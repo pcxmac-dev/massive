@@ -4,7 +4,7 @@
 const kc = window.klinecharts;
 const TZ = 'America/New_York';
 const MERGED = '*';
-const PAGE = 2000;
+const PAGE = 20000;  // bars per request; zooming/scrolling out loads older pages as needed
 const POLL_MS = 60_000;
 
 // -- per-viewer preferences (localStorage; the app works without it) --------
@@ -219,7 +219,13 @@ kc.registerOverlay({
 
 // -- chart ---------------------------------------------------------------------
 document.body.classList.toggle('light', state.theme === 'light');
-const chart = kc.init('chart', { timezone: TZ, styles: state.theme, locale: 'en-US' });
+// Bars may shrink far below a pixel each, so any interval can be zoomed out to months or years
+// of data (KLineChart's default stops at 1 px per bar, ~700 bars on screen).
+const MIN_BAR_SPACE = 0.002;  // ~350k bars across a 700 px chart: two years of 1-minute futures
+const chart = kc.init('chart', {
+  timezone: TZ, styles: state.theme, locale: 'en-US',
+  layout: { barSpaceLimit: { min: MIN_BAR_SPACE, max: 80 } },
+});
 
 chart.setDataLoader({
   getBars: async ({ type, timestamp, symbol, period, callback }) => {

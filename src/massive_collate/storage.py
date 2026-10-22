@@ -126,6 +126,8 @@ MIGRATIONS = [
     ("watchlist", "source_ticker", "TEXT"),
     ("watchlist", "invert", "INTEGER NOT NULL DEFAULT 0"),
     ("watchlist", "rank", "INTEGER NOT NULL DEFAULT 1"),
+    # Save order: clocks can tie (Windows), a counter cannot.
+    ("layouts", "touched", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 BAR_COLUMNS = ["open", "high", "low", "close", "volume", "vwap", "transactions"]
@@ -499,7 +501,7 @@ class Store:
     MAX_LAYOUTS = 5
 
     def list_layouts(self) -> list[dict]:
-        cur = self.conn.execute("SELECT id, name, updated_at FROM layouts ORDER BY updated_at DESC, id DESC")
+        cur = self.conn.execute("SELECT id, name, updated_at FROM layouts ORDER BY touched DESC, id DESC")
         return [{"id": i, "name": n, "updated_at": u} for i, n, u in cur]
 
     def get_layout(self, layout_id: int) -> dict | None:
@@ -514,12 +516,15 @@ class Store:
             count = self.conn.execute("SELECT COUNT(*) FROM layouts").fetchone()[0]
             if count >= self.MAX_LAYOUTS:
                 raise LayoutLimit(f"at most {self.MAX_LAYOUTS} layouts; delete one first")
-            cur = self.conn.execute("INSERT INTO layouts (name, data, updated_at) VALUES (?, ?, ?)",
-                                    (name, json.dumps(data), _now_precise()))
+            cur = self.conn.execute(
+                "INSERT INTO layouts (name, data, updated_at, touched) "
+                "VALUES (?, ?, ?, (SELECT COALESCE(MAX(touched), 0) + 1 FROM layouts))",
+                (name, json.dumps(data), _now_precise()))
         return self.get_layout(cur.lastrowid)
 
     def update_layout(self, layout_id: int, name: str | None = None, data: dict | None = None) -> dict | None:
-        sets, params = ["updated_at=?"], [_now_precise()]
+        sets = ["updated_at=?", "touched=(SELECT COALESCE(MAX(touched), 0) + 1 FROM layouts)"]
+        params: list = [_now_precise()]
         if name is not None:
             sets.append("name=?")
             params.append(_layout_name(name))
