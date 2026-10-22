@@ -224,10 +224,10 @@ def sync_future(
         live = next((r for r in recs if r["state"] == "live"), None)
         if live is None and recs and len(recs) == len(tickers) and all(r["state"] == "missing" for r in recs):
             continue  # neither naming exists for this month
-        if live is None and recs and all(r["state"] in ("pending", "missing") for r in recs) \
+        if live is None and len(recs) == len(tickers) and all(r["state"] in ("pending", "missing") for r in recs) \
                 and any(r["state"] == "pending" for r in recs) \
                 and all(r["checked"] and (today - r["checked"]).days < LISTING_RECHECK_DAYS for r in recs):
-            continue  # not trading yet; look again next week
+            continue  # every naming tried, not trading yet: look again next week
         # The working ticker if known; otherwise each naming (one-digit year, then two) until one has data.
         options = [live["ticker"]] if live else [t for t in tickers if known.get(t, {}).get("state") != "missing"]
         for t in options:

@@ -104,6 +104,16 @@ def test_two_digit_year_contracts_are_found_and_remembered(store):
     assert "NGX26" in asked and "NGX6" not in asked  # the working name is remembered
 
 
+def test_untried_naming_is_tried_even_if_the_other_is_pending(store):
+    store.watch_spec("fake", resolve("NG1!"))
+    store.set_contract("fake", "NG", "NGX6", date(2026, 11, 1), "pending", None, NOW.date())  # earlier run
+    d = NOW.date() - timedelta(days=1)
+    src = FakeSource(entitled=("minute",))
+    src.bars = {("NGX26", "day"): [{"t": _ms(d, 0), "o": 3, "h": 3, "l": 3, "c": 3, "v": 500}]}
+    sync(src, store, FREE, NOW, log=_log)
+    assert {c["ticker"]: c["state"] for c in store.contracts("fake", "NG")}["NGX26"] == "live"
+
+
 def test_futures_never_request_before_floor(store):
     store.watch_spec("fake", resolve("CL1!"))
     src = FakeSource(entitled=("minute",))
