@@ -14,7 +14,7 @@ Working notes so work can resume in a fresh session. Newest first.
   under `gui/static/vendor/klinecharts`. Intervals built exactly from the finest stored data; official
   daily bars for D/W/M; regular/extended hours toggle; feed picker (single feed or merged);
   drawing tools incl. custom `measure`; drawings saved per ticker in browser localStorage.
-- Tests: `.venv\Scripts\python.exe -m pytest -q` (140 passing). CI on GitHub: Python 3.12/3.14/3.15,
+- Tests: `.venv\Scripts\python.exe -m pytest -q` (147 passing). CI on GitHub: Python 3.12/3.14/3.15,
   Windows + Ubuntu. Branch `feature/collector`, not merged to `main`.
 
 - **Highlight tool** (sidebar, 2nd; Alt+H): box, dashed center lines, start/center/end labels and
@@ -42,9 +42,18 @@ Working notes so work can resume in a fresh session. Newest first.
   - Measured (SPCX 1m ETH, 85k minutes on screen, volume pane on): 516 ms/frame → 16.7 ms (60 fps,
     vsync-capped) with or without GPU. KLineChart alone costs ~77 ms/frame at 85k bars, which is why
     LOD, not the GPU, was the decisive fix.
-- **Reliability fixes found tonight**: futures contract listing is one targeted request
-  (`ticker.any_of`) instead of paging thousands of spreads; usage is recorded per request so killed
-  runs still count against the daily cap; a sync lock left by a dead process is taken over at once.
+  - LOD also covers brick types (Renko, line break, range, Heikin Ashi): Renko full zoom 328 → 16.6 ms.
+    Kagi / point & figure stay at full detail. NQ1! (688k minutes) full zoom: 60 fps at ×512.
+- **Futures collection (rewritten tonight)**: Massive's contract listing returns one row per
+  contract per day, so contracts are derived from tickers instead (`futures.candidate_contracts`),
+  trying one-digit (CLZ6) and two-digit (NGX26) year names; each costs one session-bar request,
+  and ended/missing contracts are remembered. Roll gaps come from settlement closes when intraday
+  bars don't overlap. State after the night: NQ1!, CL1!, NG1! all 2024-10-23 → 2026-10-22 on
+  1-minute bars (~710k / 727k / ~677k), 8 NQ quarterly rolls (gaps +206 to +296), IXIC 194k,
+  USDEUR 734k minute bars. An hourly sync now costs ~24 requests.
+- **Reliability fixes found tonight**: usage is recorded per request so killed runs still count
+  against the daily cap; a sync lock left by a dead process is taken over at once; the LOD cache
+  key includes chart type + parameters (it once served Renko aggregates for line break).
 
 ## Next
 
