@@ -217,30 +217,41 @@ def sync_future(
     horizon = today + timedelta(days=ROLL_HORIZON_DAYS)
     known = {c["ticker"]: c for c in store.contracts(source.name, product)}
     saved = 0
-    for t, month in candidate_contracts(product, floor - timedelta(days=31), horizon):
-        c = known.get(t)
-        state = c["state"] if c else None
-        if state in ("ended", "missing"):
+    for month, tickers in candidate_contracts(product, floor - timedelta(days=31), horizon):
+        recs = [known[t] for t in tickers if t in known]
+        if any(r["state"] == "ended" for r in recs):
             continue
-        if state == "pending" and c["checked"] and (today - c["checked"]).days < LISTING_RECHECK_DAYS:
-            continue
-        stored = store.bar_range(source.name, t, "day")
-        if stored and _ms_to_date(stored[1]) >= today - timedelta(days=1):
-            continue  # live and already up to date today
-        start = _ms_to_date(stored[1]) if stored else max(floor, month - timedelta(days=CONTRACT_LEAD_DAYS))
-        end = min(today, month + timedelta(days=62))
-        if start > end:
-            store.set_contract(source.name, product, t, month, "pending", None, today)
-            continue
-        for page in _guard(source.bar_pages(t, start, end, "day", asset="future")):
-            saved += store.upsert_bars(source.name, t, "day", 1, page)
-        stored = store.bar_range(source.name, t, "day")
-        if stored is None:
-            store.set_contract(source.name, product, t, month, "missing" if month < today else "pending", None, today)
-        elif _ms_to_date(stored[1]) < today - timedelta(days=ENDED_AFTER_DAYS):
-            store.set_contract(source.name, product, t, month, "ended", _ms_to_date(stored[1]), today)
-        else:
-            store.set_contract(source.name, product, t, month, "live", None, today)
+        live = next((r for r in recs if r["state"] == "live"), None)
+        if live is None and recs and len(recs) == len(tickers) and all(r["state"] == "missing" for r in recs):
+            continue  # neither naming exists for this month
+        if live is None and recs and all(r["state"] in ("pending", "missing") for r in recs) \
+                and any(r["state"] == "pending" for r in recs) \
+                and all(r["checked"] and (today - r["checked"]).days < LISTING_RECHECK_DAYS for r in recs):
+            continue  # not trading yet; look again next week
+        # The working ticker if known; otherwise each naming (one-digit year, then two) until one has data.
+        options = [live["ticker"]] if live else [t for t in tickers if known.get(t, {}).get("state") != "missing"]
+        for t in options:
+            stored = store.bar_range(source.name, t, "day")
+            if stored and _ms_to_date(stored[1]) >= today - timedelta(days=1):
+                break  # live and already up to date today
+            start = _ms_to_date(stored[1]) if stored else max(floor, month - timedelta(days=CONTRACT_LEAD_DAYS))
+            end = min(today, month + timedelta(days=62))
+            if start > end:
+                store.set_contract(source.name, product, t, month, "pending", None, today)
+                break
+            for page in _guard(source.bar_pages(t, start, end, "day", asset="future")):
+                saved += store.upsert_bars(source.name, t, "day", 1, page)
+            stored = store.bar_range(source.name, t, "day")
+            if stored is None:
+                store.set_contract(source.name, product, t, month, "missing" if month < today else "pending", None, today)
+                continue  # try the other naming
+            ended = _ms_to_date(stored[1]) < today - timedelta(days=ENDED_AFTER_DAYS)
+            store.set_contract(source.name, product, t, month, "ended" if ended else "live",
+                               _ms_to_date(stored[1]) if ended else None, today)
+            for other in tickers:  # this month's contract has one name: the others never exist
+                if other != t:
+                    store.set_contract(source.name, product, other, month, "missing", None, today)
+            break
 
     volumes, expiries = {}, {}
     for c in store.contracts(source.name, product):

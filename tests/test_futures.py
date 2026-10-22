@@ -38,11 +38,13 @@ def test_roll_moves_on_at_expiry_and_rank_two():
 def test_candidates_and_contract_months():
     from massive_collate.futures import candidate_contracts, contract_month
 
-    c = candidate_contracts("cl", date(2026, 11, 3), date(2027, 2, 1))
-    assert c == [("CLX6", date(2026, 11, 1)), ("CLZ6", date(2026, 12, 1)), ("CLF7", date(2027, 1, 1)),
-                 ("CLG7", date(2027, 2, 1))]
+    c = candidate_contracts("cl", date(2026, 11, 3), date(2027, 1, 1))
+    assert c == [(date(2026, 11, 1), ["CLX6", "CLX26"]), (date(2026, 12, 1), ["CLZ6", "CLZ26"]),
+                 (date(2027, 1, 1), ["CLF7", "CLF27"])]
     assert contract_month("CLZ6", "CL", date(2026, 10, 22)) == date(2026, 12, 1)
     assert contract_month("CLF0", "CL", date(2029, 11, 1)) == date(2030, 1, 1)  # decade rolls over
+    assert contract_month("NGX26", "NG", date(2026, 10, 22)) == date(2026, 11, 1)  # two-digit year
+    assert contract_month("NGF39", "NG", date(2026, 10, 22)) == date(2039, 1, 1)
     assert contract_month("CL:BF", "CL", date(2026, 1, 1)) is None
 
 

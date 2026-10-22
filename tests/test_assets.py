@@ -88,6 +88,22 @@ def test_known_contracts_are_not_requested_again(store):
     assert "NQZ6" in day_calls and "NQU6" not in day_calls and "NQH6" not in day_calls
 
 
+def test_two_digit_year_contracts_are_found_and_remembered(store):
+    store.watch_spec("fake", resolve("NG1!"))
+    d = NOW.date() - timedelta(days=1)
+    day = {"t": _ms(d, 0), "o": 3, "h": 3, "l": 3, "c": 3, "v": 500}
+    src = FakeSource(entitled=("minute",))
+    src.bars = {("NGX26", "day"): [day], ("NGX26", "minute"): [{"t": _ms(d), "o": 3, "h": 3, "l": 3, "c": 3}]}
+    sync(src, store, FREE, NOW, log=_log)
+    states = {c["ticker"]: c["state"] for c in store.contracts("fake", "NG")}
+    assert states["NGX26"] == "live" and states["NGX6"] == "missing"
+    assert store.rolls("fake", "NG")[-1] == (d, "NGX26")
+    src.bar_calls = []
+    sync(src, store, FREE, NOW + timedelta(days=2), log=_log)
+    asked = {c[0] for c in src.bar_calls if c[3] == "day"}
+    assert "NGX26" in asked and "NGX6" not in asked  # the working name is remembered
+
+
 def test_futures_never_request_before_floor(store):
     store.watch_spec("fake", resolve("CL1!"))
     src = FakeSource(entitled=("minute",))
