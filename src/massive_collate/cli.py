@@ -40,12 +40,48 @@ class Logger:
                 f.write(line + "\n")
 
 
+def pid_alive(pid: int) -> bool:
+    """Whether a process with this id is running (Windows and POSIX)."""
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _lock_is_stale(lock: Path) -> bool:
+    """A lock is stale if its owner process has died (crash or kill), or it is very old."""
+    try:
+        owner = int(lock.read_text().strip() or 0)
+    except (OSError, ValueError):
+        owner = 0
+    if owner and not pid_alive(owner):
+        return True
+    return time.time() - lock.stat().st_mtime > LOCK_STALE_SECONDS
+
+
 @contextmanager
 def run_lock(db_path: Path) -> Iterator[None]:
     """Only one downloading run at a time, so two runs can never double the request rate."""
     lock = db_path.with_suffix(".lock")
     lock.parent.mkdir(parents=True, exist_ok=True)
-    if lock.exists() and time.time() - lock.stat().st_mtime > LOCK_STALE_SECONDS:
+    if lock.exists() and _lock_is_stale(lock):
         lock.unlink(missing_ok=True)
     try:
         fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)

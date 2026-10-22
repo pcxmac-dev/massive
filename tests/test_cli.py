@@ -58,6 +58,37 @@ def test_overlapping_runs_are_refused(env):
         pass
 
 
+def test_lock_left_by_a_dead_process_is_taken_over(env):
+    import os
+
+    db = env / "data" / "m.db"
+    lock = db.with_suffix(".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("999999")  # no such process
+    with cli.run_lock(db):
+        assert lock.read_text() == str(os.getpid())
+    assert not lock.exists()
+
+
+def test_lock_of_a_live_process_is_respected(env):
+    import os
+
+    db = env / "data" / "m.db"
+    lock = db.with_suffix(".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(str(os.getpid()))  # this test process is alive
+    with pytest.raises(SystemExit):
+        with cli.run_lock(db):
+            pass
+    lock.unlink()
+
+
+def test_pid_alive():
+    import os
+
+    assert cli.pid_alive(os.getpid()) and not cli.pid_alive(999999) and not cli.pid_alive(0)
+
+
 def test_missing_key_is_a_config_error(env, monkeypatch, capsys):
     monkeypatch.delenv("MASSIVE_API_KEY")
     cli.main(["watch", "add", "SPCX"])
