@@ -1,0 +1,24 @@
+name: Fetch previous close
+
+on:
+  workflow_dispatch:
+    inputs:
+      ticker:
+        description: Ticker symbol
+        default: AAPL
+  schedule:
+    - cron: "30 21 * * 1-5" # weekdays after US market close (UTC)
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Fetch data
+        env:
+          # Set with: gh secret set MASSIVE_API_KEY -R pcxmac-dev/massive
+          MASSIVE_API_KEY: ${{ secrets.MASSIVE_API_KEY }}
+        run: python fetch_prev_close.py "${{ inputs.ticker || 'AAPL' }}"
