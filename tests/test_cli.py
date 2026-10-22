@@ -29,6 +29,18 @@ def test_watch_and_status_are_offline(env, capsys):
     assert "SPCX" in out and "plan: free" in out
 
 
+def test_watch_accepts_exchange_and_shows_listing(env, capsys):
+    from datetime import date
+
+    cli.main(["watch", "add", "SPCX::NASDAQ", "--resolution", "minute"])
+    with Store(env / "data" / "m.db") as s:
+        s.set_listing("massive", "SPCX", date(2026, 6, 12), "FIGI", date(2026, 10, 22))
+    capsys.readouterr()
+    cli.main(["watch", "list"])
+    out = capsys.readouterr().out
+    assert "SPCX::XNAS" in out and "listed: 2026-06-12" in out
+
+
 def test_daily_cap_reached_sends_nothing(env, monkeypatch, capsys):
     monkeypatch.setenv("MASSIVE_MAX_REQUESTS_PER_DAY", "0")
     cli.main(["watch", "add", "SPCX"])

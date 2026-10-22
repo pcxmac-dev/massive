@@ -14,6 +14,7 @@ from typing import Iterator
 from . import analysis, charts, collector
 from .config import ConfigError, Settings, load_settings
 from .errors import SourceError
+from .models import parse_symbol
 from .sources import BUILDERS, DataSource, build_source
 from .storage import Store
 
@@ -100,14 +101,22 @@ def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource
 
 # -- commands ------------------------------------------------------------------
 
+def _watch_line(w: dict) -> str:
+    symbol = f"{w['ticker']}::{w['exchange']}" if w["exchange"] else w["ticker"]
+    return (f"{w['source']:8} {symbol:14} {w['resolution']:8} listed: {str(w['listed_from'] or '?'):10}  "
+            f"backfilled to: {w['backfilled_to'] or '-'}")
+
+
 def cmd_watch(args, settings: Settings) -> int:
     with Store(settings.db_path) as store:
-        if args.action == "add":
-            store.watch(args.source, args.tickers, args.resolution)
-        elif args.action == "remove":
-            store.unwatch(args.source, args.tickers)
+        for text in args.tickers:
+            ticker, mic = parse_symbol(text)
+            if args.action == "add":
+                store.watch(args.source, [ticker], args.resolution, exchange=mic)
+            elif args.action == "remove":
+                store.unwatch(args.source, [ticker])
         for w in store.watchlist(args.source):
-            print(f"{w['source']:8} {w['ticker']:8} {w['resolution']:8} backfilled to: {w['backfilled_to'] or '-'}")
+            print(_watch_line(w))
     return 0
 
 
@@ -125,9 +134,10 @@ def cmd_probe(args, settings: Settings) -> int:
     with api_run(args, settings, f"probe {args.ticker}") as (source, store, log):
         if source is None:
             return 0
+        ticker, mic = parse_symbol(args.ticker)
         if args.watch:
-            store.watch(args.source, [args.ticker])
-        collector.resolve_resolution(source, store, args.ticker.upper(), log)
+            store.watch(args.source, [ticker], exchange=mic)
+        collector.resolve_resolution(source, store, ticker, log)
     return 0
 
 
@@ -169,6 +179,7 @@ def cmd_info(args, settings: Settings) -> int:
         if source is not None:
             inst = source.instrument(args.ticker)
             print(inst.describe())
+            print(f"listed: {inst.list_date or '?'}  active: {inst.active}  FIGI: {inst.figi or '?'}")
             if inst.country:
                 print(f"country: {inst.country.name} ({inst.country.code}), timezone {inst.country.timezone}")
     return 0
@@ -185,7 +196,7 @@ def cmd_status(args, settings: Settings) -> int:
             print(f"requests today ({src}): {store.requests_today(src)}")
         print("\nwatchlist:")
         for w in store.watchlist():
-            print(f"  {w['source']:8} {w['ticker']:8} {w['resolution']:8} backfilled to: {w['backfilled_to'] or '-'}")
+            print("  " + _watch_line(w))
         print("\nticks:")
         for src, t, n, lo, hi in s["trades"]:
             print(f"  {src:8} {t:8} {n:>12,} trades  {_ns(lo)} -> {_ns(hi)}")
@@ -383,6 +394,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if isinstance(getattr(args, "ticker", None), str) and args.command not in ("probe",):
+        args.ticker = parse_symbol(args.ticker)[0]  # data commands accept SPCX::NASDAQ too
     try:
         settings = load_settings()
         return args.func(args, settings)

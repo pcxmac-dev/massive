@@ -139,18 +139,23 @@ class MassiveSource(DataSource):
             for r in data.get("results") or [] if r.get("id") is not None
         ]
 
-    def instrument(self, ticker: str) -> Instrument:
+    def instrument(self, ticker: str, resolve_exchange: bool = True) -> Instrument:
         r = self.client.get(f"/v3/reference/tickers/{ticker.upper()}").get("results") or {}
         mic = r.get("primary_exchange")
         exchange = None
         if mic:
-            exchange = next((e for e in self.exchanges() if e.mic == mic), None) or Exchange(
+            known = self.exchanges() if resolve_exchange else []
+            exchange = next((e for e in known if e.mic == mic), None) or Exchange(
                 self.name, -1, mic, country(r.get("locale")), mic=mic
             )
+        list_date = r.get("list_date")
         cls = instrument_class(r.get("type"))
         return cls(
             ticker=r.get("ticker", ticker.upper()), name=r.get("name"),
             primary_exchange=exchange, currency=(r.get("currency_name") or "usd").upper(),
+            list_date=date.fromisoformat(list_date) if list_date else None,
+            figi=r.get("composite_figi"),
+            active=bool(r.get("active", True)) and not r.get("delisted_utc"),
         )
 
     def market_daily(self, day: date) -> list[dict]:

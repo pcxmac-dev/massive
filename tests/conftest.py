@@ -39,8 +39,11 @@ class FakeSource(DataSource):
 
     name = "fake"
 
-    def __init__(self, entitled=("trades", "second", "minute"), trades=None, bars=None, budget=None):
+    def __init__(self, entitled=("trades", "second", "minute"), trades=None, bars=None, budget=None,
+                 listing: Instrument | None = None):
         self.entitled = set(entitled)
+        self.listing = listing
+        self.instrument_calls = 0
         self.trades = sorted(trades or [], key=lambda t: t["sip_timestamp"])
         self.bars = bars or {}
         self.budget = budget
@@ -87,8 +90,10 @@ class FakeSource(DataSource):
         self._spend()
         return [Exchange("fake", 4, "Nasdaq", country("US"), mic="XNAS"), Exchange("fake", 12, "NYSE Arca", country("US"))]
 
-    def instrument(self, ticker):
-        return Instrument(ticker)
+    def instrument(self, ticker, resolve_exchange=True):
+        self._spend()
+        self.instrument_calls += 1
+        return self.listing or Instrument(ticker)
 
     def market_daily(self, day: date):
         self._spend()

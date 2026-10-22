@@ -135,6 +135,56 @@ def sync_bars(
     return saved
 
 
+# -- listing / identity --------------------------------------------------------
+
+LISTING_RECHECK_DAYS = 7
+
+
+@dataclass
+class Listing:
+    ok: bool  # False: skip this ticker this run
+    listed_from: date | None = None
+
+
+def check_listing(source: DataSource, store: Store, item: dict, today: date, log: Log = print) -> Listing:
+    """Make sure the symbol still means the instrument we are collecting.
+
+    Symbols get reused, so data is only kept from the current instrument's
+    listing date, only active instruments are collected, and a change of FIGI
+    (the symbol now belongs to someone else) clears what was stored for it.
+    Costs one request per ticker per week.
+    """
+    ticker, checked = item["ticker"], item["checked_at"]
+    if checked and (today - checked).days < LISTING_RECHECK_DAYS:
+        return Listing(True, item["listed_from"])
+    try:
+        inst = _guard_call(source.instrument, ticker, resolve_exchange=False)
+    except NotEntitled as e:
+        log(f"{ticker}: reference data not available ({e.message}); collecting without a listing check")
+        return Listing(True, item["listed_from"])
+
+    if not inst.active:
+        log(f"{ticker}: not an active listing; skipped")
+        return Listing(False)
+    mic = inst.primary_exchange.mic if inst.primary_exchange else None
+    if item["exchange"] and mic and mic != item["exchange"]:
+        log(f"{ticker}: listed on {mic}, not {item['exchange']} as watched; skipped")
+        return Listing(False)
+
+    if item["figi"] and inst.figi and inst.figi != item["figi"]:
+        n = store.delete_before(source.name, ticker)
+        store.reset_backfill(source.name, ticker)
+        log(f"{ticker}: symbol now belongs to a different instrument ({inst.name}); removed {n} old rows")
+    if inst.list_date:
+        n = store.delete_before(source.name, ticker, _date_ns(inst.list_date))
+        if n:
+            log(f"{ticker}: removed {n} rows from before its {inst.list_date} listing (another instrument)")
+        if item["backfilled_to"] and item["backfilled_to"] < inst.list_date:
+            store.set_backfilled(source.name, ticker, inst.list_date)
+    store.set_listing(source.name, ticker, inst.list_date, inst.figi, today)
+    return Listing(True, inst.list_date)
+
+
 # -- scheduled run -----------------------------------------------------------
 
 def sync_exchanges(source: DataSource, store: Store, log: Log = print) -> int:
@@ -167,8 +217,13 @@ def sync(source: DataSource, store: Store, tier: Tier, now: datetime | None = No
     try:
         sync_exchanges(source, store, log)
         for item in store.watchlist(source.name):
-            ticker, resolution = item["ticker"], item["resolution"]
-            backfilled_to = item["backfilled_to"]
+            ticker = item["ticker"]
+            listing = check_listing(source, store, item, today, log)
+            if not listing.ok:
+                continue
+            item_floor = max(floor, listing.listed_from) if listing.listed_from else floor
+            item = next(w for w in store.watchlist(source.name) if w["ticker"] == ticker)
+            resolution, backfilled_to = item["resolution"], item["backfilled_to"]
             if resolution == "auto":
                 resolution = resolve_resolution(source, store, ticker, log)
                 backfilled_to = None
@@ -177,9 +232,9 @@ def sync(source: DataSource, store: Store, tier: Tier, now: datetime | None = No
                     continue
             try:
                 if resolution == "trades":
-                    n = sync_trades(source, store, ticker, floor, backfilled_to)
+                    n = sync_trades(source, store, ticker, item_floor, backfilled_to)
                 else:
-                    n = sync_bars(source, store, ticker, resolution, floor, today, backfilled_to)
+                    n = sync_bars(source, store, ticker, resolution, item_floor, today, backfilled_to)
             except NotEntitled as e:
                 log(f"{ticker} {resolution}: refused by your plan ({e.message}); re-checking resolution next run")
                 store.set_resolution(source.name, ticker, "auto")

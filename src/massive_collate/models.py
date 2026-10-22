@@ -7,6 +7,7 @@ instrument here, and data sources in `sources/`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from typing import ClassVar
 
 
@@ -29,6 +30,32 @@ COUNTRIES: dict[str, Country] = {
 
 def country(code: str | None) -> Country | None:
     return COUNTRIES.get(code.upper()) if code else None
+
+
+# Friendly exchange names -> ISO 10383 MIC
+EXCHANGE_ALIASES: dict[str, str] = {
+    "NASDAQ": "XNAS", "NYSE": "XNYS", "ARCA": "ARCX", "NYSEARCA": "ARCX",
+    "AMEX": "XASE", "NYSEAMERICAN": "XASE", "CBOE": "BATS", "BATS": "BATS", "IEX": "IEXG",
+    "TSX": "XTSE", "LSE": "XLON", "XETRA": "XETR", "TSE": "XJPX", "ASX": "XASX",
+}
+
+
+def exchange_mic(name: str) -> str:
+    """'NASDAQ' -> 'XNAS'; a MIC is returned unchanged."""
+    key = name.strip().upper().replace(" ", "")
+    return EXCHANGE_ALIASES.get(key, key)
+
+
+def parse_symbol(text: str) -> tuple[str, str | None]:
+    """'SPCX::NASDAQ' or 'NASDAQ:SPCX' -> ('SPCX', 'XNAS'); 'SPCX' -> ('SPCX', None)."""
+    text = text.strip()
+    if "::" in text:
+        ticker, exch = text.split("::", 1)
+    elif ":" in text:
+        exch, ticker = text.split(":", 1)
+    else:
+        return text.upper(), None
+    return ticker.strip().upper(), exchange_mic(exch)
 
 
 @dataclass(frozen=True)
@@ -55,6 +82,10 @@ class Instrument:
     name: str | None = None
     primary_exchange: Exchange | None = None
     currency: str = "USD"
+    # Symbols get reused: the listing date and FIGI identify *this* instrument.
+    list_date: date | None = None
+    figi: str | None = None
+    active: bool = True
 
     @property
     def country(self) -> Country | None:

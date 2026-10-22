@@ -42,8 +42,12 @@ class DataSource(ABC):
         """Every exchange this source reports trades for."""
 
     @abstractmethod
-    def instrument(self, ticker: str) -> Instrument:
-        """Reference details for one ticker."""
+    def instrument(self, ticker: str, resolve_exchange: bool = True) -> Instrument:
+        """Reference details for the instrument currently using a ticker.
+
+        With resolve_exchange=False the primary exchange is not looked up, so the
+        call costs as little as possible (used by the scheduled listing check).
+        """
 
     def market_daily(self, day: date) -> list[dict]:
         """Daily bars for the whole market on one date (dicts also carry T = ticker).

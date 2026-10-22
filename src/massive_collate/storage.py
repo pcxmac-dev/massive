@@ -59,6 +59,10 @@ CREATE TABLE IF NOT EXISTS watchlist (
     resolution    TEXT NOT NULL DEFAULT 'auto',  -- auto | trades | second | minute
     backfilled_to TEXT,                          -- oldest date fully backfilled, NULL until done
     added_at      TEXT NOT NULL,
+    exchange      TEXT,                          -- expected primary exchange MIC, NULL = any
+    listed_from   TEXT,                          -- listing date of the current instrument
+    figi          TEXT,                          -- composite FIGI of the current instrument
+    checked_at    TEXT,                          -- date the listing was last checked
     PRIMARY KEY (source, ticker)
 );
 
@@ -83,6 +87,14 @@ CREATE TABLE IF NOT EXISTS runs (
     message     TEXT
 );
 """
+
+# Columns added after the first release: (table, column, type). Applied to older databases on open.
+MIGRATIONS = [
+    ("watchlist", "exchange", "TEXT"),
+    ("watchlist", "listed_from", "TEXT"),
+    ("watchlist", "figi", "TEXT"),
+    ("watchlist", "checked_at", "TEXT"),
+]
 
 BAR_COLUMNS = ["open", "high", "low", "close", "volume", "vwap", "transactions"]
 
@@ -119,6 +131,14 @@ class Store:
         self.conn = sqlite3.connect(str(path))
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        with self.conn:
+            for table, column, kind in MIGRATIONS:
+                existing = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
+                if column not in existing:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
 
     def close(self) -> None:
         self.conn.close()
@@ -288,16 +308,42 @@ class Store:
 
     # -- watchlist ---------------------------------------------------------
 
-    def watch(self, source: str, tickers: Iterable[str], resolution: str = "auto") -> None:
+    def watch(
+        self, source: str, tickers: Iterable[str], resolution: str = "auto", exchange: str | None = None
+    ) -> None:
+        """Add or update watchlist entries. `exchange` (a MIC) pins the expected primary exchange."""
         with self.conn:
             for t in tickers:
                 self.conn.execute(
-                    "INSERT INTO watchlist (source, ticker, resolution, added_at) VALUES (?, ?, ?, ?) "
+                    "INSERT INTO watchlist (source, ticker, resolution, added_at, exchange) VALUES (?, ?, ?, ?, ?) "
                     "ON CONFLICT (source, ticker) DO UPDATE SET resolution=excluded.resolution, "
+                    "exchange=COALESCE(excluded.exchange, watchlist.exchange), "
                     "backfilled_to=CASE WHEN watchlist.resolution=excluded.resolution "
                     "THEN watchlist.backfilled_to END",
-                    (source, t.upper(), resolution, _now()),
+                    (source, t.upper(), resolution, _now(), exchange),
                 )
+
+    def set_listing(
+        self, source: str, ticker: str, listed_from: date | None, figi: str | None, checked: date
+    ) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE watchlist SET listed_from=?, figi=?, checked_at=? WHERE source=? AND ticker=?",
+                (listed_from.isoformat() if listed_from else None, figi, checked.isoformat(), source, ticker.upper()),
+            )
+
+    def delete_before(self, source: str, ticker: str, cutoff_ns: int | None = None) -> int:
+        """Delete a ticker's ticks and bars older than cutoff_ns (all of them if None)."""
+        ticker = ticker.upper()
+        cutoff_ns = cutoff_ns if cutoff_ns is not None else 2**62
+        with self.conn:
+            n = self.conn.execute(
+                "DELETE FROM trades WHERE source=? AND ticker=? AND ts_ns < ?", (source, ticker, cutoff_ns)
+            ).rowcount
+            n += self.conn.execute(
+                "DELETE FROM bars WHERE source=? AND ticker=? AND ts < ?", (source, ticker, cutoff_ns // 10**6)
+            ).rowcount
+        return n
 
     def unwatch(self, source: str, tickers: Iterable[str]) -> None:
         with self.conn:
@@ -306,18 +352,29 @@ class Store:
             )
 
     def watchlist(self, source: str | None = None) -> list[dict]:
-        sql = "SELECT source, ticker, resolution, backfilled_to FROM watchlist"
+        sql = (
+            "SELECT source, ticker, resolution, backfilled_to, exchange, listed_from, figi, checked_at "
+            "FROM watchlist"
+        )
         params: list = []
         if source:
             sql += " WHERE source=?"
             params.append(source)
+
+        def d(v: str | None) -> date | None:
+            return date.fromisoformat(v) if v else None
+
         return [
-            {"source": s, "ticker": t, "resolution": r, "backfilled_to": date.fromisoformat(b) if b else None}
-            for s, t, r, b in self.conn.execute(sql + " ORDER BY source, ticker", params)
+            {"source": s, "ticker": t, "resolution": r, "backfilled_to": d(b), "exchange": e,
+             "listed_from": d(lf), "figi": f, "checked_at": d(c)}
+            for s, t, r, b, e, lf, f, c in self.conn.execute(sql + " ORDER BY source, ticker", params)
         ]
 
     def set_resolution(self, source: str, ticker: str, resolution: str) -> None:
         self.watch(source, [ticker], resolution)
+
+    def reset_backfill(self, source: str, ticker: str) -> None:
+        self.set_backfilled(source, ticker, None)
 
     def set_backfilled(self, source: str, ticker: str, day: date | None) -> None:
         with self.conn:
