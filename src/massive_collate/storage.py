@@ -75,6 +75,24 @@ CREATE TABLE IF NOT EXISTS grouped_days (
     PRIMARY KEY (source, day)
 );
 
+CREATE TABLE IF NOT EXISTS futures_contracts (
+    source      TEXT NOT NULL,
+    product     TEXT NOT NULL,       -- e.g. NQ
+    ticker      TEXT NOT NULL,       -- e.g. NQZ6
+    first_trade TEXT,
+    last_trade  TEXT,
+    PRIMARY KEY (source, ticker)
+);
+
+CREATE TABLE IF NOT EXISTS futures_rolls (
+    source   TEXT NOT NULL,
+    product  TEXT NOT NULL,
+    rank     INTEGER NOT NULL,       -- 1 = most active
+    session  TEXT NOT NULL,          -- session (settlement) date
+    ticker   TEXT NOT NULL,          -- contract held for that session
+    PRIMARY KEY (source, product, rank, session)
+);
+
 CREATE TABLE IF NOT EXISTS runs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     source      TEXT,
@@ -96,6 +114,10 @@ MIGRATIONS = [
     ("watchlist", "checked_at", "TEXT"),
     ("watchlist", "name", "TEXT"),
     ("watchlist", "kind", "TEXT"),
+    ("watchlist", "asset", "TEXT NOT NULL DEFAULT 'stock'"),
+    ("watchlist", "source_ticker", "TEXT"),
+    ("watchlist", "invert", "INTEGER NOT NULL DEFAULT 0"),
+    ("watchlist", "rank", "INTEGER NOT NULL DEFAULT 1"),
 ]
 
 BAR_COLUMNS = ["open", "high", "low", "close", "volume", "vwap", "transactions"]
@@ -311,19 +333,60 @@ class Store:
     # -- watchlist ---------------------------------------------------------
 
     def watch(
-        self, source: str, tickers: Iterable[str], resolution: str = "auto", exchange: str | None = None
+        self, source: str, tickers: Iterable[str], resolution: str = "auto", exchange: str | None = None,
+        asset: str | None = None, source_ticker: str | None = None, invert: bool = False, rank: int = 1,
     ) -> None:
-        """Add or update watchlist entries. `exchange` (a MIC) pins the expected primary exchange."""
+        """Add or update watchlist entries. `exchange` (a MIC) pins the expected primary exchange;
+        `asset`/`source_ticker`/`invert`/`rank` describe non-stock symbols (see symbols.resolve)."""
         with self.conn:
             for t in tickers:
                 self.conn.execute(
-                    "INSERT INTO watchlist (source, ticker, resolution, added_at, exchange) VALUES (?, ?, ?, ?, ?) "
+                    "INSERT INTO watchlist (source, ticker, resolution, added_at, exchange, asset, source_ticker, "
+                    "invert, rank) VALUES (?, ?, ?, ?, ?, COALESCE(?, 'stock'), ?, ?, ?) "
                     "ON CONFLICT (source, ticker) DO UPDATE SET resolution=excluded.resolution, "
                     "exchange=COALESCE(excluded.exchange, watchlist.exchange), "
+                    "asset=CASE WHEN ? IS NULL THEN watchlist.asset ELSE excluded.asset END, "
+                    "source_ticker=COALESCE(excluded.source_ticker, watchlist.source_ticker), "
+                    "invert=CASE WHEN ? IS NULL THEN watchlist.invert ELSE excluded.invert END, "
+                    "rank=CASE WHEN ? IS NULL THEN watchlist.rank ELSE excluded.rank END, "
                     "backfilled_to=CASE WHEN watchlist.resolution=excluded.resolution "
                     "THEN watchlist.backfilled_to END",
-                    (source, t.upper(), resolution, _now(), exchange),
+                    (source, t.upper(), resolution, _now(), exchange, asset, source_ticker, int(invert), rank,
+                     asset, asset, asset),
                 )
+
+    def watch_spec(self, source: str, spec, resolution: str = "auto") -> None:
+        """Watch a symbols.SymbolSpec."""
+        self.watch(source, [spec.ticker], resolution, exchange=spec.exchange, asset=spec.asset,
+                   source_ticker=spec.source_ticker, invert=spec.invert, rank=spec.rank)
+
+    # -- futures -----------------------------------------------------------
+
+    def upsert_contracts(self, source: str, product: str, contracts: Iterable[dict]) -> int:
+        rows = [(source, product, c["ticker"], c.get("first_trade_date"), c.get("last_trade_date")) for c in contracts]
+        with self.conn:
+            self.conn.executemany("INSERT OR REPLACE INTO futures_contracts VALUES (?, ?, ?, ?, ?)", rows)
+        return len(rows)
+
+    def contracts(self, source: str, product: str) -> list[dict]:
+        cur = self.conn.execute(
+            "SELECT ticker, first_trade, last_trade FROM futures_contracts WHERE source=? AND product=? "
+            "ORDER BY last_trade", (source, product))
+        return [{"ticker": t, "first_trade": date.fromisoformat(f) if f else None,
+                 "last_trade": date.fromisoformat(l) if l else None} for t, f, l in cur]
+
+    def set_rolls(self, source: str, product: str, rank: int, schedule: list[tuple[date, str]]) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM futures_rolls WHERE source=? AND product=? AND rank=?", (source, product, rank))
+            self.conn.executemany(
+                "INSERT INTO futures_rolls VALUES (?, ?, ?, ?, ?)",
+                [(source, product, rank, d.isoformat(), t) for d, t in schedule])
+
+    def rolls(self, source: str, product: str, rank: int = 1) -> list[tuple[date, str]]:
+        cur = self.conn.execute(
+            "SELECT session, ticker FROM futures_rolls WHERE source=? AND product=? AND rank=? ORDER BY session",
+            (source, product, rank))
+        return [(date.fromisoformat(d), t) for d, t in cur]
 
     def set_listing(
         self, source: str, ticker: str, listed_from: date | None, figi: str | None, checked: date,
@@ -359,7 +422,7 @@ class Store:
     def watchlist(self, source: str | None = None) -> list[dict]:
         sql = (
             "SELECT source, ticker, resolution, backfilled_to, exchange, listed_from, figi, checked_at, "
-            "name, kind FROM watchlist"
+            "name, kind, asset, source_ticker, invert, rank FROM watchlist"
         )
         params: list = []
         if source:
@@ -371,8 +434,10 @@ class Store:
 
         return [
             {"source": s, "ticker": t, "resolution": r, "backfilled_to": d(b), "exchange": e,
-             "listed_from": d(lf), "figi": f, "checked_at": d(c), "name": n, "kind": k}
-            for s, t, r, b, e, lf, f, c, n, k in self.conn.execute(sql + " ORDER BY source, ticker", params)
+             "listed_from": d(lf), "figi": f, "checked_at": d(c), "name": n, "kind": k,
+             "asset": a or "stock", "source_ticker": st or t, "invert": bool(inv), "rank": rk or 1}
+            for s, t, r, b, e, lf, f, c, n, k, a, st, inv, rk
+            in self.conn.execute(sql + " ORDER BY source, ticker", params)
         ]
 
     def series_fingerprint(self, source: str, ticker: str) -> tuple:

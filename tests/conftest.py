@@ -61,8 +61,9 @@ class FakeSource(DataSource):
     def requests_made(self) -> int:
         return self._requests
 
-    def is_entitled(self, resolution, ticker):
+    def is_entitled(self, resolution, ticker, asset="stock"):
         self._spend()
+        self.probed = getattr(self, "probed", []) + [(resolution, ticker, asset)]
         return resolution in self.entitled
 
     def trade_pages(self, ticker, gte_ns=None, lt_ns=None, descending=False, page_size=2) -> Iterator[list[dict]]:
@@ -80,11 +81,17 @@ class FakeSource(DataSource):
             self._spend()
             yield rows[i:i + page_size]
 
-    def bar_pages(self, ticker, start, end, timespan, multiplier=1, descending=False):
+    def bar_pages(self, ticker, start, end, timespan, multiplier=1, descending=False, asset="stock"):
         self._spend()
+        self.bar_calls = getattr(self, "bar_calls", []) + [(ticker, start, end, timespan, asset)]
         if timespan not in self.entitled and timespan not in ("day", "hour"):
             raise NotEntitled(403, "no " + timespan)
-        yield list(self.bars.get(timespan, []))
+        src = self.bars.get((ticker, timespan), self.bars.get(timespan, []))
+        yield list(src)
+
+    def future_contracts(self, product):
+        self._spend()
+        return list(getattr(self, "contracts", []))
 
     def exchanges(self):
         self._spend()

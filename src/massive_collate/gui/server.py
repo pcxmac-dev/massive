@@ -43,20 +43,22 @@ class ChartApp:
                 for s in self.engine.sources_for(ticker)
             ]
             out.append({
-                "ticker": ticker, "name": w.get("name"), "kind": w.get("kind") or "stock",
+                "ticker": ticker, "name": w.get("name"), "kind": w.get("kind") or w.get("asset") or "stock",
+                "asset": w.get("asset") or "stock",
                 "exchange": mic, "exchangeName": names.get(mic, mic) if mic else None,
                 "listed": str(w["listed_from"]) if w.get("listed_from") else None,
                 "feeds": feeds,
             })
         return out
 
-    def meta(self, source: str, ticker: str) -> dict:
-        s = self.engine.series(source, ticker)
-        if s is None:
+    def meta(self, source: str, ticker: str, adjust: str = "none") -> dict:
+        s = self.engine.series(source, ticker, _adjust(adjust))
+        if s is None or s.frame.empty:
             raise LookupError(f"no data stored for {source}:{ticker}")
         first, last = s.frame.index[0], s.frame.index[-1]
         return {
             "source": source, "ticker": s.ticker, "base": s.kind, "hasDaily": s.daily is not None,
+            "asset": s.asset, "aroundTheClock": s.around_the_clock, "rolls": s.rolls, "adjust": s.adjust,
             "feeds": self.engine.sources_for(ticker) if source == "*" else [source],
             "pricePrecision": s.price_precision, "volumePrecision": s.volume_precision,
             "periods": self.engine.periods(s), "first": first.isoformat(), "last": last.isoformat(),
@@ -79,19 +81,26 @@ class ChartApp:
             q.get("session", "regular"),
             to_ms=int(q["to"]) if q.get("to") else None,
             since_ms=int(q["since"]) if q.get("since") else None,
-            limit=limit, style=style,
+            limit=limit, style=style, adjust=_adjust(q.get("adjust")),
         )
 
     def range_stats(self, q: dict[str, str]) -> dict:
         return self.engine.range_stats(
             q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
-            q.get("session", "regular"), int(q["from"]), int(q["to"]),
+            q.get("session", "regular"), int(q["from"]), int(q["to"]), adjust=_adjust(q.get("adjust")),
         )
 
     def exchanges(self) -> list[dict]:
         with self._lock:
             df = self.store.exchanges()
         return json.loads(df.to_json(orient="records"))
+
+
+def _adjust(value: str | None) -> str:
+    value = value or "none"
+    if value not in ("none", "difference", "ratio"):
+        raise ValueError("adjust must be none, difference or ratio")
+    return value
 
 
 def make_handler(app: ChartApp, port_ref: list[int]):
@@ -124,7 +133,7 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 if url.path == "/api/symbols":
                     return self._json(app.symbols())
                 if url.path == "/api/meta":
-                    return self._json(app.meta(q["source"], q["ticker"]))
+                    return self._json(app.meta(q["source"], q["ticker"], q.get("adjust")))
                 if url.path == "/api/bars":
                     return self._json(app.bars(q))
                 if url.path == "/api/range":

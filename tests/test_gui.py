@@ -182,6 +182,43 @@ def test_server_rejects_bad_chart_parameters(tmp_path):
         app.bars({"source": "massive", "ticker": "SPCX", "type": "point_figure", "reversal": "2.5"})
 
 
+def _future_store(tmp_path):
+    from datetime import date
+
+    from massive_collate.symbols import resolve
+
+    s = Store(tmp_path / "f.db", check_same_thread=False)
+    s.watch_spec("massive", resolve("NQ1!"), "minute")
+    ms = lambda t: int(pd.Timestamp(t, tz=ET).timestamp() * 1000)  # noqa: E731
+    bar = lambda t, c: {"t": ms(t), "o": c, "h": c, "l": c, "c": c, "v": 1}  # noqa: E731
+    # NQU6 held for the 17th session (opens 16th 18:00); NQZ6 from the 18th session
+    s.upsert_bars("massive", "NQU6", "minute", 1, [bar("2026-09-16 19:00", 100.0), bar("2026-09-17 10:00", 101.0)])
+    s.upsert_bars("massive", "NQZ6", "minute", 1, [bar("2026-09-17 10:00", 111.0), bar("2026-09-17 20:00", 112.0),
+                                                     bar("2026-09-18 10:00", 113.0)])
+    s.set_rolls("massive", "NQ", 1, [(date(2026, 9, 17), "NQU6"), (date(2026, 9, 18), "NQZ6")])
+    return s
+
+
+def test_continuous_future_series(tmp_path):
+    eng = BarEngine(_future_store(tmp_path))
+    raw = eng.bars("massive", "NQ1!", "minute", 1, session="regular", limit=100)["bars"]
+    # around the clock: the 19:00 / 20:00 bars are kept even though "regular" was asked for
+    assert [b["close"] for b in raw] == [100.0, 101.0, 112.0, 113.0]
+    s = eng.series("massive", "NQ1!")
+    assert s.asset == "future" and s.around_the_clock
+    assert s.rolls[0]["from"] == "NQU6" and s.rolls[0]["to"] == "NQZ6" and s.rolls[0]["gap"] == pytest.approx(10.0)
+    adj = eng.bars("massive", "NQ1!", "minute", 1, adjust="difference", limit=100)["bars"]
+    assert [b["close"] for b in adj] == [110.0, 111.0, 112.0, 113.0]
+
+
+def test_meta_reports_asset_and_rolls(tmp_path):
+    app = ChartApp(_future_store(tmp_path))
+    m = app.meta("massive", "NQ1!")
+    assert m["asset"] == "future" and m["aroundTheClock"] and len(m["rolls"]) == 1
+    with pytest.raises(ValueError):
+        app.meta("massive", "NQ1!", "bogus")
+
+
 def test_daily_uses_official_bars(tmp_path):
     s = _store_with_bars(tmp_path)
     day = int(pd.Timestamp("2026-10-20 00:00", tz=ET).timestamp() * 1000)

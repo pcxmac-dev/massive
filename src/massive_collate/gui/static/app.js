@@ -24,6 +24,7 @@ const state = {
   theme: prefs.get('theme', 'dark'),
   indicators: prefs.get('indicators', ['VOL']),
   chartType: prefs.get('chartType', 'candles'),
+  adjust: prefs.get('adjust', 'none'),
   typeParams: prefs.get('typeParams', {}),  // per type: { box, reversal, lines }
   styleUsed: null,
   approximate: null,
@@ -101,7 +102,7 @@ function requestRangeStats(overlay, key, pa, pb) {
     try {
       const stats = await api('/api/range', {
         source: sym.source, ticker: sym.ticker, period: p.type, span: p.span, session: state.session,
-        from: pa.timestamp, to: pb.timestamp,
+        from: pa.timestamp, to: pb.timestamp, adjust: state.adjust,
       });
       chart.overrideOverlay({ id: overlay.id, extendData: { ...(overlay.extendData || {}), key, stats } });
     } catch (err) { showError(err); }
@@ -226,7 +227,7 @@ chart.setDataLoader({
     const token = type === 'init' ? ++state.loadToken : state.loadToken;
     const params = {
       source: symbol.source, ticker: symbol.ticker, period: period.type, span: period.span,
-      session: state.session, limit: PAGE, ...typeQuery(),
+      session: state.session, limit: PAGE, adjust: state.adjust, ...typeQuery(),
     };
     if (type === 'forward' && timestamp) params.to = timestamp;
     try {
@@ -238,6 +239,7 @@ chart.setDataLoader({
         state.styleUsed = res.style;
         state.approximate = res.approximate || null;
         renderTypeParams();
+        requestAnimationFrame(drawRolls);
         // After the first render: overlays created in the same tick as the data skew the price scale.
         requestAnimationFrame(() => requestAnimationFrame(restoreDrawings));
         updateStatus(res.bars.length);
@@ -256,7 +258,7 @@ chart.setDataLoader({
         if (PRICE_BASED.has(state.chartType)) return; // path-dependent: refreshed by reloading
         const res = await api('/api/bars', {
           source: symbol.source, ticker: symbol.ticker, period: period.type, span: period.span,
-          session: state.session, since: list[list.length - 1].timestamp, ...typeQuery(),
+          session: state.session, since: list[list.length - 1].timestamp, adjust: state.adjust, ...typeQuery(),
         });
         res.bars.forEach((bar) => callback(bar));
       } catch { /* the next poll will retry */ }
@@ -490,7 +492,9 @@ function symbolInfo(ticker) {
 }
 
 async function selectSymbol(ticker, source = MERGED) {
-  const meta = await api('/api/meta', { source, ticker });
+  const meta = await api('/api/meta', { source, ticker, adjust: state.adjust });
+  $('ethBtn').hidden = meta.aroundTheClock;  // fx and futures trade around the clock
+  $('adjustSelect').hidden = meta.asset !== 'future';
   saveDrawings();
   state.ticker = meta.ticker;
   state.source = source;
@@ -525,6 +529,41 @@ function renderFeeds(info) {
 }
 
 $('feedSelect').addEventListener('change', (e) => selectSymbol(state.ticker, e.target.value).catch(showError));
+
+$('adjustSelect').value = state.adjust;
+$('adjustSelect').addEventListener('change', (e) => {
+  state.adjust = e.target.value;
+  prefs.set('adjust', state.adjust);
+  selectSymbol(state.ticker, state.source).catch(showError);
+});
+
+// Continuous futures: a dashed line and label at every contract roll.
+kc.registerOverlay({
+  name: 'rollMarker',
+  totalStep: 2,
+  lock: true,
+  needDefaultPointFigure: false,
+  createPointFigures: ({ overlay, coordinates, bounding }) => {
+    if (!coordinates.length) return [];
+    const x = coordinates[0].x;
+    const r = overlay.extendData || {};
+    const gap = r.gap == null ? '' : `  gap ${r.gap >= 0 ? '+' : ''}${Number(r.gap).toPrecision(6)}`;
+    return [
+      { type: 'line', ignoreEvent: true, attrs: { coordinates: [{ x, y: 0 }, { x, y: bounding.height }] },
+        styles: { style: 'dashed', dashedValue: [3, 3], color: '#9598a1', size: 1 } },
+      { type: 'text', ignoreEvent: true, attrs: { x: x + 4, y: 4, text: `roll ${r.from} → ${r.to}${gap}`, align: 'left', baseline: 'top' },
+        styles: { color: '#d1d4dc', backgroundColor: 'rgba(19,23,34,0.8)', size: 11, paddingLeft: 4, paddingRight: 4, paddingTop: 2, paddingBottom: 2 } },
+    ];
+  },
+});
+
+function drawRolls() {
+  chart.removeOverlay({ groupId: 'rolls' });
+  for (const r of state.meta?.rolls || []) {
+    chart.createOverlay({ name: 'rollMarker', groupId: 'rolls', lock: true, extendData: r,
+                          points: [{ timestamp: r.time, value: 0 }] });
+  }
+}
 
 function openSymbolDialog() {
   const dlg = $('symbolDialog');

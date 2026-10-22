@@ -64,9 +64,10 @@ def test_backfill_stops_at_listing_date(store):
     calls = []
 
     class Recording(FakeSource):
-        def bar_pages(self, ticker, start, end, timespan, multiplier=1, descending=False):
-            calls.append(start)
-            return super().bar_pages(ticker, start, end, timespan, multiplier, descending)
+        def bar_pages(self, ticker, start, end, timespan, multiplier=1, descending=False, asset="stock"):
+            if timespan != "day":
+                calls.append(start)
+            return super().bar_pages(ticker, start, end, timespan, multiplier, descending, asset)
 
     store.watch("fake", ["SPCX"], "minute")
     sync(Recording(entitled=("minute",), listing=_spcx()), store, FREE, NOW, log=_log)

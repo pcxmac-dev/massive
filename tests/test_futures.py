@@ -1,0 +1,65 @@
+from datetime import date
+
+import pandas as pd
+import pytest
+
+from massive_collate.futures import continuous, roll_schedule, session_dates
+from massive_collate.sources.massive import normalize_future_bar
+
+ET = "America/New_York"
+
+
+def test_session_dates_follow_the_cme_evening_open():
+    idx = pd.DatetimeIndex(["2026-10-20 17:59", "2026-10-20 18:00", "2026-10-21 16:59"], tz=ET)
+    assert list(session_dates(idx)) == [date(2026, 10, 20), date(2026, 10, 21), date(2026, 10, 21)]
+
+
+D = [date(2026, 9, d) for d in (14, 15, 16, 17, 18, 21)]
+EXP = {"NQU6": date(2026, 9, 18), "NQZ6": date(2026, 12, 18), "NQH7": date(2027, 3, 19)}
+
+
+def test_roll_follows_volume_and_never_goes_back():
+    vol = {
+        "NQU6": {D[0]: 900, D[1]: 500, D[2]: 300, D[3]: 600, D[4]: 100},
+        "NQZ6": {D[0]: 100, D[1]: 600, D[2]: 800, D[3]: 500, D[4]: 900, D[5]: 1000},
+        "NQH7": {D[0]: 1, D[1]: 1, D[2]: 1, D[3]: 1, D[4]: 1, D[5]: 2},
+    }
+    s = roll_schedule(vol, EXP)
+    # rolls on the 15th (Z6 out-trades U6); stays on Z6 on the 17th even though U6 traded more
+    assert s == [(D[0], "NQU6"), (D[1], "NQZ6"), (D[2], "NQZ6"), (D[3], "NQZ6"), (D[4], "NQZ6"), (D[5], "NQZ6")]
+
+
+def test_roll_moves_on_at_expiry_and_rank_two():
+    vol = {"NQU6": {D[4]: 900}, "NQZ6": {D[4]: 100, D[5]: 50}, "NQH7": {D[4]: 1, D[5]: 60}}
+    assert roll_schedule(vol, EXP) == [(D[4], "NQU6"), (D[5], "NQH7")]
+    assert roll_schedule(vol, EXP, rank=2) == [(D[4], "NQZ6")]
+
+
+def _frame(times, closes):
+    idx = pd.DatetimeIndex(times, tz=ET)
+    return pd.DataFrame({"open": closes, "high": closes, "low": closes, "close": closes, "volume": 1.0}, index=idx)
+
+
+def test_continuous_joins_and_reports_rolls():
+    u = _frame(["2026-09-14 10:00", "2026-09-15 10:00"], [100.0, 101.0])
+    z = _frame(["2026-09-14 10:00", "2026-09-15 10:00", "2026-09-16 10:00"], [110.0, 111.0, 112.0])
+    sched = [(D[0], "NQU6"), (D[1], "NQZ6"), (D[2], "NQZ6")]
+    joined, rolls = continuous({"NQU6": u, "NQZ6": z}, sched)
+    assert list(joined["close"]) == [100.0, 111.0, 112.0]
+    assert list(joined["contract"]) == ["NQU6", "NQZ6", "NQZ6"]
+    assert len(rolls) == 1 and rolls[0].old == "NQU6" and rolls[0].new == "NQZ6"
+    assert rolls[0].gap == pytest.approx(10.0)  # 110 - 100 at the last old bar
+
+    diff, _ = continuous({"NQU6": u, "NQZ6": z}, sched, adjust="difference")
+    assert list(diff["close"]) == [110.0, 111.0, 112.0]
+    ratio, _ = continuous({"NQU6": u, "NQZ6": z}, sched, adjust="ratio")
+    assert ratio["close"].iloc[0] == pytest.approx(110.0)
+
+
+def test_normalize_future_bar():
+    raw = {"window_start": 1792628700000000000, "session_end_date": "2026-10-22", "open": 1, "high": 2, "low": 0.5,
+           "close": 1.5, "volume": 10, "transactions": 4, "dollar_volume": 15.0}
+    m = normalize_future_bar(raw, "minute")
+    assert m == {"t": 1792628700000, "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 10, "vw": 1.5, "n": 4}
+    d = normalize_future_bar(raw, "day")
+    assert pd.Timestamp(d["t"], unit="ms", tz="UTC").tz_convert(ET) == pd.Timestamp("2026-10-22", tz=ET)

@@ -14,7 +14,7 @@ from typing import Iterator
 from . import analysis, charts, collector
 from .config import ConfigError, Settings, load_settings
 from .errors import SourceError
-from .models import parse_symbol
+from .symbols import resolve
 from .sources import BUILDERS, DataSource, build_source
 from .storage import Store
 
@@ -103,18 +103,19 @@ def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource
 
 def _watch_line(w: dict) -> str:
     symbol = f"{w['ticker']}::{w['exchange']}" if w["exchange"] else w["ticker"]
-    return (f"{w['source']:8} {symbol:14} {w['resolution']:8} listed: {str(w['listed_from'] or '?'):10}  "
-            f"backfilled to: {w['backfilled_to'] or '-'}")
+    via = w["source_ticker"] + (" (inverted)" if w["invert"] else "") if w["source_ticker"] != w["ticker"] else ""
+    return (f"{w['source']:8} {symbol:14} {w['asset']:6} {via:20} {w['resolution']:8} "
+            f"listed: {str(w['listed_from'] or '?'):10}  backfilled to: {w['backfilled_to'] or '-'}")
 
 
 def cmd_watch(args, settings: Settings) -> int:
     with Store(settings.db_path) as store:
         for text in args.tickers:
-            ticker, mic = parse_symbol(text)
+            spec = resolve(text)
             if args.action == "add":
-                store.watch(args.source, [ticker], args.resolution, exchange=mic)
+                store.watch_spec(args.source, spec, args.resolution)
             elif args.action == "remove":
-                store.unwatch(args.source, [ticker])
+                store.unwatch(args.source, [spec.ticker])
         for w in store.watchlist(args.source):
             print(_watch_line(w))
     return 0
@@ -156,10 +157,13 @@ def cmd_probe(args, settings: Settings) -> int:
     with api_run(args, settings, f"probe {args.ticker}") as (source, store, log):
         if source is None:
             return 0
-        ticker, mic = parse_symbol(args.ticker)
+        spec = resolve(args.ticker)
         if args.watch:
-            store.watch(args.source, [ticker], exchange=mic)
-        collector.resolve_resolution(source, store, ticker, log)
+            store.watch_spec(args.source, spec)
+        if spec.asset == "future":
+            log(f"{spec.ticker}: continuous futures are resolved by `sync` (it needs the current contract)")
+            return 0
+        collector.resolve_resolution(source, store, spec.ticker, log, asset=spec.asset, fetch=spec.source_ticker)
     return 0
 
 
@@ -424,7 +428,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if isinstance(getattr(args, "ticker", None), str) and args.command not in ("probe",):
-        args.ticker = parse_symbol(args.ticker)[0]  # data commands accept SPCX::NASDAQ too
+        args.ticker = resolve(args.ticker).ticker  # data commands accept SPCX::NASDAQ, USDEUR, NQ1! ...
     try:
         settings = load_settings()
         return args.func(args, settings)

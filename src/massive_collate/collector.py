@@ -17,7 +17,8 @@ from zoneinfo import ZoneInfo
 
 from .config import UNLIMITED_BACKFILL_YEARS, Tier
 from .errors import BudgetExhausted, NotEntitled, RateLimited
-from .sources.base import RESOLUTIONS, DataSource
+from .futures import roll_schedule
+from .sources.base import RESOLUTIONS, RESOLUTIONS_BY_ASSET, DataSource
 from .storage import Store
 
 ET = ZoneInfo("America/New_York")
@@ -73,11 +74,14 @@ def _guard(pages: Iterator[list[dict]]) -> Iterator[list[dict]]:
 
 # -- resolution --------------------------------------------------------------
 
-def resolve_resolution(source: DataSource, store: Store, ticker: str, log: Log = print) -> str | None:
-    """Find the finest resolution the plan allows for a ticker and remember it."""
-    for resolution in RESOLUTIONS:
+def resolve_resolution(
+    source: DataSource, store: Store, ticker: str, log: Log = print, asset: str = "stock", fetch: str | None = None,
+) -> str | None:
+    """Find the finest resolution the plan allows for a ticker and remember it.
+    `fetch` is the source's own ticker when it differs (I:COMP, C:EURUSD, a futures contract)."""
+    for resolution in RESOLUTIONS_BY_ASSET.get(asset, RESOLUTIONS):
         try:
-            ok = source.is_entitled(resolution, ticker)
+            ok = source.is_entitled(resolution, fetch or ticker, asset)
         except BudgetExhausted as e:
             raise StopRun(f"request cap reached ({e})") from e
         except RateLimited as e:
@@ -112,30 +116,56 @@ def sync_trades(source: DataSource, store: Store, ticker: str, floor: date, back
     return saved
 
 
+def invert_bars(bars: list[dict]) -> list[dict]:
+    """A currency pair's bars as the inverse pair (EURUSD -> USDEUR).
+
+    Prices invert exactly, and high/low swap (1/low is the highest inverse price).
+    VWAP does not invert (1/average != average of 1/price), so it is dropped
+    rather than shown wrong.
+    """
+    out = []
+    for b in bars:
+        o, h, l, c = b.get("o"), b.get("h"), b.get("l"), b.get("c")
+        if not all((o, h, l, c)):
+            continue
+        out.append({**b, "o": 1 / o, "h": 1 / l, "l": 1 / h, "c": 1 / c, "vw": None})
+    return out
+
+
+def _store_bars(store: Store, source: DataSource, ticker: str, timespan: str, page: list[dict], invert: bool) -> int:
+    return store.upsert_bars(source.name, ticker, timespan, 1, invert_bars(page) if invert else page)
+
+
 def sync_bars(
     source: DataSource, store: Store, ticker: str, timespan: str, floor: date, today: date,
-    backfilled_to: date | None,
+    backfilled_to: date | None, fetch: str | None = None, asset: str = "stock", invert: bool = False,
 ) -> int:
+    """Bring a bar series up to date, then backfill it to the floor. `fetch` is the source's
+    ticker when it differs from the stored one; `invert` stores an fx pair inverted."""
+    fetch = fetch or ticker
     saved = 0
     stored = store.bar_range(source.name, ticker, timespan)
 
     if stored:  # forward: from the day of the newest stored bar to today
-        for page in _guard(source.bar_pages(ticker, _ms_to_date(stored[1]), today, timespan)):
-            saved += store.upsert_bars(source.name, ticker, timespan, 1, page)
+        for page in _guard(source.bar_pages(fetch, _ms_to_date(stored[1]), today, timespan, asset=asset)):
+            saved += _store_bars(store, source, ticker, timespan, page, invert)
 
     if backfilled_to is None or backfilled_to > floor:  # backward: to the plan floor
         stored = store.bar_range(source.name, ticker, timespan)
         end = _ms_to_date(stored[0]) if stored else today
         try:
-            for page in _guard(source.bar_pages(ticker, floor, end, timespan, descending=True)):
-                saved += store.upsert_bars(source.name, ticker, timespan, 1, page)
+            for page in _guard(source.bar_pages(fetch, floor, end, timespan, descending=True, asset=asset)):
+                saved += _store_bars(store, source, ticker, timespan, page, invert)
         except NotEntitled:
             pass
         store.set_backfilled(source.name, ticker, floor)
     return saved
 
 
-def sync_daily(source: DataSource, store: Store, ticker: str, floor: date, today: date) -> int:
+def sync_daily(
+    source: DataSource, store: Store, ticker: str, floor: date, today: date,
+    fetch: str | None = None, asset: str = "stock", invert: bool = False,
+) -> int:
     """Official daily bars (include the closing auction), one request per run.
 
     Day/week/month charts use these rather than bars rebuilt from intraday data.
@@ -144,10 +174,88 @@ def sync_daily(source: DataSource, store: Store, ticker: str, floor: date, today
     start = max(floor, _ms_to_date(stored[1])) if stored else floor
     saved = 0
     try:
-        for page in _guard(source.bar_pages(ticker, start, today, "day")):
-            saved += store.upsert_bars(source.name, ticker, "day", 1, page)
+        for page in _guard(source.bar_pages(fetch or ticker, start, today, "day", asset=asset)):
+            saved += _store_bars(store, source, ticker, "day", page, invert)
     except NotEntitled:
         pass
+    return saved
+
+
+# -- futures -------------------------------------------------------------------
+
+ROLL_HORIZON_DAYS = 150  # contracts expiring this far ahead can matter for the roll
+
+
+def _windows(schedule: list[tuple[date, str]]) -> list[tuple[str, date, date]]:
+    """Consecutive sessions held on the same contract: [(contract, first, last)]."""
+    out: list[list] = []
+    for d, t in schedule:
+        if out and out[-1][0] == t:
+            out[-1][2] = d
+        else:
+            out.append([t, d, d])
+    return [tuple(w) for w in out]
+
+
+def sync_future(
+    source: DataSource, store: Store, item: dict, floor: date, today: date, log: Log = print,
+) -> int:
+    """Continuous futures: contracts -> official session bars -> roll schedule ->
+    intraday bars of each held contract over the sessions it was held."""
+    ticker, product, rank = item["ticker"], item["source_ticker"], item["rank"]
+    checked = item["checked_at"]
+    contracts = store.contracts(source.name, product)
+    if not contracts or not checked or (today - checked).days >= LISTING_RECHECK_DAYS:
+        raw = _guard_call(source.future_contracts, product)
+        store.upsert_contracts(source.name, product, raw)
+        store.set_listing(source.name, ticker, None, None, today, f"{product} continuous #{rank}", "future")
+        contracts = store.contracts(source.name, product)
+        log(f"{ticker}: {len(raw)} {product} contracts listed")
+    horizon = today + timedelta(days=ROLL_HORIZON_DAYS)
+    relevant = [c for c in contracts if c["last_trade"] and floor <= c["last_trade"] <= horizon]
+    if not relevant:
+        log(f"{ticker}: no {product} contracts in range")
+        return 0
+
+    saved = 0
+    for c in relevant:  # official session bars: they drive the roll and the daily chart
+        t = c["ticker"]
+        stored = store.bar_range(source.name, t, "day")
+        last_needed = min(c["last_trade"], today - timedelta(days=1))
+        if stored and _ms_to_date(stored[1]) >= last_needed:
+            continue
+        start = _ms_to_date(stored[1]) if stored else max(floor, c["first_trade"] or floor)
+        for page in _guard(source.bar_pages(t, start, min(today, c["last_trade"]), "day", asset="future")):
+            saved += store.upsert_bars(source.name, t, "day", 1, page)
+
+    volumes, expiries = {}, {}
+    for c in relevant:
+        df = store.load_bars([c["ticker"]], "day", 1, source=source.name)
+        volumes[c["ticker"]] = {t.date(): float(v or 0) for t, v in zip(df["time"], df["volume"])}
+        expiries[c["ticker"]] = c["last_trade"]
+    schedule = [(d, t) for d, t in roll_schedule(volumes, expiries, rank) if d >= floor]
+    store.set_rolls(source.name, product, rank, schedule)
+    if not schedule:
+        return saved
+
+    resolution = item["resolution"]
+    if resolution == "auto":
+        resolution = resolve_resolution(source, store, ticker, log, asset="future", fetch=schedule[-1][1])
+        if resolution is None:
+            return saved
+    for contract, first, last in _windows(schedule):
+        start, end = first - timedelta(days=1), (today if contract == schedule[-1][1] else last)
+        stored = store.bar_range(source.name, contract, resolution)
+        if stored is None:
+            pages = source.bar_pages(contract, start, end, resolution, asset="future")
+        elif _ms_to_date(stored[0]) > start:  # backward fill keeps stored data contiguous
+            pages = source.bar_pages(contract, start, _ms_to_date(stored[0]), resolution, descending=True, asset="future")
+        elif _ms_to_date(stored[1]) < end:
+            pages = source.bar_pages(contract, _ms_to_date(stored[1]), end, resolution, asset="future")
+        else:
+            continue
+        for page in _guard(pages):
+            saved += store.upsert_bars(source.name, contract, resolution, 1, page)
     return saved
 
 
@@ -233,15 +341,28 @@ def sync(source: DataSource, store: Store, tier: Tier, now: datetime | None = No
     try:
         sync_exchanges(source, store, log)
         for item in store.watchlist(source.name):
-            ticker = item["ticker"]
-            listing = check_listing(source, store, item, today, log)
-            if not listing.ok:
+            ticker, asset = item["ticker"], item["asset"]
+            if asset == "future":
+                try:
+                    n = sync_future(source, store, item, floor, today, log)
+                except NotEntitled as e:
+                    log(f"{ticker}: futures refused by your plan ({e.message}); skipped")
+                    continue
+                result.rows += n
+                log(f"{ticker}: {n} rows")
                 continue
+            if asset == "stock":  # listing/identity checks only apply to listed securities
+                listing = check_listing(source, store, item, today, log)
+                if not listing.ok:
+                    continue
+            else:
+                listing = Listing(True)
             item_floor = max(floor, listing.listed_from) if listing.listed_from else floor
             item = next(w for w in store.watchlist(source.name) if w["ticker"] == ticker)
             resolution, backfilled_to = item["resolution"], item["backfilled_to"]
+            fetch, invert = item["source_ticker"], item["invert"]
             if resolution == "auto":
-                resolution = resolve_resolution(source, store, ticker, log)
+                resolution = resolve_resolution(source, store, ticker, log, asset=asset, fetch=fetch)
                 backfilled_to = None
                 if resolution is None:
                     log(f"{ticker}: no supported resolution on your plan; skipped")
@@ -250,7 +371,8 @@ def sync(source: DataSource, store: Store, tier: Tier, now: datetime | None = No
                 if resolution == "trades":
                     n = sync_trades(source, store, ticker, item_floor, backfilled_to)
                 else:
-                    n = sync_bars(source, store, ticker, resolution, item_floor, today, backfilled_to)
+                    n = sync_bars(source, store, ticker, resolution, item_floor, today, backfilled_to,
+                                  fetch=fetch, asset=asset, invert=invert)
             except NotEntitled as e:
                 log(f"{ticker} {resolution}: refused by your plan ({e.message}); re-checking resolution next run")
                 store.set_resolution(source.name, ticker, "auto")
@@ -258,8 +380,8 @@ def sync(source: DataSource, store: Store, tier: Tier, now: datetime | None = No
             result.rows += n
             log(f"{ticker} {resolution}: {n} rows")
             if resolution != "day":
-                n = sync_daily(source, store, ticker, item_floor, today)
-                result.rows += n
+                result.rows += sync_daily(source, store, ticker, item_floor, today, fetch=fetch, asset=asset,
+                                          invert=invert)
     except StopRun as e:
         result.stopped = str(e)
         log(f"stopped: {e}")

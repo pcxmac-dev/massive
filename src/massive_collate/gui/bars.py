@@ -7,7 +7,7 @@ intervals are left out (as TradingView does).
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import time
 from threading import RLock
 
@@ -37,6 +37,14 @@ class Series:
     daily: pd.DataFrame | None  # official daily bars, if stored
     price_precision: int
     volume_precision: int
+    asset: str = "stock"  # stock | index | fx | future
+    rolls: list = field(default_factory=list)  # continuous futures: contract changes
+    adjust: str = "none"  # continuous futures back-adjustment: none | difference | ratio
+
+    @property
+    def around_the_clock(self) -> bool:
+        """Forex and futures trade nearly 24h: no regular-hours filter applies."""
+        return self.asset in ("fx", "future")
 
 
 def decimals(values, cap: int = 6, minimum: int = 0) -> int:
@@ -80,7 +88,9 @@ def _aggregate(groups) -> pd.DataFrame:
     return out[count > 0]
 
 
-def resample(frame: pd.DataFrame, period: str, span: int = 1, session: str = "regular") -> pd.DataFrame:
+def resample(
+    frame: pd.DataFrame, period: str, span: int = 1, session: str = "regular", align_hours_to_open: bool = True,
+) -> pd.DataFrame:
     """Aggregate a fine frame into bars. `session` is "regular" (09:30-16:00 ET) or "extended"."""
     if frame.empty:
         return frame.copy()
@@ -90,8 +100,9 @@ def resample(frame: pd.DataFrame, period: str, span: int = 1, session: str = "re
             return frame.copy()
     if period in INTRADAY:
         rule = f"{span}{INTRADAY[period]}"
-        # Hour bars line up with the 09:30 open, like TradingView's US equities.
-        offset = "9h30min" if period == "hour" else None
+        # US equities: hour bars line up with the 09:30 open, like TradingView. Around-the-clock
+        # markets (fx, futures) use clock hours.
+        offset = "9h30min" if period == "hour" and align_hours_to_open else None
         return _aggregate(frame.resample(rule, origin="start_day", offset=offset, label="left", closed="left"))
     return _aggregate(frame.groupby(calendar_key(frame.index, period)))
 
@@ -188,26 +199,46 @@ class BarEngine:
         self.lock = RLock()
         self._lock = self.lock
 
+    def _watch_item(self, source: str, ticker: str) -> dict | None:
+        return next((w for w in self.store.watchlist(source) if w["ticker"] == ticker), None)
+
     def sources_for(self, ticker: str) -> list[str]:
         with self._lock:
             have = {s for s, t, _ in self.store.stored_series() if t == ticker.upper()}
+            have |= {w["source"] for w in self.store.watchlist() if w["ticker"] == ticker.upper()
+                     and w["asset"] == "future"}  # continuous futures are stored under their contracts
         ranked = [s for s in self.priority if s in have]
         return ranked + sorted(have - set(ranked))
 
-    def series(self, source: str, ticker: str) -> Series | None:
+    def _fingerprint(self, source: str, ticker: str) -> tuple:
+        item = self._watch_item(source, ticker)
+        if item and item["asset"] == "future":
+            rolls = self.store.rolls(source, item["source_ticker"], item["rank"])
+            contracts = sorted({t for _, t in rolls})
+            return (len(rolls), rolls[-1] if rolls else None,
+                    tuple(self.store.series_fingerprint(source, c) for c in contracts))
+        return self.store.series_fingerprint(source, ticker)
+
+    def series(self, source: str, ticker: str, adjust: str = "none") -> Series | None:
+        """A ticker's finest stored series. `adjust` applies to continuous futures only."""
         ticker = ticker.upper()
         with self._lock:
             if source == MERGED:
-                parts = [self.series(s, ticker) for s in self.sources_for(ticker)]
-                fp = tuple(self._series[(p.source, ticker)][0] for p in parts if p)
+                parts = [self.series(s, ticker, adjust) for s in self.sources_for(ticker)]
+                fp = tuple(self._series[(p.source, ticker, adjust)][0] for p in parts if p)
             else:
                 parts = None
-                fp = self.store.series_fingerprint(source, ticker)
-            key = (source, ticker)
+                fp = self._fingerprint(source, ticker)
+            key = (source, ticker, adjust)
             cached = self._series.get(key)
             if cached and cached[0] == fp:
                 return cached[1]
-            s = self._merge(ticker, [p for p in parts if p]) if parts is not None else self._load(source, ticker)
+            if parts is not None:
+                s = self._merge(ticker, [p for p in parts if p])
+            else:
+                s = self._load(source, ticker, adjust)
+            if s is not None:
+                s.adjust = adjust
             self._series[key] = (fp, s)
             return s
 
@@ -216,7 +247,8 @@ class BarEngine:
             return None
         if len(parts) == 1:
             p = parts[0]
-            return Series(MERGED, ticker, p.kind, p.frame, p.daily, p.price_precision, p.volume_precision)
+            return Series(MERGED, ticker, p.kind, p.frame, p.daily, p.price_precision, p.volume_precision,
+                          p.asset, p.rolls)
         # Common base = the coarsest of the feeds; finer feeds are aggregated up to it exactly.
         base = max((p.kind for p in parts), key=BASE_KINDS.index)
         frames = []
@@ -231,9 +263,46 @@ class BarEngine:
         return Series(
             MERGED, ticker, base, merge_frames(frames, "1min" if base == "trades" else None), daily,
             max(p.price_precision for p in parts), max(p.volume_precision for p in parts),
+            parts[0].asset, parts[0].rolls,
         )
 
-    def _load(self, source: str, ticker: str) -> Series | None:
+    def _load(self, source: str, ticker: str, adjust: str = "none") -> Series | None:
+        item = self._watch_item(source, ticker)
+        asset = item["asset"] if item else "stock"
+        if asset == "future":
+            return self._load_future(source, item, adjust)
+        s = self._load_plain(source, ticker)
+        if s is not None:
+            s.asset = asset
+        return s
+
+    def _load_future(self, source: str, item: dict, adjust: str) -> Series | None:
+        from ..futures import continuous
+
+        rolls = self.store.rolls(source, item["source_ticker"], item["rank"])
+        if not rolls:
+            return None
+        contracts = sorted({t for _, t in rolls})
+        kinds = {k for s, t, k in self.store.stored_series() if s == source and t in contracts}
+        kind = next((k for k in BASE_KINDS if k in kinds and k != "day"), None)
+        if kind is None:
+            return None
+        frames = {c: frame_from_bars(self.store.load_bars([c], kind, 1, source=source)) for c in contracts}
+        joined, roll_list = continuous(frames, rolls, adjust)
+        dailies = {c: frame_from_bars(self.store.load_bars([c], "day", 1, source=source)) for c in contracts}
+        daily, _ = continuous(dailies, rolls, adjust)
+        frame = joined.drop(columns="contract")
+        prices = frame[["open", "high", "low", "close"]].to_numpy().ravel()
+        return Series(
+            source, item["ticker"], kind, frame.sort_index(), daily.drop(columns="contract") if not daily.empty else None,
+            price_precision=decimals(prices, cap=6, minimum=2),
+            volume_precision=decimals(frame["volume"].to_numpy(), cap=4),
+            asset="future",
+            rolls=[{"time": int(r.time.as_unit("ms").value), "session": str(r.session), "from": r.old, "to": r.new,
+                    "gap": r.gap} for r in roll_list],
+        )
+
+    def _load_plain(self, source: str, ticker: str) -> Series | None:
         kinds = {k for s, t, k in self.store.stored_series() if s == source and t == ticker}
         kind = next((k for k in BASE_KINDS if k in kinds), None)
         if kind is None:
@@ -268,11 +337,12 @@ class BarEngine:
     def bars(
         self, source: str, ticker: str, period: str, span: int = 1, session: str = "regular",
         to_ms: int | None = None, since_ms: int | None = None, limit: int = 1000,
-        style: Style = Style(),
+        style: Style = Style(), adjust: str = "none",
     ) -> dict:
-        s = self.series(source, ticker)
+        s = self.series(source, ticker, adjust)
         if s is None:
             return {"bars": [], "more": False}
+        session = "extended" if s.around_the_clock else session
         if not any(p["type"] == period and p["span"] == span for p in self.periods(s)):
             raise ValueError(f"{period}/{span} cannot be built from {s.kind} data")
         all_bars, used = self._styled(s, period, span, session, style)
@@ -304,8 +374,8 @@ class BarEngine:
             used["lines"] = style.lines
         elif style.type in ("renko", "range"):
             used["box"] = box
-        key = (s.source, s.ticker, period, span, session, tuple(sorted(used.items())),
-               self._series[(s.source, s.ticker)][0])
+        key = (s.source, s.ticker, s.adjust, period, span, session, tuple(sorted(used.items())),
+               self._series[(s.source, s.ticker, s.adjust)][0])
         with self._lock:
             if key in self._bars:
                 self._bars.move_to_end(key)
@@ -343,12 +413,14 @@ class BarEngine:
 
     def range_stats(
         self, source: str, ticker: str, period: str, span: int, session: str, from_ms: int, to_ms: int,
+        adjust: str = "none",
     ) -> dict:
         """Statistics over the bars whose start lies in [from_ms, to_ms] (either order),
         computed from exactly the bars the chart shows."""
-        s = self.series(source, ticker)
+        s = self.series(source, ticker, adjust)
         if s is None:
             raise LookupError(f"no data stored for {source}:{ticker}")
+        session = "extended" if s.around_the_clock else session
         lo_ms, hi_ms = sorted((int(from_ms), int(to_ms)))
         bars = self._resampled(s, period, span, session)
         ts = epoch_ms(bars.index)
@@ -375,8 +447,8 @@ class BarEngine:
         }
 
     def _resampled(self, s: Series, period: str, span: int, session: str) -> pd.DataFrame:
-        fp = self._series[(s.source, s.ticker)][0]
-        key = (s.source, s.ticker, period, span, session, fp)
+        fp = self._series[(s.source, s.ticker, s.adjust)][0]
+        key = (s.source, s.ticker, s.adjust, period, span, session, fp)
         with self._lock:
             if key in self._bars:
                 self._bars.move_to_end(key)
@@ -387,7 +459,7 @@ class BarEngine:
             daily.index = calendar_key(daily.index, "day")
             bars = daily if period == "day" else _aggregate(daily.groupby(calendar_key(daily.index, period)))
         else:
-            bars = resample(s.frame, period, span, session)
+            bars = resample(s.frame, period, span, session, align_hours_to_open=s.asset in ("stock", "index"))
         with self._lock:
             self._bars[key] = bars
             if len(self._bars) > self._cache_size:

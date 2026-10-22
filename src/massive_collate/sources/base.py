@@ -7,8 +7,14 @@ from typing import Iterator
 
 from ..models import Exchange, Instrument
 
-# Finest first. A source tries each in turn and keeps the first the plan allows.
-RESOLUTIONS = ("trades", "second", "minute")
+# Finest first, per asset class. A source tries each in turn and keeps the first the plan allows.
+RESOLUTIONS_BY_ASSET = {
+    "stock": ("trades", "second", "minute"),
+    "index": ("second", "minute"),
+    "fx": ("second", "minute"),
+    "future": ("second", "minute"),
+}
+RESOLUTIONS = RESOLUTIONS_BY_ASSET["stock"]
 
 
 class DataSource(ABC):
@@ -20,8 +26,9 @@ class DataSource(ABC):
         """API requests sent so far by this instance."""
 
     @abstractmethod
-    def is_entitled(self, resolution: str, ticker: str) -> bool:
-        """Probe (with as few requests as possible) whether the plan allows a resolution."""
+    def is_entitled(self, resolution: str, ticker: str, asset: str = "stock") -> bool:
+        """Probe (with as few requests as possible) whether the plan allows a resolution.
+        `ticker` is the source's own ticker (e.g. I:COMP, C:EURUSD, NQZ6)."""
 
     @abstractmethod
     def trade_pages(
@@ -33,9 +40,10 @@ class DataSource(ABC):
     @abstractmethod
     def bar_pages(
         self, ticker: str, start: date, end: date, timespan: str, multiplier: int = 1,
-        descending: bool = False,
+        descending: bool = False, asset: str = "stock",
     ) -> Iterator[list[dict]]:
-        """OHLCV bars. Dicts have t (ms bar start), o, h, l, c, v, vw, n."""
+        """OHLCV bars in one shape for every asset class: t (ms bar start; for "day" bars
+        midnight US/Eastern of the trading/settlement date), o, h, l, c, v, vw, n."""
 
     @abstractmethod
     def exchanges(self) -> list[Exchange]:
@@ -48,6 +56,11 @@ class DataSource(ABC):
         With resolve_exchange=False the primary exchange is not looked up, so the
         call costs as little as possible (used by the scheduled listing check).
         """
+
+    def future_contracts(self, product: str) -> list[dict]:
+        """Single (non-spread) contracts of a futures product: dicts with ticker,
+        first_trade_date, last_trade_date. Optional."""
+        raise NotImplementedError(f"{self.name} has no futures")
 
     def market_daily(self, day: date) -> list[dict]:
         """Daily bars for the whole market on one date (dicts also carry T = ticker).

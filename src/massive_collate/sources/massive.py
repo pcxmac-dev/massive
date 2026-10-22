@@ -1,8 +1,10 @@
 """Massive (massive.com, formerly Polygon.io) REST API source."""
 from __future__ import annotations
 
+import re
 import time
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Callable, Iterator
 from urllib.parse import urlparse
 
@@ -91,7 +93,7 @@ class MassiveSource(DataSource):
     def requests_made(self) -> int:
         return self.client.requests_made
 
-    def is_entitled(self, resolution: str, ticker: str) -> bool:
+    def is_entitled(self, resolution: str, ticker: str, asset: str = "stock") -> bool:
         """One request with limit=1 over the last week."""
         end = datetime.now(timezone.utc).date()
         start = end - timedelta(days=7)
@@ -99,6 +101,8 @@ class MassiveSource(DataSource):
             if resolution == "trades":
                 ns = int(datetime(start.year, start.month, start.day, tzinfo=timezone.utc).timestamp()) * 10**9
                 next(iter(self._trade_pages(ticker, gte_ns=ns, limit=1)), None)
+            elif asset == "future":
+                next(iter(self._future_pages(ticker, start, end, resolution, False, limit=1)), None)
             else:
                 next(iter(self._bar_pages(ticker, start, end, resolution, 1, False, limit=1)), None)
         except NotEntitled:
@@ -117,8 +121,42 @@ class MassiveSource(DataSource):
         pages = self.client.pages(f"/v3/trades/{ticker.upper()}", params)
         return pages if limit == PAGE_LIMIT else _first(pages)
 
-    def bar_pages(self, ticker, start, end, timespan, multiplier=1, descending=False):
+    def bar_pages(self, ticker, start, end, timespan, multiplier=1, descending=False, asset="stock"):
+        if asset == "future":
+            if multiplier != 1:
+                raise ValueError("futures bars are fetched at multiplier 1")
+            return self._future_pages(ticker, start, end, timespan, descending)
+        # Stocks, indices (I:...) and currencies (C:...) share the aggregates endpoint.
         return self._bar_pages(ticker, start, end, timespan, multiplier, descending)
+
+    # -- futures ---------------------------------------------------------------
+
+    def _future_pages(self, contract, start, end, timespan, descending, limit=PAGE_LIMIT):
+        if timespan not in FUTURE_RESOLUTIONS:
+            raise ValueError(f"futures timespan must be one of {tuple(FUTURE_RESOLUTIONS)}")
+        params = {
+            "resolution": FUTURE_RESOLUTIONS[timespan],
+            # Sessions open the evening before they settle: start a day early so `start`'s session is included.
+            "window_start.gte": str(start - timedelta(days=1) if timespan == "day" else start),
+            "window_start.lt": str(end + timedelta(days=1)),
+            "sort": f"window_start.{'desc' if descending else 'asc'}",
+            "limit": limit,
+        }
+        pages = (
+            [normalize_future_bar(b, timespan) for b in page]
+            for page in self.client.pages(f"/futures/v1/aggs/{contract.upper()}", params)
+        )
+        return pages if limit == PAGE_LIMIT else _first(pages)
+
+    def future_contracts(self, product: str) -> list[dict]:
+        """Every single (non-spread) contract of a product, e.g. NQ -> NQH5, NQM5, ..."""
+        product = product.upper()
+        pattern = re.compile(rf"^{re.escape(product)}[FGHJKMNQUVXZ]\d{{1,2}}$")
+        out = []
+        for page in self.client.pages("/futures/v1/contracts",
+                                      {"product_code": product, "limit": 1000, "sort": "ticker.asc"}):
+            out += [c for c in page if pattern.match(c.get("ticker", "")) and c.get("last_trade_date")]
+        return out
 
     def _bar_pages(self, ticker, start, end, timespan, multiplier, descending, limit=PAGE_LIMIT):
         if timespan not in TIMESPANS:
@@ -161,6 +199,30 @@ class MassiveSource(DataSource):
     def market_daily(self, day: date) -> list[dict]:
         data = self.client.get(f"/v2/aggs/grouped/locale/us/market/stocks/{day}", {"adjusted": "true"})
         return data.get("results") or []
+
+
+FUTURE_RESOLUTIONS = {"second": "1sec", "minute": "1min", "hour": "1hour", "day": "1session"}
+_ET = ZoneInfo("America/New_York")
+
+
+def normalize_future_bar(b: dict, timespan: str) -> dict:
+    """Massive futures bar -> the common bar shape (t ms, o, h, l, c, v, vw, n).
+
+    Session ("day") bars are stamped at midnight US/Eastern of their settlement date,
+    like stock daily bars, so the date shown is the trading date.
+    """
+    if timespan == "day" and b.get("session_end_date"):
+        d = date.fromisoformat(b["session_end_date"])
+        t = int(datetime(d.year, d.month, d.day, tzinfo=_ET).timestamp() * 1000)
+    else:
+        t = int(b["window_start"]) // 10**6
+    volume = b.get("volume")
+    dollar = b.get("dollar_volume")
+    return {
+        "t": t, "o": b.get("open"), "h": b.get("high"), "l": b.get("low"), "c": b.get("close"),
+        "v": volume, "vw": dollar / volume if dollar is not None and volume else None,
+        "n": b.get("transactions"),
+    }
 
 
 def _first(pages: Iterator[list[dict]]) -> Iterator[list[dict]]:
