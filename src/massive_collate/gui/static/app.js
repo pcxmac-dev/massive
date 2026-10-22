@@ -247,7 +247,8 @@ chart.setDataLoader({
         state.baseTotal = (res.total || 0) * lodFor();  // bars at full detail
         renderTypeParams();
         requestAnimationFrame(drawRolls);
-        finishLodSwitch();
+        if (state.lodSwitch) finishLodSwitch();
+        else requestAnimationFrame(checkLod);  // new symbol/interval/type at a far zoom: pick the right detail
         // After the first render: overlays created in the same tick as the data skew the price scale.
         requestAnimationFrame(() => requestAnimationFrame(restoreDrawings));
         updateStatus(res.bars.length);
@@ -283,7 +284,8 @@ window.addEventListener('resize', () => chart.resize());
 // bars (k a power of two keeping candles 1-4 px wide). Far fewer bars for the chart to
 // process each frame, the same visible envelope; statistics still use every bar.
 const LOD_TYPES = new Set(['candles', 'hollow', 'bars', 'volume_candles', 'line', 'line_markers', 'step', 'area',
-                           'hlc_area', 'baseline', 'columns', 'high_low']);
+                           'hlc_area', 'baseline', 'columns', 'high_low',
+                           'heikin_ashi', 'renko', 'line_break', 'range']);
 const MAX_LOD = 4096;
 state.lod = 1;
 state.lodSwitch = null;
@@ -646,12 +648,16 @@ $('typeSelect').value = state.chartType;
 $('typeSelect').addEventListener('change', (e) => {
   const wasTransformed = TRANSFORMED.has(state.chartType);
   state.chartType = e.target.value;
-  resetLod();
   prefs.set('chartType', state.chartType); markDirty();
   state.styleUsed = null;
   applyChartType();
   renderTypeParams();
-  if (wasTransformed || TRANSFORMED.has(state.chartType)) chart.resetData();
+  // Between two time-based types the same bars (and detail level) are reused; anything
+  // involving a transformed type reloads, and the detail level is chosen again after loading.
+  if (wasTransformed || TRANSFORMED.has(state.chartType)) {
+    resetLod();
+    chart.resetData();
+  }
 });
 
 // -- symbol selection ----------------------------------------------------------
@@ -1300,7 +1306,10 @@ function updateStatus(loaded) {
     'times US/Eastern',
   ];
   if (state.lod > 1 && LOD_TYPES.has(state.chartType)) {
-    parts.push(`zoomed out: each candle = ${state.lod} consecutive ${state.period.span}${PERIOD_LABEL[state.period.type]} bars (exact OHLCV)`);
+    const unit = PRICE_BASED.has(state.chartType) ? `${$('typeSelect').selectedOptions[0].text.toLowerCase()} bricks`
+      : state.chartType === 'heikin_ashi' ? 'Heikin Ashi candles'
+      : `${state.period.span}${PERIOD_LABEL[state.period.type]} bars`;
+    parts.push(`zoomed out: each candle = ${state.lod} consecutive ${unit} (first open, last close, high/low, summed volume)`);
   }
   if (loaded !== undefined) parts.push(`${loaded.toLocaleString()} bars loaded (scroll left for more)`);
   $('statusText').textContent = parts.join('  |  ');

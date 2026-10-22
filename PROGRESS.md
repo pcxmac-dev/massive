@@ -14,7 +14,7 @@ Working notes so work can resume in a fresh session. Newest first.
   under `gui/static/vendor/klinecharts`. Intervals built exactly from the finest stored data; official
   daily bars for D/W/M; regular/extended hours toggle; feed picker (single feed or merged);
   drawing tools incl. custom `measure`; drawings saved per ticker in browser localStorage.
-- Tests: `.venv\Scripts\python.exe -m pytest -q` (69 passing). CI on GitHub: Python 3.12/3.14/3.15,
+- Tests: `.venv\Scripts\python.exe -m pytest -q` (140 passing). CI on GitHub: Python 3.12/3.14/3.15,
   Windows + Ubuntu. Branch `feature/collector`, not merged to `main`.
 
 - **Highlight tool** (sidebar, 2nd; Alt+H): box, dashed center lines, start/center/end labels and
@@ -33,10 +33,25 @@ Working notes so work can resume in a fresh session. Newest first.
   Autosave (1.5 s debounce), Ctrl+S, rename, copy, new, delete. Writes need the `X-Massive-Charts`
   header (blocks cross-site writes).
 
+- **Rendering performance (night of 2026-10-22)**: goal 60 fps on modest hardware.
+  - `gui/static/gpu.js`: WebGL2 (OpenGL ES 3) instanced candle renderer under KLineChart's canvas;
+    bars uploaded once, shader does placement with the chart's own rounding (x exact; y differs by
+    1 px for 0.005% of prices at half-pixel ties). GPU toggle in the toolbar shows the device.
+  - Level of detail: when candles are < 0.5 px the server sends exact aggregates of k consecutive
+    bars (`lod` param, `lod_aggregate`), k a power of two, capped so ≥ half the chart width is used.
+  - Measured (SPCX 1m ETH, 85k minutes on screen, volume pane on): 516 ms/frame → 16.7 ms (60 fps,
+    vsync-capped) with or without GPU. KLineChart alone costs ~77 ms/frame at 85k bars, which is why
+    LOD, not the GPU, was the decisive fix.
+- **Reliability fixes found tonight**: futures contract listing is one targeted request
+  (`ticker.any_of`) instead of paging thousands of spreads; usage is recorded per request so killed
+  runs still count against the daily cap; a sync lock left by a dead process is taken over at once.
+
 ## Next
 
 1. Verify the remaining drawing tools by hand (trend line, channel, fib, note); confirm right-click
    and Delete remove a drawing.
+1b. Optional: GPU volume pane (the remaining CPU-heavy pane when LOD is off, e.g. price-based types
+   with very many bricks).
 2. "Go to date" control (load older pages until the date is in range, then scroll to it).
 3. Show which feed supplied each bar in the tooltip when viewing merged feeds.
 4. A second source (e.g. an overnight/BOATS feed) as a `DataSource` subclass + `SOURCE_PRIORITY`.

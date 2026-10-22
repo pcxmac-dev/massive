@@ -250,6 +250,33 @@ def test_engine_lod_paging_and_limits(tmp_path):
         eng.bars("massive", "SPCX", "minute", 1, lod=0)
 
 
+def test_lod_cache_is_per_chart_type(tmp_path):
+    from massive_collate.gui.bars import Style
+
+    eng = BarEngine(_store_with_bars(tmp_path))
+    q = dict(limit=100000, lod=2)
+    rng = eng.bars("massive", "SPCX", "minute", 1, style=Style(type="range", box=0.25), **q)
+    candles = eng.bars("massive", "SPCX", "minute", 1, **q)
+    rng_small = eng.bars("massive", "SPCX", "minute", 1, style=Style(type="range", box=0.1), **q)
+    assert candles["total"] == 195 and rng["total"] != candles["total"]
+    assert rng_small["total"] != rng["total"]  # parameters matter too
+    assert eng.bars("massive", "SPCX", "minute", 1, style=Style(type="range", box=0.25), **q)["total"] == rng["total"]
+
+
+def test_lod_applies_to_bricks_but_not_kagi(tmp_path):
+    from massive_collate.gui.bars import Style
+
+    eng = BarEngine(_store_with_bars(tmp_path))
+    rng = eng.bars("massive", "SPCX", "minute", 1, limit=100000, style=Style(type="range", box=0.25))
+    rng4 = eng.bars("massive", "SPCX", "minute", 1, limit=100000, style=Style(type="range", box=0.25), lod=4)
+    assert rng["total"] > 8
+    assert rng4["style"]["lod"] == 4 and rng4["total"] == -(-rng["total"] // 4)
+    assert max(b["high"] for b in rng4["bars"]) == max(b["high"] for b in rng["bars"])
+    assert min(b["low"] for b in rng4["bars"]) == min(b["low"] for b in rng["bars"])
+    kagi = eng.bars("massive", "SPCX", "minute", 1, limit=100000, style=Style(type="kagi", reversal=0.01), lod=4)
+    assert "lod" not in kagi["style"]  # drawn from per-segment fields: never aggregated
+
+
 def test_daily_uses_official_bars(tmp_path):
     s = _store_with_bars(tmp_path)
     day = int(pd.Timestamp("2026-10-20 00:00", tz=ET).timestamp() * 1000)

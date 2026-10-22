@@ -129,9 +129,11 @@ def epoch_ms(index: pd.DatetimeIndex) -> np.ndarray:
 
 
 MAX_LOD = 4096
-# Time-based types can be shown as exact aggregates; price-based ones (Renko, Kagi, ...) cannot.
+# Types whose candles can be shown as exact aggregates of consecutive candles (first open, last
+# close, high/low envelope, summed volume). Kagi and point & figure are drawn from per-segment
+# fields and are left at full detail.
 LOD_TYPES = ("candles", "hollow", "bars", "volume_candles", "line", "line_markers", "step", "area",
-             "hlc_area", "baseline", "columns", "high_low")
+             "hlc_area", "baseline", "columns", "high_low", "heikin_ashi", "renko", "line_break", "range")
 
 
 def lod_aggregate(bars: pd.DataFrame, k: int) -> pd.DataFrame:
@@ -373,7 +375,9 @@ class BarEngine:
             raise ValueError(f"lod must be 1-{MAX_LOD}")
         all_bars, used = self._styled(s, period, span, session, style)
         if lod > 1 and style.type in LOD_TYPES:
-            key = ("lod", s.source, s.ticker, s.adjust, period, span, session, lod,
+            # The chart type and its parameters are part of the key: aggregates of Renko bricks
+            # must never be served for line break (or candles) and vice versa.
+            key = ("lod", s.source, s.ticker, s.adjust, period, span, session, lod, tuple(sorted(used.items())),
                    self._series[(s.source, s.ticker, s.adjust)][0])
             with self._lock:
                 cached = self._bars.get(key)
