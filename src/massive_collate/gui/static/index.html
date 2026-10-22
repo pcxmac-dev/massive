@@ -11,6 +11,31 @@
     <button id="symbolBtn" class="symbol" title="Change symbol (/)">Select symbol</button>
     <select id="feedSelect" title="Data feed"></select>
     <div id="periods" class="group" role="toolbar" aria-label="Interval"></div>
+    <select id="typeSelect" title="Chart type">
+      <optgroup label="Time based">
+        <option value="bars">Bars</option>
+        <option value="candles">Candles</option>
+        <option value="hollow">Hollow candles</option>
+        <option value="volume_candles">Volume candles</option>
+        <option value="line">Line</option>
+        <option value="line_markers">Line with markers</option>
+        <option value="step">Step line</option>
+        <option value="area">Area</option>
+        <option value="hlc_area">HLC area</option>
+        <option value="baseline">Baseline</option>
+        <option value="columns">Columns</option>
+        <option value="high_low">High-low</option>
+        <option value="heikin_ashi">Heikin Ashi</option>
+      </optgroup>
+      <optgroup label="Price based">
+        <option value="renko">Renko</option>
+        <option value="line_break">Line break</option>
+        <option value="kagi">Kagi</option>
+        <option value="point_figure">Point &amp; figure</option>
+        <option value="range">Range</option>
+      </optgroup>
+    </select>
+    <span id="typeParams" class="params"></span>
     <button id="ethBtn" class="toggle" title="Extended hours: pre-market, after-hours and overnight">ETH</button>
     <div class="menu">
       <button id="indBtn" aria-haspopup="true">Indicators</button>

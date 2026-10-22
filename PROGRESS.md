@@ -17,10 +17,18 @@ Working notes so work can resume in a fresh session. Newest first.
 - Tests: `.venv\Scripts\python.exe -m pytest -q` (69 passing). CI on GitHub: Python 3.12/3.14/3.15,
   Windows + Ubuntu. Branch `feature/collector`, not merged to `main`.
 
+- **Highlight tool** (sidebar, 2nd; Alt+H): box, dashed center lines, start/center/end labels and
+  exact range statistics from `/api/range`. Verified with real mouse clicks.
+- **Chart types** (all of TradingView's): bars, candles, hollow, volume candles, line, line with
+  markers, step, area, HLC area, baseline, columns, high-low, Heikin Ashi, Renko, Line break, Kagi,
+  Point & figure, Range. Transforms in `gui/charttypes.py` (server, unit-tested; ATR(14) defaults;
+  Range flagged approximate without ticks). Custom-drawn types use the `CHART_STYLE` renderer in
+  `app.js` over invisible candles. All 18 checked visually on SPCX.
+
 ## Next
 
-1. Verify the drawing tools by hand at full desktop width (trend line, channel, fib, measure, note);
-   confirm right-click and Delete remove a drawing.
+1. Verify the remaining drawing tools by hand (trend line, channel, fib, note); confirm right-click
+   and Delete remove a drawing.
 2. "Go to date" control (load older pages until the date is in range, then scroll to it).
 3. Show which feed supplied each bar in the tooltip when viewing merged feeds.
 4. A second source (e.g. an overnight/BOATS feed) as a `DataSource` subclass + `SOURCE_PRIORITY`.

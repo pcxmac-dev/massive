@@ -35,6 +35,10 @@ def round_box(box: float, precision: int) -> float:
     return max(step, round(box / step) * step)
 
 
+def _clean(v: float) -> float:
+    return round(float(v), 9)
+
+
 class _Out:
     """Collects output bars with distinct increasing timestamps and carried-over volume."""
 
@@ -52,8 +56,12 @@ class _Out:
 
     def emit(self, t: pd.Timestamp, o: float, c: float, high: float | None = None, low: float | None = None, **extra):
         stamp = t if not self.index or t > self.index[-1] else self.index[-1] + pd.Timedelta(milliseconds=1)
-        self.rows.append({"open": o, "high": max(o, c) if high is None else high,
-                          "low": min(o, c) if low is None else low, "close": c,
+        # Box levels are built by repeated addition; drop the floating-point noise
+        # (e.g. 158.85140000000018 -> 158.8514) without losing real precision.
+        o, c = _clean(o), _clean(c)
+        high = max(o, c) if high is None else _clean(high)
+        low = min(o, c) if low is None else _clean(low)
+        self.rows.append({"open": o, "high": high, "low": low, "close": c,
                           "volume": self.vol, "turnover": self.turn, "trades": self.trades,
                           "src_time": t, **extra})
         self.index.append(stamp)

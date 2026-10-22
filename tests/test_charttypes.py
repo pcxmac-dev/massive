@@ -51,6 +51,12 @@ def test_renko_one_bar_many_bricks_get_distinct_times():
     assert (r["src_time"] == r["src_time"].iloc[0]).all()
 
 
+def test_renko_levels_have_no_float_noise():
+    r = ct.renko(_bars(np.linspace(150, 170, 400)), box=0.4918)
+    levels = np.r_[r["open"].to_numpy(), r["close"].to_numpy()]
+    assert all(repr(v) == repr(round(v, 4)) for v in levels)  # exactly 4 dp, like the box
+
+
 def test_line_break_three_lines():
     lb = ct.line_break(_bars([10, 11, 12, 13, 12.5, 11.5, 10.5, 9.5]), lines=3)
     lines = list(zip(lb["open"], lb["close"]))

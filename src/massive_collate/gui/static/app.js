@@ -23,6 +23,10 @@ const state = {
   session: prefs.get('session', 'regular'),
   theme: prefs.get('theme', 'dark'),
   indicators: prefs.get('indicators', ['VOL']),
+  chartType: prefs.get('chartType', 'candles'),
+  typeParams: prefs.get('typeParams', {}),  // per type: { box, reversal, lines }
+  styleUsed: null,
+  approximate: null,
   magnet: prefs.get('magnet', 'normal'),
   meta: null,
   symbols: [],
@@ -222,7 +226,7 @@ chart.setDataLoader({
     const token = type === 'init' ? ++state.loadToken : state.loadToken;
     const params = {
       source: symbol.source, ticker: symbol.ticker, period: period.type, span: period.span,
-      session: state.session, limit: PAGE,
+      session: state.session, limit: PAGE, ...typeQuery(),
     };
     if (type === 'forward' && timestamp) params.to = timestamp;
     try {
@@ -231,6 +235,9 @@ chart.setDataLoader({
       callback(res.bars, { forward: res.more, backward: false });
       showError(null);
       if (type === 'init') {
+        state.styleUsed = res.style;
+        state.approximate = res.approximate || null;
+        renderTypeParams();
         // After the first render: overlays created in the same tick as the data skew the price scale.
         requestAnimationFrame(() => requestAnimationFrame(restoreDrawings));
         updateStatus(res.bars.length);
@@ -246,9 +253,10 @@ chart.setDataLoader({
       const list = chart.getDataList();
       if (!list.length) return;
       try {
+        if (PRICE_BASED.has(state.chartType)) return; // path-dependent: refreshed by reloading
         const res = await api('/api/bars', {
           source: symbol.source, ticker: symbol.ticker, period: period.type, span: period.span,
-          session: state.session, since: list[list.length - 1].timestamp,
+          session: state.session, since: list[list.length - 1].timestamp, ...typeQuery(),
         });
         res.bars.forEach((bar) => callback(bar));
       } catch { /* the next poll will retry */ }
@@ -258,6 +266,219 @@ chart.setDataLoader({
 });
 
 window.addEventListener('resize', () => chart.resize());
+
+// -- chart types -------------------------------------------------------------------
+// Native KLineChart candle types; transformed types come back from the server as OHLC
+// boxes and render as candles; the rest are drawn by the CHART_STYLE renderer below.
+const NATIVE = { candles: 'candle_solid', bars: 'ohlc', area: 'area', heikin_ashi: 'candle_solid',
+                 renko: 'candle_solid', line_break: 'candle_solid', range: 'candle_solid' };
+const TRANSFORMED = new Set(['heikin_ashi', 'renko', 'line_break', 'kagi', 'point_figure', 'range']);
+const PRICE_BASED = new Set(['renko', 'line_break', 'kagi', 'point_figure', 'range']);
+const LINE = '#2962ff';
+const CLEAR = 'rgba(0,0,0,0)';
+
+function typeQuery() {
+  if (!TRANSFORMED.has(state.chartType)) return {};
+  const p = state.typeParams[state.chartType] || {};
+  return { type: state.chartType, box: p.box || undefined, reversal: p.reversal || undefined, lines: p.lines || undefined };
+}
+
+// The theme's own candle colours, captured before any chart type hides them.
+const DEFAULT_CANDLE = (() => {
+  const c = chart.getStyles().candle;
+  return { bar: { ...c.bar }, priceMark: { high: { ...c.priceMark.high }, low: { ...c.priceMark.low } } };
+})();
+
+function applyChartType() {
+  const custom = !NATIVE[state.chartType];
+  chart.setStyles(state.theme);
+  chart.setStyles({ candle: { type: NATIVE[state.chartType] || 'candle_solid', ...DEFAULT_CANDLE } });
+  if (custom) {
+    // Keep the (invisible) candles for scaling, crosshair and tooltip; draw the type ourselves.
+    chart.setStyles({ candle: {
+      bar: { upColor: CLEAR, downColor: CLEAR, noChangeColor: CLEAR, upBorderColor: CLEAR, downBorderColor: CLEAR,
+             noChangeBorderColor: CLEAR, upWickColor: CLEAR, downWickColor: CLEAR, noChangeWickColor: CLEAR },
+      priceMark: { high: { show: false }, low: { show: false } },
+    } });
+  }
+  if (state.chartType === 'area') chart.setStyles({ candle: { area: { lineColor: LINE } } });
+  chart.removeIndicator({ name: 'CHART_STYLE' });
+  if (custom) chart.createIndicator({ name: 'CHART_STYLE', paneId: 'candle_pane' }, true);
+}
+
+function px(xAxis, i) { return xAxis.convertToPixel(i); }
+
+kc.registerIndicator({
+  name: 'CHART_STYLE',
+  shortName: '',
+  series: 'price',
+  figures: [],
+  calc: (list) => list.map(() => ({})),
+  createTooltipDataSource: () => ({ name: '', calcParamsText: '', features: [], legends: [] }),
+  draw: ({ ctx, chart: c, bounding, xAxis, yAxis }) => {
+    const data = c.getDataList();
+    const { from, to } = c.getVisibleRange();
+    if (!data.length || to <= from) return true;
+    const bar = c.getBarSpace().bar;
+    const half = Math.max(1, bar * 0.4);
+    const y = (v) => yAxis.convertToPixel(v);
+    const type = state.chartType;
+    ctx.save();
+    ctx.setLineDash([]);  // the chart leaves its own dash pattern set on the shared context
+    ctx.globalAlpha = 1;
+    ctx.lineJoin = 'round';
+    const lo = Math.max(0, from - 1), hi = Math.min(data.length, to + 1);
+
+    const polyline = (values, color, width = 1.5, step = false) => {
+      ctx.beginPath();
+      for (let i = lo; i < hi; i++) {
+        const x = px(xAxis, i), yy = y(values(data[i]));
+        if (i === lo) ctx.moveTo(x, yy);
+        else if (step) { ctx.lineTo(x, y(values(data[i - 1]))); ctx.lineTo(x, yy); }
+        else ctx.lineTo(x, yy);
+      }
+      ctx.strokeStyle = color; ctx.lineWidth = width; ctx.stroke();
+    };
+    const dirColor = (i) => (i > 0 && data[i].close < data[i - 1].close ? DOWN : UP);
+
+    if (type === 'line' || type === 'line_markers' || type === 'step') {
+      polyline((d) => d.close, LINE, 1.5, type === 'step');
+      if (type === 'line_markers') {
+        ctx.fillStyle = LINE;
+        for (let i = lo; i < hi; i++) { ctx.beginPath(); ctx.arc(px(xAxis, i), y(data[i].close), 2.5, 0, Math.PI * 2); ctx.fill(); }
+      }
+    } else if (type === 'hlc_area') {
+      ctx.beginPath();
+      for (let i = lo; i < hi; i++) ctx[i === lo ? 'moveTo' : 'lineTo'](px(xAxis, i), y(data[i].high));
+      for (let i = hi - 1; i >= lo; i--) ctx.lineTo(px(xAxis, i), y(data[i].low));
+      ctx.closePath(); ctx.fillStyle = 'rgba(41,98,255,0.15)'; ctx.fill();
+      polyline((d) => d.high, 'rgba(38,166,154,0.8)', 1);
+      polyline((d) => d.low, 'rgba(239,83,80,0.8)', 1);
+      polyline((d) => d.close, LINE, 1.5);
+    } else if (type === 'baseline') {
+      const range = yAxis.getRange();
+      const base = (range.from + range.to) / 2;  // TradingView default: 50% of the visible scale
+      const by = y(base);
+      for (const [clipTop, clipH, fill, stroke] of [[0, by, 'rgba(38,166,154,0.18)', UP], [by, bounding.height - by, 'rgba(239,83,80,0.18)', DOWN]]) {
+        ctx.save();
+        ctx.beginPath(); ctx.rect(0, clipTop, bounding.width, clipH); ctx.clip();
+        ctx.beginPath();
+        for (let i = lo; i < hi; i++) ctx[i === lo ? 'moveTo' : 'lineTo'](px(xAxis, i), y(data[i].close));
+        ctx.lineTo(px(xAxis, hi - 1), by); ctx.lineTo(px(xAxis, lo), by); ctx.closePath();
+        ctx.fillStyle = fill; ctx.fill();
+        polyline((d) => d.close, stroke, 1.5);
+        ctx.restore();
+      }
+      ctx.setLineDash([4, 4]); ctx.strokeStyle = '#787b86'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(0, by); ctx.lineTo(bounding.width, by); ctx.stroke(); ctx.setLineDash([]);
+    } else if (type === 'columns') {
+      for (let i = lo; i < hi; i++) {
+        const x = px(xAxis, i), top = y(data[i].close);
+        ctx.fillStyle = dirColor(i); ctx.globalAlpha = 0.7;
+        ctx.fillRect(x - half, top, half * 2, bounding.height - top);
+      }
+      ctx.globalAlpha = 1;
+    } else if (type === 'high_low') {
+      ctx.fillStyle = LINE;
+      for (let i = lo; i < hi; i++) {
+        const x = px(xAxis, i), t = y(data[i].high), b = y(data[i].low);
+        ctx.fillRect(x - half, t, half * 2, Math.max(1, b - t));
+      }
+    } else if (type === 'hollow' || type === 'volume_candles') {
+      let maxVol = 0;
+      if (type === 'volume_candles') for (let i = lo; i < hi; i++) maxVol = Math.max(maxVol, data[i].volume || 0);
+      for (let i = lo; i < hi; i++) {
+        const d = data[i], x = px(xAxis, i);
+        const color = type === 'hollow' ? dirColor(i) : (d.close >= d.open ? UP : DOWN);
+        const w = type === 'volume_candles' && maxVol ? Math.max(1, half * 2 * (d.volume || 0) / maxVol) : half * 2;
+        const top = y(Math.max(d.open, d.close)), bottom = y(Math.min(d.open, d.close));
+        ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(x + 0.5, y(d.high)); ctx.lineTo(x + 0.5, top);
+        ctx.moveTo(x + 0.5, bottom); ctx.lineTo(x + 0.5, y(d.low)); ctx.stroke();
+        if (type === 'hollow' && d.close > d.open) ctx.strokeRect(x - w / 2 + 0.5, top + 0.5, Math.max(1, w - 1), Math.max(1, bottom - top - 1));
+        else ctx.fillRect(x - w / 2, top, w, Math.max(1, bottom - top));
+      }
+    } else if (type === 'kagi') {
+      for (let i = lo; i < hi; i++) {
+        const d = data[i], x = px(xAxis, i);
+        if (i > 0) {  // shoulder/waist connector from the previous line
+          ctx.strokeStyle = data[i - 1].yang ? UP : DOWN; ctx.lineWidth = data[i - 1].yang ? 3 : 1;
+          ctx.beginPath(); ctx.moveTo(px(xAxis, i - 1), y(d.open)); ctx.lineTo(x, y(d.open)); ctx.stroke();
+        }
+        const segs = d.switch != null
+          ? [[d.open, d.switch, d.yang_start], [d.switch, d.close, d.yang]]
+          : [[d.open, d.close, d.yang]];
+        for (const [a, b, yang] of segs) {
+          ctx.strokeStyle = yang ? UP : DOWN; ctx.lineWidth = yang ? 3 : 1;
+          ctx.beginPath(); ctx.moveTo(x, y(a)); ctx.lineTo(x, y(b)); ctx.stroke();
+        }
+      }
+    } else if (type === 'point_figure') {
+      const box = state.styleUsed?.box;
+      if (box) {
+        const size = Math.max(3, Math.min(half, Math.abs(y(0) - y(box)) / 2 - 1));
+        ctx.lineWidth = 1.5;
+        for (let i = lo; i < hi; i++) {
+          const d = data[i], x = px(xAxis, i);
+          ctx.strokeStyle = d.up ? UP : DOWN;
+          for (let v = d.low; v <= d.high + box / 2; v += box) {
+            const yy = y(v);
+            ctx.beginPath();
+            if (d.up) { ctx.moveTo(x - size, yy - size); ctx.lineTo(x + size, yy + size); ctx.moveTo(x + size, yy - size); ctx.lineTo(x - size, yy + size); }
+            else ctx.arc(x, yy, size, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+        }
+      }
+    }
+    ctx.restore();
+    return true;
+  },
+});
+
+function renderTypeParams() {
+  const box = $('typeParams');
+  box.innerHTML = '';
+  const t = state.chartType;
+  const used = state.styleUsed || {};
+  const p = state.typeParams[t] || {};
+  const input = (key, label, placeholder, step) => {
+    const l = document.createElement('label');
+    l.textContent = label;
+    const i = document.createElement('input');
+    i.type = 'number'; i.min = '0'; i.step = step; i.placeholder = placeholder; i.value = p[key] ?? '';
+    i.title = `${label} (empty = ${placeholder})`;
+    i.addEventListener('change', () => {
+      state.typeParams[t] = { ...(state.typeParams[t] || {}), [key]: i.value ? Number(i.value) : undefined };
+      prefs.set('typeParams', state.typeParams);
+      chart.resetData();
+    });
+    l.append(i);
+    box.append(l);
+  };
+  if (t === 'renko' || t === 'range' || t === 'point_figure') {
+    input('box', t === 'range' ? 'Range' : 'Box', used.box != null ? `ATR ${used.box}` : 'ATR(14)', 'any');
+  }
+  if (t === 'kagi') input('reversal', 'Reversal', used.reversal != null ? `ATR ${used.reversal}` : 'ATR(14)', 'any');
+  if (t === 'point_figure') input('reversal', 'Reversal boxes', '3', '1');
+  if (t === 'line_break') input('lines', 'Lines', '3', '1');
+  if (state.approximate && t === 'range') {
+    const s = document.createElement('span');
+    s.className = 'approx'; s.textContent = 'approx.'; s.title = state.approximate;
+    box.append(s);
+  }
+}
+
+$('typeSelect').value = state.chartType;
+$('typeSelect').addEventListener('change', (e) => {
+  const wasTransformed = TRANSFORMED.has(state.chartType);
+  state.chartType = e.target.value;
+  prefs.set('chartType', state.chartType);
+  state.styleUsed = null;
+  applyChartType();
+  renderTypeParams();
+  if (wasTransformed || TRANSFORMED.has(state.chartType)) chart.resetData();
+});
 
 // -- symbol selection ----------------------------------------------------------
 async function loadSymbols() {
@@ -579,7 +800,7 @@ $('themeBtn').addEventListener('click', () => {
   state.theme = state.theme === 'dark' ? 'light' : 'dark';
   prefs.set('theme', state.theme);
   document.body.classList.toggle('light', state.theme === 'light');
-  chart.setStyles(state.theme);
+  applyChartType();
 });
 
 document.addEventListener('keydown', (e) => {
@@ -620,6 +841,8 @@ function updateStatus(loaded) {
   renderTools();
   renderIndicatorMenu();
   renderSession();
+  applyChartType();
+  renderTypeParams();
   state.indicators.forEach(addIndicator);
   try {
     await loadSymbols();

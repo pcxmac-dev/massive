@@ -43,6 +43,9 @@ select option { background: var(--panel); }
 .group { display: flex; gap: 1px; padding: 0 6px; border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
 .group button { padding: 4px 6px; }
 .spacer { flex: 1; }
+.params { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
+.params input { width: 72px; border-color: var(--border); background: var(--bg); padding: 3px 6px; cursor: text; }
+.params .approx { color: #f0b90b; }
 
 .menu { position: relative; }
 .dropdown {
