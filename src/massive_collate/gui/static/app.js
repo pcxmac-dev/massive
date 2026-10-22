@@ -452,7 +452,7 @@ function renderTypeParams() {
     i.title = `${label} (empty = ${placeholder})`;
     i.addEventListener('change', () => {
       state.typeParams[t] = { ...(state.typeParams[t] || {}), [key]: i.value ? Number(i.value) : undefined };
-      prefs.set('typeParams', state.typeParams);
+      prefs.set('typeParams', state.typeParams); markDirty();
       chart.resetData();
     });
     l.append(i);
@@ -475,7 +475,7 @@ $('typeSelect').value = state.chartType;
 $('typeSelect').addEventListener('change', (e) => {
   const wasTransformed = TRANSFORMED.has(state.chartType);
   state.chartType = e.target.value;
-  prefs.set('chartType', state.chartType);
+  prefs.set('chartType', state.chartType); markDirty();
   state.styleUsed = null;
   applyChartType();
   renderTypeParams();
@@ -501,6 +501,7 @@ async function selectSymbol(ticker, source = MERGED) {
   state.meta = meta;
   state.restoredFor = null;
   prefs.set('last', { ticker: meta.ticker, source });
+  markDirty();
 
   if (!meta.periods.some((p) => p.type === state.period.type && p.span === state.period.span)) {
     state.period = meta.periods.find((p) => p.type === 'minute' && p.span === 1) || meta.periods[0];
@@ -533,7 +534,7 @@ $('feedSelect').addEventListener('change', (e) => selectSymbol(state.ticker, e.t
 $('adjustSelect').value = state.adjust;
 $('adjustSelect').addEventListener('change', (e) => {
   state.adjust = e.target.value;
-  prefs.set('adjust', state.adjust);
+  prefs.set('adjust', state.adjust); markDirty();
   selectSymbol(state.ticker, state.source).catch(showError);
 });
 
@@ -631,7 +632,7 @@ function renderPeriods() {
     b.classList.toggle('active', p.type === state.period.type && p.span === state.period.span);
     b.addEventListener('click', () => {
       state.period = p;
-      prefs.set('period', p);
+      prefs.set('period', p); markDirty();
       renderPeriods();
       chart.setPeriod(p);
     });
@@ -645,7 +646,7 @@ function renderSession() {
 
 $('ethBtn').addEventListener('click', () => {
   state.session = state.session === 'extended' ? 'regular' : 'extended';
-  prefs.set('session', state.session);
+  prefs.set('session', state.session); markDirty();
   renderSession();
   chart.resetData();
 });
@@ -675,7 +676,7 @@ function renderIndicatorMenu() {
       cb.addEventListener('change', () => {
         if (cb.checked) { addIndicator(name); state.indicators.push(name); }
         else { chart.removeIndicator({ name }); state.indicators = state.indicators.filter((n) => n !== name); }
-        prefs.set('indicators', state.indicators);
+        prefs.set('indicators', state.indicators); markDirty();
       });
       l.append(cb, document.createTextNode(`${name}  ${label}`));
       menu.append(l);
@@ -802,26 +803,274 @@ function renderTools() {
   setActiveTool('cursor');
 }
 
-// Drawings are stored per ticker as (timestamp, price) points, so they line up on every interval.
+// Drawings belong to the current layout, per ticker, as (timestamp, price) points so they
+// line up on every interval.
 function saveDrawings() {
-  if (!state.ticker || state.restoredFor !== state.ticker) return;
+  if (!state.ticker || state.restoredFor !== state.ticker || !layout.current) return;
   const user = chart.getOverlays({ groupId: 'user' }).filter((o) => o.id !== state.drawingId);
-  prefs.set(`drawings:${state.ticker}`, user.map((o) => ({
+  const drawings = layout.current.data.drawings || (layout.current.data.drawings = {});
+  drawings[state.ticker] = user.map((o) => ({
     name: o.name, lock: o.lock, visible: o.visible, extendData: o.extendData ?? null, styles: o.styles ?? null,
     points: o.points.map((p) => ({ timestamp: p.timestamp, value: p.value })),
-  })));
+  }));
+  markDirty();
 }
 
 function restoreDrawings() {
   if (state.restoredFor === state.ticker) return;
   chart.removeOverlay({ groupId: 'user' });
-  for (const d of prefs.get(`drawings:${state.ticker}`, [])) {
+  for (const d of layout.current?.data.drawings?.[state.ticker] || []) {
     chart.createOverlay({
       name: d.name, groupId: 'user', points: d.points, lock: d.lock, visible: d.visible,
       extendData: d.extendData ?? undefined, styles: d.styles ?? undefined, ...overlayEvents(),
     });
   }
   state.restoredFor = state.ticker;
+}
+
+// -- layouts (saved markups), like TradingView's layout menu ------------------------
+// A layout is the whole chart setup: symbol, feed, interval, chart type and settings,
+// session, futures adjustment, indicators and every symbol's drawings. Stored by the
+// local server in the database; up to 5.
+const layout = {
+  current: null,  // { id, name, data }
+  list: [],
+  max: 5,
+  dirty: false,
+  autosave: prefs.get('autosave', true),
+  timer: null,
+};
+
+async function apiWrite(method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: { 'Content-Type': 'application/json', 'X-Massive-Charts': '1' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function snapshot() {
+  return {
+    version: 1,
+    symbol: state.ticker ? { ticker: state.ticker, source: state.source } : null,
+    period: state.period,
+    session: state.session,
+    chartType: state.chartType,
+    typeParams: state.typeParams,
+    adjust: state.adjust,
+    indicators: [...state.indicators],
+    drawings: layout.current?.data.drawings || {},
+  };
+}
+
+function markDirty() {
+  if (!layout.current || state.applyingLayout) return;
+  layout.dirty = true;
+  renderLayoutButton();
+  if (layout.autosave) {
+    clearTimeout(layout.timer);
+    layout.timer = setTimeout(() => saveLayout().catch(showError), 1500);
+  }
+}
+
+async function saveLayout() {
+  if (!layout.current) return;
+  clearTimeout(layout.timer);
+  layout.current.data = snapshot();
+  const saved = await apiWrite('PUT', `/api/layouts/${layout.current.id}`, { data: layout.current.data });
+  layout.current = saved;
+  layout.dirty = false;
+  await refreshLayoutList();
+}
+
+async function refreshLayoutList() {
+  const res = await api('/api/layouts');
+  layout.list = res.layouts;
+  layout.max = res.max;
+  renderLayoutButton();
+}
+
+function renderLayoutButton() {
+  $('layoutName').textContent = layout.current ? layout.current.name : 'Layout';
+  $('layoutDirty').hidden = !layout.dirty;
+}
+
+async function applyLayout(l) {
+  state.applyingLayout = true;
+  try {
+    const d = l.data || {};
+    layout.current = { ...l, data: { drawings: {}, ...d } };
+    layout.dirty = false;
+    prefs.set('layoutId', l.id);
+    if (d.period) state.period = d.period;
+    if (d.session) state.session = d.session;
+    if (d.chartType) state.chartType = d.chartType;
+    if (d.typeParams) state.typeParams = d.typeParams;
+    if (d.adjust) state.adjust = d.adjust;
+    if (Array.isArray(d.indicators)) {
+      for (const name of state.indicators) chart.removeIndicator({ name });
+      state.indicators = [...d.indicators];
+      state.indicators.forEach(addIndicator);
+    }
+    $('typeSelect').value = state.chartType;
+    $('adjustSelect').value = state.adjust;
+    renderSession();
+    applyChartType();
+    renderTypeParams();
+    renderIndicatorMenu();
+    renderLayoutButton();
+    state.restoredFor = null;
+    const sym = d.symbol && state.symbols.some((s) => s.ticker === d.symbol.ticker) ? d.symbol
+      : state.ticker ? { ticker: state.ticker, source: state.source }
+      : state.symbols.length ? { ticker: state.symbols[0].ticker, source: MERGED } : null;
+    if (sym) await selectSymbol(sym.ticker, sym.source);
+  } finally {
+    state.applyingLayout = false;
+  }
+}
+
+async function loadLayout(id) {
+  if (layout.dirty) await saveLayout();
+  await applyLayout(await api(`/api/layouts/${id}`));
+}
+
+function askName(message, fallback) {
+  const name = prompt(message, fallback);
+  return name && name.trim() ? name.trim().slice(0, 60) : null;
+}
+
+async function createLayout(copy) {
+  if (layout.list.length >= layout.max) {
+    alert(`You can keep up to ${layout.max} layouts. Delete one first.`);
+    return;
+  }
+  const name = askName(copy ? 'Name for the copy' : 'Name for the new layout',
+                       copy ? `${layout.current?.name || 'Layout'} copy` : `Layout ${layout.list.length + 1}`);
+  if (!name) return;
+  if (layout.dirty) await saveLayout();
+  const data = copy ? snapshot() : { ...snapshot(), drawings: {} };
+  const made = await apiWrite('POST', '/api/layouts', { name, data });
+  await refreshLayoutList();
+  await applyLayout(made);
+}
+
+async function renameLayout() {
+  if (!layout.current) return;
+  const name = askName('Rename layout', layout.current.name);
+  if (!name) return;
+  layout.current = await apiWrite('PUT', `/api/layouts/${layout.current.id}`, { name });
+  await refreshLayoutList();
+}
+
+async function deleteLayout(id) {
+  const target = layout.list.find((l) => l.id === id);
+  if (!target || !confirm(`Delete layout "${target.name}" and its drawings?`)) return;
+  await apiWrite('DELETE', `/api/layouts/${id}`);
+  await refreshLayoutList();
+  if (layout.current?.id === id) {
+    layout.current = null;
+    if (layout.list.length) await loadLayout(layout.list[0].id);
+    else await ensureLayout();
+  }
+}
+
+function menuItem(label, onClick, key) {
+  const b = document.createElement('button');
+  b.className = 'menu-item';
+  b.append(document.createTextNode(label));
+  if (key) { const k = document.createElement('span'); k.className = 'key'; k.textContent = key; b.append(k); }
+  b.addEventListener('click', () => { $('layoutMenu').hidden = true; onClick(); });
+  return b;
+}
+
+function renderLayoutMenu() {
+  const menu = $('layoutMenu');
+  menu.innerHTML = '';
+  const run = (fn) => () => fn().catch(showError);
+  menu.append(menuItem('Save layout', run(saveLayout), 'Ctrl+S'));
+  const auto = document.createElement('label');
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.checked = layout.autosave;
+  cb.addEventListener('change', () => {
+    layout.autosave = cb.checked;
+    prefs.set('autosave', cb.checked);
+    if (cb.checked && layout.dirty) saveLayout().catch(showError);
+  });
+  auto.append(cb, document.createTextNode('Autosave'));
+  menu.append(auto);
+  menu.append(menuItem('Rename…', run(renameLayout)));
+  menu.append(menuItem('Make a copy…', run(() => createLayout(true))));
+  menu.append(menuItem('Create new layout…', run(() => createLayout(false))));
+  const sep = document.createElement('hr'); sep.className = 'menu-sep'; menu.append(sep);
+  const h = document.createElement('h4');
+  h.textContent = `Layouts (${layout.list.length}/${layout.max})`;
+  menu.append(h);
+  for (const l of layout.list) {
+    const row = document.createElement('div');
+    row.className = 'layout-row' + (l.id === layout.current?.id ? ' current' : '');
+    const open = menuItem(l.name, run(() => loadLayout(l.id)));
+    const when = document.createElement('span');
+    when.className = 'key';
+    when.textContent = new Date(l.updated_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    open.append(when);
+    const del = document.createElement('button');
+    del.className = 'del'; del.title = `Delete "${l.name}"`; del.setAttribute('aria-label', del.title); del.textContent = '✕';
+    del.addEventListener('click', (e) => { e.stopPropagation(); $('layoutMenu').hidden = true; deleteLayout(l.id).catch(showError); });
+    row.append(open, del);
+    menu.append(row);
+  }
+}
+
+$('layoutBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const menu = $('layoutMenu');
+  if (menu.hidden) renderLayoutMenu();
+  menu.hidden = !menu.hidden;
+  if (!menu.hidden) {
+    // Open towards whichever side has room (the button moves when the toolbar wraps).
+    menu.style.left = menu.style.right = '';
+    if (menu.getBoundingClientRect().left < 0) { menu.style.left = '0'; menu.style.right = 'auto'; }
+  }
+});
+document.addEventListener('click', (e) => { if (!$('layoutMenu').contains(e.target)) $('layoutMenu').hidden = true; });
+window.addEventListener('beforeunload', () => {
+  if (layout.dirty && layout.current) {
+    // Best effort: keep the last changes if the window closes before autosave fires.
+    fetch(`/api/layouts/${layout.current.id}`, {
+      method: 'PUT', keepalive: true,
+      headers: { 'Content-Type': 'application/json', 'X-Massive-Charts': '1' },
+      body: JSON.stringify({ data: snapshot() }),
+    });
+  }
+});
+
+// First run: create "Default" from what this browser had before layouts existed.
+async function ensureLayout() {
+  await refreshLayoutList();
+  if (layout.list.length) {
+    const want = prefs.get('layoutId', null);
+    const id = layout.list.some((l) => l.id === want) ? want : layout.list[0].id;
+    await applyLayout(await api(`/api/layouts/${id}`));
+    return;
+  }
+  const drawings = {};
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith('mc:drawings:')) drawings[key.slice(12)] = JSON.parse(localStorage.getItem(key));
+    }
+  } catch { /* no browser storage: start empty */ }
+  const last = prefs.get('last', null);
+  const made = await apiWrite('POST', '/api/layouts', {
+    name: 'Default',
+    data: { ...snapshot(), symbol: last, drawings },
+  });
+  await refreshLayoutList();
+  await applyLayout(made);
 }
 
 // -- top bar actions and keys ----------------------------------------------------
@@ -843,6 +1092,11 @@ $('themeBtn').addEventListener('click', () => {
 });
 
 document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+    e.preventDefault();
+    saveLayout().catch(showError);
+    return;
+  }
   if (e.target.matches('input, select, textarea') || $('symbolDialog').open) return;
   if (e.key === 'Escape') { cancelDrawing(); setActiveTool('cursor'); }
   else if (e.key === 'h' && e.altKey) { e.preventDefault(); startDrawing('measure'); }
@@ -889,9 +1143,7 @@ function updateStatus(loaded) {
       $('statusText').textContent = 'No data stored yet. Add a ticker with: python -m massive_collate watch add TICKER::EXCHANGE, then sync.';
       return;
     }
-    const last = prefs.get('last', null);
-    const pick = last && state.symbols.some((s) => s.ticker === last.ticker) ? last : { ticker: state.symbols[0].ticker, source: MERGED };
-    await selectSymbol(pick.ticker, pick.source);
+    await ensureLayout();
   } catch (err) {
     showError(err);
   }

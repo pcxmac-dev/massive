@@ -10,11 +10,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from ..storage import Store
+from ..storage import LayoutLimit, Store
 from .bars import BarEngine, Style
 
 STATIC = Path(__file__).parent / "static"
 MAX_LIMIT = 20000
+MAX_BODY = 5 * 1024 * 1024
+WRITE_HEADER = "X-Massive-Charts"
 
 
 class ChartApp:
@@ -90,6 +92,42 @@ class ChartApp:
             q.get("session", "regular"), int(q["from"]), int(q["to"]), adjust=_adjust(q.get("adjust")),
         )
 
+    # -- layouts (saved markups) ----------------------------------------------
+
+    def layouts(self) -> dict:
+        with self._lock:
+            return {"layouts": self.store.list_layouts(), "max": self.store.MAX_LAYOUTS}
+
+    def layout(self, layout_id: int) -> dict:
+        with self._lock:
+            found = self.store.get_layout(layout_id)
+        if found is None:
+            raise LookupError(f"no layout {layout_id}")
+        return found
+
+    def create_layout(self, body: dict) -> dict:
+        data = body.get("data", {})
+        if not isinstance(data, dict):
+            raise ValueError("data must be an object")
+        with self._lock:
+            return self.store.create_layout(str(body.get("name", "")), data)
+
+    def update_layout(self, layout_id: int, body: dict) -> dict:
+        data = body.get("data")
+        if data is not None and not isinstance(data, dict):
+            raise ValueError("data must be an object")
+        with self._lock:
+            found = self.store.update_layout(layout_id, body.get("name"), data)
+        if found is None:
+            raise LookupError(f"no layout {layout_id}")
+        return found
+
+    def delete_layout(self, layout_id: int) -> dict:
+        with self._lock:
+            if not self.store.delete_layout(layout_id):
+                raise LookupError(f"no layout {layout_id}")
+        return {"deleted": layout_id}
+
     def exchanges(self) -> list[dict]:
         with self._lock:
             df = self.store.exchanges()
@@ -122,14 +160,66 @@ def make_handler(app: ChartApp, port_ref: list[int]):
         def _json(self, data, status: int = 200) -> None:
             self._send(status, json.dumps(data, allow_nan=False).encode(), "application/json")
 
-        def do_GET(self) -> None:
+        def _local(self) -> bool:
             # Only answer requests addressed to this machine (blocks DNS-rebinding from web pages).
             host = (self.headers.get("Host") or "").split(":")[0]
             if host not in ("127.0.0.1", "localhost"):
-                return self._send(HTTPStatus.FORBIDDEN, b"forbidden", "text/plain")
+                self._send(HTTPStatus.FORBIDDEN, b"forbidden", "text/plain")
+                return False
+            return True
+
+        def _write(self, method: str) -> None:
+            """POST/PUT/DELETE for layouts. The custom header can't be sent cross-site without a
+            CORS preflight, which this server never grants, so other web pages can't write."""
+            if not self._local():
+                return
+            if self.headers.get(WRITE_HEADER) != "1":
+                return self._send(HTTPStatus.FORBIDDEN, b"missing request header", "text/plain")
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > MAX_BODY:
+                return self._json({"error": "request too large"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}") if method != "DELETE" else {}
+                if not isinstance(body, dict):
+                    raise ValueError("body must be a JSON object")
+                parts = urlparse(self.path).path.rstrip("/").split("/")
+                if parts[:3] != ["", "api", "layouts"]:
+                    return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+                if method == "POST" and len(parts) == 3:
+                    return self._json(app.create_layout(body), HTTPStatus.CREATED)
+                if len(parts) == 4:
+                    layout_id = int(parts[3])
+                    if method == "PUT":
+                        return self._json(app.update_layout(layout_id, body))
+                    if method == "DELETE":
+                        return self._json(app.delete_layout(layout_id))
+                return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            except LayoutLimit as e:
+                return self._json({"error": str(e)}, HTTPStatus.CONFLICT)
+            except (ValueError, json.JSONDecodeError) as e:
+                return self._json({"error": f"bad request: {e}"}, HTTPStatus.BAD_REQUEST)
+            except LookupError as e:
+                return self._json({"error": str(e)}, HTTPStatus.NOT_FOUND)
+
+        def do_POST(self) -> None:
+            self._write("POST")
+
+        def do_PUT(self) -> None:
+            self._write("PUT")
+
+        def do_DELETE(self) -> None:
+            self._write("DELETE")
+
+        def do_GET(self) -> None:
+            if not self._local():
+                return
             url = urlparse(self.path)
             q = {k: v[-1] for k, v in parse_qs(url.query).items()}
             try:
+                if url.path == "/api/layouts":
+                    return self._json(app.layouts())
+                if url.path.startswith("/api/layouts/"):
+                    return self._json(app.layout(int(url.path.rsplit("/", 1)[1])))
                 if url.path == "/api/symbols":
                     return self._json(app.symbols())
                 if url.path == "/api/meta":

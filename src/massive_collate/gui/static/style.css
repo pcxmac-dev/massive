@@ -43,6 +43,18 @@ select option { background: var(--panel); }
 .group { display: flex; gap: 1px; padding: 0 6px; border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
 .group button { padding: 4px 6px; }
 .spacer { flex: 1; }
+.dropdown.right { left: auto; right: 0; min-width: 260px; }
+.dirty { color: #f0b90b; font-size: 10px; }
+#layoutBtn { border-color: var(--border); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 6px 8px; border-radius: 4px; }
+.menu-item .key { margin-left: auto; color: var(--muted); font-size: 11px; }
+.menu-sep { border: 0; border-top: 1px solid var(--border); margin: 6px 0; }
+.layout-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+.layout-row .menu-item { flex: 1; min-width: 0; }
+.layout-row .menu-item span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.layout-row.current .menu-item { color: var(--accent); }
+.layout-row .del { color: var(--muted); padding: 4px 6px; }
+.layout-row .del:hover { color: var(--down); }
 .params { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
 .params input { width: 72px; border-color: var(--border); background: var(--bg); padding: 3px 6px; cursor: text; }
 .params .approx { color: #f0b90b; }

@@ -5,6 +5,7 @@ so data from several providers can live side by side.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import closing
 from datetime import date, datetime, timezone
@@ -93,6 +94,13 @@ CREATE TABLE IF NOT EXISTS futures_rolls (
     PRIMARY KEY (source, product, rank, session)
 );
 
+CREATE TABLE IF NOT EXISTS layouts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    data       TEXT NOT NULL,        -- JSON: symbol, interval, chart type, indicators, drawings per ticker
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS runs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     source      TEXT,
@@ -133,6 +141,21 @@ ON CONFLICT (source, ticker, timespan, multiplier, ts) DO UPDATE SET
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _now_precise() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+class LayoutLimit(Exception):
+    """The maximum number of saved layouts has been reached."""
+
+
+def _layout_name(name: str) -> str:
+    name = (name or "").strip()
+    if not name or len(name) > 60:
+        raise ValueError("layout name must be 1-60 characters")
+    return name
 
 
 def _date_ms(d: date) -> int:
@@ -470,6 +493,46 @@ class Store:
                 "UPDATE watchlist SET backfilled_to=? WHERE source=? AND ticker=?",
                 (day.isoformat() if day else None, source, ticker.upper()),
             )
+
+    # -- chart layouts (saved markups) --------------------------------------
+
+    MAX_LAYOUTS = 5
+
+    def list_layouts(self) -> list[dict]:
+        cur = self.conn.execute("SELECT id, name, updated_at FROM layouts ORDER BY updated_at DESC, id DESC")
+        return [{"id": i, "name": n, "updated_at": u} for i, n, u in cur]
+
+    def get_layout(self, layout_id: int) -> dict | None:
+        row = self.conn.execute("SELECT id, name, data, updated_at FROM layouts WHERE id=?", (layout_id,)).fetchone()
+        if row is None:
+            return None
+        return {"id": row[0], "name": row[1], "data": json.loads(row[2]), "updated_at": row[3]}
+
+    def create_layout(self, name: str, data: dict) -> dict:
+        name = _layout_name(name)
+        with self.conn:
+            count = self.conn.execute("SELECT COUNT(*) FROM layouts").fetchone()[0]
+            if count >= self.MAX_LAYOUTS:
+                raise LayoutLimit(f"at most {self.MAX_LAYOUTS} layouts; delete one first")
+            cur = self.conn.execute("INSERT INTO layouts (name, data, updated_at) VALUES (?, ?, ?)",
+                                    (name, json.dumps(data), _now_precise()))
+        return self.get_layout(cur.lastrowid)
+
+    def update_layout(self, layout_id: int, name: str | None = None, data: dict | None = None) -> dict | None:
+        sets, params = ["updated_at=?"], [_now_precise()]
+        if name is not None:
+            sets.append("name=?")
+            params.append(_layout_name(name))
+        if data is not None:
+            sets.append("data=?")
+            params.append(json.dumps(data))
+        with self.conn:
+            n = self.conn.execute(f"UPDATE layouts SET {', '.join(sets)} WHERE id=?", (*params, layout_id)).rowcount
+        return self.get_layout(layout_id) if n else None
+
+    def delete_layout(self, layout_id: int) -> bool:
+        with self.conn:
+            return self.conn.execute("DELETE FROM layouts WHERE id=?", (layout_id,)).rowcount > 0
 
     # -- runs / audit ------------------------------------------------------
 

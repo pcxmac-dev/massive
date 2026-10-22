@@ -25,6 +25,14 @@ Working notes so work can resume in a fresh session. Newest first.
   Range flagged approximate without ticks). Custom-drawn types use the `CHART_STYLE` renderer in
   `app.js` over invisible candles. All 18 checked visually on SPCX.
 
+- **Multi-asset**: `symbols.resolve` maps NQ1!/CL1!/NG1! (continuous futures, `futures.py` rolls on
+  session volume), USDEUR/EURUSD (fx, exact inversion), IXIC (I:COMP). SPX/RUT/DJI are not on the
+  free plan. Free Futures Basic data is 8 h behind.
+- **Layouts** (TradingView-style menu, top right): up to 5 saved markups in the `layouts` table —
+  symbol, feed, interval, chart type + params, session, adjustment, indicators, drawings per ticker.
+  Autosave (1.5 s debounce), Ctrl+S, rename, copy, new, delete. Writes need the `X-Massive-Charts`
+  header (blocks cross-site writes).
+
 ## Next
 
 1. Verify the remaining drawing tools by hand (trend line, channel, fib, note); confirm right-click
