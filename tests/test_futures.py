@@ -35,6 +35,24 @@ def test_roll_moves_on_at_expiry_and_rank_two():
     assert roll_schedule(vol, EXP, rank=2) == [(D[4], "NQZ6")]
 
 
+def test_candidates_and_contract_months():
+    from massive_collate.futures import candidate_contracts, contract_month
+
+    c = candidate_contracts("cl", date(2026, 11, 3), date(2027, 2, 1))
+    assert c == [("CLX6", date(2026, 11, 1)), ("CLZ6", date(2026, 12, 1)), ("CLF7", date(2027, 1, 1)),
+                 ("CLG7", date(2027, 2, 1))]
+    assert contract_month("CLZ6", "CL", date(2026, 10, 22)) == date(2026, 12, 1)
+    assert contract_month("CLF0", "CL", date(2029, 11, 1)) == date(2030, 1, 1)  # decade rolls over
+    assert contract_month("CL:BF", "CL", date(2026, 1, 1)) is None
+
+
+def test_roll_moves_on_when_held_contract_stops_trading():
+    # provisional expiry far away, but U6 has no session on the 21st: re-select
+    vol = {"NQU6": {D[4]: 900}, "NQZ6": {D[4]: 100, D[5]: 500}}
+    far = {"NQU6": date(2026, 11, 1), "NQZ6": date(2027, 2, 1)}
+    assert roll_schedule(vol, far) == [(D[4], "NQU6"), (D[5], "NQZ6")]
+
+
 def _frame(times, closes):
     idx = pd.DatetimeIndex(times, tz=ET)
     return pd.DataFrame({"open": closes, "high": closes, "low": closes, "close": closes, "volume": 1.0}, index=idx)

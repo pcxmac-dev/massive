@@ -47,36 +47,50 @@ def test_inverted_fx_pair_is_stored_inverted(store):
     assert df["close"].iloc[0] == pytest.approx(0.8)
 
 
-def test_continuous_future_rolls_and_fetches_held_contracts(store):
-    store.watch_spec("fake", resolve("NQ1!"))
+def _nq_source():
     d1, d2 = date(2026, 9, 17), date(2026, 9, 18)
-    src = FakeSource(entitled=("minute",))
-    src.contracts = [
-        {"ticker": "NQU6", "first_trade_date": "2025-06-20", "last_trade_date": "2026-09-18"},
-        {"ticker": "NQZ6", "first_trade_date": "2025-09-19", "last_trade_date": "2026-12-18"},
-        {"ticker": "NQZ5", "first_trade_date": "2024-09-20", "last_trade_date": "2025-12-19"},  # out of range? no: kept
-    ]
     day = lambda d, v: {"t": _ms(d, 0), "o": 1, "h": 1, "l": 1, "c": 1, "v": v}  # noqa: E731
+    src = FakeSource(entitled=("minute",))
     src.bars = {
         ("NQU6", "day"): [day(d1, 900), day(d2, 100)],
-        ("NQZ6", "day"): [day(d1, 100), day(d2, 800)],
-        ("NQZ5", "day"): [],
+        ("NQZ6", "day"): [day(d1, 100), day(d2, 800), day(NOW.date() - timedelta(days=1), 700)],
         ("NQU6", "minute"): [{"t": _ms(d1), "o": 1, "h": 1, "l": 1, "c": 1}],
         ("NQZ6", "minute"): [{"t": _ms(d2), "o": 2, "h": 2, "l": 2, "c": 2}],
     }
+    return src, d1, d2
+
+
+def test_continuous_future_rolls_and_fetches_held_contracts(store):
+    store.watch_spec("fake", resolve("NQ1!"))
+    src, d1, d2 = _nq_source()
     sync(src, store, FREE, NOW, log=_log)
-    assert store.rolls("fake", "NQ") == [(d1, "NQU6"), (d2, "NQZ6")]
+    rolls = store.rolls("fake", "NQ")
+    assert rolls[:2] == [(d1, "NQU6"), (d2, "NQZ6")] and {t for _, t in rolls} == {"NQU6", "NQZ6"}
     minute_calls = [c for c in src.bar_calls if c[3] == "minute"]
     assert {c[0] for c in minute_calls} == {"NQU6", "NQZ6"} and all(c[4] == "future" for c in minute_calls)
-    assert store.watchlist("fake")[0]["resolution"] == "minute"
-    assert store.watchlist("fake")[0]["kind"] == "future"
+    w = store.watchlist("fake")[0]
+    assert w["resolution"] == "minute" and w["kind"] == "future"
+    states = {c["ticker"]: c["state"] for c in store.contracts("fake", "NQ")}
+    assert states["NQU6"] == "ended" and states["NQZ6"] == "live" and states["NQH6"] == "missing"
+
+
+def test_known_contracts_are_not_requested_again(store):
+    store.watch_spec("fake", resolve("NQ1!"))
+    src, _, _ = _nq_source()
+    sync(src, store, FREE, NOW, log=_log)
+    src.bar_calls = []
+    sync(src, store, FREE, NOW, log=_log)  # same day: missing/ended skipped, live already current
+    assert [c for c in src.bar_calls if c[3] == "day"] == []
+    later = NOW + timedelta(days=2)
+    src.bar_calls = []
+    sync(src, store, FREE, later, log=_log)
+    day_calls = {c[0] for c in src.bar_calls if c[3] == "day"}
+    assert "NQZ6" in day_calls and "NQU6" not in day_calls and "NQH6" not in day_calls
 
 
 def test_futures_never_request_before_floor(store):
     store.watch_spec("fake", resolve("CL1!"))
     src = FakeSource(entitled=("minute",))
-    src.contracts = [{"ticker": "CLZ6", "first_trade_date": "2020-01-01", "last_trade_date": "2026-11-19"}]
-    src.bars = {("CLZ6", "day"): []}
     sync(src, store, FREE, NOW, log=_log)
     floor = history_floor(FREE, NOW.date())
-    assert all(c[1] >= floor - timedelta(days=1) for c in src.bar_calls)
+    assert src.bar_calls and all(c[1] >= floor for c in src.bar_calls)

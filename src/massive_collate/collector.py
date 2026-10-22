@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 from .config import UNLIMITED_BACKFILL_YEARS, Tier
 from .errors import BudgetExhausted, NotEntitled, RateLimited
-from .futures import roll_schedule
+from .futures import candidate_contracts, roll_schedule
 from .sources.base import RESOLUTIONS, RESOLUTIONS_BY_ASSET, DataSource
 from .storage import Store
 
@@ -184,6 +184,8 @@ def sync_daily(
 # -- futures -------------------------------------------------------------------
 
 ROLL_HORIZON_DAYS = 150  # contracts expiring this far ahead can matter for the roll
+CONTRACT_LEAD_DAYS = 120  # a contract is fetched from this long before its month (covers its time as front)
+ENDED_AFTER_DAYS = 5  # no session bar for this long: the contract has expired
 
 
 def _windows(schedule: list[tuple[date, str]]) -> list[tuple[str, date, date]]:
@@ -200,39 +202,55 @@ def _windows(schedule: list[tuple[date, str]]) -> list[tuple[str, date, date]]:
 def sync_future(
     source: DataSource, store: Store, item: dict, floor: date, today: date, log: Log = print,
 ) -> int:
-    """Continuous futures: contracts -> official session bars -> roll schedule ->
-    intraday bars of each held contract over the sessions it was held."""
-    ticker, product, rank = item["ticker"], item["source_ticker"], item["rank"]
-    checked = item["checked_at"]
-    contracts = store.contracts(source.name, product)
-    horizon = today + timedelta(days=ROLL_HORIZON_DAYS)
-    if not contracts or not checked or (today - checked).days >= LISTING_RECHECK_DAYS:
-        raw = _guard_call(source.future_contracts, product, floor, horizon)
-        store.upsert_contracts(source.name, product, raw)
-        store.set_listing(source.name, ticker, None, None, today, f"{product} continuous #{rank}", "future")
-        contracts = store.contracts(source.name, product)
-        log(f"{ticker}: {len(raw)} {product} contracts listed")
-    relevant = [c for c in contracts if c["last_trade"] and floor <= c["last_trade"] <= horizon]
-    if not relevant:
-        log(f"{ticker}: no {product} contracts in range")
-        return 0
+    """Continuous futures: candidate contracts -> official session bars -> roll schedule ->
+    intraday bars of each held contract over the sessions it was held.
 
+    Contracts are derived from their tickers (product + month code + year digit) rather
+    than listed: a listing returns one row per contract per day and costs dozens of pages.
+    Each candidate costs one request for its session bars, which also shows whether it
+    exists and when it stopped trading; finished and non-existent contracts are remembered
+    and never requested again, live ones at most once a day.
+    """
+    ticker, product, rank = item["ticker"], item["source_ticker"], item["rank"]
+    if not item["checked_at"]:
+        store.set_listing(source.name, ticker, None, None, today, f"{product} continuous #{rank}", "future")
+    horizon = today + timedelta(days=ROLL_HORIZON_DAYS)
+    known = {c["ticker"]: c for c in store.contracts(source.name, product)}
     saved = 0
-    for c in relevant:  # official session bars: they drive the roll and the daily chart
-        t = c["ticker"]
-        stored = store.bar_range(source.name, t, "day")
-        last_needed = min(c["last_trade"], today - timedelta(days=1))
-        if stored and _ms_to_date(stored[1]) >= last_needed:
+    for t, month in candidate_contracts(product, floor - timedelta(days=31), horizon):
+        c = known.get(t)
+        state = c["state"] if c else None
+        if state in ("ended", "missing"):
             continue
-        start = _ms_to_date(stored[1]) if stored else max(floor, c["first_trade"] or floor)
-        for page in _guard(source.bar_pages(t, start, min(today, c["last_trade"]), "day", asset="future")):
+        if state == "pending" and c["checked"] and (today - c["checked"]).days < LISTING_RECHECK_DAYS:
+            continue
+        stored = store.bar_range(source.name, t, "day")
+        if stored and _ms_to_date(stored[1]) >= today - timedelta(days=1):
+            continue  # live and already up to date today
+        start = _ms_to_date(stored[1]) if stored else max(floor, month - timedelta(days=CONTRACT_LEAD_DAYS))
+        end = min(today, month + timedelta(days=62))
+        if start > end:
+            store.set_contract(source.name, product, t, month, "pending", None, today)
+            continue
+        for page in _guard(source.bar_pages(t, start, end, "day", asset="future")):
             saved += store.upsert_bars(source.name, t, "day", 1, page)
+        stored = store.bar_range(source.name, t, "day")
+        if stored is None:
+            store.set_contract(source.name, product, t, month, "missing" if month < today else "pending", None, today)
+        elif _ms_to_date(stored[1]) < today - timedelta(days=ENDED_AFTER_DAYS):
+            store.set_contract(source.name, product, t, month, "ended", _ms_to_date(stored[1]), today)
+        else:
+            store.set_contract(source.name, product, t, month, "live", None, today)
 
     volumes, expiries = {}, {}
-    for c in relevant:
+    for c in store.contracts(source.name, product):
+        if c["state"] not in ("live", "ended"):
+            continue
         df = store.load_bars([c["ticker"]], "day", 1, source=source.name)
         volumes[c["ticker"]] = {t.date(): float(v or 0) for t, v in zip(df["time"], df["volume"])}
-        expiries[c["ticker"]] = c["last_trade"]
+        # Live contracts: provisional expiry after their month; the roll also moves on when
+        # the held contract stops trading.
+        expiries[c["ticker"]] = c["last_trade"] or (c["month"] + timedelta(days=62))
     schedule = [(d, t) for d, t in roll_schedule(volumes, expiries, rank) if d >= floor]
     store.set_rolls(source.name, product, rank, schedule)
     if not schedule:

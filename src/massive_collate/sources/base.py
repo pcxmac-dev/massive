@@ -57,11 +57,6 @@ class DataSource(ABC):
         call costs as little as possible (used by the scheduled listing check).
         """
 
-    def future_contracts(self, product: str, start: date, end: date) -> list[dict]:
-        """Outright (non-spread) contracts of a futures product expiring between start and
-        end: dicts with ticker, first_trade_date, last_trade_date. Optional."""
-        raise NotImplementedError(f"{self.name} has no futures")
-
     def market_daily(self, day: date) -> list[dict]:
         """Daily bars for the whole market on one date (dicts also carry T = ticker).
 

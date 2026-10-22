@@ -153,30 +153,6 @@ class MassiveSource(DataSource):
         )
         return pages if limit == PAGE_LIMIT else _first(pages)
 
-    def future_contracts(self, product: str, start: date, end: date) -> list[dict]:
-        """Outright (non-spread) contracts of a product expiring between start and end.
-
-        Asks for exactly the candidate tickers (every month code for every year in the
-        window, e.g. CLX4,...,CLZ6) instead of paging through the product's thousands of
-        spreads: one request.
-        """
-        product = product.upper()
-        years = {y % 10 for y in range(start.year, end.year + 1)}
-        candidates = sorted(f"{product}{m}{y}" for m in MONTH_CODES for y in years)
-        pattern = re.compile(rf"^{re.escape(product)}[{MONTH_CODES}]\d{{1,2}}$")
-        params = {
-            "ticker.any_of": ",".join(candidates),
-            "last_trade_date.gte": str(start), "last_trade_date.lte": str(end),
-            "limit": 1000, "sort": "ticker.asc",
-        }
-        latest: dict[str, dict] = {}
-        for page in self.client.pages("/futures/v1/contracts", params):
-            for c in page:
-                t = c.get("ticker", "")
-                if pattern.match(t) and c.get("last_trade_date"):
-                    if t not in latest or (c.get("date") or "") > (latest[t].get("date") or ""):
-                        latest[t] = c  # point-in-time rows: keep the newest
-        return sorted(latest.values(), key=lambda c: c["last_trade_date"])
 
     def _bar_pages(self, ticker, start, end, timespan, multiplier, descending, limit=PAGE_LIMIT):
         if timespan not in TIMESPANS:
@@ -222,7 +198,6 @@ class MassiveSource(DataSource):
 
 
 FUTURE_RESOLUTIONS = {"second": "1sec", "minute": "1min", "hour": "1hour", "day": "1session"}
-MONTH_CODES = "FGHJKMNQUVXZ"  # Jan..Dec
 _ET = ZoneInfo("America/New_York")
 
 

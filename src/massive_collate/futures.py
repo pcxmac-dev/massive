@@ -22,6 +22,28 @@ import pandas as pd
 
 ET = "America/New_York"
 SESSION_SHIFT = pd.Timedelta(hours=6)
+MONTH_CODES = "FGHJKMNQUVXZ"  # Jan..Dec
+
+
+def candidate_contracts(product: str, start: date, end: date) -> list[tuple[str, date]]:
+    """Every outright ticker whose contract month falls in [start, end]: [(ticker, month start)].
+    Tickers use a one-digit year (CLZ6 = December 2026), unambiguous within such a window."""
+    out = []
+    y, m = start.year, start.month
+    while (y, m) <= (end.year, end.month):
+        out.append((f"{product.upper()}{MONTH_CODES[m - 1]}{y % 10}", date(y, m, 1)))
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return out
+
+
+def contract_month(ticker: str, product: str, around: date) -> date | None:
+    """Contract month of an outright ticker, choosing the decade closest to `around`."""
+    rest = ticker.upper()[len(product):]
+    if len(rest) != 2 or rest[0] not in MONTH_CODES or not rest[1].isdigit():
+        return None
+    month, digit = MONTH_CODES.index(rest[0]) + 1, int(rest[1])
+    year = min((around.year // 10 * 10 + digit + d for d in (-10, 0, 10)), key=lambda y: abs(y - around.year))
+    return date(year, month, 1)
 
 
 def session_dates(index: pd.DatetimeIndex) -> pd.Index:
@@ -41,7 +63,9 @@ def roll_schedule(
         if not live:
             continue
         vol = lambda t: volumes[t].get(d, 0.0)  # noqa: E731
-        if front is None or d > expiries[front]:
+        # Re-select at expiry, or when the held contract has stopped trading (its expiry is only
+        # provisional until it has ended).
+        if front is None or d > expiries[front] or front not in live:
             later = [t for t in live if front is None or expiries[t] >= expiries[front]]
             pool = later or live
             front = max(pool, key=lambda t: (vol(t), -expiries[t].toordinal()))

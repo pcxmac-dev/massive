@@ -89,10 +89,6 @@ class FakeSource(DataSource):
         src = self.bars.get((ticker, timespan), self.bars.get(timespan, []))
         yield list(src)
 
-    def future_contracts(self, product, start, end):
-        self._spend()
-        return list(getattr(self, "contracts", []))
-
     def exchanges(self):
         self._spend()
         return [Exchange("fake", 4, "Nasdaq", country("US"), mic="XNAS"), Exchange("fake", 12, "NYSE Arca", country("US"))]

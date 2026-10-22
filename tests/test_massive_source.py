@@ -55,23 +55,6 @@ def test_exchanges_carry_country():
     assert ex[0].country.code == "US" and ex[0].timezone == "America/New_York"
 
 
-def test_future_contracts_is_one_targeted_request():
-    rows = [
-        {"ticker": "CLZ6", "last_trade_date": "2026-11-19", "date": "2026-10-01"},
-        {"ticker": "CLZ6", "last_trade_date": "2026-11-19", "date": "2026-10-20"},  # newer snapshot
-        {"ticker": "CL:BF Z6-F7-G7", "last_trade_date": "2026-11-19"},  # spread: ignored
-        {"ticker": "CLX6", "last_trade_date": "2026-10-20"},
-    ]
-    src, session = _source([FakeResponse(200, {"results": rows})])
-    out = src.future_contracts("cl", date(2024, 10, 22), date(2027, 3, 20))
-    assert [c["ticker"] for c in out] == ["CLX6", "CLZ6"] and out[1]["date"] == "2026-10-20"
-    assert len(session.calls) == 1
-    _, params, _ = session.calls[0]
-    tickers = params["ticker.any_of"].split(",")
-    assert "CLF5" in tickers and "CLZ7" in tickers and len(tickers) == 12 * 4  # 2024-2027, every month
-    assert params["last_trade_date.gte"] == "2024-10-22" and params["last_trade_date.lte"] == "2027-03-20"
-
-
 def test_instrument_resolves_kind_and_exchange():
     details = {"results": {"ticker": "SPCX", "name": "SPAC ETF", "type": "ETF", "primary_exchange": "ARCX",
                            "locale": "us", "currency_name": "usd"}}

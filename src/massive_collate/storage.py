@@ -128,6 +128,9 @@ MIGRATIONS = [
     ("watchlist", "rank", "INTEGER NOT NULL DEFAULT 1"),
     # Save order: clocks can tie (Windows), a counter cannot.
     ("layouts", "touched", "INTEGER NOT NULL DEFAULT 0"),
+    # Futures contracts: live | ended | missing (no such contract month); checked = last probe date
+    ("futures_contracts", "state", "TEXT"),
+    ("futures_contracts", "checked", "TEXT"),
 ]
 
 BAR_COLUMNS = ["open", "high", "low", "close", "volume", "vwap", "transactions"]
@@ -387,18 +390,26 @@ class Store:
 
     # -- futures -----------------------------------------------------------
 
-    def upsert_contracts(self, source: str, product: str, contracts: Iterable[dict]) -> int:
-        rows = [(source, product, c["ticker"], c.get("first_trade_date"), c.get("last_trade_date")) for c in contracts]
+    def set_contract(
+        self, source: str, product: str, ticker: str, month: date, state: str,
+        last_trade: date | None, checked: date,
+    ) -> None:
+        """Record what is known about a contract: `month` is its contract month (stored in
+        first_trade), `state` live | ended | missing, `last_trade` its last session once ended."""
         with self.conn:
-            self.conn.executemany("INSERT OR REPLACE INTO futures_contracts VALUES (?, ?, ?, ?, ?)", rows)
-        return len(rows)
+            self.conn.execute(
+                "INSERT OR REPLACE INTO futures_contracts (source, product, ticker, first_trade, last_trade, state, checked) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (source, product, ticker, month.isoformat(), last_trade.isoformat() if last_trade else None,
+                 state, checked.isoformat()))
 
     def contracts(self, source: str, product: str) -> list[dict]:
         cur = self.conn.execute(
-            "SELECT ticker, first_trade, last_trade FROM futures_contracts WHERE source=? AND product=? "
-            "ORDER BY last_trade", (source, product))
-        return [{"ticker": t, "first_trade": date.fromisoformat(f) if f else None,
-                 "last_trade": date.fromisoformat(l) if l else None} for t, f, l in cur]
+            "SELECT ticker, first_trade, last_trade, state, checked FROM futures_contracts "
+            "WHERE source=? AND product=? ORDER BY first_trade", (source, product))
+        d = lambda v: date.fromisoformat(v) if v else None  # noqa: E731
+        return [{"ticker": t, "month": d(f), "last_trade": d(l), "state": s, "checked": d(c)}
+                for t, f, l, s, c in cur]
 
     def set_rolls(self, source: str, product: str, rank: int, schedule: list[tuple[date, str]]) -> None:
         with self.conn:
