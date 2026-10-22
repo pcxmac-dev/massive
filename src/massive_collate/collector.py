@@ -135,6 +135,22 @@ def sync_bars(
     return saved
 
 
+def sync_daily(source: DataSource, store: Store, ticker: str, floor: date, today: date) -> int:
+    """Official daily bars (include the closing auction), one request per run.
+
+    Day/week/month charts use these rather than bars rebuilt from intraday data.
+    """
+    stored = store.bar_range(source.name, ticker, "day")
+    start = max(floor, _ms_to_date(stored[1])) if stored else floor
+    saved = 0
+    try:
+        for page in _guard(source.bar_pages(ticker, start, today, "day")):
+            saved += store.upsert_bars(source.name, ticker, "day", 1, page)
+    except NotEntitled:
+        pass
+    return saved
+
+
 # -- listing / identity --------------------------------------------------------
 
 LISTING_RECHECK_DAYS = 7
@@ -181,7 +197,7 @@ def check_listing(source: DataSource, store: Store, item: dict, today: date, log
             log(f"{ticker}: removed {n} rows from before its {inst.list_date} listing (another instrument)")
         if item["backfilled_to"] and item["backfilled_to"] < inst.list_date:
             store.set_backfilled(source.name, ticker, inst.list_date)
-    store.set_listing(source.name, ticker, inst.list_date, inst.figi, today)
+    store.set_listing(source.name, ticker, inst.list_date, inst.figi, today, inst.name, inst.kind)
     return Listing(True, inst.list_date)
 
 
@@ -241,6 +257,9 @@ def sync(source: DataSource, store: Store, tier: Tier, now: datetime | None = No
                 continue
             result.rows += n
             log(f"{ticker} {resolution}: {n} rows")
+            if resolution != "day":
+                n = sync_daily(source, store, ticker, item_floor, today)
+                result.rows += n
     except StopRun as e:
         result.stopped = str(e)
         log(f"stopped: {e}")

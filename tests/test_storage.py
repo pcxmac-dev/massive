@@ -19,6 +19,13 @@ def test_trades_upsert_is_idempotent(store):
     assert store.trade_range("s", "SPCX") == (1_000, 2_000)
 
 
+def test_tick_timestamps_keep_nanoseconds(store):
+    ns = 1_792_503_000_123_456_789
+    store.upsert_trades("s", "X", [_trade(ns)])
+    t = store.load_trades("X", "s")["time"].iloc[0]
+    assert t.as_unit("ns").value == ns
+
+
 def test_sources_are_kept_apart(store):
     store.upsert_trades("a", "X", [_trade(1)])
     store.upsert_trades("b", "X", [_trade(1)])

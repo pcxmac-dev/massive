@@ -53,7 +53,24 @@ python -m massive_collate analyze SPCX         # statistics + per-exchange break
 python -m massive_collate chart SPCX --rule 1s --sma 20 50 --ticks
 python -m massive_collate export SPCX --kind trades --out spcx.csv
 python -m massive_collate admin check|vacuum|backup
+python -m massive_collate gui                  # chart app in your browser (localhost only)
 ```
+
+## Chart app
+
+`python -m massive_collate gui` serves a TradingView-style chart on http://127.0.0.1:8765 using
+[KLineChart](https://github.com/klinecharts/KLineChart) 10.1.0 (Apache-2.0, bundled, works offline).
+
+- Intervals from 1s (when ticks or second bars are stored) to monthly, built exactly from the finest
+  stored data; day/week/month use the official daily bars (closing auction included).
+- Regular hours (09:30–16:00 ET) or extended hours (ETH).
+- Feeds: each ticker can be viewed per feed or merged; overlapping slots come from the
+  highest-priority feed only (`SOURCE_PRIORITY`), so nothing is double counted.
+- Drawing tools: trend line, ray, extended/horizontal/vertical lines, price line, parallel and price
+  channels, Fibonacci, measure (price change, %, bars, time), notes; magnet mode; lock/hide/delete.
+  Drawings are saved per ticker in the browser.
+- Keys: type to search symbols, `+`/`-` zoom, `End` latest bar, `Esc` cancel, `Delete` removes the
+  selected drawing.
 
 ## Layout
 

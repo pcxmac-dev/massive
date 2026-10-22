@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Massive Charts</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="topbar">
+    <button id="symbolBtn" class="symbol" title="Change symbol (/)">Select symbol</button>
+    <select id="feedSelect" title="Data feed"></select>
+    <div id="periods" class="group" role="toolbar" aria-label="Interval"></div>
+    <button id="ethBtn" class="toggle" title="Extended hours: pre-market, after-hours and overnight">ETH</button>
+    <div class="menu">
+      <button id="indBtn" aria-haspopup="true">Indicators</button>
+      <div id="indMenu" class="dropdown" hidden></div>
+    </div>
+    <span class="spacer"></span>
+    <button id="zoomOut" title="Zoom out (-)">&minus;</button>
+    <button id="zoomIn" title="Zoom in (+)">+</button>
+    <button id="latestBtn" title="Jump to latest bar (End)">Latest</button>
+    <button id="shotBtn" title="Save a PNG of the chart">PNG</button>
+    <button id="themeBtn" title="Light / dark">Theme</button>
+  </header>
+  <main>
+    <nav id="tools" aria-label="Drawing tools"></nav>
+    <div id="chart"></div>
+  </main>
+  <footer id="status"><span id="statusText">Loading…</span><span id="error" role="alert"></span></footer>
+
+  <dialog id="symbolDialog">
+    <form method="dialog" class="dialog-head">
+      <input id="symbolSearch" type="search" placeholder="Search ticker, name or exchange" autocomplete="off">
+      <button value="close" aria-label="Close">&times;</button>
+    </form>
+    <div id="symbolList"></div>
+  </dialog>
+
+  <script src="vendor/klinecharts/klinecharts.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

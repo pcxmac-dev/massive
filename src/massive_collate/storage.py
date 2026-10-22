@@ -94,6 +94,8 @@ MIGRATIONS = [
     ("watchlist", "listed_from", "TEXT"),
     ("watchlist", "figi", "TEXT"),
     ("watchlist", "checked_at", "TEXT"),
+    ("watchlist", "name", "TEXT"),
+    ("watchlist", "kind", "TEXT"),
 ]
 
 BAR_COLUMNS = ["open", "high", "low", "close", "volume", "vwap", "transactions"]
@@ -124,11 +126,11 @@ def _bar_row(source: str, ticker: str, timespan: str, multiplier: int, bar: dict
 
 
 class Store:
-    def __init__(self, path: Path | str):
+    def __init__(self, path: Path | str, check_same_thread: bool = True):
         self.path = Path(path)
         if str(path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(path))
+        self.conn = sqlite3.connect(str(path), check_same_thread=check_same_thread)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
         self._migrate()
@@ -324,12 +326,15 @@ class Store:
                 )
 
     def set_listing(
-        self, source: str, ticker: str, listed_from: date | None, figi: str | None, checked: date
+        self, source: str, ticker: str, listed_from: date | None, figi: str | None, checked: date,
+        name: str | None = None, kind: str | None = None,
     ) -> None:
         with self.conn:
             self.conn.execute(
-                "UPDATE watchlist SET listed_from=?, figi=?, checked_at=? WHERE source=? AND ticker=?",
-                (listed_from.isoformat() if listed_from else None, figi, checked.isoformat(), source, ticker.upper()),
+                "UPDATE watchlist SET listed_from=?, figi=?, checked_at=?, name=COALESCE(?, name), "
+                "kind=COALESCE(?, kind) WHERE source=? AND ticker=?",
+                (listed_from.isoformat() if listed_from else None, figi, checked.isoformat(), name, kind,
+                 source, ticker.upper()),
             )
 
     def delete_before(self, source: str, ticker: str, cutoff_ns: int | None = None) -> int:
@@ -353,8 +358,8 @@ class Store:
 
     def watchlist(self, source: str | None = None) -> list[dict]:
         sql = (
-            "SELECT source, ticker, resolution, backfilled_to, exchange, listed_from, figi, checked_at "
-            "FROM watchlist"
+            "SELECT source, ticker, resolution, backfilled_to, exchange, listed_from, figi, checked_at, "
+            "name, kind FROM watchlist"
         )
         params: list = []
         if source:
@@ -366,9 +371,27 @@ class Store:
 
         return [
             {"source": s, "ticker": t, "resolution": r, "backfilled_to": d(b), "exchange": e,
-             "listed_from": d(lf), "figi": f, "checked_at": d(c)}
-            for s, t, r, b, e, lf, f, c in self.conn.execute(sql + " ORDER BY source, ticker", params)
+             "listed_from": d(lf), "figi": f, "checked_at": d(c), "name": n, "kind": k}
+            for s, t, r, b, e, lf, f, c, n, k in self.conn.execute(sql + " ORDER BY source, ticker", params)
         ]
+
+    def series_fingerprint(self, source: str, ticker: str) -> tuple:
+        """Cheap value that changes whenever a ticker's stored data changes (for caching)."""
+        t = self.conn.execute(
+            "SELECT COUNT(*), MAX(ts_ns) FROM trades WHERE source=? AND ticker=?", (source, ticker.upper())
+        ).fetchone()
+        b = self.conn.execute(
+            "SELECT COUNT(*), MAX(ts) FROM bars WHERE source=? AND ticker=?", (source, ticker.upper())
+        ).fetchone()
+        return tuple(t) + tuple(b)
+
+    def stored_series(self) -> list[tuple]:
+        """(source, ticker, kind) for every series with data, kind = trades | second | minute | ..."""
+        rows = self.conn.execute("SELECT DISTINCT source, ticker, 'trades' FROM trades").fetchall()
+        rows += self.conn.execute(
+            "SELECT DISTINCT source, ticker, timespan FROM bars WHERE multiplier=1"
+        ).fetchall()
+        return rows
 
     def set_resolution(self, source: str, ticker: str, resolution: str) -> None:
         self.watch(source, [ticker], resolution)

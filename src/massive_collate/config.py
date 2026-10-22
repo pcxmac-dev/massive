@@ -10,6 +10,7 @@ Settings come from environment variables, optionally loaded from a `.env` file
     MASSIVE_BASE_URL  API base URL (default: https://api.massive.com)
     MASSIVE_MAX_REQUESTS_PER_RUN   hard cap on API requests in one command (default: 250)
     MASSIVE_MAX_REQUESTS_PER_DAY   hard cap on API requests per day, all runs (default: 2000)
+    SOURCE_PRIORITY   feed order when sources overlap, e.g. "massive,blueocean" (default: massive)
 """
 from __future__ import annotations
 
@@ -55,6 +56,8 @@ class Settings:
     base_url: str = DEFAULT_BASE_URL
     max_requests_per_run: int = 250
     max_requests_per_day: int = 2000
+    # Feed order when several sources cover the same ticker (SOURCE_PRIORITY, comma-separated).
+    source_priority: tuple[str, ...] = ("massive",)
 
     def require_api_key(self) -> str:
         if not self.api_key:
@@ -110,6 +113,9 @@ def load_settings(
         base_url=(merged.get("MASSIVE_BASE_URL") or DEFAULT_BASE_URL).rstrip("/"),
         max_requests_per_run=250 if per_run is None else per_run,
         max_requests_per_day=2000 if per_day is None else per_day,
+        source_priority=tuple(
+            s.strip().lower() for s in (merged.get("SOURCE_PRIORITY") or "massive").split(",") if s.strip()
+        ),
     )
 
 

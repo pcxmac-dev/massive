@@ -121,12 +121,34 @@ def cmd_watch(args, settings: Settings) -> int:
 
 
 def cmd_sync(args, settings: Settings) -> int:
-    with api_run(args, settings, "sync") as (source, store, log):
-        if source is None:
-            return 0
-        result = collector.sync(source, store, settings.tier, log=log)
-        args._rows = result.rows
-        log(f"sync: {result.rows} rows saved" + (f" (stopped: {result.stopped})" if result.stopped else ""))
+    """Sync every configured feed (or just --source), each within its own limits."""
+    names = list(BUILDERS) if args.all_sources else [args.source]
+    ran, errors = 0, []
+    for name in names:
+        args.source = name
+        try:
+            with api_run(args, settings, "sync") as (source, store, log):
+                if source is None:
+                    continue
+                result = collector.sync(source, store, settings.tier, log=log)
+                args._rows = result.rows
+                log(f"sync {name}: {result.rows} rows saved"
+                    + (f" (stopped: {result.stopped})" if result.stopped else ""))
+            ran += 1
+        except ConfigError as e:
+            errors.append(f"{name}: {e}")  # feed not configured on this machine
+    if not ran and errors:
+        raise ConfigError("; ".join(errors))
+    for e in errors:
+        print(f"skipped {e}", file=sys.stderr)
+    return 0
+
+
+def cmd_gui(args, settings: Settings) -> int:
+    from .gui.server import serve
+
+    serve(settings.db_path, port=args.port, open_browser=not args.no_browser,
+          priority=list(settings.source_priority))
     return 0
 
 
@@ -326,8 +348,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--resolution", default="auto", choices=["auto", "trades", "second", "minute"])
     s.set_defaults(func=cmd_watch)
 
-    s = sub.add_parser("sync", help="scheduled run: update and backfill the watchlist")
-    s.set_defaults(func=cmd_sync)
+    s = sub.add_parser("sync", help="scheduled run: update and backfill the watchlist on every feed")
+    s.add_argument("--only", dest="all_sources", action="store_false",
+                   help="sync only the feed given by --source instead of all configured feeds")
+    s.set_defaults(func=cmd_sync, all_sources=True)
+
+    s = sub.add_parser("gui", help="open the chart app in your browser")
+    s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--no-browser", action="store_true")
+    s.set_defaults(func=cmd_gui)
 
     s = sub.add_parser("probe", help="find the finest resolution your plan allows for a ticker")
     s.add_argument("ticker")
