@@ -78,6 +78,7 @@ main { flex: 1; display: flex; min-height: 0; }
 #tools svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 1.5; stroke-linecap: round; }
 #tools hr { width: 70%; border: 0; border-top: 1px solid var(--border); margin: 4px auto; }
 #chart { flex: 1; min-width: 0; }
+.gpu-layer { position: absolute; left: 0; top: 0; pointer-events: none; }
 
 #status {
   display: flex; gap: 16px; justify-content: space-between;

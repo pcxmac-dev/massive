@@ -294,13 +294,116 @@ function typeQuery() {
 // The theme's own candle colours, captured before any chart type hides them.
 const DEFAULT_CANDLE = (() => {
   const c = chart.getStyles().candle;
-  return { bar: { ...c.bar }, priceMark: { high: { ...c.priceMark.high }, low: { ...c.priceMark.low } } };
+  return { bar: { ...c.bar }, priceMark: { high: { ...c.priceMark.high }, low: { ...c.priceMark.low } },
+           area: JSON.parse(JSON.stringify(c.area)) };
 })();
+
+// -- GPU rendering -------------------------------------------------------------------
+// Candle-shaped chart types are drawn by WebGL2 (gpu.js) underneath KLineChart's canvas,
+// which keeps axes, crosshair, indicators and drawings. KLineChart's own candles are
+// switched to an invisible area line so it does no per-candle work.
+const GPU_TYPES = new Set(['candles', 'bars', 'heikin_ashi', 'renko', 'line_break', 'range', 'volume_candles']);
+const GPU_INFO = window.GpuBars ? window.GpuBars.probe() : { supported: false, renderer: null };
+state.gpu = GPU_INFO.supported && prefs.get('gpu', true);
+let gpuBars = null;
+state.gpuFrameMs = null;
+
+function gpuActive() {
+  return state.gpu && GPU_TYPES.has(state.chartType);
+}
+
+function ensureGpu() {
+  if (gpuBars) return gpuBars;
+  try {
+    gpuBars = new window.GpuBars();
+  } catch (err) {
+    state.gpu = false;
+    showError(`GPU rendering unavailable: ${err.message}`);
+  }
+  return gpuBars;
+}
+
+// KLineChart (v10) places bar i at x = floor(a + i*bar + 0.5); the shader applies the same
+// rounding, so GPU bars land on exactly the chart's pixels. Falls back to an estimate from the
+// public API (within one pixel) if the internals ever change.
+function xMapping(c, xAxis, count) {
+  const store = c._chartStore;
+  const bar = c.getBarSpace().bar;
+  if (store && typeof store._totalBarSpace === 'number' && typeof store._lastBarRightSideDiffBarCount === 'number') {
+    return [store._totalBarSpace - (count + store._lastBarRightSideDiffBarCount - 0.5) * bar, bar];
+  }
+  return [xAxis.convertToPixel(count - 1) - (count - 1) * bar, bar];
+}
+
+// The y axis maps price -> round((1 - (price - realFrom) / realRange) * height); pass the
+// unrounded line and let the shader round the same way.
+function yMapping(yAxis) {
+  const r = yAxis.getRange();
+  const height = yAxis.getBounding().height;
+  const realRange = r.realRange || 1;
+  const sign = yAxis.reverse ? 1 : -1;
+  const scale = (sign * height) / realRange;
+  return [(yAxis.reverse ? 0 : height) - r.realFrom * scale, scale];
+}
+
+kc.registerIndicator({
+  name: 'GPU_BARS',
+  shortName: '',
+  series: 'price',
+  figures: [],
+  calc: (list) => list.map(() => ({})),
+  createTooltipDataSource: () => ({ name: '', calcParamsText: '', features: [], legends: [] }),
+  draw: ({ chart: c, bounding, xAxis, yAxis }) => {
+    const g = ensureGpu();
+    if (!g || !gpuActive()) return true;
+    const host = c.getDom('candle_pane', 'main');
+    if (host) {
+      if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+      g.attach(host);
+    }
+    const data = c.getDataList();
+    g.upload(data);
+    const { from, to } = c.getVisibleRange();
+    state.gpuFrameMs = g.render({
+      width: bounding.width, height: bounding.height, from: from - 1, to: to + 1,
+      xMap: xMapping(c, xAxis, data.length), yMap: yMapping(yAxis),
+      bodyWidth: Math.max(1, c.getBarSpace().gapBar), style: state.chartType,
+      upColor: DEFAULT_CANDLE.bar.upColor, downColor: DEFAULT_CANDLE.bar.downColor,
+    });
+    return true;
+  },
+});
+
+function renderGpuButton() {
+  const b = $('gpuBtn');
+  b.classList.toggle('on', gpuActive());
+  b.disabled = !GPU_INFO.supported;
+  b.title = !GPU_INFO.supported ? 'GPU rendering not available in this browser (no WebGL2)'
+    : `GPU rendering ${state.gpu ? 'on' : 'off'} — ${GPU_INFO.renderer}${GPU_INFO.software ? ' (software, no hardware acceleration)' : ''}`
+      + (state.gpu && !GPU_TYPES.has(state.chartType) ? '. This chart type is drawn on the CPU.' : '');
+}
+
+$('gpuBtn').addEventListener('click', () => {
+  state.gpu = !state.gpu;
+  prefs.set('gpu', state.gpu);
+  applyChartType();
+});
 
 function applyChartType() {
   const custom = !NATIVE[state.chartType];
   chart.setStyles(state.theme);
   chart.setStyles({ candle: { type: NATIVE[state.chartType] || 'candle_solid', ...DEFAULT_CANDLE } });
+  chart.removeIndicator({ name: 'GPU_BARS' });
+  if (gpuActive() && ensureGpu()) {
+    chart.setStyles({ candle: { type: 'area', area: {
+      lineColor: CLEAR, backgroundColor: [{ offset: 0, color: CLEAR }, { offset: 1, color: CLEAR }],
+      point: { show: false },
+    } } });
+    chart.createIndicator({ name: 'GPU_BARS', paneId: 'candle_pane' }, true);
+  } else if (gpuBars) {
+    gpuBars.detach();
+  }
+  renderGpuButton();
   if (custom) {
     // Keep the (invisible) candles for scaling, crosshair and tooltip; draw the type ourselves.
     chart.setStyles({ candle: {
