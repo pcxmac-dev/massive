@@ -117,13 +117,36 @@ def epoch_ms(index: pd.DatetimeIndex) -> np.ndarray:
     return index.as_unit("ms").asi8
 
 
+EXTRA_COLUMNS = ("yang_start", "yang", "switch", "up")
+
+
 def to_records(bars: pd.DataFrame) -> list[dict]:
     ts = epoch_ms(bars.index).tolist()
     cols = {c: bars[c].to_numpy(dtype=float).tolist() for c in COLUMNS}
-    return [
-        {"timestamp": int(t), **{c: cols[c][i] for c in COLUMNS}}
-        for i, t in enumerate(ts)
-    ]
+    extra = {c: bars[c].tolist() for c in EXTRA_COLUMNS if c in bars}
+    if "src_time" in bars:
+        extra["srcTime"] = epoch_ms(pd.DatetimeIndex(bars["src_time"])).tolist()
+    records = []
+    for i, t in enumerate(ts):
+        r = {"timestamp": int(t), **{c: cols[c][i] for c in COLUMNS}}
+        for c, values in extra.items():
+            v = values[i]
+            r[c] = None if isinstance(v, float) and np.isnan(v) else (bool(v) if c in ("yang", "yang_start", "up") else v)
+        records.append(r)
+    return records
+
+
+@dataclass(frozen=True)
+class Style:
+    """Chart type and its parameters. Box/reversal of None means ATR(14), like TradingView."""
+    type: str = "candles"
+    box: float | None = None
+    reversal: float | None = None  # kagi: price amount; point & figure: number of boxes
+    lines: int = 3  # line break
+
+
+TIME_TYPES = ("candles", "hollow", "bars", "volume_candles", "line", "line_markers", "step", "area",
+              "hlc_area", "baseline", "columns", "high_low")
 
 
 MERGED = "*"  # pseudo-source: every feed for a ticker combined
@@ -245,13 +268,69 @@ class BarEngine:
     def bars(
         self, source: str, ticker: str, period: str, span: int = 1, session: str = "regular",
         to_ms: int | None = None, since_ms: int | None = None, limit: int = 1000,
+        style: Style = Style(),
     ) -> dict:
         s = self.series(source, ticker)
         if s is None:
             return {"bars": [], "more": False}
         if not any(p["type"] == period and p["span"] == span for p in self.periods(s)):
             raise ValueError(f"{period}/{span} cannot be built from {s.kind} data")
-        all_bars = self._resampled(s, period, span, session)
+        all_bars, used = self._styled(s, period, span, session, style)
+        page = self._page(all_bars, to_ms, since_ms, limit)
+        page["style"] = used
+        if style.type == "range" and s.kind != "trades":
+            page["approximate"] = "range bars built from bars, not ticks: intra-bar order of high and low is assumed"
+        return page
+
+    def _styled(self, s: Series, period: str, span: int, session: str, style: Style) -> tuple[pd.DataFrame, dict]:
+        from . import charttypes as ct
+
+        if style.type in TIME_TYPES:
+            return self._resampled(s, period, span, session), {"type": style.type}
+        if style.type not in ct.TRANSFORMS:
+            raise ValueError(f"unknown chart type {style.type!r}")
+        base = self._resampled(s, period, span, session)
+        default = ct.round_box(ct.atr(base), s.price_precision) if not base.empty else 1.0
+        box = style.box or default
+        used = {"type": style.type}
+        if style.type == "kagi":
+            used["reversal"] = style.reversal or default
+        elif style.type == "point_figure":
+            boxes = style.reversal if style.reversal is not None else 3
+            if boxes < 1 or boxes != int(boxes):
+                raise ValueError("point & figure reversal is a whole number of boxes (1 or more)")
+            used.update(box=box, reversal=int(boxes))
+        elif style.type == "line_break":
+            used["lines"] = style.lines
+        elif style.type in ("renko", "range"):
+            used["box"] = box
+        key = (s.source, s.ticker, period, span, session, tuple(sorted(used.items())),
+               self._series[(s.source, s.ticker)][0])
+        with self._lock:
+            if key in self._bars:
+                self._bars.move_to_end(key)
+                return self._bars[key], used
+        if style.type == "heikin_ashi":
+            out = ct.heikin_ashi(base)
+        elif style.type == "renko":
+            out = ct.renko(base, box)
+        elif style.type == "line_break":
+            out = ct.line_break(base, style.lines)
+        elif style.type == "kagi":
+            out = ct.kagi(base, used["reversal"])
+        elif style.type == "point_figure":
+            out = ct.point_figure(base, box, used["reversal"])
+        else:  # range: from the finest data, not the chart interval
+            fine = s.frame if session == "extended" else regular_session(s.frame)
+            out = ct.range_bars(fine, box)
+        with self._lock:
+            self._bars[key] = out
+            if len(self._bars) > self._cache_size:
+                self._bars.popitem(last=False)
+        return out, used
+
+    @staticmethod
+    def _page(all_bars: pd.DataFrame, to_ms: int | None, since_ms: int | None, limit: int) -> dict:
         ts = epoch_ms(all_bars.index)
         if since_ms is not None:
             sel, more = all_bars[ts >= since_ms], False

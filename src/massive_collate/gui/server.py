@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from ..storage import Store
-from .bars import BarEngine
+from .bars import BarEngine, Style
 
 STATIC = Path(__file__).parent / "static"
 MAX_LIMIT = 20000
@@ -65,12 +65,21 @@ class ChartApp:
 
     def bars(self, q: dict[str, str]) -> dict:
         limit = min(int(q.get("limit", 1000)), MAX_LIMIT)
+        style = Style(
+            type=q.get("type", "candles"),
+            box=float(q["box"]) if q.get("box") else None,
+            reversal=float(q["reversal"]) if q.get("reversal") else None,
+            lines=int(q.get("lines", 3)),
+        )
+        if (style.box is not None and style.box <= 0) or (style.reversal is not None and style.reversal <= 0) \
+                or not 1 <= style.lines <= 10:
+            raise ValueError("box, reversal and lines must be positive (lines 1-10)")
         return self.engine.bars(
             q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
             q.get("session", "regular"),
             to_ms=int(q["to"]) if q.get("to") else None,
             since_ms=int(q["since"]) if q.get("since") else None,
-            limit=limit,
+            limit=limit, style=style,
         )
 
     def range_stats(self, q: dict[str, str]) -> dict:

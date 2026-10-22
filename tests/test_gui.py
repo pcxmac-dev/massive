@@ -159,6 +159,29 @@ def test_range_stats_empty_window(tmp_path):
     assert eng.range_stats("massive", "SPCX", "minute", 1, "regular", 0, 1) == {"bars": 0}
 
 
+@pytest.mark.parametrize("kind", ["heikin_ashi", "renko", "line_break", "kagi", "point_figure", "range"])
+def test_engine_chart_types(tmp_path, kind):
+    from massive_collate.gui.bars import Style
+
+    eng = BarEngine(_store_with_bars(tmp_path))
+    reversal = 3 if kind == "point_figure" else 0.01
+    res = eng.bars("massive", "SPCX", "minute", 1, limit=100000, style=Style(type=kind, box=0.01, reversal=reversal))
+    assert res["style"]["type"] == kind
+    ts = [b["timestamp"] for b in res["bars"]]
+    assert ts == sorted(ts) and len(set(ts)) == len(ts)
+    assert ("approximate" in res) == (kind == "range")
+
+
+def test_server_rejects_bad_chart_parameters(tmp_path):
+    app = ChartApp(_store_with_bars(tmp_path))
+    with pytest.raises(ValueError):
+        app.bars({"source": "massive", "ticker": "SPCX", "type": "renko", "box": "-1"})
+    with pytest.raises(ValueError):
+        app.bars({"source": "massive", "ticker": "SPCX", "type": "nope"})
+    with pytest.raises(ValueError):
+        app.bars({"source": "massive", "ticker": "SPCX", "type": "point_figure", "reversal": "2.5"})
+
+
 def test_daily_uses_official_bars(tmp_path):
     s = _store_with_bars(tmp_path)
     day = int(pd.Timestamp("2026-10-20 00:00", tz=ET).timestamp() * 1000)
