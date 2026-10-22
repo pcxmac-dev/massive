@@ -262,6 +262,39 @@ class BarEngine:
             sel, more = all_bars.tail(limit), len(all_bars) > limit
         return {"bars": to_records(sel), "more": bool(more)}
 
+    def range_stats(
+        self, source: str, ticker: str, period: str, span: int, session: str, from_ms: int, to_ms: int,
+    ) -> dict:
+        """Statistics over the bars whose start lies in [from_ms, to_ms] (either order),
+        computed from exactly the bars the chart shows."""
+        s = self.series(source, ticker)
+        if s is None:
+            raise LookupError(f"no data stored for {source}:{ticker}")
+        lo_ms, hi_ms = sorted((int(from_ms), int(to_ms)))
+        bars = self._resampled(s, period, span, session)
+        ts = epoch_ms(bars.index)
+        sel = bars[(ts >= lo_ms) & (ts <= hi_ms)]
+        if sel.empty:
+            return {"bars": 0}
+        sel_ts = epoch_ms(sel.index)
+        volume = float(sel["volume"].sum())
+        turnover = float(sel["turnover"].sum())
+        first_open, last_close = float(sel["open"].iloc[0]), float(sel["close"].iloc[-1])
+        hi_i, lo_i = int(np.argmax(sel["high"].to_numpy())), int(np.argmin(sel["low"].to_numpy()))
+        return {
+            "bars": int(len(sel)),
+            "from": int(sel_ts[0]), "to": int(sel_ts[-1]),
+            "open": first_open, "close": last_close,
+            "change": last_close - first_open,
+            "changePct": (last_close / first_open - 1) * 100 if first_open else None,
+            "high": float(sel["high"].iloc[hi_i]), "highTime": int(sel_ts[hi_i]),
+            "low": float(sel["low"].iloc[lo_i]), "lowTime": int(sel_ts[lo_i]),
+            "rangePct": (float(sel["high"].max()) / float(sel["low"].min()) - 1) * 100 if sel["low"].min() else None,
+            "volume": volume,
+            "vwap": turnover / volume if volume else None,
+            "trades": int(sel["trades"].sum()),
+        }
+
     def _resampled(self, s: Series, period: str, span: int, session: str) -> pd.DataFrame:
         fp = self._series[(s.source, s.ticker)][0]
         key = (s.source, s.ticker, period, span, session, fp)

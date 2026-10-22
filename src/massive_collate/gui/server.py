@@ -73,6 +73,12 @@ class ChartApp:
             limit=limit,
         )
 
+    def range_stats(self, q: dict[str, str]) -> dict:
+        return self.engine.range_stats(
+            q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
+            q.get("session", "regular"), int(q["from"]), int(q["to"]),
+        )
+
     def exchanges(self) -> list[dict]:
         with self._lock:
             df = self.store.exchanges()
@@ -112,6 +118,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.meta(q["source"], q["ticker"]))
                 if url.path == "/api/bars":
                     return self._json(app.bars(q))
+                if url.path == "/api/range":
+                    return self._json(app.range_stats(q))
                 if url.path == "/api/exchanges":
                     return self._json(app.exchanges())
             except (KeyError, ValueError) as e:

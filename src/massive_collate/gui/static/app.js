@@ -56,39 +56,159 @@ function fmtDuration(ms) {
   return `${(h / 24).toFixed(1)}d`;
 }
 
+// Highlight: box between two points with a center line, start/center/end labels,
+// and exact statistics for the bars inside it (computed by the server).
+const UP = '#26a69a';
+const DOWN = '#ef5350';
+const MID = '#f0b90b';
+const statsTimers = new Map();
+
+function signed(v, digits) { return `${v >= 0 ? '+' : ''}${v.toFixed(digits)}`; }
+
+function change(from, to, precision) {
+  const pct = from ? ((to - from) / from) * 100 : 0;
+  return `${signed(to - from, precision)} (${signed(pct, 2)}%)`;
+}
+
+function fmtTime(ts) {
+  const p = chart.getPeriod() || { type: 'minute' };
+  const opts = { timeZone: TZ, month: 'short', day: '2-digit', hourCycle: 'h23' };
+  if (p.type === 'second' || p.type === 'minute' || p.type === 'hour') Object.assign(opts, { hour: '2-digit', minute: '2-digit' });
+  if (p.type === 'second') opts.second = '2-digit';
+  if (p.type === 'month' || p.type === 'week') opts.year = 'numeric';
+  return new Intl.DateTimeFormat('en-US', opts).format(new Date(ts));
+}
+
+function compact(v) {
+  return new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 3 }).format(v);
+}
+
+function statsKey(pa, pb) {
+  const p = chart.getPeriod() || {};
+  return `${p.type}:${p.span}|${state.session}|${pa.timestamp}|${pb.timestamp}`;
+}
+
+function requestRangeStats(overlay, key, pa, pb) {
+  clearTimeout(statsTimers.get(overlay.id));
+  statsTimers.set(overlay.id, setTimeout(async () => {
+    const p = chart.getPeriod();
+    const sym = chart.getSymbol();
+    if (!p || !sym) return;
+    try {
+      const stats = await api('/api/range', {
+        source: sym.source, ticker: sym.ticker, period: p.type, span: p.span, session: state.session,
+        from: pa.timestamp, to: pb.timestamp,
+      });
+      chart.overrideOverlay({ id: overlay.id, extendData: { ...(overlay.extendData || {}), key, stats } });
+    } catch (err) { showError(err); }
+  }, 150));
+}
+
+const LABEL_SIZE = 12;
+const LABEL_PAD = 5;
+
+function textWidth(text) {
+  return (kc.utils?.calcTextWidth ? kc.utils.calcTextWidth(text, LABEL_SIZE) : text.length * 7) + LABEL_PAD * 2;
+}
+
+const LINE_H = 17;
+
+// A block of text lines, positioned relative to (x, y) and kept inside the pane.
+function label(x, y, lines, bounding, { align = 'left', color = '#ffffff', bg = 'rgba(19,23,34,0.85)', baseline = 'middle' } = {}) {
+  const w = Math.max(...lines.map(textWidth));
+  const h = LINE_H * lines.length;
+  let left = align === 'left' ? x : align === 'right' ? x - w : x - w / 2;
+  let top = baseline === 'bottom' ? y - h : baseline === 'top' ? y : y - h / 2;
+  left = Math.min(Math.max(left, 2), Math.max(2, bounding.width - w - 2));
+  top = Math.min(Math.max(top, 2), Math.max(2, bounding.height - h - 2));
+  return { left, top, w, h, lines, color, bg };
+}
+
+// Place blocks in order; a block overlapping one already placed moves below it
+// (or above, if there is no room below), so labels never cover each other.
+function layoutLabels(blocks, bounding) {
+  const placed = [];
+  const hits = (b) => placed.find((p) => b.left < p.left + p.w && p.left < b.left + b.w && b.top < p.top + p.h && p.top < b.top + b.h);
+  for (const b of blocks) {
+    for (let i = 0, p; i < 12 && (p = hits(b)); i++) {
+      const below = p.top + p.h + 2;
+      b.top = below + b.h <= bounding.height ? below : Math.max(2, p.top - b.h - 2);
+    }
+    placed.push(b);
+  }
+  return placed.flatMap((b) => b.lines.map((text, i) => ({
+    type: 'text',
+    ignoreEvent: true,
+    attrs: { x: b.left, y: b.top + i * LINE_H, text, align: 'left', baseline: 'top' },
+    styles: { color: b.color, backgroundColor: b.bg, size: LABEL_SIZE, borderRadius: 2,
+              paddingLeft: LABEL_PAD, paddingRight: LABEL_PAD, paddingTop: 2, paddingBottom: 2 },
+  })));
+}
+
 kc.registerOverlay({
   name: 'measure',
   totalStep: 3,
   needDefaultPointFigure: true,
   needDefaultXAxisFigure: true,
   needDefaultYAxisFigure: true,
-  createPointFigures: ({ chart, overlay, coordinates }) => {
+  createPointFigures: ({ chart: c, overlay, coordinates, bounding }) => {
     if (coordinates.length < 2 || overlay.points.length < 2) return [];
     const [a, b] = coordinates;
     const [pa, pb] = overlay.points;
-    if (pa.value == null || pb.value == null) return [];
-    const precision = chart.getSymbol()?.pricePrecision ?? 2;
-    const diff = pb.value - pa.value;
-    const pct = pa.value ? (diff / pa.value) * 100 : 0;
-    const bars = (pb.dataIndex ?? 0) - (pa.dataIndex ?? 0);
-    const up = diff >= 0;
-    const color = up ? '#26a69a' : '#ef5350';
-    const text = `${up ? '+' : ''}${diff.toFixed(precision)} (${up ? '+' : ''}${pct.toFixed(2)}%)  `
-      + `${bars} bars, ${fmtDuration((pb.timestamp ?? 0) - (pa.timestamp ?? 0))}`;
-    return [
-      {
-        type: 'rect',
-        attrs: { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), width: Math.abs(b.x - a.x), height: Math.abs(b.y - a.y) },
-        styles: { style: 'fill', color: up ? 'rgba(38,166,154,0.18)' : 'rgba(239,83,80,0.18)' },
-      },
-      {
-        type: 'text',
-        ignoreEvent: true,
-        attrs: { x: (a.x + b.x) / 2, y: Math.min(a.y, b.y) - 6, text, align: 'center', baseline: 'bottom' },
-        styles: { color: '#ffffff', backgroundColor: color, size: 12, borderRadius: 3,
-                  paddingLeft: 6, paddingRight: 6, paddingTop: 3, paddingBottom: 3 },
-      },
+    if (pa.value == null || pb.value == null || pa.timestamp == null || pb.timestamp == null) return [];
+    const prec = c.getSymbol()?.pricePrecision ?? 2;
+    const up = pb.value >= pa.value;
+    const color = up ? UP : DOWN;
+    const left = Math.min(a.x, b.x), right = Math.max(a.x, b.x);
+    const top = Math.min(a.y, b.y), bottom = Math.max(a.y, b.y);
+    const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
+    const midPrice = (pa.value + pb.value) / 2;
+    const midTime = Math.round((pa.timestamp + pb.timestamp) / 2);
+
+    const key = statsKey(pa, pb);
+    const ext = overlay.extendData || {};
+    if (ext.key !== key) requestRangeStats(overlay, key, pa, pb);
+    const st = ext.key === key ? ext.stats : null;
+    // Exact count from the server once known; until then from the chart's indexes.
+    const bars = st ? st.bars
+      : (pa.dataIndex != null && pb.dataIndex != null ? Math.abs(pb.dataIndex - pa.dataIndex) + 1 : '…');
+
+    const aLeft = a.x <= b.x;
+    const shapes = [
+      { type: 'rect', attrs: { x: left, y: top, width: right - left, height: bottom - top },
+        styles: { style: 'fill', color: up ? 'rgba(38,166,154,0.15)' : 'rgba(239,83,80,0.15)' } },
+      { type: 'line', ignoreEvent: true, attrs: { coordinates: [{ x: left, y: cy }, { x: right, y: cy }] },
+        styles: { style: 'dashed', dashedValue: [5, 4], color: MID, size: 1 } },
+      { type: 'line', ignoreEvent: true, attrs: { coordinates: [{ x: cx, y: top }, { x: cx, y: bottom }] },
+        styles: { style: 'dashed', dashedValue: [2, 4], color: MID, size: 1 } },
+      { type: 'circle', ignoreEvent: true, attrs: { x: cx, y: cy, r: 3.5 }, styles: { style: 'fill', color: MID } },
     ];
+    if (right < 0 || left > bounding.width) return shapes; // scrolled out of view: no labels
+    // Placement order = priority: the statistics line first, then start, end, center.
+    const blocks = [];
+    if (st && st.bars) {
+      const above = top - 6 - 2 * LINE_H > 0;
+      blocks.push(label(cx, above ? top - 6 : bottom + 6, [
+        `O ${st.open.toFixed(prec)}  H ${st.high.toFixed(prec)} (${fmtTime(st.highTime)})  `
+          + `L ${st.low.toFixed(prec)} (${fmtTime(st.lowTime)})  C ${st.close.toFixed(prec)}`,
+        `${st.bars} bars  ·  Vol ${compact(st.volume)}  ·  VWAP ${st.vwap != null ? st.vwap.toFixed(prec) : '-'}`
+          + `  ·  Trades ${compact(st.trades)}  ·  H/L range ${st.rangePct != null ? st.rangePct.toFixed(2) + '%' : '-'}`,
+      ], bounding, { align: 'center', baseline: above ? 'bottom' : 'top' }));
+    }
+    blocks.push(label(a.x + (aLeft ? -8 : 8), a.y + (a.y <= cy ? 4 : -4), [
+      `Start  ${pa.value.toFixed(prec)}`, fmtTime(pa.timestamp),
+    ], bounding, { align: aLeft ? 'right' : 'left', baseline: a.y <= cy ? 'top' : 'bottom' }));
+    blocks.push(label(b.x + (aLeft ? 8 : -8), b.y + (b.y <= cy ? 4 : -4), [
+      `End  ${pb.value.toFixed(prec)}`, fmtTime(pb.timestamp),
+      change(pa.value, pb.value, prec),
+      `${bars} bars · ${fmtDuration(pb.timestamp - pa.timestamp)}`,
+    ], bounding, { align: aLeft ? 'left' : 'right', color, baseline: b.y <= cy ? 'top' : 'bottom' }));
+    blocks.push(label(cx + 8, cy, [
+      `Mid  ${midPrice.toFixed(prec)}  ·  ${fmtTime(midTime)}`,
+      `start→mid ${change(pa.value, midPrice, prec)}`,
+      `mid→end ${change(midPrice, pb.value, prec)}`,
+    ], bounding, { color: MID }));
+    return [...shapes, ...layoutLabels(blocks, bounding)];
   },
 });
 
@@ -319,7 +439,8 @@ const ICON = {
   parallelStraightLine: '<path d="M2 13L14 3M6 18L18 8"/>',
   priceChannelLine: '<path d="M2 12L18 4M2 17L18 9"/><path d="M2 14.5L18 6.5" stroke-dasharray="2 2"/>',
   fibonacciLine: '<path d="M2 4h16M2 8h16M2 12h16M2 16h16"/>',
-  measure: '<path d="M3 17V7h14v10z"/><path d="M10 9v6M8 11l2-2 2 2"/>',
+  measure: '<rect x="2.5" y="4.5" width="15" height="11" fill="currentColor" fill-opacity=".25"/>'
+    + '<path d="M2.5 10h15" stroke-dasharray="2 1.5"/><circle cx="10" cy="10" r="1.3" fill="currentColor"/>',
   simpleAnnotation: '<path d="M4 4h12v9H9l-3 3v-3H4z"/>',
   magnet: '<path d="M5 3v7a5 5 0 0010 0V3h-3v7a2 2 0 01-4 0V3z"/>',
   lock: '<rect x="4" y="9" width="12" height="9" rx="1"/><path d="M7 9V6a3 3 0 016 0v3"/>',
@@ -327,12 +448,13 @@ const ICON = {
   trash: '<path d="M3 5h14M8 5V3h4v2M5 5l1 13h8l1-13"/>',
 };
 const TOOLS = [
-  ['cursor', 'Cursor (Esc)'], null,
+  ['cursor', 'Cursor (Esc)'],
+  ['measure', 'Highlight (Alt+H): box with center line and start / center / end statistics'], null,
   ['segment', 'Trend line'], ['rayLine', 'Ray'], ['straightLine', 'Extended line'],
   ['horizontalStraightLine', 'Horizontal line'], ['horizontalRayLine', 'Horizontal ray'],
   ['verticalStraightLine', 'Vertical line'], ['priceLine', 'Price line'], null,
   ['parallelStraightLine', 'Parallel channel'], ['priceChannelLine', 'Price channel'],
-  ['fibonacciLine', 'Fibonacci retracement'], ['measure', 'Measure: price change, %, bars, time'],
+  ['fibonacciLine', 'Fibonacci retracement'],
   ['simpleAnnotation', 'Note'], null,
 ];
 
@@ -463,6 +585,7 @@ $('themeBtn').addEventListener('click', () => {
 document.addEventListener('keydown', (e) => {
   if (e.target.matches('input, select, textarea') || $('symbolDialog').open) return;
   if (e.key === 'Escape') { cancelDrawing(); setActiveTool('cursor'); }
+  else if (e.key === 'h' && e.altKey) { e.preventDefault(); startDrawing('measure'); }
   else if ((e.key === 'Delete' || e.key === 'Backspace') && state.selectedOverlay) {
     chart.removeOverlay({ id: state.selectedOverlay });
   } else if (e.key === '/' || (e.key.length === 1 && /[a-z]/i.test(e.key) && !e.ctrlKey && !e.metaKey)) {

@@ -130,6 +130,35 @@ def test_engine_merged_feed(tmp_path):
     assert len(reg) == 390
 
 
+def test_range_stats_are_exact(tmp_path):
+    s = _store_with_bars(tmp_path)
+    eng = BarEngine(s)
+    bars = eng.bars("massive", "SPCX", "minute", 1, limit=10000)["bars"]
+    a, b = bars[10], bars[19]  # 10 bars inclusive
+    st = eng.range_stats("massive", "SPCX", "minute", 1, "regular", b["timestamp"], a["timestamp"])  # either order
+    sel = bars[10:20]
+    assert st["bars"] == 10
+    assert st["open"] == sel[0]["open"] and st["close"] == sel[-1]["close"]
+    assert st["high"] == max(x["high"] for x in sel) and st["low"] == min(x["low"] for x in sel)
+    assert st["highTime"] == sel[0]["timestamp"]  # first bar reaching the high
+    assert st["volume"] == sum(x["volume"] for x in sel)
+    assert st["vwap"] == pytest.approx(sum(x["turnover"] for x in sel) / st["volume"])
+    assert st["change"] == pytest.approx(sel[-1]["close"] - sel[0]["open"])
+    assert st["changePct"] == pytest.approx((sel[-1]["close"] / sel[0]["open"] - 1) * 100)
+
+
+def test_range_stats_follow_the_interval(tmp_path):
+    eng = BarEngine(_store_with_bars(tmp_path))
+    five = eng.bars("massive", "SPCX", "minute", 5, limit=10000)["bars"]
+    st = eng.range_stats("massive", "SPCX", "minute", 5, "regular", five[0]["timestamp"], five[1]["timestamp"])
+    assert st["bars"] == 2 and st["volume"] == 1000  # 10 one-minute bars of 100
+
+
+def test_range_stats_empty_window(tmp_path):
+    eng = BarEngine(_store_with_bars(tmp_path))
+    assert eng.range_stats("massive", "SPCX", "minute", 1, "regular", 0, 1) == {"bars": 0}
+
+
 def test_daily_uses_official_bars(tmp_path):
     s = _store_with_bars(tmp_path)
     day = int(pd.Timestamp("2026-10-20 00:00", tz=ET).timestamp() * 1000)
@@ -166,6 +195,10 @@ def test_server_endpoints(server):
     assert status == 200 and meta["base"] == "minute" and {"type": "second", "span": 1} not in meta["periods"]
     status, body = _get(server, "/api/bars?source=*&ticker=SPCX&period=minute&span=5&limit=3")
     assert status == 200 and len(json.loads(body)["bars"]) == 3
+    bars = json.loads(body)["bars"]
+    status, body = _get(server, f"/api/range?source=*&ticker=SPCX&period=minute&span=5"
+                                f"&from={bars[0]['timestamp']}&to={bars[-1]['timestamp']}")
+    assert status == 200 and json.loads(body)["bars"] == 3
     status, _ = _get(server, "/")
     assert status == 200
 
