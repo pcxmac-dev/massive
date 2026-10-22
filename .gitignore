@@ -1,2 +1,12 @@
 .env
 __pycache__/
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/
+# Market data stays local (default location is ~/MassiveData, outside the repo)
+*.db
+*.db-wal
+*.db-shm
+*.lock

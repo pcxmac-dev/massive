@@ -1,13 +1,14 @@
 name: Fetch previous close
 
+# Manual check that the MASSIVE_API_KEY secret works. Not scheduled: market data
+# is collected on the local machine, and a scheduled job here would share the
+# plan's request limit with the local sync.
 on:
   workflow_dispatch:
     inputs:
       ticker:
         description: Ticker symbol
         default: AAPL
-  schedule:
-    - cron: "30 21 * * 1-5" # weekdays after US market close (UTC)
 
 jobs:
   fetch:
