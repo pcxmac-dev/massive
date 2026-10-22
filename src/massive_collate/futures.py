@@ -91,13 +91,33 @@ class Roll:
     gap: float | None  # new - old close at the last bar of the old contract (None if not overlapping)
 
 
+def _gap_from_sessions(daily: dict[str, pd.DataFrame], old: str, new: str, before: pd.Timestamp, ratio: bool):
+    """Roll gap from official session closes on the old contract's last held session."""
+    o, n = daily.get(old), daily.get(new)
+    if o is None or n is None or o.empty or n.empty:
+        return None
+    last_session = session_dates(pd.DatetimeIndex([before]))[0]
+    o_s = o[[d <= last_session for d in session_dates(o.index)]]
+    if o_s.empty:
+        return None
+    day = session_dates(o_s.index[-1:])[0]
+    n_s = n[[d == day for d in session_dates(n.index)]]
+    if n_s.empty:
+        return None
+    oc, nc = float(o_s["close"].iloc[-1]), float(n_s["close"].iloc[-1])
+    return nc / oc if ratio else nc - oc
+
+
 def continuous(
     frames: dict[str, pd.DataFrame], schedule: list[tuple[date, str]], adjust: str = "none",
+    sessions: dict[str, pd.DataFrame] | None = None,
 ) -> tuple[pd.DataFrame, list[Roll]]:
     """Join contract frames (indexed by time, OHLC columns) along the roll schedule.
 
     adjust: "none" (prices as traded), "difference" (shift earlier contracts by the
-    price gap at each roll) or "ratio" (scale them by the ratio).
+    price gap at each roll) or "ratio" (scale them by the ratio). The gap is taken from
+    both contracts' bars at the old contract's last bar when they overlap, otherwise
+    from their official session closes on that session (`sessions`).
     """
     if adjust not in ("none", "difference", "ratio"):
         raise ValueError("adjust must be none, difference or ratio")
@@ -123,9 +143,11 @@ def continuous(
         last_old = joined.index[i - 1]
         new_frame = frames[new]
         at = new_frame.loc[:last_old]
-        gap = float(at["close"].iloc[-1] - joined["close"].iloc[i - 1]) if not at.empty else None
-        if adjust == "ratio" and gap is not None:
-            gap = float(at["close"].iloc[-1] / joined["close"].iloc[i - 1])
+        if not at.empty:
+            old_close, new_close = float(joined["close"].iloc[i - 1]), float(at["close"].iloc[-1])
+            gap = new_close / old_close if adjust == "ratio" else new_close - old_close
+        else:
+            gap = _gap_from_sessions(sessions or {}, old, new, last_old, adjust == "ratio")
         rolls.append(Roll(session_dates(joined.index[i:i + 1])[0], joined.index[i], old, new, gap))
 
     if adjust != "none" and rolls:

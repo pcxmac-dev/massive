@@ -215,6 +215,9 @@ def test_meta_reports_asset_and_rolls(tmp_path):
     app = ChartApp(_future_store(tmp_path))
     m = app.meta("massive", "NQ1!")
     assert m["asset"] == "future" and m["aroundTheClock"] and len(m["rolls"]) == 1
+    # roll time is epoch milliseconds of the first bar on the new contract (the chart's unit)
+    first_new = app.bars({"source": "massive", "ticker": "NQ1!", "period": "minute", "limit": "100"})["bars"][2]
+    assert m["rolls"][0]["time"] == first_new["timestamp"] == int(pd.Timestamp("2026-09-17 20:00", tz=ET).timestamp() * 1000)
     with pytest.raises(ValueError):
         app.meta("massive", "NQ1!", "bogus")
 

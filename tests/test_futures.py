@@ -74,6 +74,21 @@ def test_continuous_joins_and_reports_rolls():
     assert ratio["close"].iloc[0] == pytest.approx(110.0)
 
 
+def test_roll_gap_from_session_closes_when_bars_do_not_overlap():
+    # intraday bars only for the sessions each contract was held: no overlap at the switch
+    u = _frame(["2026-09-14 10:00"], [100.0])
+    z = _frame(["2026-09-15 10:00", "2026-09-16 10:00"], [111.0, 112.0])
+    daily = lambda closes: _frame(["2026-09-14 00:00", "2026-09-15 00:00"], closes)  # noqa: E731
+    sessions = {"NQU6": daily([100.5, 101.0]), "NQZ6": daily([110.25, 111.0])}
+    sched = [(D[0], "NQU6"), (D[1], "NQZ6"), (D[2], "NQZ6")]
+    joined, rolls = continuous({"NQU6": u, "NQZ6": z}, sched, sessions=sessions)
+    assert rolls[0].gap == pytest.approx(110.25 - 100.5)  # settlement-to-settlement on the 14th
+    adj, _ = continuous({"NQU6": u, "NQZ6": z}, sched, adjust="difference", sessions=sessions)
+    assert adj["close"].iloc[0] == pytest.approx(100.0 + 9.75)
+    _, no_ref = continuous({"NQU6": u, "NQZ6": z}, sched)
+    assert no_ref[0].gap is None  # nothing to measure: reported as unknown, not guessed
+
+
 def test_normalize_future_bar():
     raw = {"window_start": 1792628700000000000, "session_end_date": "2026-10-22", "open": 1, "high": 2, "low": 0.5,
            "close": 1.5, "volume": 10, "transactions": 4, "dollar_volume": 15.0}

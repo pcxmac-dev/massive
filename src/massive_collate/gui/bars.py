@@ -312,9 +312,9 @@ class BarEngine:
         if kind is None:
             return None
         frames = {c: frame_from_bars(self.store.load_bars([c], kind, 1, source=source)) for c in contracts}
-        joined, roll_list = continuous(frames, rolls, adjust)
         dailies = {c: frame_from_bars(self.store.load_bars([c], "day", 1, source=source)) for c in contracts}
-        daily, _ = continuous(dailies, rolls, adjust)
+        joined, roll_list = continuous(frames, rolls, adjust, sessions=dailies)
+        daily, _ = continuous(dailies, rolls, adjust, sessions=dailies)
         frame = joined.drop(columns="contract")
         prices = frame[["open", "high", "low", "close"]].to_numpy().ravel()
         return Series(
@@ -322,8 +322,8 @@ class BarEngine:
             price_precision=decimals(prices, cap=6, minimum=2),
             volume_precision=decimals(frame["volume"].to_numpy(), cap=4),
             asset="future",
-            rolls=[{"time": int(r.time.as_unit("ms").value), "session": str(r.session), "from": r.old, "to": r.new,
-                    "gap": r.gap} for r in roll_list],
+            rolls=[{"time": int(epoch_ms(pd.DatetimeIndex([r.time]))[0]), "session": str(r.session), "from": r.old,
+                    "to": r.new, "gap": r.gap} for r in roll_list],
         )
 
     def _load_plain(self, source: str, ticker: str) -> Series | None:
