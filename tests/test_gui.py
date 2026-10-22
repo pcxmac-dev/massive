@@ -219,6 +219,37 @@ def test_meta_reports_asset_and_rolls(tmp_path):
         app.meta("massive", "NQ1!", "bogus")
 
 
+def test_lod_aggregate_is_exact_and_anchored():
+    from massive_collate.gui.bars import lod_aggregate
+
+    f = _minutes("2026-10-20 09:30", 10)
+    agg = lod_aggregate(f, 4)
+    assert len(agg) == 3  # 4 + 4 + 2
+    first = agg.iloc[0]
+    assert first["open"] == f["open"].iloc[0] and first["close"] == f["close"].iloc[3]
+    assert first["high"] == f["high"].iloc[:4].max() and first["low"] == f["low"].iloc[:4].min()
+    assert first["volume"] == f["volume"].iloc[:4].sum()
+    assert list(agg.index) == [f.index[0], f.index[4], f.index[8]]
+    # anchored to the series start: appending bars never moves existing groups
+    longer = lod_aggregate(_minutes("2026-10-20 09:30", 13), 4)
+    assert longer.iloc[:2].equals(agg.iloc[:2])
+    assert lod_aggregate(f, 1) is f
+
+
+def test_engine_lod_paging_and_limits(tmp_path):
+    eng = BarEngine(_store_with_bars(tmp_path))
+    full = eng.bars("massive", "SPCX", "minute", 1, limit=100000)
+    lod = eng.bars("massive", "SPCX", "minute", 1, limit=100000, lod=8)
+    assert full["total"] == 390 and lod["total"] == 49 and lod["style"]["lod"] == 8
+    assert max(b["high"] for b in lod["bars"]) == max(b["high"] for b in full["bars"])
+    assert sum(b["volume"] for b in lod["bars"]) == sum(b["volume"] for b in full["bars"])
+    page = eng.bars("massive", "SPCX", "minute", 1, limit=10, lod=8)
+    older = eng.bars("massive", "SPCX", "minute", 1, limit=100, lod=8, to_ms=page["bars"][0]["timestamp"])
+    assert len(page["bars"]) + len(older["bars"]) == 49
+    with pytest.raises(ValueError):
+        eng.bars("massive", "SPCX", "minute", 1, lod=0)
+
+
 def test_daily_uses_official_bars(tmp_path):
     s = _store_with_bars(tmp_path)
     day = int(pd.Timestamp("2026-10-20 00:00", tz=ET).timestamp() * 1000)

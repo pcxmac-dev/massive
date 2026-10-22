@@ -128,6 +128,28 @@ def epoch_ms(index: pd.DatetimeIndex) -> np.ndarray:
     return index.as_unit("ms").asi8
 
 
+MAX_LOD = 4096
+# Time-based types can be shown as exact aggregates; price-based ones (Renko, Kagi, ...) cannot.
+LOD_TYPES = ("candles", "hollow", "bars", "volume_candles", "line", "line_markers", "step", "area",
+             "hlc_area", "baseline", "columns", "high_low")
+
+
+def lod_aggregate(bars: pd.DataFrame, k: int) -> pd.DataFrame:
+    """Level of detail: exact OHLCV of every k consecutive bars, for drawing when bars are
+    thinner than a pixel. Groups are counted from the first bar of the series, so they stay
+    put while scrolling and paging. Each group is stamped with its first bar's time."""
+    if k <= 1 or bars.empty:
+        return bars
+    groups = np.arange(len(bars)) // k
+    g = bars.groupby(groups, sort=True)
+    out = pd.DataFrame({
+        "open": g["open"].first(), "high": g["high"].max(), "low": g["low"].min(), "close": g["close"].last(),
+        "volume": g["volume"].sum(), "turnover": g["turnover"].sum(), "trades": g["trades"].sum(),
+    })
+    out.index = bars.index[::k][: len(out)]
+    return out
+
+
 EXTRA_COLUMNS = ("yang_start", "yang", "switch", "up")
 
 
@@ -337,17 +359,35 @@ class BarEngine:
     def bars(
         self, source: str, ticker: str, period: str, span: int = 1, session: str = "regular",
         to_ms: int | None = None, since_ms: int | None = None, limit: int = 1000,
-        style: Style = Style(), adjust: str = "none",
+        style: Style = Style(), adjust: str = "none", lod: int = 1,
     ) -> dict:
+        """`lod` > 1 returns exact aggregates of `lod` consecutive bars (time-based chart types
+        only) for drawing far zoomed-out views; statistics never use it."""
         s = self.series(source, ticker, adjust)
         if s is None:
             return {"bars": [], "more": False}
         session = "extended" if s.around_the_clock else session
         if not any(p["type"] == period and p["span"] == span for p in self.periods(s)):
             raise ValueError(f"{period}/{span} cannot be built from {s.kind} data")
+        if not 1 <= lod <= MAX_LOD:
+            raise ValueError(f"lod must be 1-{MAX_LOD}")
         all_bars, used = self._styled(s, period, span, session, style)
+        if lod > 1 and style.type in LOD_TYPES:
+            key = ("lod", s.source, s.ticker, s.adjust, period, span, session, lod,
+                   self._series[(s.source, s.ticker, s.adjust)][0])
+            with self._lock:
+                cached = self._bars.get(key)
+            if cached is None:
+                cached = lod_aggregate(all_bars, lod)
+                with self._lock:
+                    self._bars[key] = cached
+                    if len(self._bars) > self._cache_size:
+                        self._bars.popitem(last=False)
+            all_bars = cached
+            used = {**used, "lod": lod}
         page = self._page(all_bars, to_ms, since_ms, limit)
         page["style"] = used
+        page["total"] = int(len(all_bars))
         if style.type == "range" and s.kind != "trades":
             page["approximate"] = "range bars built from bars, not ticks: intra-bar order of high and low is assumed"
         return page

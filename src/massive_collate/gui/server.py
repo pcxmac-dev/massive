@@ -83,7 +83,7 @@ class ChartApp:
             q.get("session", "regular"),
             to_ms=int(q["to"]) if q.get("to") else None,
             since_ms=int(q["since"]) if q.get("since") else None,
-            limit=limit, style=style, adjust=_adjust(q.get("adjust")),
+            limit=limit, style=style, adjust=_adjust(q.get("adjust")), lod=int(q.get("lod", 1)),
         )
 
     def range_stats(self, q: dict[str, str]) -> dict:

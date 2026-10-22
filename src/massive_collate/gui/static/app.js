@@ -233,7 +233,7 @@ chart.setDataLoader({
     const token = type === 'init' ? ++state.loadToken : state.loadToken;
     const params = {
       source: symbol.source, ticker: symbol.ticker, period: period.type, span: period.span,
-      session: state.session, limit: PAGE, adjust: state.adjust, ...typeQuery(),
+      session: state.session, limit: PAGE, adjust: state.adjust, lod: lodFor(), ...typeQuery(),
     };
     if (type === 'forward' && timestamp) params.to = timestamp;
     try {
@@ -244,8 +244,10 @@ chart.setDataLoader({
       if (type === 'init') {
         state.styleUsed = res.style;
         state.approximate = res.approximate || null;
+        state.baseTotal = (res.total || 0) * lodFor();  // bars at full detail
         renderTypeParams();
         requestAnimationFrame(drawRolls);
+        finishLodSwitch();
         // After the first render: overlays created in the same tick as the data skew the price scale.
         requestAnimationFrame(() => requestAnimationFrame(restoreDrawings));
         updateStatus(res.bars.length);
@@ -264,7 +266,8 @@ chart.setDataLoader({
         if (PRICE_BASED.has(state.chartType)) return; // path-dependent: refreshed by reloading
         const res = await api('/api/bars', {
           source: symbol.source, ticker: symbol.ticker, period: period.type, span: period.span,
-          session: state.session, since: list[list.length - 1].timestamp, adjust: state.adjust, ...typeQuery(),
+          session: state.session, since: list[list.length - 1].timestamp, adjust: state.adjust, lod: lodFor(),
+          ...typeQuery(),
         });
         res.bars.forEach((bar) => callback(bar));
       } catch { /* the next poll will retry */ }
@@ -274,6 +277,65 @@ chart.setDataLoader({
 });
 
 window.addEventListener('resize', () => chart.resize());
+
+// -- level of detail -------------------------------------------------------------------
+// Zoomed out past half a pixel per bar, the chart is fed exact aggregates of k consecutive
+// bars (k a power of two keeping candles 1-4 px wide). Far fewer bars for the chart to
+// process each frame, the same visible envelope; statistics still use every bar.
+const LOD_TYPES = new Set(['candles', 'hollow', 'bars', 'volume_candles', 'line', 'line_markers', 'step', 'area',
+                           'hlc_area', 'baseline', 'columns', 'high_low']);
+const MAX_LOD = 4096;
+state.lod = 1;
+state.lodSwitch = null;
+
+function lodFor() {
+  return LOD_TYPES.has(state.chartType) ? state.lod : 1;
+}
+
+function resetLod() {
+  state.lod = 1;
+  state.lodSwitch = null;
+}
+
+function chartWidth() {
+  return chart.getSize('candle_pane', 'main')?.width || 800;
+}
+
+function checkLod() {
+  if (state.lodSwitch || !LOD_TYPES.has(state.chartType)) return;
+  const bar = chart.getBarSpace().bar;
+  let k = state.lod;
+  if (bar < 0.5) k = state.lod * 2 ** Math.ceil(Math.log2(1 / bar));
+  else if (bar > 4 && state.lod > 1) k = Math.max(1, state.lod / 2 ** Math.floor(Math.log2(bar)));
+  // Never aggregate further than needed: keep at least half the chart width in candles.
+  if (state.baseTotal) k = Math.min(k, 2 ** Math.max(0, Math.floor(Math.log2(state.baseTotal / (chartWidth() / 2)))));
+  k = Math.min(MAX_LOD, Math.max(1, k));
+  if (k === state.lod) return;
+  const data = chart.getDataList();
+  const { from, to } = chart.getVisibleRange();
+  const centre = data[Math.min(data.length - 1, Math.max(0, Math.floor((from + to) / 2)))];
+  state.lodSwitch = { barSpace: bar * (k / state.lod), anchor: centre ? centre.timestamp : null, atLatest: to >= data.length };
+  state.lod = k;
+  chart.resetData();
+}
+
+function finishLodSwitch() {
+  const sw = state.lodSwitch;
+  if (!sw) return;
+  state.lodSwitch = null;
+  chart.setBarSpace(Math.max(MIN_BAR_SPACE, sw.barSpace));
+  if (sw.atLatest || sw.anchor == null) {
+    chart.scrollToRealTime(0);
+  } else {
+    // Put the anchor bar back in the centre of the chart.
+    chart.scrollToTimestamp(sw.anchor, 0);
+    const x = chart.convertToPixel({ timestamp: sw.anchor }, { paneId: 'candle_pane' }).x;
+    if (Number.isFinite(x)) chart.scrollByDistance(chartWidth() / 2 - x, 0);
+  }
+  updateStatus(chart.getDataList().length);
+}
+
+chart.subscribeAction('onZoom', () => checkLod());
 
 // -- chart types -------------------------------------------------------------------
 // Native KLineChart candle types; transformed types come back from the server as OHLC
@@ -584,6 +646,7 @@ $('typeSelect').value = state.chartType;
 $('typeSelect').addEventListener('change', (e) => {
   const wasTransformed = TRANSFORMED.has(state.chartType);
   state.chartType = e.target.value;
+  resetLod();
   prefs.set('chartType', state.chartType); markDirty();
   state.styleUsed = null;
   applyChartType();
@@ -601,6 +664,7 @@ function symbolInfo(ticker) {
 }
 
 async function selectSymbol(ticker, source = MERGED) {
+  resetLod();
   const meta = await api('/api/meta', { source, ticker, adjust: state.adjust });
   $('ethBtn').hidden = meta.aroundTheClock;  // fx and futures trade around the clock
   $('adjustSelect').hidden = meta.asset !== 'future';
@@ -741,6 +805,7 @@ function renderPeriods() {
     b.classList.toggle('active', p.type === state.period.type && p.span === state.period.span);
     b.addEventListener('click', () => {
       state.period = p;
+      resetLod();
       prefs.set('period', p); markDirty();
       renderPeriods();
       chart.setPeriod(p);
@@ -1234,6 +1299,9 @@ function updateStatus(loaded) {
     state.session === 'extended' ? 'extended hours' : 'regular hours 09:30–16:00',
     'times US/Eastern',
   ];
+  if (state.lod > 1 && LOD_TYPES.has(state.chartType)) {
+    parts.push(`zoomed out: each candle = ${state.lod} consecutive ${state.period.span}${PERIOD_LABEL[state.period.type]} bars (exact OHLCV)`);
+  }
   if (loaded !== undefined) parts.push(`${loaded.toLocaleString()} bars loaded (scroll left for more)`);
   $('statusText').textContent = parts.join('  |  ');
 }
