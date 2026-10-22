@@ -73,6 +73,7 @@ def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource
     """Open the store, take the lock, build a source with a hard request cap, and audit the run."""
     log = Logger(settings.db_path.parent / "logs" / "massive-collate.log")
     with Store(settings.db_path) as store, run_lock(settings.db_path):
+        store.close_abandoned_runs()  # we hold the lock, so anything still "running" died
         budget = _budget(settings, store, args.source)
         if budget == 0:
             log(f"daily request cap of {settings.max_requests_per_day} reached for {args.source}; nothing sent")
@@ -80,6 +81,9 @@ def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource
             return
         source = build_source(args.source, settings, request_budget=budget)
         run_id = store.start_run(args.source, command)
+        client = getattr(source, "client", None)
+        if client is not None:  # record usage as it happens, not only at the end
+            client.on_request = lambda n: store.set_run_requests(run_id, n)
         log(f"{command}: source={args.source} tier={settings.tier.name} "
             f"rate={settings.tier.requests_per_minute or 'unlimited'}/min cap={budget} requests")
         status, message = "ok", ""

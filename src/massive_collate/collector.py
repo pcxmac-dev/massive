@@ -205,13 +205,13 @@ def sync_future(
     ticker, product, rank = item["ticker"], item["source_ticker"], item["rank"]
     checked = item["checked_at"]
     contracts = store.contracts(source.name, product)
+    horizon = today + timedelta(days=ROLL_HORIZON_DAYS)
     if not contracts or not checked or (today - checked).days >= LISTING_RECHECK_DAYS:
-        raw = _guard_call(source.future_contracts, product)
+        raw = _guard_call(source.future_contracts, product, floor, horizon)
         store.upsert_contracts(source.name, product, raw)
         store.set_listing(source.name, ticker, None, None, today, f"{product} continuous #{rank}", "future")
         contracts = store.contracts(source.name, product)
         log(f"{ticker}: {len(raw)} {product} contracts listed")
-    horizon = today + timedelta(days=ROLL_HORIZON_DAYS)
     relevant = [c for c in contracts if c["last_trade"] and floor <= c["last_trade"] <= horizon]
     if not relevant:
         log(f"{ticker}: no {product} contracts in range")

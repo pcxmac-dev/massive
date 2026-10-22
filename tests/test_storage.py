@@ -62,6 +62,27 @@ def test_run_log_counts_requests_per_source(store):
     assert store.recent_runs(1)[0][1] == "b"
 
 
+def test_interrupted_run_still_counts_its_requests(store):
+    run = store.start_run("a", "sync")
+    store.set_run_requests(run, 42)  # recorded per request; then the process dies
+    assert store.requests_today("a") == 42
+    assert store.close_abandoned_runs() == 1
+    assert store.recent_runs(1)[0][7] == "abandoned" and store.requests_today("a") == 42
+
+
+def test_client_reports_every_request():
+    from massive_collate.sources.massive import MassiveClient
+
+    from .conftest import FakeResponse, FakeSession
+
+    seen = []
+    client = MassiveClient("K", session=FakeSession([FakeResponse(200, {})] * 3), sleep=lambda s: None)
+    client.on_request = seen.append
+    for _ in range(3):
+        client.get("/x")
+    assert seen == [1, 2, 3]
+
+
 def test_grouped_days_and_denied(store):
     store.save_grouped_day("s", date(2026, 1, 2), [{"T": "AAA", "t": 1, "c": 1}])
     store.mark_grouped_day("s", date(2024, 1, 2), "denied")

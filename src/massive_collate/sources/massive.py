@@ -44,6 +44,9 @@ class MassiveClient:
         # Hard cap on requests this client may send, retries included.
         self.request_budget = request_budget
         self.requests_made = 0
+        # Called with the running total after every request, so usage is recorded even if
+        # the run is interrupted (the daily cap counts it).
+        self.on_request: Callable[[int], None] | None = None
 
     def get(self, path_or_url: str, params: dict[str, Any] | None = None) -> dict:
         if path_or_url.startswith("http"):
@@ -60,6 +63,8 @@ class MassiveClient:
             self._limiter.acquire()
             resp = self._session.get(url, params=params, headers=self._headers, timeout=self._timeout)
             self.requests_made += 1
+            if self.on_request:
+                self.on_request(self.requests_made)
             retryable = resp.status_code == 429 or resp.status_code >= 500
             if not retryable or attempt == self._max_retries:
                 break
@@ -148,15 +153,30 @@ class MassiveSource(DataSource):
         )
         return pages if limit == PAGE_LIMIT else _first(pages)
 
-    def future_contracts(self, product: str) -> list[dict]:
-        """Every single (non-spread) contract of a product, e.g. NQ -> NQH5, NQM5, ..."""
+    def future_contracts(self, product: str, start: date, end: date) -> list[dict]:
+        """Outright (non-spread) contracts of a product expiring between start and end.
+
+        Asks for exactly the candidate tickers (every month code for every year in the
+        window, e.g. CLX4,...,CLZ6) instead of paging through the product's thousands of
+        spreads: one request.
+        """
         product = product.upper()
-        pattern = re.compile(rf"^{re.escape(product)}[FGHJKMNQUVXZ]\d{{1,2}}$")
-        out = []
-        for page in self.client.pages("/futures/v1/contracts",
-                                      {"product_code": product, "limit": 1000, "sort": "ticker.asc"}):
-            out += [c for c in page if pattern.match(c.get("ticker", "")) and c.get("last_trade_date")]
-        return out
+        years = {y % 10 for y in range(start.year, end.year + 1)}
+        candidates = sorted(f"{product}{m}{y}" for m in MONTH_CODES for y in years)
+        pattern = re.compile(rf"^{re.escape(product)}[{MONTH_CODES}]\d{{1,2}}$")
+        params = {
+            "ticker.any_of": ",".join(candidates),
+            "last_trade_date.gte": str(start), "last_trade_date.lte": str(end),
+            "limit": 1000, "sort": "ticker.asc",
+        }
+        latest: dict[str, dict] = {}
+        for page in self.client.pages("/futures/v1/contracts", params):
+            for c in page:
+                t = c.get("ticker", "")
+                if pattern.match(t) and c.get("last_trade_date"):
+                    if t not in latest or (c.get("date") or "") > (latest[t].get("date") or ""):
+                        latest[t] = c  # point-in-time rows: keep the newest
+        return sorted(latest.values(), key=lambda c: c["last_trade_date"])
 
     def _bar_pages(self, ticker, start, end, timespan, multiplier, descending, limit=PAGE_LIMIT):
         if timespan not in TIMESPANS:
@@ -202,6 +222,7 @@ class MassiveSource(DataSource):
 
 
 FUTURE_RESOLUTIONS = {"second": "1sec", "minute": "1min", "hour": "1hour", "day": "1session"}
+MONTH_CODES = "FGHJKMNQUVXZ"  # Jan..Dec
 _ET = ZoneInfo("America/New_York")
 
 

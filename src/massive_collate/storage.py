@@ -555,6 +555,19 @@ class Store:
                 (_now(), requests, rows, status, message, run_id),
             )
 
+    def set_run_requests(self, run_id: int, requests: int) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE runs SET requests=? WHERE id=?", (requests, run_id))
+
+    def close_abandoned_runs(self) -> int:
+        """Runs still marked 'running' (crashed or killed). Their recorded requests are kept;
+        nothing is lowered, so the daily cap stays conservative."""
+        with self.conn:
+            return self.conn.execute(
+                "UPDATE runs SET status='abandoned', finished_at=COALESCE(finished_at, ?), "
+                "message=COALESCE(message, '') || ' (run did not finish)' WHERE status='running'", (_now(),)
+            ).rowcount
+
     def requests_today(self, source: str) -> int:
         """API requests recorded today (UTC) for a source, across all runs."""
         today = datetime.now(timezone.utc).date().isoformat()
