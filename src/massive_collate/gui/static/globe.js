@@ -297,6 +297,7 @@
       // each zone's offset right now (daylight saving included), at anchors inside the zone
       const placed = [];
       for (const [lon, lat] of tz.anchors) {
+        if (lat < 55) continue;  // one row of labels, up towards the North Pole
         const p = project(lon, lat, g);
         if (!p.visible || p.depth < 0.2 || p.x < 0 || p.x > g.w || p.y < TOP) continue;
         const off = tz.offsets[zoneAt(lon, lat)];
