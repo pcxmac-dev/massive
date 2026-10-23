@@ -139,7 +139,7 @@ class MassiveSource(DataSource):
             if multiplier != 1:
                 raise ValueError("futures bars are fetched at multiplier 1")
             return self._future_pages(ticker, start, end, timespan, descending)
-        # Stocks, indices (I:...) and currencies (C:...) share the aggregates endpoint.
+        # Stocks, indices (I:...), currencies (C:...) and crypto (X:...) share the aggregates endpoint.
         return self._bar_pages(ticker, start, end, timespan, multiplier, descending)
 
     # -- futures ---------------------------------------------------------------

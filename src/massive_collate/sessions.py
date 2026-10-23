@@ -245,6 +245,14 @@ class MarketCalendar:
             return [Session(d, start, end)]
         return [Session(d, start, early), Session(d, end, end + timedelta(minutes=1))]
 
+    # -- crypto ------------------------------------------------------------------------
+    @staticmethod
+    def crypto_session(d: date) -> list[Session]:
+        """Crypto trades around the clock, every day of the year. The source's day bars are UTC
+        days (stamped 00:00 UTC), so a session is one UTC day."""
+        start = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+        return [Session(d, start.astimezone(ET), (start + timedelta(days=1)).astimezone(ET))]
+
     # -- any asset ---------------------------------------------------------------------
     def sessions(self, asset: str, start: date, end: date, product: str | None = None,
                  extended: bool = True) -> list[Session]:
@@ -256,6 +264,8 @@ class MarketCalendar:
                 out.extend(self.future_sessions(product, d))
             elif asset == "fx":
                 out.extend(self.fx_session(d))
+            elif asset == "crypto":
+                out.extend(self.crypto_session(d))
             else:
                 s = self.stock_session(d, extended=extended and asset == "stock") if asset == "stock" \
                     else self._index_session(d)

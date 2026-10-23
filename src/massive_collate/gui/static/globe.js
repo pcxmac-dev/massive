@@ -739,7 +739,8 @@
     for (const { m, p } of items) {
       const perf = m.performance?.changePct;
       const color = perf != null ? perfColor(perf) : STATE_COLOR[m.state] || STATE_COLOR.unknown;
-      if (m.state === 'open') {
+      const crypto = m.kind === 'crypto';
+      if (m.state === 'open' && !crypto) {
         ctx.beginPath(); ctx.arc(p.x, p.y, 6 + 5 * pulse, 0, 2 * Math.PI);
         ctx.fillStyle = `rgba(38,166,154,${0.12 + 0.12 * (1 - pulse)})`; ctx.fill();
       }
@@ -762,13 +763,13 @@
         ctx.beginPath(); ctx.arc(p.x, p.y, 7, 0, 2 * Math.PI);
         ctx.fillStyle = 'rgba(240,185,11,0.35)'; ctx.fill();
       }
-      ctx.beginPath(); ctx.arc(p.x, p.y, m === hover ? 5.5 : 4, 0, 2 * Math.PI);
+      marker(p.x, p.y, m.kind, m === hover ? 5.5 : 4);
       ctx.globalAlpha = m.state === 'closed' && perf != null ? 0.7 : 1;
       ctx.fillStyle = color; ctx.fill();
       ctx.globalAlpha = 1;
       ctx.strokeStyle = perf != null ? (STATE_COLOR[m.state] || STATE_COLOR.unknown) : (dark ? '#0b0e15' : '#fff');
       ctx.lineWidth = perf != null ? 1.6 : 1; ctx.stroke();
-      if (m.state === 'open' || m.state === 'break' || m === hover || featured) {
+      if ((m.state === 'open' && !crypto) || m.state === 'break' || m === hover || featured) {
         const label = `${m.city} · ${m.index.split(' · ')[0]}${perf != null ? ` ${perf >= 0 ? '+' : ''}${perf.toFixed(2)}%` : ''}`;
         ctx.font = '11px system-ui, sans-serif';
         const w = ctx.measureText(label).width;
@@ -790,11 +791,15 @@
     ctx.fillText(`−${PERF_SCALE}%`, lx, ly - 4); ctx.textAlign = 'center'; ctx.fillText('day', lx + lw / 2, ly - 4);
     ctx.textAlign = 'end'; ctx.fillText(`+${PERF_SCALE}%`, lx + lw, ly - 4); ctx.textAlign = 'start';
     ctx.fillText('ring: open · lunch · closed', lx, ly + 18);
+    ctx.fillText('● stocks  ■ FX centre  ◆ crypto', lx, ly - 18);
 
-    const open = markets.world.filter((m) => m.state === 'open').length;
-    const brk = markets.world.filter((m) => m.state === 'break').length;
+    const stocks = markets.world.filter((m) => (m.kind || 'stock') === 'stock');
+    const open = stocks.filter((m) => m.state === 'open').length;
+    const brk = stocks.filter((m) => m.state === 'break').length;
+    const fxOpen = markets.world.filter((m) => m.kind === 'fx' && m.state === 'open').map((m) => m.city);
     const utc = new Date().toISOString().slice(11, 19);
-    const infoHtml = `<b>${open}</b> exchanges open${brk ? `, <b>${brk}</b> at lunch` : ''} · ${utc} GMT${zoom > 1.01 ? ` · ${zoom >= 10 ? zoom.toFixed(0) : zoom.toFixed(1)}×` : ''}
+    const infoHtml = `<b>${open}</b> exchanges open${brk ? `, <b>${brk}</b> at lunch` : ''}
+      · FX ${fxOpen.length ? `<b>${esc(fxOpen.join(', '))}</b>` : 'centres closed'} · crypto 24/7 · ${utc} GMT${zoom > 1.01 ? ` · ${zoom >= 10 ? zoom.toFixed(0) : zoom.toFixed(1)}×` : ''}
       <div class="p-muted small">Sun overhead at ${Math.abs(markets.sun.lat).toFixed(1)}°${markets.sun.lat >= 0 ? 'N' : 'S'}
       ${Math.abs(markets.sun.lon).toFixed(1)}°${markets.sun.lon >= 0 ? 'E' : 'W'} · turning in real time
       ${following() && zoom <= 1.01 ? '' : ' · <a href="#" id="globeNoon">recentre</a>'}</div>`;
@@ -817,9 +822,17 @@
     try { return new Date().toLocaleTimeString('en-GB', { timeZone: tz, weekday: 'short', hour: '2-digit', minute: '2-digit' }); } catch { return ''; }
   }
 
+  // ● stock exchange, ■ FX dealing centre, ◆ crypto exchange (path only: the caller fills and strokes)
+  function marker(x, y, kind, r) {
+    ctx.beginPath();
+    if (kind === 'fx') ctx.rect(x - r * 0.9, y - r * 0.9, r * 1.8, r * 1.8);
+    else if (kind === 'crypto') { ctx.moveTo(x, y - r * 1.25); ctx.lineTo(x + r * 1.25, y); ctx.lineTo(x, y + r * 1.25); ctx.lineTo(x - r * 1.25, y); ctx.closePath(); }
+    else ctx.arc(x, y, r, 0, 2 * Math.PI);
+  }
+
   function renderList() {
     if (!markets || document.body.dataset.view !== 'markets') return;
-    const regions = ['Asia-Pacific', 'Europe', 'Middle East & Africa', 'Americas'];
+    const regions = ['Asia-Pacific', 'Europe', 'Middle East & Africa', 'Americas', 'Foreign exchange', 'Crypto'];
     const mine = markets.markets.map((m) => `
       <div class="mk-row${m.symbols.includes(state.ticker) ? ' mine' : ''}">
         <span class="mk-dot" style="background:${m.state === 'open' ? STATE_COLOR.open : ['pre-market', 'after-hours'].includes(m.state) ? STATE_COLOR.break : STATE_COLOR.closed}"></span>
@@ -837,9 +850,9 @@
             <span class="mk-dot" style="background:${STATE_COLOR[m.state] || STATE_COLOR.unknown}"></span>
             <div class="mk-main"><b${m.performance ? ` style="color:${perfColor(m.performance.changePct)}"` : ''}>${esc(m.city)}</b>
               <span class="p-muted small">${esc(m.index)}</span>
-              ${m.performance ? `<span class="small" style="color:${perfColor(m.performance.changePct)}" title="Latest daily move of ${esc(m.performance.proxy)}, a US-listed fund tracking this market (USD, ${esc(m.performance.day)})">${m.performance.changePct >= 0 ? '+' : ''}${m.performance.changePct.toFixed(2)}% <span class="p-muted">${esc(m.performance.proxy)}</span></span>` : ''}
+              ${m.performance ? `<span class="small" style="color:${perfColor(m.performance.changePct)}" title="Latest daily move: ${esc(m.performance.basis || `${m.performance.proxy}, a US-listed fund tracking this market (USD, ${m.performance.day})`)}">${m.performance.changePct >= 0 ? '+' : ''}${m.performance.changePct.toFixed(2)}% <span class="p-muted">${esc(m.performance.proxy)}</span></span>` : ''}
               <div class="p-muted small"><span${m.performance ? ` style="color:${perfColor(m.performance.changePct)}"` : ''}>${esc(m.name)}</span> · ${esc(localTime(m.timezone))}
-                ${m.today ? ` · ${esc(m.today.open)}–${esc(m.today.close)}${m.today.break ? ` (lunch ${esc(m.today.break)})` : ''}` : m.state !== 'unknown' ? ' · no session today' : ''}</div>
+                ${m.aroundTheClock ? ' · around the clock' : m.today ? ` · ${m.kind === 'fx' ? 'business hours ' : ''}${esc(m.today.open)}–${esc(m.today.close)}${m.today.break ? ` (lunch ${esc(m.today.break)})` : ''}` : m.state !== 'unknown' ? ` · ${m.kind === 'fx' ? 'not a business day' : 'no session today'}` : ''}</div>
               ${m.holidays?.length ? `<div class="small mk-hol">Holidays: ${m.holidays.map(esc).join(', ')}</div>` : ''}
               ${m.calendarEnds && m.calendarEnds < new Date(Date.now() + 60 * 864e5).toISOString().slice(0, 10)
                 ? `<div class="small p-muted">holidays published to ${esc(m.calendarEnds)}</div>` : ''}

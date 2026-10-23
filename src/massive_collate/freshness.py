@@ -8,7 +8,8 @@ symbols are worth a (cheap) check.
 Publication delays (observed on Massive, Oct 2026; adjust PLAN_DELAYS if the plan changes):
 - free plan, stocks and indices: end of day. A session's minute bars appear overnight; they
   were present by 03:27 ET the next morning and absent at 21:23 ET the same evening.
-- free plan, currencies: through the end of the previous UTC day, shortly after 00:00 UTC.
+- free plan, currencies and crypto: through the end of the previous UTC day, shortly after
+  00:00 UTC (BTCUSD probed 2026-10-23 04:17 UTC: newest minute 23:59 UTC the day before).
 - futures (Basic): 8 hours delayed.
 - paid stock plans: 15 minutes delayed (Starter, Developer) or real time (Advanced).
 """
@@ -44,13 +45,13 @@ class Delay:
 
 
 PLAN_DELAYS: dict[str, dict[str, Delay]] = {
-    "free": {"stock": Delay("eod"), "index": Delay("eod"), "fx": Delay("utc_day"),
+    "free": {"stock": Delay("eod"), "index": Delay("eod"), "fx": Delay("utc_day"), "crypto": Delay("utc_day"),
              "future": Delay("delay", timedelta(hours=8))},
     "starter": {"stock": Delay("delay", timedelta(minutes=15)), "index": Delay("delay", timedelta(minutes=15)),
-                "fx": Delay("delay", timedelta(minutes=15)), "future": Delay("delay", timedelta(hours=8))},
+                "fx": Delay("delay", timedelta(minutes=15)), "crypto": Delay("delay", timedelta(minutes=15)), "future": Delay("delay", timedelta(hours=8))},
     "developer": {"stock": Delay("delay", timedelta(minutes=15)), "index": Delay("delay", timedelta(minutes=15)),
-                  "fx": Delay("delay", timedelta(minutes=15)), "future": Delay("delay", timedelta(hours=8))},
-    "advanced": {"stock": Delay("delay"), "index": Delay("delay"), "fx": Delay("delay"),
+                  "fx": Delay("delay", timedelta(minutes=15)), "crypto": Delay("delay", timedelta(minutes=15)), "future": Delay("delay", timedelta(hours=8))},
+    "advanced": {"stock": Delay("delay"), "index": Delay("delay"), "fx": Delay("delay"), "crypto": Delay("delay"),
                  "future": Delay("delay", timedelta(hours=8))},
 }
 

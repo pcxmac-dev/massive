@@ -967,7 +967,7 @@ function renderSymbolList(query) {
   }
   const groups = [
     ['Stocks', sortedSymbols(matches.filter((s) => s.asset === 'stock'))],
-    ['Futures, indices and forex', matches.filter((s) => s.asset !== 'stock').sort((a, b) => a.ticker.localeCompare(b.ticker))],
+    ['Futures, indices, forex and crypto', matches.filter((s) => s.asset !== 'stock').sort((a, b) => a.ticker.localeCompare(b.ticker))],
   ];
   list.innerHTML = groups.filter(([, items]) => items.length).map(([title, items]) => `
     <h4>${e(title)} <span class="p-muted">${items.length}</span></h4>

@@ -172,7 +172,7 @@ class SessionBins:
 
 def _horizon(period: str, span: int, needed: int, asset: str) -> timedelta:
     """A first guess at how much calendar time holds `needed` bars (refined by doubling)."""
-    open_fraction = {"stock": 0.45, "index": 0.18, "fx": 0.70, "future": 0.65}.get(asset, 0.2)
+    open_fraction = {"stock": 0.45, "index": 0.18, "fx": 0.70, "crypto": 1.0, "future": 0.65}.get(asset, 0.2)
     seconds = PERIOD_SECONDS[period] * span * needed / (1.0 if period in CALENDAR else open_fraction)
     return timedelta(seconds=seconds * 1.3 + 7 * 86400)
 

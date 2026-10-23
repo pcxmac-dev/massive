@@ -13,7 +13,7 @@
     for (const ch of ticker) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
     return BADGE[h % BADGE.length];
   }
-  const KIND_GLYPH = { future: '⧗', fx: '¤', index: 'Σ' };
+  const KIND_GLYPH = { future: '⧗', fx: '¤', crypto: '₿', index: 'Σ' };
 
   // `sym`: { ticker, icon (bool), asset }. Size in px.
   function symbolIcon(sym, size = 20) {

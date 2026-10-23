@@ -189,3 +189,14 @@ def test_listing_check_fills_in_the_exchange_when_none_was_given(store):
     src = FakeSource(entitled=("minute",), listing=Instrument("NVDA", name="NVIDIA", primary_exchange=nasdaq))
     sync(src, store, FREE, NOW, log=_log)
     assert store.watchlist("fake")[0]["exchange"] == "XNAS"
+
+
+def test_crypto_pair_is_fetched_by_source_ticker_without_listing_check(store):
+    store.watch_spec("fake", resolve("COINBASE:BTCUSD"))
+    bar = {"t": _ms(date(2026, 10, 20)), "o": 1, "h": 1, "l": 1, "c": 1}
+    src = FakeSource(entitled=("minute",), bars={"minute": [bar], "day": [bar]})
+    sync(src, store, FREE, NOW, log=_log)
+    assert store.watchlist("fake")[0]["ticker"] == "BTCUSD"
+    assert all(call[0] == "X:BTCUSD" and call[4] == "crypto" for call in src.bar_calls)
+    assert ("second", "X:BTCUSD", "crypto") in src.probed
+    assert store.bar_range("fake", "BTCUSD", "minute") is not None

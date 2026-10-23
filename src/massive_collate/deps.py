@@ -114,6 +114,8 @@ def checks(store: Store, settings, source: str = "massive", now: datetime | None
 
         short = []
         for e in world.EXCHANGES:
+            if e.kind == "crypto":  # around the clock: no calendar
+                continue
             cal = world._calendar(e.calendar or e.code)
             last = cal.sessions[-1].date()
             if (last - now.date()).days < 60:

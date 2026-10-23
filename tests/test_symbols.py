@@ -27,3 +27,13 @@ from massive_collate.symbols import resolve
 def test_resolve(text, ticker, asset, source, invert, rank, exch):
     s = resolve(text)
     assert (s.ticker, s.asset, s.source_ticker, s.invert, s.rank, s.exchange) == (ticker, asset, source, invert, rank, exch)
+
+
+def test_crypto_pairs():
+    for text in ("BTCUSD", "btc/usd", "BTC-USD", "X:BTCUSD", "COINBASE:BTCUSD", "BTCUSD::KRAKEN"):
+        spec = resolve(text)
+        assert (spec.ticker, spec.asset, spec.source_ticker) == ("BTCUSD", "crypto", "X:BTCUSD"), text
+    assert resolve("ETH/BTC").source_ticker == "X:ETHBTC"
+    assert resolve("BTC").asset == "stock"  # the Grayscale Bitcoin Mini Trust, a listed fund
+    assert resolve("NASDAQ:COIN").asset == "stock"  # an exchange prefix that is not a crypto venue
+    assert resolve("EURUSD").asset == "fx"

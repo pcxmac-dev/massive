@@ -103,6 +103,15 @@ def markets(cal: MarketCalendar, exchanges, watch: list[dict], now: datetime | N
             "symbols": sorted(w["ticker"] for w in watch if w["asset"] == "fx"),
             **_around_the_clock(cal, "fx", None, now),
         })
+    if any(w["asset"] == "crypto" for w in watch):
+        out.append({
+            "id": "crypto", "name": "Crypto", "timezone": "UTC",
+            "hours": "Around the clock, every day; daily bars are UTC days",
+            "exchanges": [{"name": "Consolidated across crypto exchanges", "mic": None}],
+            "symbols": sorted(w["ticker"] for w in watch if w["asset"] == "crypto"),
+            # never closes: the UTC day boundary is not a close, so no "until"
+            **_around_the_clock(cal, "crypto", None, now), "since": None, "until": None, "next": None,
+        })
     return {"now": now.isoformat(), "markets": out}
 
 

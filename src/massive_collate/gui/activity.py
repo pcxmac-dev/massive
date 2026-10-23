@@ -17,7 +17,7 @@ LOG_TAIL_BYTES = 64 * 1024
 # Rough request cost of backfilling minute bars: Massive returns up to 50,000 bars per request and
 # a stock trades ~960 minutes a day including extended hours. Futures and FX trade around the clock.
 BARS_PER_REQUEST = 50_000
-MINUTES_PER_DAY = {"stock": 960, "index": 390, "fx": 1440, "future": 1380}
+MINUTES_PER_DAY = {"stock": 960, "index": 390, "fx": 1440, "crypto": 1440, "future": 1380}
 
 
 def log_path(db_path: Path) -> Path:
@@ -80,7 +80,8 @@ def symbol_status(item: dict, edges: tuple | None, floor: date, today: date, now
         done = item.get("backfilled_to") is not None and item["backfilled_to"] <= target
     progress = 1.0 if done else (0.0 if reached is None else min(1.0, max(0.0, (today - reached).days / span)))
     missing_days = 0 if done else (today - target).days if reached is None else max(0, (reached - target).days)
-    per_day = MINUTES_PER_DAY.get(item["asset"], 960) * 5 / 7  # calendar days to trading days
+    # calendar days to trading days (crypto trades every day)
+    per_day = MINUTES_PER_DAY.get(item["asset"], 960) * (1 if item["asset"] == "crypto" else 5 / 7)
     left = 0 if done else math.ceil(missing_days * per_day / BARS_PER_REQUEST) + (2 if reached is None else 0)
 
     fresh = freshness.assess(item["asset"], tier, last, now)
@@ -171,10 +172,15 @@ def exchange_checks(store: Store, source: str, now: datetime) -> list[dict]:
     checks = []
     try:
         markets = world.world_markets(now)
-        open_now = sum(m.get("state") == "open" for m in markets)
-        lunch = sum(m.get("state") == "break" for m in markets)
+        stocks = [m for m in markets if m.get("kind", "stock") == "stock"]
+        centres = [m for m in markets if m.get("kind") == "fx"]
+        crypto = [m for m in markets if m.get("kind") == "crypto"]
+        open_now = sum(m.get("state") == "open" for m in stocks)
+        lunch = sum(m.get("state") == "break" for m in stocks)
         checks.append({"name": "World exchange status", "last": now.isoformat(), "next": "continuous",
-                       "found": f"{open_now} of {len(markets)} exchanges open" + (f", {lunch} at lunch" if lunch else ""),
+                       "found": f"{open_now} of {len(stocks)} exchanges open" + (f", {lunch} at lunch" if lunch else "")
+                       + f"; FX centres {sum(m.get('state') == 'open' for m in centres)} of {len(centres)} in business hours"
+                       + f"; {len(crypto)} crypto exchanges (24/7)",
                        "cost": "free (exchange calendars)"})
     except Exception as e:  # calendars still loading
         checks.append({"name": "World exchange status", "last": None, "next": "continuous", "found": str(e), "cost": "free"})

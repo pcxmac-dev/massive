@@ -1,31 +1,41 @@
-"""World stock exchanges for the Markets view: where they are, whether they are open right now
-(lunch breaks included), when that changes, and their upcoming holidays.
+"""World markets for the Markets view: stock exchanges, foreign-exchange dealing centres and
+crypto exchanges. Where they are, whether they are open right now (lunch breaks included), when
+that changes, and their upcoming holidays.
 
-Sessions and holidays come from `exchange_calendars` (each exchange's own calendar, lunar
-holidays and special closures included). Shenzhen shares Shanghai's calendar and the NSE shares
-the BSE's. Calendars are built once per process and cover a year ahead.
+Stock exchange sessions and holidays come from `exchange_calendars` (each exchange's own
+calendar, lunar holidays and special closures included). Shenzhen shares Shanghai's calendar and
+the NSE shares the BSE's. Calendars are built once per process and cover a year ahead.
+
+Spot FX trades over the counter from Sunday 17:00 to Friday 17:00 New York time; liquidity moves
+round the world with the dealing centres' business hours (FX_HOURS local, on the local
+exchange's business days). Crypto exchanges trade around the clock every day; they are placed
+at their headquarters (or place of registration where they declare none).
 """
 from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 import pandas as pd
 
 
 @dataclass(frozen=True)
 class Exchange:
-    code: str  # exchange_calendars name (ISO MIC)
+    code: str  # exchange_calendars name (ISO MIC); FX centres and crypto exchanges: our own code
     name: str
     city: str
     country: str
     region: str
     lat: float
     lon: float
-    index: str  # flagship index
-    calendar: str | None = None  # calendar to use when it differs from `code`
+    index: str  # flagship index (FX: the currency; crypto: the main market)
+    calendar: str | None = None  # calendar to use when it differs from `code` (FX: the local exchange's)
     proxy: str | None = None  # US-listed fund tracking the market (daily change for the colour)
+    kind: str = "stock"  # stock | fx | crypto
+    tz: str | None = None  # crypto: local time zone of the headquarters
+    series: str | None = None  # a watched symbol whose stored day bars give the move (preferred to `proxy`)
+    invert: bool = False  # the move is the inverse of `series` (USDJPY -> yen against the dollar)
 
 
 E = Exchange
@@ -103,8 +113,58 @@ EXCHANGES: tuple[Exchange, ...] = (
     E("XBDA", "Dhaka Stock Exchange", "Dhaka", "Bangladesh", "Asia-Pacific", 23.73, 90.41, "DSEX"),
     E("XASX", "Australian Securities Exchange", "Sydney", "Australia", "Asia-Pacific", -33.87, 151.21, "S&P/ASX 200", proxy="EWA"),
     E("XNZE", "NZX", "Wellington", "New Zealand", "Asia-Pacific", -41.29, 174.78, "S&P/NZX 50", proxy="ENZL"),
+    # Foreign exchange: the dealing centres, west to east from the week's open. Colour: the local
+    # currency against the US dollar (stored pair, else its CurrencyShares fund; New York: the
+    # dollar index fund). Hong Kong and Singapore have neither.
+    E("FX-WLG", "Wellington FX", "Wellington", "New Zealand", "Foreign exchange", -41.28, 174.77, "NZD · New Zealand dollar",
+      "XNZE", kind="fx", series="NZDUSD"),
+    E("FX-SYD", "Sydney FX", "Sydney", "Australia", "Foreign exchange", -33.86, 151.20, "AUD · Australian dollar",
+      "XASX", proxy="FXA", kind="fx", series="AUDUSD"),
+    E("FX-TYO", "Tokyo FX", "Tokyo", "Japan", "Foreign exchange", 35.68, 139.76, "JPY · Japanese yen",
+      "XTKS", proxy="FXY", kind="fx", series="USDJPY", invert=True),
+    E("FX-HKG", "Hong Kong FX", "Hong Kong", "Hong Kong", "Foreign exchange", 22.28, 114.15, "HKD · Hong Kong dollar",
+      "XHKG", kind="fx"),
+    E("FX-SIN", "Singapore FX", "Singapore", "Singapore", "Foreign exchange", 1.28, 103.85, "SGD · Singapore dollar",
+      "XSES", kind="fx"),
+    E("FX-ZRH", "Zurich FX", "Zurich", "Switzerland", "Foreign exchange", 47.37, 8.54, "CHF · Swiss franc",
+      "XSWX", proxy="FXF", kind="fx", series="USDCHF", invert=True),
+    E("FX-FRA", "Frankfurt FX", "Frankfurt", "Germany", "Foreign exchange", 50.11, 8.68, "EUR · euro",
+      "XETR", proxy="FXE", kind="fx", series="USDEUR", invert=True),
+    E("FX-LON", "London FX", "London", "United Kingdom", "Foreign exchange", 51.51, -0.09, "GBP · pound sterling",
+      "XLON", proxy="FXB", kind="fx", series="GBPUSD"),
+    E("FX-TOR", "Toronto FX", "Toronto", "Canada", "Foreign exchange", 43.65, -79.38, "CAD · Canadian dollar",
+      "XTSE", proxy="FXC", kind="fx", series="USDCAD", invert=True),
+    E("FX-NYC", "New York FX", "New York", "United States", "Foreign exchange", 40.71, -74.01, "USD · US dollar (index)",
+      "XNYS", proxy="UUP", kind="fx"),
+    # Crypto exchanges: around the clock. Colour: Bitcoin's UTC-day move (stored BTCUSD, else IBIT).
+    E("CB", "Coinbase", "San Francisco", "United States", "Crypto", 37.79, -122.39, "BTC/USD",
+      proxy="IBIT", kind="crypto", tz="America/Los_Angeles", series="BTCUSD"),
+    E("KRAKEN", "Kraken", "San Francisco", "United States", "Crypto", 37.77, -122.42, "BTC/USD",
+      proxy="IBIT", kind="crypto", tz="America/Los_Angeles", series="BTCUSD"),
+    E("GEMINI", "Gemini", "New York", "United States", "Crypto", 40.74, -73.99, "BTC/USD",
+      proxy="IBIT", kind="crypto", tz="America/New_York", series="BTCUSD"),
+    E("BITSO", "Bitso", "Mexico City", "Mexico", "Crypto", 19.43, -99.17, "BTC/MXN",
+      proxy="IBIT", kind="crypto", tz="America/Mexico_City", series="BTCUSD"),
+    E("BITFINEX", "Bitfinex", "Road Town (registered)", "British Virgin Islands", "Crypto", 18.43, -64.62, "BTC/USD",
+      proxy="IBIT", kind="crypto", tz="America/Tortola", series="BTCUSD"),
+    E("BITSTAMP", "Bitstamp", "Luxembourg", "Luxembourg", "Crypto", 49.60, 6.12, "BTC/EUR",
+      proxy="IBIT", kind="crypto", tz="Europe/Luxembourg", series="BTCUSD"),
+    E("BINANCE", "Binance (no declared HQ)", "Dubai (main hub)", "United Arab Emirates", "Crypto", 25.20, 55.27, "BTC/USDT",
+      proxy="IBIT", kind="crypto", tz="Asia/Dubai", series="BTCUSD"),
+    E("BYBIT", "Bybit", "Dubai", "United Arab Emirates", "Crypto", 25.08, 55.14, "BTC/USDT",
+      proxy="IBIT", kind="crypto", tz="Asia/Dubai", series="BTCUSD"),
+    E("OKX", "OKX", "Victoria (registered)", "Seychelles", "Crypto", -4.62, 55.45, "BTC/USDT",
+      proxy="IBIT", kind="crypto", tz="Indian/Mahe", series="BTCUSD"),
+    E("UPBIT", "Upbit", "Seoul", "South Korea", "Crypto", 37.50, 127.04, "BTC/KRW",
+      proxy="IBIT", kind="crypto", tz="Asia/Seoul", series="BTCUSD"),
+    E("BITHUMB", "Bithumb", "Seoul", "South Korea", "Crypto", 37.52, 127.06, "BTC/KRW",
+      proxy="IBIT", kind="crypto", tz="Asia/Seoul", series="BTCUSD"),
+    E("BITFLYER", "bitFlyer", "Tokyo", "Japan", "Crypto", 35.66, 139.73, "BTC/JPY",
+      proxy="IBIT", kind="crypto", tz="Asia/Tokyo", series="BTCUSD"),
 )
 PROXIES = sorted({e.proxy for e in EXCHANGES if e.proxy})
+SERIES = sorted({e.series for e in EXCHANGES if e.series})
+FX_HOURS = (time(8, 0), time(17, 0))  # a dealing centre's business hours, local time
 
 _calendars: dict[str, object] = {}
 _lock = threading.Lock()
@@ -131,6 +191,8 @@ def _calendar(name: str):
 def warm() -> None:
     """Build every calendar (a few seconds); run in a background thread at start-up."""
     for e in EXCHANGES:
+        if e.kind == "crypto":
+            continue
         try:
             _calendar(e.calendar or e.code)
         except Exception:  # an unknown calendar must not stop the others
@@ -149,7 +211,7 @@ def status(e: Exchange, now: datetime) -> dict:
     sessions = cal.sessions
     today = local_now.tz_localize(None).normalize()
     out = {"code": e.code, "name": e.name, "city": e.city, "country": e.country, "region": e.region,
-           "lat": e.lat, "lon": e.lon, "index": e.index, "timezone": tz,
+           "lat": e.lat, "lon": e.lon, "index": e.index, "timezone": tz, "kind": e.kind,
            "localTime": local_now.strftime("%a %H:%M")}
     if cal.is_open_on_minute(minute, ignore_breaks=True):
         session = cal.minute_to_session(minute, direction="previous")
@@ -184,14 +246,108 @@ def status(e: Exchange, now: datetime) -> dict:
         out["holidayToday"] = cal.weekmask[today.dayofweek] == "1" and today <= sessions[-1]
         adhoc = {pd.Timestamp(d).normalize() for d in getattr(cal, "adhoc_holidays", [])}
         out["unscheduledClosure"] = bool(out["holidayToday"] and today in adhoc)
-    # Upcoming closures on the exchange's normal trading days (its own weekend excluded).
+    out.update(_holidays(cal, today))
+    return out
+
+
+def _holidays(cal, today: pd.Timestamp) -> dict:
+    """Upcoming closures on the calendar's normal trading days (its own weekend excluded)."""
+    sessions = cal.sessions
     days = pd.date_range(today, today + pd.Timedelta(days=60), freq="D")
     trading_weekdays = days[[cal.weekmask[d.dayofweek] == "1" for d in days]]
     last = sessions[-1]
-    out["holidays"] = [d.strftime("%Y-%m-%d") for d in trading_weekdays if d not in sessions and d <= last][:4]
-    out["calendarEnds"] = last.strftime("%Y-%m-%d")
-    out["weekend"] = [i for i, c in enumerate(cal.weekmask) if c == "0"]
+    return {"holidays": [d.strftime("%Y-%m-%d") for d in trading_weekdays if d not in sessions and d <= last][:4],
+            "calendarEnds": last.strftime("%Y-%m-%d"),
+            "weekend": [i for i, c in enumerate(cal.weekmask) if c == "0"]}
+
+
+def _base(e: Exchange, tz: str, now: datetime) -> dict:
+    return {"code": e.code, "name": e.name, "city": e.city, "country": e.country, "region": e.region,
+            "lat": e.lat, "lon": e.lon, "index": e.index, "timezone": tz, "kind": e.kind,
+            "localTime": pd.Timestamp(now).tz_convert(tz).strftime("%a %H:%M")}
+
+
+def fx_windows(e: Exchange, start: datetime, days: int = 14) -> list[tuple[datetime, datetime]]:
+    """When a dealing centre is active from `start` on: its business hours (FX_HOURS local, on its
+    local exchange's business days) inside the FX week as the data source quotes it (Sunday 17:00
+    to Friday 17:00 New York; holiday early stops included). Adjacent pieces are merged."""
+    from ..sessions import ET, MarketCalendar
+
+    cal = _calendar(e.calendar)
+    tz = str(cal.tz)
+    zone = pd.Timestamp(start).tz_convert(tz).tz
+    first = pd.Timestamp(start).tz_convert(tz).date() - timedelta(days=1)
+    fx = MarketCalendar.fx_session
+    week = [s for k in range(-2, days + 2) for s in fx(start.astimezone(ET).date() + timedelta(days=k))]
+    out: list[tuple[datetime, datetime]] = []
+    for k in range(days + 1):
+        d = first + timedelta(days=k)
+        if pd.Timestamp(d) not in cal.sessions:
+            continue
+        a = datetime.combine(d, FX_HOURS[0], zone)
+        b = datetime.combine(d, FX_HOURS[1], zone)
+        for s in week:
+            lo, hi = max(a, s.open), min(b, s.close)
+            if lo < hi:
+                if out and out[-1][1] == lo:
+                    out[-1] = (out[-1][0], hi)
+                else:
+                    out.append((lo, hi))
     return out
+
+
+def fx_status(e: Exchange, now: datetime) -> dict:
+    cal = _calendar(e.calendar)
+    tz = str(cal.tz)
+    out = _base(e, tz, now)
+    windows = fx_windows(e, now - timedelta(days=1))
+    current = next((w for w in windows if w[0] <= now < w[1]), None)
+    upcoming = next((w for w in windows if w[0] > now), None)
+    if current:
+        out.update(state="open", openedAt=_iso(pd.Timestamp(current[0])), until=_iso(pd.Timestamp(current[1])), event="closes")
+    else:
+        out.update(state="closed", until=_iso(pd.Timestamp(upcoming[0])) if upcoming else None, event="opens")
+    local = pd.Timestamp(now).tz_convert(tz)
+    today = local.tz_localize(None).normalize()
+    todays = [w for w in windows if pd.Timestamp(w[0]).tz_convert(tz).date() == local.date()]
+    out["today"] = {"open": pd.Timestamp(todays[0][0]).tz_convert(tz).strftime("%H:%M"),
+                    "close": pd.Timestamp(todays[-1][1]).tz_convert(tz).strftime("%H:%M")} if todays else None
+    out["holidayToday"] = cal.weekmask[today.dayofweek] == "1" and today <= cal.sessions[-1] and today not in cal.sessions
+    out.update(_holidays(cal, today))
+    return out
+
+
+def crypto_status(e: Exchange, now: datetime) -> dict:
+    out = _base(e, e.tz or "UTC", now)
+    day = pd.Timestamp(now).tz_convert("UTC").normalize()
+    out.update(state="open", openedAt=None, until=None, event=None, aroundTheClock=True,
+               today={"open": "00:00", "close": "24:00 UTC"}, holidays=[],
+               dayStart=_iso(day), weekend=[])
+    return out
+
+
+def _performance(e: Exchange, moves: dict[str, dict]) -> dict | None:
+    """The market's latest daily move: from a stored watched series when there is one (inverted
+    for USD-based pairs), else from its US-listed proxy fund."""
+    if e.series and e.series in moves:
+        m = moves[e.series]
+        if e.invert:
+            ccy = e.index.split(" · ")[0]
+            return {"proxy": f"{ccy}/USD", "day": m["day"], "changePct": (m["prevClose"] / m["close"] - 1) * 100,
+                    "basis": f"{e.series} day bars stored locally, inverted ({ccy} against the dollar), UTC day {m['day']}"}
+        return {"proxy": e.series, "day": m["day"], "changePct": m["changePct"],
+                "basis": f"{e.series} day bars stored locally, UTC day {m['day']}"}
+    if e.proxy and e.proxy in moves:
+        what = {"fx": "this currency against the dollar", "crypto": "Bitcoin"}.get(e.kind, "this market")
+        return {"proxy": e.proxy, **moves[e.proxy],
+                "basis": f"{e.proxy}, a US-listed fund tracking {what} (USD, US hours, {moves[e.proxy]['day']})"}
+    return None
+
+
+def market_moves(store, source: str = "massive") -> dict[str, dict]:
+    """Every move the globe can colour by: proxy funds (from the market file) and the watched
+    series in SERIES (from their stored day bars). No requests."""
+    return {**store.proxy_moves(source), **store.series_moves(source, SERIES)}
 
 
 def world_markets(now: datetime | None = None, moves: dict[str, dict] | None = None) -> list[dict]:
@@ -202,13 +358,14 @@ def world_markets(now: datetime | None = None, moves: dict[str, dict] | None = N
     out = []
     for e in EXCHANGES:
         try:
-            row = status(e, now)
-            if e.proxy and e.proxy in moves:
-                row["performance"] = {"proxy": e.proxy, **moves[e.proxy]}
+            row = {"fx": fx_status, "crypto": crypto_status}.get(e.kind, status)(e, now)
+            perf = _performance(e, moves)
+            if perf:
+                row["performance"] = perf
             out.append(row)
         except Exception as err:  # keep the rest if one calendar has a problem
             out.append({"code": e.code, "name": e.name, "city": e.city, "country": e.country, "region": e.region,
-                        "lat": e.lat, "lon": e.lon, "index": e.index, "state": "unknown", "error": str(err)})
+                        "lat": e.lat, "lon": e.lon, "index": e.index, "kind": e.kind, "state": "unknown", "error": str(err)})
     return out
 
 

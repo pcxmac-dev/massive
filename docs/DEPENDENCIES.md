@@ -14,13 +14,14 @@ Status: ✅ handled · ⚠️ partly handled (see notes) · ❌ gap (not handled
 
 ## 1. Massive REST API (api.massive.com)
 
-Plan: free (5 requests/min, 2 years of history, end-of-day stocks/indices, futures 8 h delayed).
+Plan: free (5 requests/min, 2 years of history, end-of-day stocks/indices, currencies and crypto through the previous UTC day, futures 8 h delayed).
 Hard caps: 250 requests per run, 2,000 per day (`MASSIVE_MAX_REQUESTS_PER_RUN/DAY`). Every request,
 retries included, counts.
 
 | Data | Endpoint | Fetched by | When | Cost | Status |
 |---|---|---|---|---|---|
-| Minute/day bars (stocks, indices, FX) | `/v2/aggs/ticker/{T}/range/...` | `collector.sync_bars`, `sync_daily` | each sync, only when the plan should have published a new session (`freshness`) | 1+ per symbol per new session; backfill ~12 per stock | ✅ |
+| Minute/day bars (stocks, indices, FX `C:`, crypto `X:`) | `/v2/aggs/ticker/{T}/range/...` | `collector.sync_bars`, `sync_daily` | each sync, only when the plan should have published a new session (`freshness`) | 1+ per symbol per new session; backfill ~12 per stock | ✅ |
+| Crypto bars | same aggregates endpoint, `X:BTCUSD` (consolidated across the exchanges Massive covers; per-exchange data needs trades, a paid plan) | `collector.sync_bars` | each sync once the UTC day is published (free plan: minute, not second; probed 2026-10-23) | ~21 requests to backfill 2 years, then 1-2 a day | ✅ |
 | Trades (ticks) | `/v3/trades/{T}` | `collector.sync_trades` | not on the free plan (probed once a week) | — | ✅ |
 | Futures bars | `/futures/v1/aggs/{contract}` | `collector.sync_future` | each sync (8 h delayed data moves continuously) | 1–2 per product per run | ✅ |
 | Plan entitlements | probes of the above, limit 1 | `resolve_resolution` | once per asset class per week (`entitlements` table) | 1 per probe | ✅ |
@@ -62,7 +63,9 @@ retries included, counts.
 | List | Where | How it goes stale | Status |
 |---|---|---|---|
 | World exchanges, cities, flagship indices | `gui/world.py` `EXCHANGES` | new exchanges, renamed indices | ⚠️ review yearly |
-| Market proxy funds (US-listed country ETFs) | `gui/world.py` `proxy=` | funds close or change ticker (GXG became COLO in 2023, found by `deps`) | ✅ `deps` flags any proxy missing from the market file |
+| Market proxy funds (US-listed country ETFs; CurrencyShares FXA/FXB/FXC/FXE/FXF/FXY, UUP; IBIT) | `gui/world.py` `proxy=` (FX centres and crypto prefer the stored pair: `series=`) | funds close or change ticker (GXG became COLO in 2023, found by `deps`) | ✅ `deps` flags any proxy missing from the market file |
+| FX dealing centres (city, local exchange calendar for its holidays, currency pair, fund) | `gui/world.py` (`kind="fx"`) | centres' importance shifts slowly; business hours are a convention (08:00-17:00 local) | ✅ |
+| Crypto exchanges (headquarters or registration, main market) | `gui/world.py` (`kind="crypto"`) | exchanges move domicile, merge or close (Bitstamp is now Robinhood's; Binance declares no HQ) | ⚠️ review yearly |
 | Futures product groups | `sessions.py` `EQUITY_FUTURES`, `ENERGY_FUTURES` | new products | ⚠️ only products on the watchlist matter |
 | Company types counted as companies | `collector.COMPANY_TYPES` | Massive adding types | ✅ |
 

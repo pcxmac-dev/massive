@@ -12,6 +12,7 @@ RESOLUTIONS_BY_ASSET = {
     "stock": ("trades", "second", "minute"),
     "index": ("second", "minute"),
     "fx": ("second", "minute"),
+    "crypto": ("second", "minute"),
     "future": ("second", "minute"),
 }
 RESOLUTIONS = RESOLUTIONS_BY_ASSET["stock"]
@@ -28,7 +29,7 @@ class DataSource(ABC):
     @abstractmethod
     def is_entitled(self, resolution: str, ticker: str, asset: str = "stock") -> bool:
         """Probe (with as few requests as possible) whether the plan allows a resolution.
-        `ticker` is the source's own ticker (e.g. I:COMP, C:EURUSD, NQZ6)."""
+        `ticker` is the source's own ticker (e.g. I:COMP, C:EURUSD, X:BTCUSD, NQZ6)."""
 
     @abstractmethod
     def trade_pages(

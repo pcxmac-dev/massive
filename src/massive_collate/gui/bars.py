@@ -56,8 +56,8 @@ class Series:
 
     @property
     def around_the_clock(self) -> bool:
-        """Forex and futures trade nearly 24h: no regular-hours filter applies."""
-        return self.asset in ("fx", "future")
+        """Forex, crypto and futures trade (nearly) 24h: no regular-hours filter applies."""
+        return self.asset in ("fx", "crypto", "future")
 
     def session_for(self, wanted: str) -> str:
         """The session actually drawn: around-the-clock markets have one session; an index is

@@ -122,3 +122,27 @@ def test_nyse_rules_agree_with_exchange_calendars_every_day_2000_2027():
             close = CAL.regular_hours(d)[1]
             assert (close.hour, close.minute) == (sessions[d].hour, sessions[d].minute), d
         d += timedelta(days=1)
+
+
+def test_crypto_sessions_are_utc_days_every_day():
+    from datetime import date, datetime, timezone
+
+    from massive_collate.sessions import MarketCalendar
+
+    cal = MarketCalendar()
+    days = cal.sessions("crypto", date(2026, 12, 24), date(2026, 12, 27))  # Christmas and a weekend
+    assert [s.day for s in days] == [date(2026, 12, d) for d in (24, 25, 26, 27)]
+    assert days[0].open == datetime(2026, 12, 24, tzinfo=timezone.utc)
+    assert all(a.close == b.open for a, b in zip(days, days[1:]))
+    assert cal.is_open("crypto", datetime(2026, 12, 25, 12, 0, tzinfo=timezone.utc))
+
+
+def test_crypto_freshness_on_the_free_plan_is_the_previous_utc_day():
+    from datetime import datetime, timezone
+
+    from massive_collate import freshness
+    from massive_collate.config import TIERS
+
+    exp = freshness.expected("crypto", TIERS["free"], datetime(2026, 10, 24, 4, 17, tzinfo=timezone.utc))  # a Saturday
+    assert exp.latest == datetime(2026, 10, 23, 23, 59, tzinfo=timezone.utc)
+    assert exp.next_due == datetime(2026, 10, 25, tzinfo=timezone.utc)

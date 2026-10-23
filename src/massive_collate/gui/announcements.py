@@ -5,7 +5,7 @@ Routine calendar items (opening, closing soon, lunch, scheduled holidays) are no
   they mention (US listings: New York);
 - unscheduled closures today (days of mourning, storms, emergencies: a calendar's ad-hoc
   holidays) and early closes today;
-- big moves: a market's proxy fund up or down BIG_MOVE_PCT or more on the latest day.
+- big moves: a market up or down BIG_MOVE_PCT (by market type) or more on the latest day.
 """
 from __future__ import annotations
 
@@ -15,7 +15,9 @@ from . import world
 
 US_MICS = {"XNAS", "XNYS", "ARCX", "BATS", "XASE", "IEXG"}
 NEWS_HOURS = 48
-BIG_MOVE_PCT = 2.0
+# A daily move worth announcing, by market type: about two standard deviations of a normal day
+# (stock markets ~1%, major currencies ~0.5%, Bitcoin ~3%).
+BIG_MOVE_PCT = {"stock": 2.0, "fx": 1.0, "crypto": 6.0}
 
 
 def exchange_events(now: datetime, markets: list[dict] | None = None) -> list[dict]:
@@ -33,12 +35,18 @@ def exchange_events(now: datetime, markets: list[dict] | None = None) -> list[di
             out.append({"kind": "event", "text": f"{m['name']} closes early today at {m['today']['close']} local",
                         "source": f"{m['code']} calendar", "time": now.isoformat(), "exchange": m["code"], "weight": 2})
         perf = m.get("performance")
-        if perf and abs(perf["changePct"]) >= BIG_MOVE_PCT and (m["country"], perf["proxy"]) not in seen_moves:
-            seen_moves.add((m["country"], perf["proxy"]))
+        kind = m.get("kind", "stock")
+        # one item per move: a country's exchanges share a fund, every crypto exchange shares Bitcoin's
+        key = perf["proxy"] if perf and kind == "crypto" else (m["country"], perf and perf["proxy"])
+        if perf and abs(perf["changePct"]) >= BIG_MOVE_PCT.get(kind, 2.0) and key not in seen_moves:
+            seen_moves.add(key)
             pct = perf["changePct"]
-            out.append({"kind": "move", "text": f"{m['country']} {'up' if pct > 0 else 'down'} {abs(pct):.1f}% on {perf['day']} · {idx}",
-                        "source": f"{perf['proxy']} (US-listed proxy)", "time": now.isoformat(), "exchange": m["code"],
-                        "weight": 3, "changePct": pct})
+            what = {"fx": f"{idx} against the dollar", "crypto": "Bitcoin"}.get(kind, m["country"])
+            tail = f" · {idx}" if kind == "stock" else ""
+            stored = "day bars stored locally" in perf.get("basis", "")
+            out.append({"kind": "move", "text": f"{what} {'up' if pct > 0 else 'down'} {abs(pct):.1f}% on {perf['day']}{tail}",
+                        "source": perf["proxy"] if stored else f"{perf['proxy']} (US-listed proxy)",
+                        "time": now.isoformat(), "exchange": m["code"], "weight": 3, "changePct": pct})
     return out
 
 
@@ -60,7 +68,7 @@ def news_items(store, watch: list[dict], now: datetime) -> list[dict]:
 def announcements(store, watch: list[dict], now: datetime | None = None, markets: list[dict] | None = None) -> dict:
     now = now or datetime.now(timezone.utc)
     if markets is None:
-        markets = world.world_markets(now, moves=store.proxy_moves())
+        markets = world.world_markets(now, moves=world.market_moves(store))
     events = exchange_events(now, markets)
     news = news_items(store, watch, now)
     # Irregular exchange events first (they are about right now), then headlines, watched first,

@@ -835,6 +835,20 @@ class Store:
         return {t: {"day": days[1].isoformat(), "close": c, "changePct": (c / prev[t] - 1) * 100}
                 for t, c in last.items() if prev.get(t)}
 
+    def series_moves(self, source: str, tickers: Iterable[str]) -> dict[str, dict]:
+        """Latest daily change of stored series from their own day bars: {ticker: {day (UTC date
+        of the newest bar), close, prevClose, changePct}}. Tickers without two day bars are left out."""
+        out = {}
+        for t in tickers:
+            rows = self.conn.execute(
+                "SELECT ts, close FROM bars WHERE source=? AND ticker=? AND timespan='day' AND multiplier=1 "
+                "ORDER BY ts DESC LIMIT 2", (source, t.upper())).fetchall()
+            if len(rows) == 2 and rows[0][1] and rows[1][1]:
+                day = datetime.fromtimestamp(rows[0][0] / 1000, timezone.utc).date().isoformat()
+                out[t] = {"day": day, "close": rows[0][1], "prevClose": rows[1][1],
+                          "changePct": (rows[0][1] / rows[1][1] - 1) * 100}
+        return out
+
     # -- directory ------------------------------------------------------------
 
     def save_directory(self, source: str, rows: Iterable[dict], seen: date) -> int:
