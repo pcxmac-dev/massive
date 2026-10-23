@@ -154,6 +154,13 @@ class ChartApp:
         out["sky"] = astro.sky()
         return out
 
+    def announcements(self) -> dict:
+        from .announcements import announcements
+
+        with self._lock:
+            watch = self.store.watchlist()
+            return announcements(self.store, watch)
+
     def calendar(self, q: dict[str, str]) -> dict:
         """Sessions of a symbol between two times (ms), for annotating the chart."""
         from .markets import symbol_sessions
@@ -373,6 +380,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.bars(q))
                 if url.path == "/api/info":
                     return self._json(app.info(q["source"], q["ticker"], q.get("adjust")))
+                if url.path == "/api/announcements":
+                    return self._json(app.announcements())
                 if url.path == "/api/markets":
                     return self._json(app.markets())
                 if url.path == "/api/calendar":

@@ -130,6 +130,7 @@ def status(e: Exchange, now: datetime) -> dict:
     if cal.is_open_on_minute(minute, ignore_breaks=True):
         session = cal.minute_to_session(minute, direction="previous")
         close = cal.session_close(session)
+        out["openedAt"] = _iso(cal.session_open(session))
         b0, b1 = cal.session_break_start(session), cal.session_break_end(session)
         if not pd.isna(b0) and b0 <= minute < b1:
             out.update(state="break", until=_iso(b1), event="reopens")
@@ -147,6 +148,8 @@ def status(e: Exchange, now: datetime) -> dict:
             out["today"]["break"] = f"{b0.tz_convert(tz):%H:%M}-{b1.tz_convert(tz):%H:%M}"
     else:
         out["today"] = None
+        # A normal trading weekday with no session: a holiday.
+        out["holidayToday"] = cal.weekmask[today.dayofweek] == "1" and today <= sessions[-1]
     # Upcoming closures on the exchange's normal trading days (its own weekend excluded).
     days = pd.date_range(today, today + pd.Timedelta(days=60), freq="D")
     trading_weekdays = days[[cal.weekmask[d.dayofweek] == "1" for d in days]]

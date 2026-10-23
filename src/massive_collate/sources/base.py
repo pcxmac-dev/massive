@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import date
+from datetime import date, datetime
 from typing import Iterator
 
 from ..models import Exchange, Instrument
@@ -70,6 +70,10 @@ class DataSource(ABC):
     def futures_schedule(self, product: str, since: date) -> list[tuple[str, str, int]]:
         """Official futures session events from `since` on: (session date, event, ms)."""
         raise NotImplementedError(f"{self.name} has no futures schedules")
+
+    def news(self, since: datetime | None = None, limit: int = 100) -> list[dict]:
+        """Recent news, newest first: dicts with id, published_ms, title, publisher, url, tickers."""
+        raise NotImplementedError(f"{self.name} has no news")
 
     def icon(self, url: str) -> tuple[bytes, str]:
         """Download a company icon from the source: (content, content type)."""

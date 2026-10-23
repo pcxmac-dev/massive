@@ -233,6 +233,22 @@ class MassiveSource(DataSource):
                 out.append((r["session_end_date"], r["event"], int(t.timestamp() * 1000)))
         return out
 
+    def news(self, since: datetime | None = None, limit: int = 100) -> list[dict]:
+        params: dict[str, Any] = {"order": "desc", "sort": "published_utc", "limit": limit}
+        if since:
+            params["published_utc.gte"] = since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        rows = self.client.get("/v2/reference/news", params).get("results") or []
+        out = []
+        for r in rows:
+            try:
+                t = datetime.fromisoformat(r["published_utc"].replace("Z", "+00:00"))
+            except (KeyError, ValueError):
+                continue
+            out.append({"id": r.get("id"), "published_ms": int(t.timestamp() * 1000), "title": r.get("title"),
+                        "publisher": (r.get("publisher") or {}).get("name"), "url": r.get("article_url"),
+                        "tickers": r.get("tickers") or []})
+        return out
+
     def icon(self, url: str) -> tuple[bytes, str]:
         return self.client.get_bytes(url)
 

@@ -149,6 +149,19 @@ CREATE TABLE IF NOT EXISTS futures_schedule (
     PRIMARY KEY (source, product, day, event, ts_ms)
 );
 
+-- News headlines (announcements ticker on the Markets globe).
+CREATE TABLE IF NOT EXISTS news (
+    source       TEXT NOT NULL,
+    id           TEXT NOT NULL,
+    published_ms INTEGER NOT NULL,
+    title        TEXT NOT NULL,
+    publisher    TEXT,
+    url          TEXT,
+    tickers      TEXT,                      -- JSON list
+    PRIMARY KEY (source, id)
+);
+CREATE INDEX IF NOT EXISTS news_time ON news (source, published_ms);
+
 CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -712,6 +725,26 @@ class Store:
                 (source,)):
             out.setdefault((product, day), []).append((event, ms))
         return [(p, date.fromisoformat(d), ev) for (p, d), ev in out.items()]
+
+    def save_news(self, source: str, items: Iterable[dict]) -> int:
+        rows = [(source, str(i["id"]), int(i["published_ms"]), i["title"], i.get("publisher"), i.get("url"),
+                 json.dumps(i.get("tickers") or [])) for i in items if i.get("id") and i.get("title")]
+        with self.conn:
+            self.conn.executemany("INSERT OR REPLACE INTO news VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
+        return len(rows)
+
+    def news(self, source: str | None = None, since_ms: int = 0, limit: int = 60) -> list[dict]:
+        sql = "SELECT source, id, published_ms, title, publisher, url, tickers FROM news WHERE published_ms >= ?"
+        params: list = [since_ms]
+        if source:
+            sql += " AND source=?"
+            params.append(source)
+        rows = self.conn.execute(sql + " ORDER BY published_ms DESC LIMIT ?", params + [limit]).fetchall()
+        return [{"source": s, "id": i, "published_ms": t, "title": ti, "publisher": p, "url": u,
+                 "tickers": json.loads(tk or "[]")} for s, i, t, ti, p, u, tk in rows]
+
+    def latest_news_ms(self, source: str) -> int | None:
+        return self.conn.execute("SELECT MAX(published_ms) FROM news WHERE source=?", (source,)).fetchone()[0]
 
     def kv_get(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()

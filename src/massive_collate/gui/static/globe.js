@@ -22,6 +22,9 @@
   let topo = null;                 // decoded boundary lines: [[ [lon,lat], ... ], ...]
   let hover = null;
   let nightCache = null;
+  let news = { items: [], i: 0, shownAt: 0, fetchedAt: 0 };  // announcements ticker
+  const ticker = document.getElementById('newsTicker');
+  const TICK_MS = 6500;
 
   // -- data --------------------------------------------------------------------------------
   async function load() {
@@ -211,10 +214,18 @@
         ctx.beginPath(); ctx.arc(p.x, p.y, 6 + 5 * pulse, 0, 2 * Math.PI);
         ctx.fillStyle = `rgba(38,166,154,${0.12 + 0.12 * (1 - pulse)})`; ctx.fill();
       }
+      const featured = currentItem()?.exchange === m.code;
+      if (featured) {  // the exchange the ticker is talking about: a gold beacon
+        const beat = 0.5 + 0.5 * Math.sin(Date.now() / 250);
+        ctx.beginPath(); ctx.arc(p.x, p.y, 10 + 8 * beat, 0, 2 * Math.PI);
+        ctx.strokeStyle = `rgba(240,185,11,${0.35 + 0.4 * (1 - beat)})`; ctx.lineWidth = 2; ctx.stroke();
+        ctx.beginPath(); ctx.arc(p.x, p.y, 7, 0, 2 * Math.PI);
+        ctx.fillStyle = 'rgba(240,185,11,0.35)'; ctx.fill();
+      }
       ctx.beginPath(); ctx.arc(p.x, p.y, m === hover ? 5.5 : 4, 0, 2 * Math.PI);
       ctx.fillStyle = color; ctx.fill();
       ctx.strokeStyle = dark ? '#0b0e15' : '#fff'; ctx.lineWidth = 1; ctx.stroke();
-      if (m.state === 'open' || m.state === 'break' || m === hover) {
+      if (m.state === 'open' || m.state === 'break' || m === hover || featured) {
         const label = `${m.city} · ${m.index.split(' · ')[0]}`;
         ctx.font = '11px system-ui, sans-serif';
         const w = ctx.measureText(label).width;
@@ -282,6 +293,48 @@
       }).join('')}`;
   }
 
+  // -- announcements ticker ---------------------------------------------------------------
+  function currentItem() { return news.items.length ? news.items[news.i % news.items.length] : null; }
+
+  async function loadNews() {
+    try {
+      const res = await api('/api/announcements');
+      const key = (x) => `${x.kind}|${x.text}`;
+      const cur = currentItem();
+      news.items = res.items;
+      const at = cur ? news.items.findIndex((x) => key(x) === key(cur)) : -1;
+      news.i = at >= 0 ? at : 0;
+      news.fetchedAt = Date.now();
+      renderTicker(false);
+    } catch { /* keep the last items */ }
+  }
+
+  function ago(iso) {
+    const m = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+    return m < 1 ? 'now' : m < 60 ? `${m}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`;
+  }
+
+  function renderTicker(slide) {
+    const it = currentItem();
+    if (!it) { ticker.innerHTML = ''; return; }
+    const ex = markets?.world.find((m) => m.code === it.exchange);
+    const text = esc(it.text) + (it.tickers?.length ? ` <span class="p-muted">${esc(it.tickers.join(' '))}</span>` : '');
+    ticker.innerHTML = `<span class="src" title="Source">${esc(it.source)}</span>`
+      + (it.url ? `<a class="txt" href="${esc(it.url)}" target="_blank" rel="noopener noreferrer">${text}</a>` : `<span class="txt">${text}</span>`)
+      + `<span class="when">${ex ? esc(ex.city) + ' · ' : ''}${it.kind === 'news' ? ago(it.time) : 'now'}</span>`
+      + `<span class="count">${(news.i % news.items.length) + 1}/${news.items.length}</span>`;
+    ticker.classList.toggle('slide', slide);
+    if (slide) { void ticker.offsetWidth; }
+  }
+
+  function tick() {
+    if (!news.items.length || ticker.matches(':hover')) return;  // hovering holds the item
+    if (Date.now() - news.shownAt < TICK_MS) return;
+    news.i = (news.i + 1) % news.items.length;
+    news.shownAt = Date.now();
+    renderTicker(true);
+  }
+
   // -- interaction -----------------------------------------------------------------------
   let dragging = null;
   function sunHit(e) {
@@ -340,6 +393,8 @@
   function frame() {
     if (document.body.dataset.view === 'markets') {
       if (Date.now() - fetchedAt > 30000) load();
+      if (Date.now() - news.fetchedAt > 60000) loadNews();
+      tick();
       updateView();
       draw();
       if (Date.now() - lastList > 1000) { renderList(); lastList = Date.now(); }
