@@ -18,7 +18,7 @@ from .errors import SourceError
 from .sessions import ET
 from .symbols import resolve
 from .sources import BUILDERS, SUPPORTED_ASSETS, DataSource, build_source, feed_profiles
-from .storage import Store
+from .storage import Store, ticks_backup_path
 
 TASK_NAME = "MassiveCollateSync"
 LOCK_STALE_SECONDS = 6 * 3600
@@ -186,6 +186,7 @@ def cmd_sync(args, settings: Settings) -> int:
                 result = collector.sync(source, store, feed.tier, log=log, refresh_hours=settings.refresh_hours,
                                         feeds=feed_profiles(settings),
                                         audits=(settings.audits_per_run, settings.audits_random_per_run),
+                                        tick_min_free_gb=settings.tick_min_free_gb,
                                         on_item=lambda t: store.set_run_current(args._run_id, t),
                                         directory_allowance=max(0, reserve_left))
                 args._rows = result.rows
@@ -416,8 +417,9 @@ def cmd_status(args, settings: Settings) -> int:
         for w in store.watchlist():
             print("  " + _watch_line(w))
         print("\nticks:")
+        print(f"  tick file: {store.ticks_path} ({store.ticks_bytes() / 1e9:.2f} GB)")
         for src, t, n, lo, hi in s["trades"]:
-            print(f"  {src:8} {t:8} {n:>12,} trades  {_ns(lo)} -> {_ns(hi)}")
+            print(f"  {src:8} {t:8} {_ns(lo)} -> {_ns(hi)}")
         print("\nbars:")
         for src, ts, mult, tickers, n, lo, hi in s["bars"]:
             print(f"  {src:8} {mult}/{ts:7} {tickers:>6} tickers {n:>12,} bars  {_ns(lo * 10**6)} -> {_ns(hi * 10**6)}")
@@ -441,7 +443,8 @@ def cmd_admin(args, settings: Settings) -> int:
             print("vacuumed")
         elif args.action == "backup":
             dest = args.dest or settings.db_path.parent / "backups" / f"massive-{datetime.now():%Y%m%d-%H%M%S}.db"
-            print(f"backup written to {store.backup(Path(dest))}")
+            print(f"backup written to {store.backup(Path(dest), ticks=args.ticks)}"
+                  + (f" (ticks: {ticks_backup_path(Path(dest))})" if args.ticks else " (main file; add --ticks for the tick file)"))
         elif args.action == "reset-denied":
             print(f"cleared {store.clear_denied(args.source)} denied days")
     return 0
@@ -607,6 +610,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("admin", help="database maintenance")
     s.add_argument("action", choices=["check", "vacuum", "backup", "reset-denied"])
     s.add_argument("--dest")
+    s.add_argument("--ticks", action="store_true", help="backup: also copy the tick file (large)")
     s.set_defaults(func=cmd_admin)
 
     for name, func, helptext in (

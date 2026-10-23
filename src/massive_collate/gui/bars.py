@@ -53,6 +53,11 @@ class Series:
     asset: str = "stock"  # stock | index | fx | future
     rolls: list = field(default_factory=list)  # continuous futures: contract changes
     adjust: str = "none"  # continuous futures back-adjustment: none | difference | ratio
+    # One-second bars built from ticks, kept apart from `frame` (a year of them would not fit in
+    # memory): the feeds holding them and the spans [start ms, end ms) they cover. Second
+    # intervals read only the window the chart asks for.
+    fine_sources: list = field(default_factory=list)
+    fine_spans: list = field(default_factory=list)
 
     @property
     def around_the_clock(self) -> bool:
@@ -304,12 +309,16 @@ class BarEngine:
         return next((w for w in self.store.watchlist(source) if w["ticker"] == ticker), None)
 
     def sources_for(self, ticker: str) -> list[str]:
+        """Feeds holding a ticker, best first: a feed with ticks (finer data) for it ranks first,
+        then the configured priority."""
         with self._lock:
-            have = {s for s, t, _ in self.store.stored_series() if t == ticker.upper()}
+            stored = [(s, k) for s, t, k in self.store.stored_series() if t == ticker.upper()]
+            have = {s for s, _ in stored}
             have |= {w["source"] for w in self.store.watchlist() if w["ticker"] == ticker.upper()
                      and w["asset"] == "future"}  # continuous futures are stored under their contracts
-        ranked = [s for s in self.priority if s in have]
-        return ranked + sorted(have - set(ranked))
+        fine = {s for s, k in stored if k in ("trades", "second")}
+        order = {s: i for i, s in enumerate(self.priority)}
+        return sorted(have, key=lambda s: (s not in fine, order.get(s, len(order)), s))
 
     def _fingerprint(self, source: str, ticker: str) -> tuple:
         item = self._watch_item(source, ticker)
@@ -349,7 +358,7 @@ class BarEngine:
         if len(parts) == 1:
             p = parts[0]
             return Series(MERGED, ticker, p.kind, p.frame, p.daily, p.price_precision, p.volume_precision,
-                          p.asset, p.rolls)
+                          p.asset, p.rolls, fine_sources=p.fine_sources, fine_spans=p.fine_spans)
         # Common base = the coarsest of the feeds; finer feeds are aggregated up to it exactly.
         base = max((p.kind for p in parts), key=BASE_KINDS.index)
         frames = []
@@ -365,6 +374,8 @@ class BarEngine:
             MERGED, ticker, base, merge_frames(frames, "1min" if base == "trades" else None), daily,
             max(p.price_precision for p in parts), max(p.volume_precision for p in parts),
             parts[0].asset, parts[0].rolls,
+            fine_sources=[src for p in parts for src in p.fine_sources],
+            fine_spans=sorted(span for p in parts for span in p.fine_spans),
         )
 
     def _load(self, source: str, ticker: str, adjust: str = "none") -> Series | None:
@@ -405,7 +416,9 @@ class BarEngine:
 
     def _load_plain(self, source: str, ticker: str) -> Series | None:
         kinds = {k for s, t, k in self.store.stored_series() if s == source and t == ticker}
-        kind = next((k for k in BASE_KINDS if k in kinds), None)
+        # Minute bars are the base wherever a feed has them (second bars built from its ticks are a
+        # layer read by window); a series of ticks or seconds alone is small and loaded whole.
+        kind = "minute" if "minute" in kinds else next((k for k in BASE_KINDS if k in kinds), None)
         if kind is None:
             return None
         if kind == "trades":
@@ -416,15 +429,19 @@ class BarEngine:
         if "day" in kinds and kind != "day":
             daily = frame_from_bars(self.store.load_bars([ticker], "day", 1, source=source))
         prices = frame[["open", "high", "low", "close"]].to_numpy().ravel()
+        fine = [(a, b) for src, _, a, b in self.store.coverage_detail(ticker, "second") if src == source] \
+            if kind == "minute" and "second" in kinds else []
         return Series(
             source, ticker, kind, frame.sort_index(), daily,
             price_precision=decimals(prices, cap=6, minimum=2),
             volume_precision=decimals(frame["volume"].to_numpy(), cap=4),
+            fine_sources=[source] if fine else [], fine_spans=fine,
         )
 
     def periods(self, series: Series) -> list[dict]:
-        """Intervals that can be built exactly from the stored data."""
-        base = BASE_SECONDS[series.kind]
+        """Intervals that can be built exactly from the stored data (seconds where second bars
+        built from ticks exist, read by window)."""
+        base = 1 if series.fine_spans else BASE_SECONDS[series.kind]
         out = []
         choices = (("second", (1, 5, 15, 30)), ("minute", (1, 3, 5, 15, 30, 45)),
                    ("hour", (1, 2, 4)), ("day", (1,)), ("week", (1,)), ("month", (1,)))
@@ -449,6 +466,10 @@ class BarEngine:
         session = s.session_for(session)
         if not any(p["type"] == period and p["span"] == span for p in self.periods(s)):
             raise ValueError(f"{period}/{span} cannot be built from {s.kind} data")
+        if self._windowed(s, period) and style.type in TIME_TYPES and model.is_price and lod == 1:
+            page = self._fine_page(s, span, session, to_ms, since_ms, limit)
+            page["style"] = {"type": style.type}
+            return page
         if not 1 <= lod <= MAX_LOD:
             raise ValueError(f"lod must be 1-{MAX_LOD}")
         model.validate()
@@ -602,7 +623,7 @@ class BarEngine:
             raise LookupError(f"no data stored for {source}:{ticker}")
         session = s.session_for(session)
         lo_ms, hi_ms = sorted((int(from_ms), int(to_ms)))
-        bars = self._resampled(s, period, span, session)
+        bars = self._fine_bars(s, span, session, lo_ms, hi_ms + 1) if self._windowed(s, period)             else self._resampled(s, period, span, session)
         if not model.validate().is_price:
             bars = self._modelled(s, bars, period, span, session, model)
         ts = epoch_ms(bars.index)
@@ -630,7 +651,43 @@ class BarEngine:
             **({} if model.is_price else {"rangePct": None, "model": model.kind, "unit": model.unit_label()}),
         }
 
+    @staticmethod
+    def _windowed(s: Series, period: str) -> bool:
+        """Second intervals of a minute-based series come from its second-bar layer, by window."""
+        return period == "second" and bool(s.fine_spans) and s.kind not in ("trades", "second")
+
+    def _fine_bars(self, s: Series, span: int, session: str, lo_ms: int, hi_ms: int) -> pd.DataFrame:
+        with self._lock:
+            raw = self.store.bars_window(s.fine_sources, s.ticker, "second", lo_ms, hi_ms)
+        if raw.empty:
+            return pd.DataFrame(columns=COLUMNS, index=pd.DatetimeIndex([], tz=ET))
+        return resample(frame_from_bars(raw), "second", span, session)
+
+    def _fine_page(self, s: Series, span: int, session: str, to_ms: int | None, since_ms: int | None,
+                   limit: int) -> dict:
+        """A page of second bars read from the layer: widen the window backwards until it holds
+        `limit` bars or the layer's start is reached."""
+        first = min(a for a, _ in s.fine_spans)
+        last = max(b for _, b in s.fine_spans)
+        if since_ms is not None:
+            bars = self._fine_bars(s, span, session, since_ms, last + 1000)
+            return {"bars": to_records(bars), "more": False, "total": int(len(bars)), "fine": True}
+        hi = min(to_ms, last + 1000) if to_ms is not None else last + 1000
+        width = max(3_600_000, limit * span * 1000 * 4)
+        while True:
+            lo = max(first, hi - width)
+            bars = self._fine_bars(s, span, session, lo, hi)
+            if len(bars) >= limit or lo <= first:
+                break
+            width *= 4
+        sel = bars.tail(limit)
+        more = len(bars) > limit or lo > first
+        return {"bars": to_records(sel), "more": bool(more), "total": int(len(bars)), "fine": True}
+
     def _resampled(self, s: Series, period: str, span: int, session: str) -> pd.DataFrame:
+        if self._windowed(s, period):  # whole-series uses (projection, chart types): the latest day of seconds
+            last = max(b for _, b in s.fine_spans)
+            return self._fine_bars(s, span, session, last - 86_400_000, last + 1000)
         fp = self._series[(s.source, s.ticker, s.adjust)][0]
         key = (s.source, s.ticker, s.adjust, period, span, session, fp)
         with self._lock:

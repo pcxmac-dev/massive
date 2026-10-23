@@ -24,9 +24,11 @@ random (`AUDITS_PER_RUN`, `AUDITS_RANDOM_PER_RUN`), or with `python -m massive_c
 For every ticker on the watchlist it probes your plan and uses the finest
 resolution available, as far back as the plan allows:
 
-1. **trades** — every tick, nanosecond timestamps, with the exchange it printed on
+1. **trades** — every tick, nanosecond timestamps, with the exchange it printed on: going forward
+   always, backfilled one year (`TICK_HISTORY_DAYS`); one-second and minute bars are built from
+   them here with the tape's condition rules, and seconds charts read them by window
 2. **second** — 1-second bars
-3. **minute** — 1-minute bars (available on the free plan)
+3. **minute** — 1-minute bars (available on the free plan), for all history before the tick window
 
 Runs fill newest-first and save page by page, so a run that stops part-way loses
 nothing and the next run continues where it left off.

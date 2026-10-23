@@ -210,6 +210,8 @@
       ${data.source !== 'massive' ? '' : `<div class="tile"><h5>Directory icons</h5><div class="big">${num(data.directory?.icons)} <small>/ ${num(data.directory?.companies)} companies</small></div>
         ${meter(data.directory?.companies ? data.directory.iconsChecked / data.directory.companies : 0, 'good')}
         <small>${data.directory?.companies ? `Nasdaq + NYSE · ≈${num(data.directory.requestsLeft)} requests left (~${data.directory.days} days, leftover budget only)` : 'listing arrives with the next sync'}</small></div>`}
+      ${data.ticks ? `<div class="tile"><h5>Ticks</h5><div class="big">${(data.ticks.bytes / 1e9).toFixed(1)} <small>GB · ${num(data.ticks.series)} symbols</small></div>
+        <small>${data.ticks.paused ? `<span class="down">backfill paused: ${esc(data.ticks.paused)}</span>` : `backfill ${num(data.ticks.days)} days · new ticks always`} · ${num(Math.round(data.ticks.freeBytes / 1e9))} GB free</small></div>` : ''}
       <div class="tile"><h5>Plan</h5><div class="big">${esc(plan.tier)}</div>
         <small>history from ${esc(plan.historyFloor)}</small></div>`;
 
@@ -284,7 +286,7 @@
       return `<tr title="${esc(a.reason || '')}${r.worst?.length ? ` · worst: ${esc(r.worst.map((w) => `${w.field} ${w.bps} bps`).join(', '))}` : ''}">
         <td>${ago(a.at)}</td><td><b>${esc(a.ticker)}</b> <span class="sub">${esc(span)} ET</span></td>
         <td>${esc(a.owner)} → ${esc(a.auditor)}</td><td><span class="state ${vcls[a.verdict] || ''}">${esc(a.verdict)}</span></td>
-        <td class="num">${num(a.matched)}<div class="sub">${num(a.only_owner)}/${num(a.only_auditor)} one-sided</div>${r.note ? `<div class="sub" title="${esc(r.note)}">cross-venue</div>` : ''}</td>
+        <td class="num">${num(a.matched)}<div class="sub">${num(a.only_owner)}/${num(a.only_auditor)} one-sided</div>${r.note ? `<div class="sub" title="${esc(r.note)}">cross-venue</div>` : ''}${r.ownerOrigin ? `<div class="sub" title="${esc(r.ownerOrigin)}">from ticks</div>` : ''}</td>
         <td>${boxSvg(bx.c, tol.price_bps || 5)}</td><td>${boxSvg(bx.range, 2 * (tol.price_bps || 5))}</td>
         <td>${boxSvg(bx.v, tol.volume_pct || 5)}</td><td class="sub">${tim}</td></tr>`;
     }).join('') : '<tr><td colspan="9" class="empty">No audits yet: they run after new data arrives and at random, once a second feed watches the same symbols (or run <code>python -m massive_collate audit</code>).</td></tr>';

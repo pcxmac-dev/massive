@@ -171,6 +171,9 @@ def audit_span(auditor, store, ticker: str, timespan: str, a: int, b: int, owner
         report["note"] = (f"cross-venue: {owner} is {venues[owner] or 'its own consolidation'}, "
                           f"{auditor.name} is {venues[auditor.name] or 'its own consolidation'}; highs, lows "
                           "and volume differ by design, opens, closes and VWAP should agree")
+    origins = {o for src, o, x, y in store.coverage_detail(ticker, timespan) if src == owner and x < b and y > a}
+    if "ticks" in origins:  # the stored bars were built here from the owner's ticks
+        report["ownerOrigin"] = f"built here from {owner}'s ticks (condition rules applied)"
     result = {"ticker": ticker, "asset": row["asset"], "timespan": timespan, "start_ms": a, "end_ms": b,
               "owner": owner, "auditor": auditor.name, "reason": reason, "verdict": report["verdict"],
               "matched": report["matched"], "only_owner": report["onlyOwner"],

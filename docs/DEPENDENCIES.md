@@ -48,10 +48,28 @@ requests are refused before anything is sent.
 | Data | Endpoint | Fetched by | When | Cost | Status |
 |---|---|---|---|---|---|
 | Stock minute/day bars (split-adjusted, like Massive) | `/v2/stocks/bars?feed=sip&adjustment=split` | `sync_bars` | spans no better-ranked feed serves: history before Massive's 2 years, and the current session up to 15 min ago | 10,000 bars per request | ⚠️ waiting for keys |
-| Stock ticks | `/v2/stocks/trades` | `sync_trades` | only for symbols watched with `--resolution trades` (since 2016 they would be terabytes) | 10,000 trades per request | ⚠️ opt-in |
+| Stock ticks | `/v2/stocks/trades` | `sync_trades` | every watched stock: new ticks each sync, backfilled `TICK_HISTORY_DAYS` (365); minute bars before that | 10,000 trades per request (~2,200 a day for 101 stocks) | ⚠️ waiting for keys |
+| Crypto ticks (taker side kept) | `/v1beta3/crypto/us-1/trades` | `sync_trades` | as stocks; Kraken history from 2021 | 10,000 trades per request | ✅ |
 | Crypto minute/day bars | `/v1beta3/crypto/us-1/bars` | `sync_bars` | spans nobody holds (BTC: 2021 to Massive's start, and today) | 10,000 bars per request | ✅ |
 | Asset record (name, exchange, active) | trading API `/v2/assets/{T}` | `check_listing` | weekly, unless another feed checked the ticker this week (shared) | 1 | ✅ |
 | Exchange codes (trade venues) | `/v2/stocks/meta/exchanges` | `sync_exchanges` | once | 1 | ✅ |
+
+### Ticks: highest resolution within reason
+
+Measured from stored bars (Oct 2026): the 101 watched stocks print about 21 million trades a day
+(NVDA 1.8M, median stock 120k); Bitcoin on Kraken about 160k. A stored tick takes 72 bytes, so
+ticks grow by about 1.5 GB a day (~390 GB a year) for ~2,200 requests a day. Every tick back to
+2016 would be ~2.2 TB and 3 million requests, so: ticks are collected going forward always and
+backfilled one year (`TICK_HISTORY_DAYS`), minute bars cover everything older. Ticks live in their
+own file (`ticks.db` beside `massive.db`; `admin backup --ticks` copies it). Tick backfill pauses
+below `TICK_MIN_FREE_GB` (250) free, all tick downloads below a fifth of that.
+
+One-second and minute bars are built here from the ticks, applying the consolidated tape's
+condition rules (odd lots set no high/low, average-price prints no open/close, ...). The rules
+come from Massive's `/v3/reference/conditions` (weekly, 1 request; `conditions` table). Where a
+feed holds or is collecting ticks no bars are downloaded; audits compare the bars built from ticks
+with another feed's own bars. Charts: minute bars are the base for all history; second intervals
+read the one-second layer for the window on screen.
 
 ### One feed per span, and audits
 
@@ -103,6 +121,7 @@ comparison, never the bars. Audits run after new data (queued for the other feed
 | News outside the US | the ticker's headlines are US-only, so world exchanges light up only for calendar events and big moves | a non-US news API (cost, licence) | ❌ |
 | Real index levels for non-US markets | colours use US-listed proxy funds (USD, US hours), not the local index | Massive indices plan, or an index data vendor | ❌ |
 | ~20 exchanges without a proxy fund (Prague, Budapest, Baltics, Dhaka...) | they stay uncoloured | local index data | ❌ |
+| Ticks before the one-year window | seconds charts and tick analysis stop a year back | raise `TICK_HISTORY_DAYS` (≈390 GB and ~550k requests per extra year for the current watchlist) | ⚠️ by choice |
 | Alpaca stock keys | without them Alpaca collects crypto only; with them it serves stock history from 2016 and the current session (15 min delayed) | a free Alpaca account's API keys, as user environment variables | ❌ waiting for keys |
 | Audit referee | with two feeds an audit says how far they differ, not which is right (their scores move together) | a third feed, or official closing prints | ⚠️ |
 | Live recorder (websocket) | the Live view's "recording" is grey; current-session data arrives only with fetcher runs | Massive websockets (paid plans) | ❌ |

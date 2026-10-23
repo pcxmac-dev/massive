@@ -154,6 +154,16 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
     return rows
 
 
+def _ticks(store: Store, settings: Settings) -> dict:
+    """The tick store: size, free disk, the backfill window and whether backfill is paused."""
+    import shutil
+
+    free = shutil.disk_usage(store.ticks_path.parent if store.ticks_path else Path.home()).free
+    series = sum(1 for _, _, k in store.stored_series() if k == "trades")
+    return {"bytes": store.ticks_bytes(), "freeBytes": free, "series": series,
+            "days": getattr(settings, "tick_history_days", 365), "paused": store.kv_get("ticks:backfill-paused") or None}
+
+
 def _directory(store: Store, source: str, settings: Settings, used_today: int) -> dict:
     from ..collector import COMPANY_TYPES, DAILY_RESERVE
 
@@ -278,6 +288,7 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
         },
         "symbols": symbols,
         "directory": _directory(store, source, settings, used),
+        "ticks": _ticks(store, settings),
         "liveFeeds": live_feeds(store, settings, source, now),
         "runs": runs,
         "log": log_tail(log_path(db_path), log_lines),

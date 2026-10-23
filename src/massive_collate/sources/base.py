@@ -97,6 +97,11 @@ class DataSource(ABC):
         """Download a company icon from the source: (content, content type)."""
         raise NotImplementedError(f"{self.name} has no company icons")
 
+    def trade_conditions(self) -> list[dict]:
+        """SIP trade conditions with their consolidated update rules: dicts with id, name, cta and
+        utp (the condition's letter on each tape family), high_low, open_close, volume (bools)."""
+        raise NotImplementedError(f"{self.name} has no trade condition reference")
+
     def market_daily(self, day: date) -> list[dict]:
         """Daily bars for the whole market on one date (dicts also carry T = ticker).
 

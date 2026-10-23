@@ -274,6 +274,21 @@ class MassiveSource(DataSource):
     def icon(self, url: str) -> tuple[bytes, str]:
         return self.client.get_bytes(url)
 
+    def trade_conditions(self) -> list[dict]:
+        out = []
+        params = {"asset_class": "stocks", "data_type": "trade", "limit": 1000}
+        for page in self.client.pages("/v3/reference/conditions", params):
+            for r in page:
+                sip = r.get("sip_mapping") or {}
+                rules = (r.get("update_rules") or {}).get("consolidated") or {}
+                if r.get("id") is None:
+                    continue
+                out.append({"id": int(r["id"]), "name": r.get("name"), "cta": sip.get("CTA"), "utp": sip.get("UTP"),
+                            "high_low": rules.get("updates_high_low", True),
+                            "open_close": rules.get("updates_open_close", True),
+                            "volume": rules.get("updates_volume", True)})
+        return out
+
     def market_daily(self, day: date) -> list[dict]:
         data = self.client.get(f"/v2/aggs/grouped/locale/us/market/stocks/{day}", {"adjusted": "true"})
         return data.get("results") or []

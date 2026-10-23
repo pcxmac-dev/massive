@@ -108,11 +108,17 @@ def normalize_bar(b: dict) -> dict:
 
 def normalize_trade(t: dict) -> dict | None:
     """Alpaca trade -> the common trade shape, or None for a withdrawn trade. Alpaca has no
-    sequence number; the exchange's trade id (unique per exchange) and the exchange make one."""
+    sequence number; the exchange's trade id (unique per exchange) and the exchange make one.
+    Crypto trades have no exchange, conditions or tape; their taker side (who crossed the spread)
+    is kept as the condition `taker=B` / `taker=S`."""
     if t.get("u") in DROPPED_UPDATES:
         return None
-    x = t.get("x") or "?"
     trade_id = int(t.get("i") or 0)
+    if "x" not in t and "tks" in t:
+        return {"sip_timestamp": _ns(t["t"]), "price": t["p"], "size": t["s"], "exchange": None,
+                "conditions": [f"taker={t['tks'].upper()}"] if t.get("tks") else [], "id": str(trade_id),
+                "sequence_number": trade_id & ((1 << 62) - 1), "tape": None}
+    x = t.get("x") or "?"
     return {"sip_timestamp": _ns(t["t"]), "price": t["p"], "size": t["s"], "exchange": ord(x[0]),
             "conditions": [c for c in t.get("c") or [] if c.strip()], "id": str(trade_id),
             "sequence_number": ((trade_id & ((1 << 56) - 1)) << 6) | (ord(x[0]) & 63),
@@ -138,10 +144,10 @@ class AlpacaSource(DataSource):
         return asset == "crypto" or (asset == "stock" and self.client.has_keys)
 
     def resolutions(self, asset: str) -> tuple[str, ...]:
-        """Finest first. Ticks are not chosen automatically: since 2016 they would be terabytes.
-        Watch a stock with resolution 'trades' to collect its ticks."""
+        """Finest first: ticks (kept for a recent window, see TICK_HISTORY_DAYS), with minute bars
+        for the history before it. Alpaca has no second bars."""
         if asset in ("stock", "crypto"):
-            return ("minute",)
+            return ("trades", "minute")
         return ()
 
     # -- requests --------------------------------------------------------------
@@ -203,17 +209,25 @@ class AlpacaSource(DataSource):
                 return  # probes cost exactly one request
 
     def trade_pages(self, ticker, gte_ns=None, lt_ns=None, descending=False, limit=PAGE_LIMIT) -> Iterator[list[dict]]:
-        self._need_keys("stock")
-        now = self._now() - (timedelta(0) if self.realtime else RECENT_SIP_BLOCK)
+        """Ticks in [gte, lt). A crypto pair (X:BTCUSD, BTC/USD) is read from the crypto venue and
+        needs no key; stocks need keys and stop 15 minutes ago on the free plan."""
+        crypto = ticker.upper().startswith("X:") or "/" in ticker
+        asset = "crypto" if crypto else "stock"
+        self._need_keys(asset)
+        blocked = timedelta(0) if self.realtime or crypto else RECENT_SIP_BLOCK
+        now = self._now() - blocked
         start = datetime.fromtimestamp(gte_ns / 1e9, timezone.utc) if gte_ns is not None else now - timedelta(days=1)
         end = datetime.fromtimestamp(lt_ns / 1e9, timezone.utc) if lt_ns is not None else now
         end = min(end, now)
         if start >= end:
             return
-        params = {"symbols": ticker.upper(), "start": _rfc3339(start), "end": _rfc3339(end), "limit": limit,
-                  "sort": "desc" if descending else "asc", "feed": self.feed}
-        for page in self.client.pages("/v2/stocks/trades", params, "trades"):
-            rows = [normalize_trade(t) for t in page.get(ticker.upper(), [])]
+        symbol = self._symbol(ticker, asset)
+        params = {"symbols": symbol, "start": _rfc3339(start), "end": _rfc3339(end), "limit": limit,
+                  "sort": "desc" if descending else "asc"}
+        if not crypto:
+            params["feed"] = self.feed
+        for page in self.client.pages(self._path(asset, "trades"), params, "trades"):
+            rows = [normalize_trade(t) for t in page.get(symbol, [])]
             yield [r for r in rows if r and (lt_ns is None or r["sip_timestamp"] < lt_ns)]
             if limit != PAGE_LIMIT:
                 return
@@ -228,9 +242,8 @@ class AlpacaSource(DataSource):
         end = self._now().date()
         try:
             if resolution == "trades":
-                if asset != "stock":
-                    return False
-                next(iter(self.trade_pages(ticker, gte_ns=int((self._now() - timedelta(days=7)).timestamp() * 1e9),
+                fetch = self._symbol(ticker, asset) if asset == "crypto" else ticker
+                next(iter(self.trade_pages(fetch, gte_ns=int((self._now() - timedelta(days=7)).timestamp() * 1e9),
                                            limit=1)), None)
             else:
                 next(iter(self.bar_pages(ticker, end - timedelta(days=7), end, resolution, asset=asset, limit=1)), None)

@@ -16,6 +16,10 @@ Settings come from environment variables, optionally loaded from a `.env` file
                       one feed only, ranked by resolution, then audited accuracy, then this order
     AUDITS_PER_RUN    audits of another feed's newly downloaded data per feed run (default: 2)
     AUDITS_RANDOM_PER_RUN   audits of a random stored session per feed run (default: 1)
+    TICK_HISTORY_DAYS how far back ticks are backfilled where a feed has them (default: 365); ticks
+                      are collected going forward always, minute bars cover the history before
+    TICK_MIN_FREE_GB  tick backfill pauses when the disk has less free space (default: 250); below
+                      a fifth of it no ticks are downloaded at all
 
 Alpaca (second feed; stocks and crypto). Keys are only ever read from the environment:
     ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY   (Alpaca's own APCA_API_KEY_ID / APCA_API_SECRET_KEY
@@ -93,6 +97,8 @@ class Settings:
     alpaca: "AlpacaSettings | None" = None
     audits_per_run: int = 2
     audits_random_per_run: int = 1
+    tick_history_days: int = 365
+    tick_min_free_gb: int = 250
 
     # The settings a feed view was made from, so any view can switch to another feed.
     origin: "Settings | None" = field(default=None, compare=False, repr=False)
@@ -214,6 +220,8 @@ def load_settings(
         alpaca=_alpaca(merged),
         audits_per_run=_default(_int_setting(merged, "AUDITS_PER_RUN"), 2),
         audits_random_per_run=_default(_int_setting(merged, "AUDITS_RANDOM_PER_RUN"), 1),
+        tick_history_days=_default(_int_setting(merged, "TICK_HISTORY_DAYS"), 365),
+        tick_min_free_gb=_default(_int_setting(merged, "TICK_MIN_FREE_GB"), 250),
     )
 
 

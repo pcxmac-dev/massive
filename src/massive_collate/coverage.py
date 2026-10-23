@@ -13,7 +13,7 @@ audits, then by SOURCE_PRIORITY. Only audits fetch a span twice, and they store 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone  # noqa: F401
 
 from . import freshness
 from .config import Tier
@@ -31,6 +31,7 @@ class FeedProfile:
     tier: Tier
     assets: frozenset = field(default_factory=frozenset)
     priority: int = 99  # position in SOURCE_PRIORITY (lower first)
+    tick_days: int = 365  # ticks are backfilled this far where the feed collects them
 
 
 def ms(t: datetime) -> int:
@@ -86,6 +87,16 @@ def has_open_time(asset: str, a: int, b: int) -> bool:
     return False
 
 
+def tick_floor(store, profile: FeedProfile, ticker: str, today: date, floor: date) -> date:
+    """Oldest day a feed backfills ticks to: TICK_HISTORY_DAYS back (not before its plan floor),
+    or, while backfill is paused for disk space, no further back than the ticks it already holds."""
+    lo = max(floor, today - timedelta(days=profile.tick_days))
+    if store.kv_get("ticks:backfill-paused"):
+        held = [a for a, _ in store.coverage(ticker, "trades").get(profile.name, [])]
+        lo = max(lo, datetime.fromtimestamp(min(held) / 1000, ET).date()) if held else today
+    return lo
+
+
 def rank(profile: FeedProfile, resolution: str, scores: dict) -> tuple:
     accuracy = (scores.get(profile.name) or {}).get("accuracy")
     return (RES_RANK.get(resolution, 2), -(accuracy or 0.0), profile.priority, profile.name)
@@ -101,8 +112,21 @@ def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, ass
     gaps = [(lo, hi)] if lo < hi else []
     held = [s for spans in store.coverage(ticker, timespan).values() for s in spans]
     gaps = subtract(gaps, held)
+    watch = {(w["source"], w["ticker"]): w for w in store.watchlist() if w["ticker"] == ticker.upper()}
+    if gaps and timespan in ("minute", "second"):
+        # Bars are built here from ticks: the window a feed collects ticks for is not downloaded
+        # as bars (by it or anyone), even before the ticks arrive.
+        held_ticks = [s for spans in store.coverage(ticker, "trades").values() for s in spans]
+        gaps = subtract(gaps, held_ticks)
+        for f in feeds.values():
+            row = watch.get((f.name, ticker.upper()))
+            if row and row.get("resolution") == "trades" and asset in f.assets:
+                f_floor = history_floor(f.tier, today)
+                if listed_from:
+                    f_floor = max(f_floor, listed_from)
+                t_lo = tick_floor(store, f, ticker, today, f_floor)
+                gaps = subtract(gaps, [(day_start_ms(t_lo), frontier_ms(asset, f.tier, now, "minute"))])
     if gaps:
-        watch = {(w["source"], w["ticker"]): w for w in store.watchlist() if w["ticker"] == ticker.upper()}
         scores = store.audit_scores()
         mine = rank(me, (watch.get((me.name, ticker.upper())) or {}).get("resolution", "auto"), scores)
         for peer in feeds.values():

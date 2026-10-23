@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from massive_collate.storage import Store
+from massive_collate.storage import Store, ticks_backup_path
 
 
 def _trade(ns: int, seq: int = 1, price: float = 10.0) -> dict:
@@ -108,6 +108,10 @@ def test_backup_and_integrity(tmp_path):
     with Store(tmp_path / "db" / "m.db") as s:
         s.upsert_trades("s", "X", [_trade(1)])
         assert s.integrity_check() == "ok"
-        dest = s.backup(tmp_path / "b" / "copy.db")
-    with Store(dest) as copy:
+        assert s.ticks_path == tmp_path / "db" / "ticks.db" and s.ticks_path.exists()  # ticks in their own file
+        plain = s.backup(tmp_path / "b" / "plain.db")
+        dest = s.backup(tmp_path / "b" / "copy.db", ticks=True)
+    with Store(plain, ticks_path=tmp_path / "b" / "none.db") as copy:
+        assert len(copy.load_trades("X")) == 0  # the main file alone has no ticks
+    with Store(dest, ticks_path=ticks_backup_path(dest)) as copy:
         assert len(copy.load_trades("X")) == 1

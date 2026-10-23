@@ -58,7 +58,7 @@ def feed_profiles(settings: Settings) -> dict[str, FeedProfile]:
             assets = frozenset({"crypto"} | ({"stock"} if a and a.has_keys else set()))
         else:
             assets = frozenset(ASSETS)
-        out[name] = FeedProfile(name, tier, assets, i)
+        out[name] = FeedProfile(name, tier, assets, i, tick_days=settings.tick_history_days)
     return out
 
 

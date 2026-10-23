@@ -45,9 +45,11 @@ def _fresh(area, item, iso, now, warn_days, fail_days, what, action) -> Check:
 
 
 def coverage_overlaps(store: Store) -> list[str]:
-    """Spans of a series held by more than one feed (should never happen: only audits fetch twice)."""
+    """Downloaded spans of a series held by more than one feed (should never happen: only audits
+    fetch twice). Bars built here from a feed's ticks may cover a span another feed downloaded at a
+    coarser resolution: that is an upgrade, not a second download."""
     rows = store.conn.execute("SELECT ticker, timespan, source, start_ms, end_ms FROM coverage "
-                              "ORDER BY ticker, timespan, start_ms").fetchall()
+                              "WHERE origin='download' ORDER BY ticker, timespan, start_ms").fetchall()
     out = []
     reach: dict[tuple, tuple[str, int]] = {}  # (ticker, timespan) -> (feed, furthest end so far)
     for ticker, timespan, src, a, b in rows:
@@ -90,6 +92,22 @@ def checks(store: Store, settings, source: str = "massive", now: datetime | None
         used = store.requests_today("alpaca")
         out.append(Check("Alpaca", "Daily request cap", "OK" if used < a.max_requests_per_day * 0.9 else "WARN",
                          f"{used} of {a.max_requests_per_day} used today"))
+    import shutil
+
+    free_gb = shutil.disk_usage(store.ticks_path.parent if store.ticks_path else Path.home()).free / 1e9
+    min_free = getattr(settings, "tick_min_free_gb", 250)
+    paused = store.kv_get("ticks:backfill-paused")
+    out.append(Check("Ticks", "Tick file and disk", "WARN" if paused or free_gb < min_free * 2 else "OK",
+                     f"{store.ticks_bytes() / 1e9:.1f} GB in {store.ticks_path.name if store.ticks_path else 'memory'}, "
+                     f"{free_gb:,.0f} GB free" + (f"; backfill paused ({paused})" if paused else ""),
+                     f"tick backfill pauses under {min_free} GB free (TICK_MIN_FREE_GB); "
+                     "free space or lower TICK_HISTORY_DAYS" if paused or free_gb < min_free * 2 else ""))
+    rules = store.condition_rules()
+    have_ticks = any(k == "trades" for _, _, k in store.stored_series())
+    out.append(Check("Ticks", "Trade condition rules", "OK" if rules or not have_ticks else "WARN",
+                     f"{len(rules)} tape condition codes with bar rules" if rules else "none stored yet",
+                     "" if rules or not have_ticks else
+                     "fetched weekly with the Massive sync; until then bars from ticks count every trade"))
     overlaps = coverage_overlaps(store)
     out.append(Check("Feeds", "One feed per span", "OK" if not overlaps else "FAIL",
                      "no span is held by two feeds" if not overlaps else

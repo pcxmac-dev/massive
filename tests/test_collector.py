@@ -63,7 +63,9 @@ def test_stopped_run_resumes_without_gaps(store):
     second = FakeSource(trades=all_trades)
     sync(second, store, FREE, NOW, log=lambda m: None)
     got = store.load_trades("SPCX", "fake")
-    assert len(got) == len(all_trades)
+    # every tick the plan has published (end of day: not today's) is in, none twice
+    published = [t for t in all_trades if t["sip_timestamp"] < int(datetime(2026, 10, 21, tzinfo=ET).timestamp()) * 10**9]
+    assert len(got) == len(published) == 9
     assert store.watchlist("fake")[0]["backfilled_to"] == history_floor(FREE, NOW.date())
 
 
@@ -73,7 +75,9 @@ def test_backfilled_series_only_fetches_new_data(store):
     sync(src, store, FREE, NOW, log=lambda m: None)
     src.trade_calls.clear()
     sync(src, store, FREE, NOW + timedelta(days=1), log=lambda m: None)  # the next session is out
-    assert len(src.trade_calls) == 1 and src.trade_calls[0]["desc"] is False
+    # one request, for the newly published session only (newest first, like every gap)
+    assert len(src.trade_calls) == 1
+    assert src.trade_calls[0]["gte"] == int(datetime(2026, 10, 20, 20, 0, tzinfo=ET).timestamp()) * 10**9
 
 
 def test_exchanges_saved_once(store):

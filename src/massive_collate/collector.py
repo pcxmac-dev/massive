@@ -11,6 +11,7 @@ part-way loses nothing and the stored data always stays contiguous.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Iterator
 from zoneinfo import ZoneInfo
@@ -108,26 +109,112 @@ def resolve_resolution(
 
 # -- one series ----------------------------------------------------------------
 
-def sync_trades(source: DataSource, store: Store, ticker: str, floor: date, backfilled_to: date | None) -> int:
-    """Ticks are opted into per symbol on one feed (watch --resolution trades), so they are kept
-    out of the minute-bar ledger: a different kind of data, not a second copy of the bars."""
+TICK_STOP_FRACTION = 5  # below TICK_MIN_FREE_GB / 5 no ticks are downloaded at all
+
+
+def tick_space(store: Store, min_free_gb: int) -> str:
+    """'ok', 'no-backfill' (free disk under min_free_gb: only new ticks) or 'stop' (under a fifth
+    of it). Remembered in kv so the planner and the Fetcher know."""
+    import shutil
+
+    where = store.ticks_path.parent if store.ticks_path else Path.home()
+    free_gb = shutil.disk_usage(where).free / 1e9
+    state = "stop" if free_gb < min_free_gb / TICK_STOP_FRACTION else "no-backfill" if free_gb < min_free_gb else "ok"
+    if state == "ok":
+        store.kv_set("ticks:backfill-paused", "")
+    else:
+        store.kv_set("ticks:backfill-paused", f"{free_gb:.0f} GB free")
+    return state
+
+
+def sync_trades(source: DataSource, store: Store, ticker: str, floor: date, now: datetime, me: FeedProfile,
+                feeds: dict[str, FeedProfile], fetch: str | None = None, asset: str = "stock",
+                listed_from: date | None = None, log: Log = print, rules: dict | None = None) -> int:
+    """Ticks for the recent window (TICK_HISTORY_DAYS) the way bars are filled: spans nobody holds,
+    newest first, recorded in the ledger page by page. One-second and minute bars are then built
+    from them here (condition rules as the tape uses them), so those spans need no bar downloads."""
+    from .coverage import tick_floor
+
+    today = now.astimezone(ET).date()
+    lo = tick_floor(store, me, ticker, today, floor)
+    gaps = plan(store, me, feeds, ticker, asset, "trades", lo, now, listed_from)
     saved = 0
-    stored = store.trade_range(source.name, ticker)
-
-    if stored:  # forward: from the newest stored trade to now
-        for page in _guard(source.trade_pages(ticker, gte_ns=stored[1])):
-            saved += store.upsert_trades(source.name, ticker, page)
-
-    if backfilled_to is None or backfilled_to > floor:  # backward: to the plan floor
-        stored = store.trade_range(source.name, ticker)
-        lt = stored[0] + 1 if stored else None
-        try:
-            for page in _guard(source.trade_pages(ticker, gte_ns=_date_ns(floor), lt_ns=lt, descending=True)):
-                saved += store.upsert_trades(source.name, ticker, page)
-        except NotEntitled:
-            pass  # older ticks are outside the plan: what we have is as far back as it goes
-        store.set_backfilled(source.name, ticker, floor)
+    for i, (a, b) in enumerate(reversed(gaps)):
+        n, span = _fill_ticks(source, store, ticker, a, b, fetch or ticker, asset, frontier=i == 0, rules=rules, log=log)
+        saved += n
+        if i == 0 and n:
+            _queue_audit(store, me, feeds, ticker, asset, "minute", span[1] - 60_000 if span else None)
     return saved
+
+
+def _fill_ticks(source: DataSource, store: Store, ticker: str, a: int, b: int, fetch: str, asset: str,
+                frontier: bool, rules: dict | None, log: Log) -> tuple[int, tuple[int, int] | None]:
+    """Download ticks in [a, b) ms newest first; after every page record the span held and, at the
+    end (or when a cap stops the run), build bars for the whole minutes now fully held."""
+    if not has_open_time(asset, a, b):
+        store.add_coverage(source.name, ticker, "trades", a, b)
+        return 0, None
+    sessions = [x for x in freshness.CALENDAR.sessions(asset, _ms_to_date(a) - timedelta(days=1), _ms_to_date(b))
+                if ms(x.open) < b]
+    last_open = ms(sessions[-1].open) if sessions else a
+    saved, oldest, newest, span = 0, None, None, None
+
+    def top() -> int:
+        if not frontier or (newest is not None and newest >= last_open):
+            return b
+        return (newest // 60_000 + 1) * 60_000 if newest is not None else a
+
+    try:
+        for page in _guard(source.trade_pages(fetch, gte_ns=a * 1_000_000, lt_ns=b * 1_000_000, descending=True)):
+            if not page:
+                continue
+            saved += store.upsert_trades(source.name, ticker, page)
+            times = [int(t["sip_timestamp"]) for t in page]
+            o, n = min(times) // 1_000_000, max(times) // 1_000_000
+            oldest = o if oldest is None else min(oldest, o)
+            newest = n if newest is None else max(newest, n)
+            store.add_coverage(source.name, ticker, "trades", oldest, top())
+        store.add_coverage(source.name, ticker, "trades", a, top())
+        span = (a, top())
+    finally:  # also when a cap stops the run: build what is complete
+        if oldest is not None:
+            build_from_ticks(store, source.name, ticker, oldest, top(), rules, log)
+    return saved, span
+
+
+def build_from_ticks(store: Store, source: str, ticker: str, a: int, b: int, rules: dict | None = None,
+                     log: Log = print) -> int:
+    """Build one-second and minute bars from stored ticks for the whole minutes of [a, b) that the
+    feed's tick spans fully hold (a minute cut by a stopped run is built once the rest arrives),
+    and record them in the ledger as built from ticks. Works a day at a time. Returns bars built."""
+    from .ticks import build_bars
+
+    minute = 60_000
+    spans = store.coverage(ticker, "trades").get(source, [])
+    span = next(((x, y) for x, y in spans if x < b and y > a), None)  # the merged span holding [a, b)
+    if span is None:
+        return 0
+    # minutes touching [a, b), but only those entirely inside the held span
+    lo = max(a // minute * minute, -(-span[0] // minute) * minute)
+    hi = min(-(-b // minute) * minute, span[1] // minute * minute)
+    if hi <= lo:
+        return 0
+    rules = rules if rules is not None else store.condition_rules()
+    built, unknown = 0, set()
+    day = 86_400_000
+    start = lo
+    while start < hi:
+        end = min(hi, (start // day + 1) * day)
+        ticks = store.trades_between(source, ticker, start * 1_000_000, end * 1_000_000)
+        for step, timespan in ((1_000_000_000, "second"), (60_000_000_000, "minute")):
+            bars, unk = build_bars(ticks, step, rules)
+            unknown |= unk
+            built += store.upsert_bars(source, ticker, timespan, 1, bars)
+            store.add_coverage(source, ticker, timespan, start, end, origin="ticks")
+        start = end
+    if unknown:
+        log(f"{ticker}: trade conditions without a rule ({', '.join(sorted(unknown))}): counted as regular")
+    return built
 
 
 def invert_bars(bars: list[dict]) -> list[dict]:
@@ -460,6 +547,7 @@ def sync(
     source: DataSource, store: Store, tier: Tier, now: datetime | None = None, log: Log = print,
     refresh_hours: float = 0.0, on_item: Callable[[str], None] | None = None, only: set[str] | None = None,
     directory_allowance: int = 0, feeds: dict[str, FeedProfile] | None = None, audits: tuple[int, int] = (0, 0),
+    tick_min_free_gb: int = 250,
 ) -> SyncResult:
     """One scheduled run over the watchlist for a source.
 
@@ -482,6 +570,11 @@ def sync(
     me = feeds.get(source.name) or FeedProfile(source.name, tier, frozenset(ASSETS))
     feeds[source.name] = me
     waiting: dict[str, int] = {}
+    tick_state = tick_space(store, tick_min_free_gb)
+    if tick_state != "ok":
+        log(f"ticks: {'paused' if tick_state == 'stop' else 'backfill paused, new ticks only'} "
+            f"({store.kv_get('ticks:backfill-paused')}, TICK_MIN_FREE_GB={tick_min_free_gb})")
+    rules = store.condition_rules()
     try:
         sync_exchanges(source, store, log)
         refresh_calendars(source, store, today, log)
@@ -534,7 +627,12 @@ def sync(
                         listed_from=listing.listed_from, log=log)
             try:
                 if resolution == "trades":
-                    n = sync_trades(source, store, ticker, item_floor, backfilled_to)
+                    # ticks for the recent window, then minute bars for everything before it
+                    n = 0
+                    if tick_state != "stop":
+                        n = sync_trades(source, store, ticker, item_floor, now, me, feeds, fetch=fetch, asset=asset,
+                                        listed_from=listing.listed_from, log=log, rules=rules)
+                    n += sync_bars(source, store, ticker, "minute", item_floor, now, **span)
                 else:
                     n = sync_bars(source, store, ticker, resolution, item_floor, now, **span)
             except NotEntitled as e:
@@ -543,8 +641,7 @@ def sync(
                 store.clear_entitlements(source.name)  # the plan may have changed: probe again
                 continue
             result.rows += n
-            if resolution != "trades":
-                store.set_backfilled(source.name, ticker, item_floor)  # every span it should hold is in
+            store.set_backfilled(source.name, ticker, item_floor)  # every span it should hold is in
             if resolution != "day":
                 try:  # official daily bars (closing auction included) for day/week/month charts
                     n_day = sync_bars(source, store, ticker, "day", item_floor, now, **span)
@@ -673,6 +770,13 @@ def refresh_calendars(source: DataSource, store: Store, today: date, log: Log = 
         pass
     except (NotEntitled, SourceError) as e:
         log(f"calendar: upcoming holidays not available ({e})")
+    try:
+        n = store.save_conditions(source.name, _guard_call(source.trade_conditions))
+        log(f"calendar: {n} trade conditions and their bar rules")
+    except NotImplementedError:
+        pass
+    except (NotEntitled, SourceError) as e:
+        log(f"calendar: trade condition rules not available ({e})")
     products = sorted({w["source_ticker"] for w in store.watchlist(source.name) if w["asset"] == "future"})
     for product in products:
         try:

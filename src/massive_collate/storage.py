@@ -20,8 +20,10 @@ _ET = ZoneInfo("America/New_York")
 if TYPE_CHECKING:
     from .models import Exchange
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS trades (
+# Ticks are kept in their own database file next to the main one (attached as `ticks`): at about
+# 1.5 GB a day for a hundred stocks they would otherwise make the main file slow to back up.
+TICKS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS ticks.trades (
     source     TEXT    NOT NULL,
     ticker     TEXT    NOT NULL,
     ts_ns      INTEGER NOT NULL,     -- SIP timestamp, ns since epoch (UTC)
@@ -34,6 +36,22 @@ CREATE TABLE IF NOT EXISTS trades (
     tape       INTEGER,
     PRIMARY KEY (source, ticker, ts_ns, seq)
 ) WITHOUT ROWID;
+"""
+
+SCHEMA = """
+-- SIP trade conditions and which bar fields each may update (consolidated rules), from the
+-- source's reference data: bars built from ticks follow the same rules as the feeds' own bars.
+CREATE TABLE IF NOT EXISTS conditions (
+    source    TEXT    NOT NULL,
+    id        INTEGER NOT NULL,
+    name      TEXT,
+    cta       TEXT,                -- the condition's letter on tapes A/B (CTA), if any
+    utp       TEXT,                -- its letter on tape C (UTP), if any
+    high_low  INTEGER,             -- updates the bar's high and low
+    open_close INTEGER,            -- updates open and close
+    volume    INTEGER,             -- counts in volume
+    PRIMARY KEY (source, id)
+);
 
 CREATE TABLE IF NOT EXISTS bars (
     source       TEXT    NOT NULL,
@@ -211,9 +229,10 @@ CREATE TABLE IF NOT EXISTS kv (
 CREATE TABLE IF NOT EXISTS coverage (
     source    TEXT    NOT NULL,
     ticker    TEXT    NOT NULL,
-    timespan  TEXT    NOT NULL,
+    timespan  TEXT    NOT NULL,   -- trades | second | minute | day
     start_ms  INTEGER NOT NULL,
     end_ms    INTEGER NOT NULL,
+    origin    TEXT    NOT NULL DEFAULT 'download',  -- download | ticks (bars built here from stored ticks)
     PRIMARY KEY (source, ticker, timespan, start_ms)
 );
 CREATE INDEX IF NOT EXISTS coverage_series ON coverage (ticker, timespan);
@@ -262,6 +281,7 @@ CREATE TABLE IF NOT EXISTS runs (
 
 # Columns added after the first release: (table, column, type). Applied to older databases on open.
 MIGRATIONS = [
+    ("coverage", "origin", "TEXT NOT NULL DEFAULT 'download'"),
     ("watchlist", "exchange", "TEXT"),
     ("watchlist", "listed_from", "TEXT"),
     ("watchlist", "figi", "TEXT"),
@@ -328,13 +348,23 @@ def _bar_row(source: str, ticker: str, timespan: str, multiplier: int, bar: dict
     )
 
 
+def ticks_backup_path(dest: Path) -> Path:
+    """Where a backup's tick file goes: beside it, named after it (open with Store(dest, ticks_path=...))."""
+    return dest.with_name(dest.stem + "-ticks.db")
+
+
 class Store:
-    def __init__(self, path: Path | str, check_same_thread: bool = True):
+    def __init__(self, path: Path | str, check_same_thread: bool = True, ticks_path: Path | str | None = None):
         self.path = Path(path)
-        if str(path) != ":memory:":
+        memory = str(path) == ":memory:"
+        if not memory:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.ticks_path = Path(ticks_path) if ticks_path else (None if memory else self.path.with_name("ticks.db"))
         self.conn = sqlite3.connect(str(path), check_same_thread=check_same_thread)
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("ATTACH DATABASE ? AS ticks", (str(self.ticks_path) if self.ticks_path else ":memory:",))
+        self.conn.execute("PRAGMA ticks.journal_mode=WAL")
+        self._move_trades_table()
         self.conn.executescript(SCHEMA)
         self._migrate()
         # Data-version caches: SQLite's data_version changes when another connection (the
@@ -356,6 +386,17 @@ class Store:
 
     def _wrote(self) -> None:
         self._writes += 1
+
+    def _move_trades_table(self) -> None:
+        """Ticks go to the attached file. An empty `trades` table left in the main file by older
+        versions is dropped (it would shadow the attached one); one holding ticks is kept in use."""
+        main = self.conn.execute("SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='trades'").fetchone()
+        if main and self.conn.execute("SELECT 1 FROM main.trades LIMIT 1").fetchone() is None:
+            with self.conn:
+                self.conn.execute("DROP TABLE main.trades")
+            main = None
+        if not main:
+            self.conn.executescript(TICKS_SCHEMA)
 
     def _migrate(self) -> None:
         with self.conn:
@@ -442,6 +483,19 @@ class Store:
             self.conn.executemany(_UPSERT_BAR, rows)
         self._wrote()
         return len(rows)
+
+    def bars_window(self, sources: Sequence[str], ticker: str, timespan: str, lo_ms: int, hi_ms: int) -> pd.DataFrame:
+        """Bars of a series in [lo, hi) ms from the given feeds (an index range scan per feed), with
+        a `time` column in US/Eastern like load_bars."""
+        frames = [pd.read_sql_query(
+            "SELECT ts, open, high, low, close, volume, vwap, transactions FROM bars WHERE source=? AND ticker=? "
+            "AND timespan=? AND multiplier=1 AND ts >= ? AND ts < ? ORDER BY ts", self.conn,
+            params=(src, ticker.upper(), timespan, int(lo_ms), int(hi_ms))) for src in sources]
+        df = pd.concat(frames) if frames else pd.DataFrame(
+            columns=["ts", "open", "high", "low", "close", "volume", "vwap", "transactions"])
+        df = df.sort_values("ts", kind="stable").drop_duplicates("ts")  # one feed per span: no real duplicates
+        df["time"] = pd.to_datetime(df.pop("ts"), unit="ms", utc=True).dt.tz_convert("America/New_York")
+        return df.reset_index(drop=True)
 
     def bar_range(self, source: str, ticker: str, timespan: str, multiplier: int = 1) -> tuple[int, int] | None:
         """(oldest ts, newest ts) in ms stored for a series, or None if empty."""
@@ -713,21 +767,31 @@ class Store:
 
     STEP_MS = {"minute": 60_000, "hour": 3_600_000, "day": 86_400_000, "week": 7 * 86_400_000}
 
-    def add_coverage(self, source: str, ticker: str, timespan: str, start_ms: int, end_ms: int) -> None:
-        """Record that `source` holds [start, end) of a series, merged with its touching spans."""
+    def add_coverage(self, source: str, ticker: str, timespan: str, start_ms: int, end_ms: int,
+                     origin: str = "download") -> None:
+        """Record that `source` holds [start, end) of a series, merged with its touching spans of
+        the same origin (downloaded, or built here from its stored ticks)."""
         if end_ms <= start_ms:
             return
         ticker = ticker.upper()
         key = (source, ticker, timespan)
         with self.conn:
             rows = self.conn.execute(
-                "SELECT start_ms, end_ms FROM coverage WHERE source=? AND ticker=? AND timespan=? "
-                "AND end_ms >= ? AND start_ms <= ?", (*key, start_ms, end_ms)).fetchall()
+                "SELECT start_ms, end_ms FROM coverage WHERE source=? AND ticker=? AND timespan=? AND origin=? "
+                "AND end_ms >= ? AND start_ms <= ?", (*key, origin, start_ms, end_ms)).fetchall()
             lo = min([start_ms] + [r[0] for r in rows])
             hi = max([end_ms] + [r[1] for r in rows])
             self.conn.executemany("DELETE FROM coverage WHERE source=? AND ticker=? AND timespan=? AND start_ms=?",
                                   [(*key, r[0]) for r in rows])
-            self.conn.execute("INSERT INTO coverage VALUES (?, ?, ?, ?, ?)", (*key, lo, hi))
+            self.conn.execute("INSERT OR REPLACE INTO coverage (source, ticker, timespan, start_ms, end_ms, origin) "
+                              "VALUES (?, ?, ?, ?, ?, ?)", (*key, lo, hi, origin))
+
+    def coverage_detail(self, ticker: str, timespan: str) -> list[tuple[str, str, int, int]]:
+        """(feed, origin, start, end) for every span of a series, oldest first (for attribution)."""
+        self._seed_coverage(ticker.upper(), timespan)
+        return [tuple(r) for r in self.conn.execute(
+            "SELECT source, origin, start_ms, end_ms FROM coverage WHERE ticker=? AND timespan=? ORDER BY start_ms",
+            (ticker.upper(), timespan))]
 
     def coverage(self, ticker: str, timespan: str, source: str | None = None) -> dict[str, list[tuple[int, int]]]:
         """{feed: [(start, end), ...]} for a series, oldest first. Series stored before the ledger
@@ -763,6 +827,47 @@ class Store:
                 d = date.fromisoformat(row[0])
                 start = min(start, int(datetime(d.year, d.month, d.day, tzinfo=_ET).timestamp() * 1000))
             self.add_coverage(src, ticker, timespan, start, r[1] + self.STEP_MS.get(timespan, 60_000))
+
+    def trade_edges(self, source: str, ticker: str) -> tuple[int, int] | None:
+        """(oldest, newest) tick in ns: two index seeks."""
+        key = (source, ticker.upper())
+        lo = self.conn.execute("SELECT MIN(ts_ns) FROM trades WHERE source=? AND ticker=?", key).fetchone()[0]
+        if lo is None:
+            return None
+        return lo, self.conn.execute("SELECT MAX(ts_ns) FROM trades WHERE source=? AND ticker=?", key).fetchone()[0]
+
+    def trades_between(self, source: str, ticker: str, start_ns: int, end_ns: int) -> pd.DataFrame:
+        """Ticks in [start, end) for building bars: ts_ns, price, size, exchange, conditions, tape."""
+        return pd.read_sql_query(
+            "SELECT ts_ns, price, size, exchange, conditions, tape FROM trades WHERE source=? AND ticker=? "
+            "AND ts_ns >= ? AND ts_ns < ? ORDER BY ts_ns, seq", self.conn, params=(source, ticker.upper(), start_ns, end_ns))
+
+    def ticks_bytes(self) -> int:
+        """Size of the tick file (and its write-ahead log)."""
+        if not self.ticks_path:
+            return 0
+        return sum(p.stat().st_size for p in (self.ticks_path, self.ticks_path.with_name(self.ticks_path.name + "-wal"))
+                   if p.exists())
+
+    # -- trade condition rules ------------------------------------------------
+
+    def save_conditions(self, source: str, rows: list[dict]) -> int:
+        with self.conn:
+            self.conn.execute("DELETE FROM conditions WHERE source=?", (source,))
+            self.conn.executemany("INSERT INTO conditions VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [
+                (source, r["id"], r.get("name"), r.get("cta"), r.get("utp"), int(bool(r.get("high_low"))),
+                 int(bool(r.get("open_close"))), int(bool(r.get("volume")))) for r in rows])
+        return len(rows)
+
+    def condition_rules(self) -> dict[tuple[str, str], tuple[bool, bool, bool]]:
+        """{(tape family 'cta'|'utp', letter): (updates high/low, open/close, volume)} from any source."""
+        out = {}
+        for cta, utp, hl, oc, vol in self.conn.execute(
+                "SELECT cta, utp, high_low, open_close, volume FROM conditions"):
+            for fam, letter in (("cta", cta), ("utp", utp)):
+                if letter:
+                    out[(fam, letter)] = (bool(hl), bool(oc), bool(vol))
+        return out
 
     def newest_any(self, ticker: str, timespan: str) -> tuple[str, int] | None:
         """(feed, ms) of the newest bar of a series in any feed: one index seek per feed holding it
@@ -1237,9 +1342,12 @@ class Store:
 
     def summary(self) -> dict:
         q = self.conn.execute
-        trades = q(
-            "SELECT source, ticker, COUNT(*), MIN(ts_ns), MAX(ts_ns) FROM trades GROUP BY source, ticker"
-        ).fetchall()
+        # No counts over the tick file (billions of rows): first and last tick per series by index.
+        trades = []
+        for src, ticker, kind in self.stored_series():
+            if kind == "trades":
+                e = self.trade_edges(src, ticker)
+                trades.append((src, ticker, None, e[0], e[1]))
         bars = q(
             "SELECT source, timespan, multiplier, COUNT(DISTINCT ticker), COUNT(*), MIN(ts), MAX(ts) "
             "FROM bars GROUP BY source, timespan, multiplier"
@@ -1253,8 +1361,13 @@ class Store:
     def vacuum(self) -> None:
         self.conn.execute("VACUUM")
 
-    def backup(self, dest: Path) -> Path:
+    def backup(self, dest: Path, ticks: bool = False) -> Path:
+        """Copy the main file to `dest`; with `ticks`, the tick file too, to `ticks_backup_path(dest)`
+        (it can be hundreds of GB, so it is not copied by default)."""
         dest.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(str(dest))) as target:
             self.conn.backup(target)
+        if ticks:
+            with closing(sqlite3.connect(str(ticks_backup_path(dest)))) as target:
+                self.conn.backup(target, name="ticks")
         return dest
