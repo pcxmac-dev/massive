@@ -504,51 +504,43 @@ CALENDAR_REFRESH_DAYS = 7
 NEWS_REFRESH_MINUTES = 30
 
 
-def fetch_market_moves(source: DataSource, store: Store, now: datetime, proxies: list[str], log: Log = print) -> int:
-    """Closes of the market proxy funds for the two newest trading days (one request per new day:
-    the whole-market daily file), so the globe can colour each exchange by its market's move."""
+def fetch_market_moves(source: DataSource, store: Store, now: datetime, proxies: list[str], log: Log = print,
+                       max_requests: int = 4) -> int:
+    """Closes of the market proxy funds for the two newest trading days that have data (the
+    whole-market daily file: one request per day, once). A day the source has not published yet
+    is asked again at most every 3 hours. The globe colours each exchange by this move."""
     now = now.astimezone(ET)
-    newest = now.date() if now.hour >= EOD_READY_HOUR_ET else now.date() - timedelta(days=1)
     have = set(store.proxy_days(source.name))
-    days, d = [], newest
-    while len(days) < 2 and (newest - d).days < 10:
-        if freshness.is_trading_day(d):
-            days.append(d)
-        d -= timedelta(days=1)
-    used = 0
-    for day in days:
-        if day in have:
+    used, found, d = 0, 0, now.date()
+    while found < 2 and used < max_requests and (now.date() - d).days < 10:
+        if not freshness.is_trading_day(d):
+            d -= timedelta(days=1)
+            continue
+        if d in have:
+            found += 1
+            d -= timedelta(days=1)
+            continue
+        key = f"proxy-empty:{source.name}:{d}"
+        tried = store.kv_get(key)
+        if tried and (now - datetime.fromisoformat(tried)).total_seconds() < 3 * 3600:
+            d -= timedelta(days=1)  # not published at the last try: skip for now
             continue
         try:
-            bars = _guard_call(source.market_daily, day)
+            bars = _guard_call(source.market_daily, d)
         except (NotEntitled, SourceError, NotImplementedError) as e:
-            log(f"market moves: {day} not available ({e})")
+            log(f"market moves: {d} not available ({e})")
             break
         used += 1
         closes = {b["T"]: b["c"] for b in bars if b.get("T") in proxies and b.get("c")}
         if closes:
-            store.save_proxy_closes(source.name, day, closes)
-            log(f"market moves: {day}, {len(closes)} market proxies")
+            store.save_proxy_closes(source.name, d, closes)
+            found += 1
+            log(f"market moves: {d}, {len(closes)} market proxies")
+        else:
+            store.kv_set(key, now.isoformat())
+            log(f"market moves: {d} not published yet")
+        d -= timedelta(days=1)
     return used
-
-
-
-def fetch_news(source: DataSource, store: Store, now: datetime, log: Log = print) -> int:
-    """Newest headlines (one request, at most every 30 minutes) for the announcements ticker."""
-    key = f"news:{source.name}"
-    last = store.kv_get(key)
-    if last and (now - datetime.fromisoformat(last)).total_seconds() < NEWS_REFRESH_MINUTES * 60:
-        return 0
-    newest = store.latest_news_ms(source.name)
-    since = datetime.fromtimestamp(newest / 1000, timezone.utc) if newest else now - timedelta(days=2)
-    try:
-        n = store.save_news(source.name, _guard_call(source.news, since, 100))
-        log(f"news: {n} headlines")
-    except (NotEntitled, SourceError, NotImplementedError) as e:
-        log(f"news: not available ({e})")
-    store.kv_set(key, now.isoformat())
-    return 1
-
 
 
 def refresh_calendars(source: DataSource, store: Store, today: date, log: Log = print) -> int:

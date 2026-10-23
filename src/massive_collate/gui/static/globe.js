@@ -651,8 +651,10 @@
         ${rows.map((m) => `
           <div class="mk-row" data-code="${esc(m.code)}">
             <span class="mk-dot" style="background:${STATE_COLOR[m.state] || STATE_COLOR.unknown}"></span>
-            <div class="mk-main"><b>${esc(m.city)}</b> <span class="p-muted small">${esc(m.index)}</span>
-              <div class="p-muted small">${esc(m.name)} · ${esc(localTime(m.timezone))}
+            <div class="mk-main"><b${m.performance ? ` style="color:${perfColor(m.performance.changePct)}"` : ''}>${esc(m.city)}</b>
+              <span class="p-muted small">${esc(m.index)}</span>
+              ${m.performance ? `<span class="small" style="color:${perfColor(m.performance.changePct)}" title="Latest daily move of ${esc(m.performance.proxy)}, a US-listed fund tracking this market (USD, ${esc(m.performance.day)})">${m.performance.changePct >= 0 ? '+' : ''}${m.performance.changePct.toFixed(2)}% <span class="p-muted">${esc(m.performance.proxy)}</span></span>` : ''}
+              <div class="p-muted small"><span${m.performance ? ` style="color:${perfColor(m.performance.changePct)}"` : ''}>${esc(m.name)}</span> · ${esc(localTime(m.timezone))}
                 ${m.today ? ` · ${esc(m.today.open)}–${esc(m.today.close)}${m.today.break ? ` (lunch ${esc(m.today.break)})` : ''}` : m.state !== 'unknown' ? ' · no session today' : ''}</div>
               ${m.holidays?.length ? `<div class="small mk-hol">Holidays: ${m.holidays.map(esc).join(', ')}</div>` : ''}
               ${m.calendarEnds && m.calendarEnds < new Date(Date.now() + 60 * 864e5).toISOString().slice(0, 10)

@@ -113,3 +113,29 @@ def test_proxy_moves_colour_the_exchanges(tmp_path):
     assert out["XTKS"]["performance"] == {"proxy": "EWJ", "day": "2026-10-22", "close": 103.0, "changePct": moves["EWJ"]["changePct"]}
     assert out["XKRX"]["performance"]["changePct"] < 0 and out["XNYS"]["performance"]["changePct"] == 0
     assert "performance" not in out["XPRA"]  # no US-listed proxy for Prague
+
+
+def test_market_moves_skip_an_unpublished_day(tmp_path):
+    from datetime import date
+
+    from massive_collate.collector import ET, fetch_market_moves
+    from massive_collate.storage import Store
+
+    class Src:
+        name = "massive"
+        calls = []
+
+        def market_daily(self, day):
+            self.calls.append(day)
+            if day == date(2026, 10, 22):
+                return []  # not published yet
+            return [{"T": "EWJ", "c": 100.0 + day.day}, {"T": "AAPL", "c": 1.0}]
+
+    src = Src()
+    with Store(tmp_path / "m.db") as store:
+        now = datetime(2026, 10, 22, 23, 0, tzinfo=ET)
+        used = fetch_market_moves(src, store, now, ["EWJ"], log=lambda m: None)
+        assert used == 3 and store.proxy_days("massive") == [date(2026, 10, 20), date(2026, 10, 21)]
+        assert round(store.proxy_moves()["EWJ"]["changePct"], 4) == round((121 / 120 - 1) * 100, 4)
+        src.calls.clear()
+        assert fetch_market_moves(src, store, now, ["EWJ"], log=lambda m: None) == 0  # nothing re-asked
