@@ -86,6 +86,8 @@ class Instrument:
     list_date: date | None = None
     figi: str | None = None
     active: bool = True
+    # The source's reference record as received (description, market cap, address, ...).
+    details: dict = field(default_factory=dict, compare=False, hash=False)
 
     @property
     def country(self) -> Country | None:

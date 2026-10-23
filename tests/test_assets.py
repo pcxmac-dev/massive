@@ -31,7 +31,9 @@ def test_index_is_fetched_by_source_ticker_without_listing_check(store):
     store.watch_spec("fake", resolve("IXIC"))
     src = FakeSource(entitled=("minute",), bars={"minute": [{"t": _ms(date(2026, 10, 20)), "o": 1, "h": 1, "l": 1, "c": 1}]})
     sync(src, store, FREE, NOW, log=_log)
-    assert src.instrument_calls == 0
+    sync(src, store, FREE, NOW + timedelta(days=1), log=_log)
+    assert src.instrument_calls == 1  # reference details only, at most weekly; no listing/identity check
+    assert store.details("fake", "IXIC") is not None
     assert all(call[0] == "I:COMP" and call[4] == "index" for call in src.bar_calls)
     assert ("second", "I:COMP", "index") in src.probed
     assert store.bar_range("fake", "IXIC", "minute") is not None
@@ -45,6 +47,17 @@ def test_inverted_fx_pair_is_stored_inverted(store):
     assert all(call[0] == "C:EURUSD" for call in src.bar_calls)
     df = store.load_bars(["USDEUR"], "minute", source="fake")
     assert df["close"].iloc[0] == pytest.approx(0.8)
+
+
+def test_inverted_pair_is_named_as_the_inverse(store):
+    from massive_collate.models import Instrument
+
+    store.watch_spec("fake", resolve("USDEUR"))
+    src = FakeSource(entitled=("minute",), listing=Instrument("C:EURUSD", name="Euro - United States dollar",
+                                                             details={"name": "Euro - United States dollar"}))
+    sync(src, store, FREE, NOW, log=_log)
+    name = "Euro - United States dollar, inverted (USD priced in EUR)"
+    assert store.details("fake", "USDEUR")["name"] == name and store.watchlist("fake")[0]["name"] == name
 
 
 def _nq_source():

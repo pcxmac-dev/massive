@@ -56,6 +56,7 @@
     <button id="zoomOut" title="Zoom out (-)">&minus;</button>
     <button id="zoomIn" title="Zoom in (+)">+</button>
     <button id="latestBtn" title="Jump to latest bar (End)">Latest</button>
+    <button id="panelBtn" class="toggle" title="Show / hide the info panel">Info</button>
     <button id="gpuBtn" class="toggle" title="GPU rendering (WebGL2 / OpenGL ES 3)">GPU</button>
     <button id="shotBtn" title="Save a PNG of the chart">PNG</button>
     <button id="themeBtn" title="Light / dark">Theme</button>
@@ -63,6 +64,14 @@
   <main>
     <nav id="tools" aria-label="Drawing tools"></nav>
     <div id="chart"></div>
+    <div id="panelResizer" role="separator" aria-orientation="vertical" aria-label="Resize info panel" tabindex="0"></div>
+    <aside id="sidePanel" aria-label="Symbol information">
+      <section id="pSymbol"></section>
+      <section id="pHighlight"></section>
+      <section id="pStats"></section>
+      <section id="pBusiness"></section>
+      <section id="pData"></section>
+    </aside>
   </main>
   <footer id="status"><span id="statusText">Loading…</span><span id="error" role="alert"></span></footer>
 

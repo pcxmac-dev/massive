@@ -94,6 +94,14 @@ CREATE TABLE IF NOT EXISTS futures_rolls (
     PRIMARY KEY (source, product, rank, session)
 );
 
+CREATE TABLE IF NOT EXISTS instrument_details (
+    source     TEXT NOT NULL,
+    ticker     TEXT NOT NULL,
+    data       TEXT NOT NULL,        -- JSON reference record from the source
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (source, ticker)
+);
+
 CREATE TABLE IF NOT EXISTS layouts (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT NOT NULL,
@@ -506,6 +514,18 @@ class Store:
                 "UPDATE watchlist SET backfilled_to=? WHERE source=? AND ticker=?",
                 (day.isoformat() if day else None, source, ticker.upper()),
             )
+
+    # -- reference details -------------------------------------------------
+
+    def set_details(self, source: str, ticker: str, data: dict) -> None:
+        with self.conn:
+            self.conn.execute("INSERT OR REPLACE INTO instrument_details VALUES (?, ?, ?, ?)",
+                              (source, ticker.upper(), json.dumps(data), _now()))
+
+    def details(self, source: str, ticker: str) -> dict | None:
+        row = self.conn.execute("SELECT data, updated_at FROM instrument_details WHERE source=? AND ticker=?",
+                                (source, ticker.upper())).fetchone()
+        return {**json.loads(row[0]), "_updated_at": row[1]} if row else None
 
     # -- chart layouts (saved markups) --------------------------------------
 

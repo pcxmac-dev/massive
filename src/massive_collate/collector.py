@@ -308,7 +308,7 @@ def check_listing(source: DataSource, store: Store, item: dict, today: date, log
     Costs one request per ticker per week.
     """
     ticker, checked = item["ticker"], item["checked_at"]
-    if checked and (today - checked).days < LISTING_RECHECK_DAYS:
+    if checked and (today - checked).days < LISTING_RECHECK_DAYS and store.details(source.name, ticker):
         return Listing(True, item["listed_from"])
     try:
         inst = _guard_call(source.instrument, ticker, resolve_exchange=False)
@@ -335,7 +335,32 @@ def check_listing(source: DataSource, store: Store, item: dict, today: date, log
         if item["backfilled_to"] and item["backfilled_to"] < inst.list_date:
             store.set_backfilled(source.name, ticker, inst.list_date)
     store.set_listing(source.name, ticker, inst.list_date, inst.figi, today, inst.name, inst.kind)
+    store.set_details(source.name, ticker, inst.details or {"unavailable": "no reference record"})
     return Listing(True, inst.list_date)
+
+
+def check_reference(source: DataSource, store: Store, item: dict, today: date, log: Log = print) -> None:
+    """Reference details (name, description, ...) for an index or currency pair, at most weekly.
+    A refusal is recorded too, so it is not retried every run."""
+    ticker = item["ticker"]
+    have = store.details(source.name, ticker)
+    if have and (today - date.fromisoformat(have["_updated_at"][:10])).days < LISTING_RECHECK_DAYS:
+        return
+    try:
+        inst = _guard_call(source.instrument, item["source_ticker"], resolve_exchange=False)
+    except NotEntitled as e:
+        store.set_details(source.name, ticker, {"unavailable": e.message})
+        log(f"{ticker}: reference data not available on your plan")
+        return
+    details = dict(inst.details or {"unavailable": "no reference record"})
+    name = inst.name
+    if item["invert"] and name:
+        # The record describes the source's pair (EURUSD); this symbol is its inverse.
+        name = f"{name}, inverted ({ticker[:3]} priced in {ticker[3:]})"
+        details["name"] = name
+    store.set_details(source.name, ticker, details)
+    if name and item.get("name") != name:
+        store.set_listing(source.name, ticker, None, None, today, name, item["asset"])
 
 
 # -- scheduled run -----------------------------------------------------------
@@ -385,6 +410,7 @@ def sync(source: DataSource, store: Store, tier: Tier, now: datetime | None = No
                 if not listing.ok:
                     continue
             else:
+                check_reference(source, store, item, today, log)
                 listing = Listing(True)
             item_floor = max(floor, listing.listed_from) if listing.listed_from else floor
             item = next(w for w in store.watchlist(source.name) if w["ticker"] == ticker)

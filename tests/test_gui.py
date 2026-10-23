@@ -280,6 +280,28 @@ def test_lod_applies_to_bricks_but_not_kagi(tmp_path):
     assert "lod" not in kagi["style"]  # drawn from per-segment fields: never aggregated
 
 
+def test_info_combines_symbol_details_stats_and_coverage(tmp_path):
+    s = _store_with_bars(tmp_path)
+    s.set_details("massive", "SPCX", {"name": "Space Exploration Technologies Corp.", "market_cap": 1.9e12,
+                                      "description": "Rockets.", "branding": {"logo_url": "x"}})
+    day = int(pd.Timestamp("2026-10-20", tz=ET).timestamp() * 1000)
+    s.upsert_bars("massive", "SPCX", "day", 1, [{"t": day, "o": 10, "h": 11, "l": 9, "c": 10.77, "v": 123456}])
+    info = ChartApp(s).info("*", "SPCX")
+    assert info["symbol"]["ticker"] == "SPCX" and info["symbol"]["exchange"] == "XNAS"
+    assert info["details"] == {"name": "Space Exploration Technologies Corp.", "market_cap": 1.9e12,
+                               "description": "Rockets."}
+    assert info["stats"]["last"] == 10.77 and info["stats"]["day"]["volume"] == 123456
+    assert info["data"]["rows"] == 390 and info["data"]["officialDaily"] is True
+    with pytest.raises(LookupError):
+        ChartApp(s).info("massive", "NOPE")
+
+
+def test_info_for_futures_reports_contract(tmp_path):
+    info = ChartApp(_future_store(tmp_path)).info("massive", "NQ1!")
+    assert info["futures"]["contract"] == "NQZ6" and info["futures"]["rolls"] == 1
+    assert info["symbol"]["asset"] == "future" and info["stats"]["last"] == 113.0
+
+
 def test_daily_uses_official_bars(tmp_path):
     s = _store_with_bars(tmp_path)
     day = int(pd.Timestamp("2026-10-20 00:00", tz=ET).timestamp() * 1000)

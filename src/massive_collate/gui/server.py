@@ -11,7 +11,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from ..storage import LayoutLimit, Store
-from .bars import BarEngine, Style
+from .bars import BarEngine, Style, resample
+from .stats import details_subset, key_stats
 
 STATIC = Path(__file__).parent / "static"
 MAX_LIMIT = 20000
@@ -85,6 +86,41 @@ class ChartApp:
             since_ms=int(q["since"]) if q.get("since") else None,
             limit=limit, style=style, adjust=_adjust(q.get("adjust")), lod=int(q.get("lod", 1)),
         )
+
+    def info(self, source: str, ticker: str, adjust: str = "none") -> dict:
+        """Side panel: symbol, business details, key statistics and data coverage."""
+        s = self.engine.series(source, ticker, _adjust(adjust))
+        if s is None or s.frame.empty:
+            raise LookupError(f"no data stored for {source}:{ticker}")
+        feeds = self.engine.sources_for(s.ticker) if source == "*" else [source]
+        with self._lock:
+            watch = next((w for w in self.store.watchlist() if w["ticker"] == s.ticker and w["source"] in feeds), {})
+            details = next((d for d in (self.store.details(f, s.ticker) for f in feeds) if d), None)
+            exchanges = self.store.exchanges()
+        daily = s.daily if s.daily is not None and not s.daily.empty else resample(s.frame, "day", 1, "extended")
+        mic = watch.get("exchange") or (details or {}).get("primary_exchange")
+        names = {r.mic: r.name for r in exchanges.itertuples() if r.mic}
+        out = {
+            "symbol": {
+                "ticker": s.ticker, "name": watch.get("name") or (details or {}).get("name"),
+                "asset": s.asset, "kind": watch.get("kind"), "exchange": mic, "exchangeName": names.get(mic, mic),
+                "sourceTicker": watch.get("source_ticker"), "inverted": bool(watch.get("invert")),
+                "listed": str(watch["listed_from"]) if watch.get("listed_from") else None,
+                "figi": watch.get("figi"),
+            },
+            "details": details_subset(details),
+            "detailsUpdated": (details or {}).get("_updated_at"),
+            "stats": key_stats(daily),
+            "data": {
+                "feeds": feeds, "base": s.kind, "rows": int(len(s.frame)),
+                "first": s.frame.index[0].isoformat(), "last": s.frame.index[-1].isoformat(),
+                "officialDaily": s.daily is not None, "pricePrecision": s.price_precision,
+            },
+        }
+        if s.asset == "future" and s.rolls:
+            out["futures"] = {"contract": s.rolls[-1]["to"], "rolls": len(s.rolls), "lastRoll": s.rolls[-1],
+                              "adjust": s.adjust}
+        return out
 
     def range_stats(self, q: dict[str, str]) -> dict:
         return self.engine.range_stats(
@@ -226,6 +262,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.meta(q["source"], q["ticker"], q.get("adjust")))
                 if url.path == "/api/bars":
                     return self._json(app.bars(q))
+                if url.path == "/api/info":
+                    return self._json(app.info(q["source"], q["ticker"], q.get("adjust")))
                 if url.path == "/api/range":
                     return self._json(app.range_stats(q))
                 if url.path == "/api/exchanges":

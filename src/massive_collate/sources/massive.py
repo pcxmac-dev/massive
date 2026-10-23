@@ -190,6 +190,7 @@ class MassiveSource(DataSource):
             list_date=date.fromisoformat(list_date) if list_date else None,
             figi=r.get("composite_figi"),
             active=bool(r.get("active", True)) and not r.get("delisted_utc"),
+            details=r,
         )
 
     def market_daily(self, day: date) -> list[dict]:

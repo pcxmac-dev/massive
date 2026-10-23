@@ -80,6 +80,40 @@ main { flex: 1; display: flex; min-height: 0; }
 #chart { flex: 1; min-width: 0; }
 .gpu-layer { position: absolute; left: 0; top: 0; pointer-events: none; }
 
+/* Right-hand info panel (resizable) */
+#panelResizer { width: 5px; cursor: col-resize; background: var(--border); flex: none; }
+#panelResizer:hover, #panelResizer.dragging, #panelResizer:focus-visible { background: var(--accent); outline: none; }
+#sidePanel {
+  width: var(--panel-w, 320px); flex: none; overflow-y: auto; background: var(--panel);
+  font-size: 12px; line-height: 1.45;
+}
+body.panel-hidden #sidePanel, body.panel-hidden #panelResizer { display: none; }
+#sidePanel section { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+#sidePanel section:empty { display: none; }
+#sidePanel h3 { margin: 0 0 6px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em;
+  display: flex; justify-content: space-between; align-items: center; }
+#sidePanel h3 button { font-size: 11px; padding: 1px 6px; text-transform: none; letter-spacing: 0; }
+.p-ticker { font-size: 18px; font-weight: 700; }
+.p-name { color: var(--muted); margin-bottom: 6px; }
+.p-price { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.p-chip { display: inline-block; font-size: 11px; padding: 0 6px; border: 1px solid var(--border); border-radius: 10px;
+  color: var(--muted); margin-right: 4px; }
+.up { color: var(--up); }
+.down { color: var(--down); }
+.mid { color: #f0b90b; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-variant-numeric: tabular-nums; }
+.kv dt { color: var(--muted); white-space: nowrap; }
+.kv dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+.kv dd small { color: var(--muted); }
+.perf { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 4px; }
+.perf div { background: var(--bg); border-radius: 4px; padding: 4px; text-align: center; font-variant-numeric: tabular-nums; }
+.perf span { display: block; font-size: 10px; color: var(--muted); }
+.p-sub { margin: 8px 0 4px; font-size: 11px; font-weight: 600; }
+.p-desc { color: var(--text); margin: 0 0 8px; }
+.p-desc.clamp { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.p-muted { color: var(--muted); }
+#sidePanel a { color: var(--accent); }
+
 #status {
   display: flex; gap: 16px; justify-content: space-between;
   padding: 3px 10px; border-top: 1px solid var(--border); background: var(--panel); color: var(--muted);

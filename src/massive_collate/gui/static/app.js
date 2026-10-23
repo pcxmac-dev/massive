@@ -104,9 +104,27 @@ function requestRangeStats(overlay, key, pa, pb) {
         source: sym.source, ticker: sym.ticker, period: p.type, span: p.span, session: state.session,
         from: pa.timestamp, to: pb.timestamp, adjust: state.adjust,
       });
-      chart.overrideOverlay({ id: overlay.id, extendData: { ...(overlay.extendData || {}), key, stats } });
+        chart.overrideOverlay({ id: overlay.id, extendData: { ...(overlay.extendData || {}), key, stats } });
+      scheduleHighlightPanel();  // also when the highlight is off-screen and not redrawn
     } catch (err) { showError(err); }
   }, 150));
+}
+
+// Everything the highlight shows, computed once: start, center and end points, the change
+// between them, and the server's exact statistics for the bars inside it (when arrived).
+function highlightSummary(pa, pb, st) {
+  const chg = (a, b) => ({ abs: b - a, pct: a ? ((b - a) / a) * 100 : null });
+  const midPrice = (pa.value + pb.value) / 2;
+  const midTime = Math.round((pa.timestamp + pb.timestamp) / 2);
+  const indexBars = pa.dataIndex != null && pb.dataIndex != null ? Math.abs(pb.dataIndex - pa.dataIndex) + 1 : null;
+  return {
+    up: pb.value >= pa.value,
+    start: { price: pa.value, time: pa.timestamp },
+    mid: { price: midPrice, time: midTime, fromStart: chg(pa.value, midPrice), toEnd: chg(midPrice, pb.value) },
+    end: { price: pb.value, time: pb.timestamp, change: chg(pa.value, pb.value),
+           bars: st ? st.bars : (indexBars ?? '…'), duration: pb.timestamp - pa.timestamp },
+    stats: st && st.bars ? st : null,
+  };
 }
 
 const LABEL_SIZE = 12;
@@ -162,21 +180,20 @@ kc.registerOverlay({
     const [pa, pb] = overlay.points;
     if (pa.value == null || pb.value == null || pa.timestamp == null || pb.timestamp == null) return [];
     const prec = c.getSymbol()?.pricePrecision ?? 2;
-    const up = pb.value >= pa.value;
-    const color = up ? UP : DOWN;
     const left = Math.min(a.x, b.x), right = Math.max(a.x, b.x);
     const top = Math.min(a.y, b.y), bottom = Math.max(a.y, b.y);
     const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
-    const midPrice = (pa.value + pb.value) / 2;
-    const midTime = Math.round((pa.timestamp + pb.timestamp) / 2);
 
     const key = statsKey(pa, pb);
     const ext = overlay.extendData || {};
     if (ext.key !== key) requestRangeStats(overlay, key, pa, pb);
     const st = ext.key === key ? ext.stats : null;
-    // Exact count from the server once known; until then from the chart's indexes.
-    const bars = st ? st.bars
-      : (pa.dataIndex != null && pb.dataIndex != null ? Math.abs(pb.dataIndex - pa.dataIndex) + 1 : '…');
+    // One summary feeds both these labels and the side panel, so they always agree.
+    const sum = highlightSummary(pa, pb, st);
+    scheduleHighlightPanel();
+    const { up } = sum;
+    const color = up ? UP : DOWN;
+    const midPrice = sum.mid.price, midTime = sum.mid.time, bars = sum.end.bars;
 
     const aLeft = a.x <= b.x;
     const shapes = [
@@ -695,6 +712,7 @@ async function selectSymbol(ticker, source = MERGED) {
     ticker: meta.ticker, source, name: info.name || meta.ticker,
     pricePrecision: meta.pricePrecision, volumePrecision: meta.volumePrecision,
   });
+  loadInfo();  // side panel: symbol, statistics, business details
 }
 
 function renderFeeds(info) {
@@ -907,7 +925,11 @@ function overlayEvents() {
   return {
     onDrawEnd: () => { state.drawingId = null; setActiveTool('cursor'); saveDrawings(); },
     onPressedMoveEnd: saveDrawings,
-    onRemoved: () => { state.selectedOverlay = null; saveDrawings(); },
+    onRemoved: (e) => {
+      state.selectedOverlay = null;
+      if (e?.overlay?.name === 'measure') scheduleHighlightPanel();
+      saveDrawings();
+    },
     onSelected: (e) => { state.selectedOverlay = e.overlay.id; },
     onDeselected: () => { state.selectedOverlay = null; },
     onRightClick: (e) => { chart.removeOverlay({ id: e.overlay.id }); },
@@ -917,6 +939,8 @@ function overlayEvents() {
 function startDrawing(name) {
   cancelDrawing();
   if (name === 'cursor') { setActiveTool('cursor'); return; }
+  // One highlight at a time: a new one replaces the previous one.
+  if (name === 'measure') chart.removeOverlay({ groupId: 'user', name: 'measure' });
   const create = { name, groupId: 'user', mode: state.magnet, ...overlayEvents() };
   if (name === 'simpleAnnotation') {
     const text = prompt('Note text');
@@ -999,13 +1023,17 @@ function saveDrawings() {
 function restoreDrawings() {
   if (state.restoredFor === state.ticker) return;
   chart.removeOverlay({ groupId: 'user' });
-  for (const d of layout.current?.data.drawings?.[state.ticker] || []) {
+  const saved = layout.current?.data.drawings?.[state.ticker] || [];
+  const lastHighlight = saved.map((d) => d.name).lastIndexOf('measure');  // one highlight at a time
+  for (const [i, d] of saved.entries()) {
+    if (d.name === 'measure' && i !== lastHighlight) continue;
     chart.createOverlay({
       name: d.name, groupId: 'user', points: d.points, lock: d.lock, visible: d.visible,
       extendData: d.extendData ?? undefined, styles: d.styles ?? undefined, ...overlayEvents(),
     });
   }
   state.restoredFor = state.ticker;
+  scheduleHighlightPanel();
 }
 
 // -- layouts (saved markups), like TradingView's layout menu ------------------------
@@ -1315,8 +1343,202 @@ function updateStatus(loaded) {
   $('statusText').textContent = parts.join('  |  ');
 }
 
+// -- side panel (like TradingView's right-hand panel) ------------------------------------
+// Symbol header, the highlight's full statistics, key stats from local daily bars,
+// business details (saved by the weekly listing check) and data coverage. Resizable.
+const PANEL_MIN = 220;
+state.info = null;
+state.hl = null;
+
+function panelMax() { return Math.max(PANEL_MIN, Math.min(760, window.innerWidth * 0.6)); }
+
+function setPanelWidth(w, save = true) {
+  const width = Math.round(Math.min(panelMax(), Math.max(PANEL_MIN, w)));
+  document.documentElement.style.setProperty('--panel-w', `${width}px`);
+  if (save) prefs.set('panelWidth', width);
+  requestAnimationFrame(() => chart.resize());
+}
+
+function setPanelHidden(hidden) {
+  document.body.classList.toggle('panel-hidden', hidden);
+  $('panelBtn').classList.toggle('on', !hidden);
+  prefs.set('panelHidden', hidden);
+  requestAnimationFrame(() => chart.resize());
+}
+
+(function initPanel() {
+  setPanelWidth(prefs.get('panelWidth', 320), false);
+  setPanelHidden(prefs.get('panelHidden', false));
+  $('panelBtn').addEventListener('click', () => setPanelHidden(!document.body.classList.contains('panel-hidden')));
+  const grip = $('panelResizer');
+  grip.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    grip.setPointerCapture(e.pointerId);
+    grip.classList.add('dragging');
+    const right = $('sidePanel').getBoundingClientRect().right;
+    const move = (ev) => setPanelWidth(right - ev.clientX);
+    const up = () => { grip.classList.remove('dragging'); grip.removeEventListener('pointermove', move); };
+    grip.addEventListener('pointermove', move);
+    grip.addEventListener('pointerup', up, { once: true });
+    grip.addEventListener('pointercancel', up, { once: true });
+  });
+  grip.addEventListener('keydown', (e) => {
+    const w = $('sidePanel').getBoundingClientRect().width;
+    if (e.key === 'ArrowLeft') setPanelWidth(w + 16);
+    else if (e.key === 'ArrowRight') setPanelWidth(w - 16);
+  });
+  window.addEventListener('resize', () => setPanelWidth($('sidePanel').getBoundingClientRect().width || 320, false));
+})();
+
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+function prec() { return state.meta?.pricePrecision ?? 2; }
+function priceText(v) { return v == null ? '–' : Number(v).toFixed(prec()); }
+function signedPx(v) { return v == null ? '–' : `${v >= 0 ? '+' : ''}${Number(v).toFixed(prec())}`; }
+function pct(v) { return v == null ? '–' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`; }
+function cls(v) { return v == null ? '' : v >= 0 ? 'up' : 'down'; }
+function big(v) { return v == null ? '–' : compact(v); }
+function dateOnly(ms) {
+  return ms == null ? '–' : new Intl.DateTimeFormat('en-US', { timeZone: TZ, year: 'numeric', month: 'short', day: '2-digit' }).format(new Date(ms));
+}
+function kv(rows) {
+  return `<dl class="kv">${rows.filter(Boolean).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl>`;
+}
+
+async function loadInfo() {
+  if (!state.ticker) return;
+  try {
+    state.info = await api('/api/info', { source: state.source, ticker: state.ticker, adjust: state.adjust });
+  } catch (err) {
+    state.info = null;
+    showError(err);
+  }
+  renderPanel();
+}
+setInterval(() => { if (!document.body.classList.contains('panel-hidden')) loadInfo(); }, POLL_MS);
+
+function renderPanel() {
+  const info = state.info;
+  if (!info) { ['pSymbol', 'pStats', 'pBusiness', 'pData'].forEach((id) => { $(id).innerHTML = ''; }); return; }
+  const { symbol: sy, stats: st = {}, details: dt = {}, data } = info;
+  const chips = [sy.asset, sy.exchangeName || sy.exchange, sy.inverted ? `inverse of ${sy.sourceTicker}` : null]
+    .filter(Boolean).map((c) => `<span class="p-chip">${esc(c)}</span>`).join('');
+  $('pSymbol').innerHTML = `
+    <div class="p-ticker">${esc(sy.ticker)}</div>
+    <div class="p-name">${esc(sy.name || dt.name || '')}</div>
+    <div>${chips}</div>
+    <div class="p-price">${priceText(st.last)} <small class="${cls(st.change)}">${signedPx(st.change)} (${pct(st.changePct)})</small></div>
+    <div class="p-muted">last session ${dateOnly(st.asOf)}${info.futures ? ` · contract ${esc(info.futures.contract)}` : ''}</div>`;
+
+  const perf = st.performance || {};
+  $('pStats').innerHTML = st.last == null ? '' : `
+    <h3>Key statistics</h3>
+    ${kv([
+      ['Open', priceText(st.day?.open)], ['Day range', `${priceText(st.day?.low)} – ${priceText(st.day?.high)}`],
+      ['Volume', big(st.day?.volume)], ['Avg volume (30)', big(st.avgVolume30)],
+      ['Prev close', priceText(st.prevClose)],
+      ['52-week range', `${priceText(st.range52w?.low)} – ${priceText(st.range52w?.high)}${st.range52w?.sessions < 252 ? ` <small>(${st.range52w.sessions} sessions)</small>` : ''}`],
+      ['All-time high', `${priceText(st.rangeAll?.high)} <small>${dateOnly(st.rangeAll?.highTime)}</small>`],
+      ['All-time low', `${priceText(st.rangeAll?.low)} <small>${dateOnly(st.rangeAll?.lowTime)}</small>`],
+      ['Volatility (30d, ann.)', st.volatility30 == null ? '–' : `${st.volatility30.toFixed(1)}%`],
+    ])}
+    <div class="p-sub">Performance</div>
+    <div class="perf">${['1W', '1M', '3M', '6M', 'YTD', '1Y', 'All'].map((k) =>
+      `<div class="${cls(perf[k])}"><span>${k}</span>${pct(perf[k])}</div>`).join('')}</div>`;
+
+  const addr = dt.address ? [dt.address.address1, dt.address.city, dt.address.state, dt.address.postal_code].filter(Boolean).join(', ') : null;
+  const site = dt.homepage_url && /^https?:\/\//i.test(dt.homepage_url) ? `<a href="${esc(dt.homepage_url)}" target="_blank" rel="noopener noreferrer">${esc(dt.homepage_url.replace(/^https?:\/\//i, ''))}</a>` : null;
+  const fut = info.futures;
+  $('pBusiness').innerHTML = `
+    <h3>${sy.asset === 'stock' ? 'Company' : sy.asset === 'future' ? 'Contract' : 'About'}</h3>
+    ${dt.description ? `<p class="p-desc clamp" id="pDesc">${esc(dt.description)}</p>` : ''}
+    ${kv([
+      dt.sic_description && ['Industry', esc(dt.sic_description)],
+      dt.market_cap && ['Market cap', `${big(dt.market_cap)} ${esc((dt.currency_name || '').toUpperCase())}`],
+      dt.share_class_shares_outstanding && ['Shares outstanding', big(dt.share_class_shares_outstanding)],
+      dt.total_employees && ['Employees', Number(dt.total_employees).toLocaleString()],
+      (sy.listed || dt.list_date) && ['Listed', esc(sy.listed || dt.list_date)],
+      site && ['Website', site],
+      addr && ['Address', esc(addr)],
+      dt.phone_number && ['Phone', esc(dt.phone_number)],
+      (sy.figi || dt.composite_figi) && ['FIGI', esc(sy.figi || dt.composite_figi)],
+      dt.cik && ['CIK', esc(dt.cik)],
+      fut && ['Front contract', esc(fut.contract)],
+      fut && ['Rolls', `${fut.rolls} · last ${esc(fut.lastRoll.session)} (${esc(fut.lastRoll.from)} → ${esc(fut.lastRoll.to)})`],
+      fut && ['Prices', fut.adjust === 'none' ? 'as traded' : `back-adjusted (${esc(fut.adjust)})`],
+      sy.sourceTicker && sy.sourceTicker !== sy.ticker && ['Source ticker', esc(sy.sourceTicker)],
+      dt.unavailable && ['Reference data', `<span class="p-muted">${esc(dt.unavailable)}</span>`],
+    ])}
+    ${info.detailsUpdated ? `<div class="p-muted">reference data as of ${esc(info.detailsUpdated.slice(0, 10))}</div>` : ''}`;
+  $('pDesc')?.addEventListener('click', (e) => e.currentTarget.classList.toggle('clamp'));
+
+  $('pData').innerHTML = `
+    <h3>Data</h3>
+    ${kv([
+      ['Feed', esc(data.feeds.join(' > '))], ['Resolution', esc(data.base) + (data.officialDaily ? ' + official daily' : '')],
+      ['Rows', data.rows.toLocaleString()], ['From', esc(data.first.slice(0, 16).replace('T', ' '))],
+      ['To', esc(data.last.slice(0, 16).replace('T', ' '))], ['Price precision', `${data.pricePrecision} dp`],
+      ['Times', 'US/Eastern'],
+    ])}`;
+}
+
+// Highlight section: built from the highlight itself (its points and the server's statistics),
+// with the same summary the chart labels use, so it shows even when the highlight is off-screen.
+let hlFrame = 0;
+function scheduleHighlightPanel() {
+  if (hlFrame) return;
+  hlFrame = requestAnimationFrame(() => { hlFrame = 0; renderHighlightPanel(); });
+}
+
+function currentHighlight() {
+  const o = chart.getOverlays({ groupId: 'user', name: 'measure' }).find((x) => x.points?.length >= 2);
+  if (!o) return null;
+  const [pa, pb] = o.points;
+  if (pa.value == null || pb.value == null || pa.timestamp == null || pb.timestamp == null) return null;
+  const key = statsKey(pa, pb);
+  const ext = o.extendData || {};
+  if (ext.key !== key) requestRangeStats(o, key, pa, pb);  // e.g. interval changed while off-screen
+  return highlightSummary(pa, pb, ext.key === key ? ext.stats : null);
+}
+
+function renderHighlightPanel() {
+  const s = currentHighlight();
+  const box = $('pHighlight');
+  if (!s) {
+    box.innerHTML = `<h3>Highlight</h3><div class="p-muted">Draw a highlight (Alt+H) to see its statistics here.</div>`;
+    return;
+  }
+  const chgCell = (c) => `<span class="${cls(c.abs)}">${signedPx(c.abs)} (${pct(c.pct)})</span>`;
+  const st = s.stats;
+  box.innerHTML = `
+    <h3>Highlight <button id="hlRemove" title="Remove the highlight">Remove</button></h3>
+    ${kv([
+      ['Start', `${priceText(s.start.price)} <small>${esc(fmtTime(s.start.time))}</small>`],
+      ['Mid', `<span class="mid">${priceText(s.mid.price)}</span> <small>${esc(fmtTime(s.mid.time))}</small>`],
+      ['Start → mid', chgCell(s.mid.fromStart)],
+      ['Mid → end', chgCell(s.mid.toEnd)],
+      ['End', `${priceText(s.end.price)} <small>${esc(fmtTime(s.end.time))}</small>`],
+      ['Change', chgCell(s.end.change)],
+      ['Bars', String(s.end.bars)],
+      ['Duration', fmtDuration(s.end.duration)],
+    ])}
+    <div class="p-sub">Bars inside the highlight${st ? '' : ' <span class="p-muted">(calculating…)</span>'}</div>
+    ${st ? kv([
+      ['Open', priceText(st.open)],
+      ['High', `${priceText(st.high)} <small>${esc(fmtTime(st.highTime))}</small>`],
+      ['Low', `${priceText(st.low)} <small>${esc(fmtTime(st.lowTime))}</small>`],
+      ['Close', priceText(st.close)],
+      ['Open → close', `<span class="${cls(st.change)}">${signedPx(st.change)} (${pct(st.changePct)})</span>`],
+      ['High/low range', st.rangePct == null ? '–' : `${st.rangePct.toFixed(2)}%`],
+      ['Volume', big(st.volume)],
+      ['VWAP', priceText(st.vwap)],
+      ['Trades', big(st.trades)],
+    ]) : ''}`;
+  $('hlRemove')?.addEventListener('click', () => chart.removeOverlay({ groupId: 'user', name: 'measure' }));
+}
+
 // -- start -------------------------------------------------------------------------
 (async function start() {
+  renderHighlightPanel();
   renderTools();
   renderIndicatorMenu();
   renderSession();
