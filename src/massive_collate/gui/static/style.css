@@ -117,9 +117,9 @@ body.panel-hidden #sidePanel, body.panel-hidden #panelResizer { display: none; }
 #sidePanel a { color: var(--accent); }
 
 #status {
-  display: flex; gap: 16px; justify-content: space-between;
-  padding: 3px 10px; border-top: 1px solid var(--border); background: var(--panel); color: var(--muted);
-  font-size: 12px; white-space: nowrap; overflow: hidden;
+  display: flex; gap: 12px; justify-content: space-between; align-items: center; flex: none;
+  height: 18px; padding: 0 8px; border-top: 1px solid var(--border); background: var(--panel); color: var(--muted);
+  font-size: 11px; line-height: 18px; white-space: nowrap; overflow: hidden;
 }
 #error { color: var(--down); overflow: hidden; text-overflow: ellipsis; }
 
@@ -301,7 +301,7 @@ main > .view[hidden] { display: none; }
 #netText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }
 .net-spin { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--border); border-top-color: var(--accent);
   animation: spin .8s linear infinite; display: inline-block; flex: none; }
-.net-bar { width: 140px; height: 8px; border: 1px solid var(--border); border-radius: 2px; overflow: hidden; flex: none;
+.net-bar { width: 120px; height: 7px; border: 1px solid var(--border); border-radius: 2px; overflow: hidden; flex: none;
   background: var(--bg); position: relative; }
 .net-bar > span { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s;
   background-image: repeating-linear-gradient(90deg, transparent 0 6px, rgba(255,255,255,.18) 6px 8px); }

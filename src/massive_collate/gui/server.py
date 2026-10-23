@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 from ..config import Settings, load_settings
 from ..storage import LayoutLimit, Store
-from . import activity
+from . import activity, astro
 from .bars import BarEngine, Style, resample
 from .models import Model
 from .stats import details_subset, key_stats
@@ -151,6 +151,7 @@ class ChartApp:
             out = markets(self.engine.calendar(), self.store.exchanges(), self.store.watchlist())
         out["world"] = world.world_markets()
         out["sun"] = world.subsolar()
+        out["sky"] = astro.sky()
         return out
 
     def calendar(self, q: dict[str, str]) -> dict:

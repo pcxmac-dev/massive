@@ -1478,30 +1478,42 @@ document.addEventListener('keydown', (e) => {
 });
 
 // -- status bar ------------------------------------------------------------------
+// Status bar: one short line (the full wording is in its tooltip).
 function updateStatus(loaded) {
   const m = state.meta;
   if (!m) return;
   const info = symbolInfo(m.ticker);
   const mo = state.model;
-  const parts = [
+  const k = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : String(n));
+  const d = (iso) => iso.slice(2, 10);  // 26-06-12
+  const base = { trades: 'ticks', second: '1s', minute: '1m', hour: '1h', day: '1D' }[m.base] || m.base;
+  const lod = state.lod > 1 && LOD_TYPES.has(state.chartType);
+  const short = [
+    m.ticker,
+    ...(mo.kind === 'price' ? [] : [`${mo.kind}${mo.kind === 'integral' ? '' : ` w${windowForDetail(mo.detail)}`}`]),
+    `${m.feeds.join('>')} ${base}${m.hasDaily ? '+D' : ''}`,
+    `${k(m.rows)} rows`,
+    `${d(m.first)}→${d(m.last)}`,
+    `${m.pricePrecision}dp`,
+    state.session === 'extended' ? 'ETH' : 'RTH',
+    'ET',
+    ...(lod ? [`×${state.lod}`] : []),
+    ...(loaded !== undefined ? [`${k(loaded)} bars`] : []),
+  ];
+  const full = [
     `${m.ticker}${info.name ? ' · ' + info.name : ''}`,
     ...(mo.kind === 'price' ? [] : [`model: ${$('modelSelect').selectedOptions[0].text} in ${state.modelUnit || '…'}`
       + (mo.kind === 'integral' ? '' : `, Savitzky-Golay window ${windowForDetail(mo.detail)} bars`)]),
     `feed: ${m.feeds.join(' > ')} (${m.base} data${m.hasDaily ? ' + official daily' : ''})`,
-    `${m.rows.toLocaleString()} rows`,
-    `${m.first.slice(0, 10)} → ${m.last.slice(0, 10)}`,
-    `price precision ${m.pricePrecision} dp`,
-    state.session === 'extended' ? 'extended hours' : 'regular hours 09:30–16:00',
+    `${m.rows.toLocaleString()} rows, ${m.first.slice(0, 10)} to ${m.last.slice(0, 10)}`,
+    `price precision ${m.pricePrecision} decimals`,
+    state.session === 'extended' ? 'extended hours' : 'regular hours 09:30-16:00',
     'times US/Eastern',
+    ...(lod ? [`zoomed out: each candle = ${state.lod} consecutive bars`] : []),
+    ...(loaded !== undefined ? [`${loaded.toLocaleString()} bars loaded (scroll left for more)`] : []),
   ];
-  if (state.lod > 1 && LOD_TYPES.has(state.chartType)) {
-    const unit = PRICE_BASED.has(state.chartType) ? `${$('typeSelect').selectedOptions[0].text.toLowerCase()} bricks`
-      : state.chartType === 'heikin_ashi' ? 'Heikin Ashi candles'
-      : `${state.period.span}${PERIOD_LABEL[state.period.type]} bars`;
-    parts.push(`zoomed out: each candle = ${state.lod} consecutive ${unit} (first open, last close, high/low, summed volume)`);
-  }
-  if (loaded !== undefined) parts.push(`${loaded.toLocaleString()} bars loaded (scroll left for more)`);
-  $('statusText').textContent = parts.join('  |  ');
+  $('statusText').textContent = short.join(' · ');
+  $('statusText').title = full.join('\n');
 }
 
 // -- side panel (like TradingView's right-hand panel) ------------------------------------

@@ -40,6 +40,13 @@
     return s < 0 ? `in ${dur(-s)}` : `${dur(s)} ago`;
   }
   const when = (iso) => (iso ? new Date(iso).toLocaleString([], { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '–');
+  // Short form for the status bar: Fri 04:00, or 10-21 19:59 when not this week.
+  const short = (iso) => {
+    if (!iso) return '–';
+    const t = new Date(iso), days = Math.abs(t - Date.now()) / 864e5;
+    const o = { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false };
+    return days < 6 ? t.toLocaleString('en-US', { ...o, weekday: 'short' }) : t.toLocaleString('en-US', { ...o, month: '2-digit', day: '2-digit' });
+  };
   const day = (iso) => (iso ? iso.slice(0, 10) : '–');
   const viewOpen = (name) => document.body.dataset.view === name;
   function meter(fraction, cls = '') {
@@ -138,20 +145,20 @@
     const running = data?.running;
     if (job && job.ticker === state.ticker) {
       const t = esc(job.ticker);
-      if (job.phase === 'checking') { msg = `Checking ${t} for new data…`; busy = true; }
-      else if (job.phase === 'waiting') { msg = `${t}: new data available — waiting for the fetcher (${esc(data?.live?.current || 'busy')})…`; busy = true; }
+      if (job.phase === 'checking') { msg = `${t}: checking…`; busy = true; }
+      else if (job.phase === 'waiting') { msg = `${t}: new data · fetcher busy`; busy = true; }
       else if (job.phase === 'downloading') {
         const req = running ? data.live.requests : 0;
-        msg = running ? `Downloading ${t} — ${num(req)} of ~${UPDATE_REQUESTS} requests` : `Starting download of ${t}…`;
+        msg = running ? `${t}: downloading ${num(req)}/~${UPDATE_REQUESTS}` : `${t}: starting…`;
         progress = running ? Math.min(0.95, req / UPDATE_REQUESTS) : 0.05;
-      } else if (job.phase === 'done') { msg = `${t}: done — ${num(job.rows)} new rows, ${num(job.requests)} requests${job.last ? ` · data through ${when(job.last)}` : ''}`; cls = 'ok'; }
-      else if (job.phase === 'current') { msg = `${t} is up to date${job.last ? ` (through ${when(job.last)})` : ''} · next new data ${when(job.nextDue)}`; }
-      else if (job.phase === 'backfilling') { msg = `${t}: history is being downloaded by the fetcher (${Math.round((job.progress || 0) * 100)}%)`; progress = job.progress || 0; }
-      else if (job.phase === 'queued') { msg = `${t}: queued for download by the fetcher`; }
-      else if (job.phase === 'fetching') { msg = `${t}: being fetched now`; busy = true; }
-      else if (job.phase === 'error') { msg = `${t}: could not fetch — ${esc(job.message)}`; cls = 'bad'; }
+      } else if (job.phase === 'done') { msg = `${t}: +${num(job.rows)} rows${job.last ? ` · to ${short(job.last)}` : ''}`; cls = 'ok'; }
+      else if (job.phase === 'current') { msg = `${t} ✓ to ${short(job.last)} · next ${short(job.nextDue)}`; }
+      else if (job.phase === 'backfilling') { msg = `${t}: backfill ${Math.round((job.progress || 0) * 100)}%`; progress = job.progress || 0; }
+      else if (job.phase === 'queued') { msg = `${t}: queued`; }
+      else if (job.phase === 'fetching') { msg = `${t}: fetching`; busy = true; }
+      else if (job.phase === 'error') { msg = `${t}: fetch failed`; cls = 'bad'; text.title = job.message; }
     } else if (running) {
-      msg = `Fetcher: ${esc(data.live.command)}${data.live.current ? ` — ${esc(data.live.current)}` : ''} · ${num(data.live.requests)} requests`;
+      msg = `Fetcher${data.live.current ? `: ${esc(data.live.current)}` : ''} · ${num(data.live.requests)} req`;
       busy = true;
     }
     text.innerHTML = msg ? `${busy ? '<span class="net-spin"></span>' : ''}${msg}` : '';

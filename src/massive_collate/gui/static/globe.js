@@ -3,7 +3,9 @@
    point) faces you, with the world's stock exchanges on it: open ones glow green, lunch breaks
    amber, closed ones grey. Night is shaded behind the terminator. Coastlines and country borders
    are drawn when vendor/world/countries-110m.json (Natural Earth, public domain) is present.
-   Drag to turn the globe; double-click to return to noon. Beside it: every exchange by region
+   The globe turns in real time (the sun's position is computed every frame, so the Earth
+   rotates under it at 15 degrees an hour), wherever it has been dragged to. Drag to turn it;
+   click the sun (or double-click anywhere) to glide back to noon. Beside it: every exchange by region
    with its local time, state, countdown, today's hours (lunch breaks included) and holidays. */
 (() => {
   const canvas = document.getElementById('globe');
@@ -14,8 +16,9 @@
   const rad = Math.PI / 180;
 
   let markets = null, fetchedAt = 0;
-  let view = { lon: 0, lat: 0 };   // centre of the globe
-  let follow = true;               // keep the noon point centred until the user drags
+  let view = { lon: 0, lat: 0 };   // centre of the globe, recomputed every frame from:
+  let offset = { lon: 0, lat: null };  // where the view sits relative to the sun (lat null = the sun's)
+  let glide = null;                // animation back to the sun: { from, start }
   let topo = null;                 // decoded boundary lines: [[ [lon,lat], ... ], ...]
   let hover = null;
   let nightCache = null;
@@ -25,7 +28,6 @@
     try {
       markets = await api('/api/markets');
       fetchedAt = Date.now();
-      if (follow) view = { lon: markets.sun.lon, lat: markets.sun.lat };
       nightCache = null;
       renderList();
       draw();
@@ -49,6 +51,43 @@
       let x = 0, y = 0;
       return arc.map(([dx, dy]) => { x += dx; y += dy; return [x * sx + tx, y * sy + ty]; });
     });
+  }
+
+  // -- the sun ----------------------------------------------------------------------------
+  // Where it is noon now (subsolar point), within about half a degree. Same formulas as the
+  // server's world.subsolar.
+  function subsolar(t = new Date()) {
+    const start = Date.UTC(t.getUTCFullYear(), 0, 1);
+    const day = Math.floor((t.getTime() - start) / 864e5) + 1;
+    const hours = t.getUTCHours() + t.getUTCMinutes() / 60 + t.getUTCSeconds() / 3600 + t.getUTCMilliseconds() / 3.6e6;
+    const g = (2 * Math.PI / 365) * (day - 1 + (hours - 12) / 24);
+    const eqtime = 229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g)
+      - 0.014615 * Math.cos(2 * g) - 0.040849 * Math.sin(2 * g));
+    const decl = 0.006918 - 0.399912 * Math.cos(g) + 0.070257 * Math.sin(g) - 0.006758 * Math.cos(2 * g)
+      + 0.000907 * Math.sin(2 * g) - 0.002697 * Math.cos(3 * g) + 0.00148 * Math.sin(3 * g);
+    const lon = ((-15 * (hours - 12 + eqtime / 60)) + 540) % 360 - 180;
+    return { lon, lat: decl / rad };
+  }
+
+  const following = () => !glide && offset.lon === 0 && offset.lat === null;
+  const wrap = (d) => ((d + 540) % 360) - 180;
+
+  // The view follows the sun as the Earth turns, keeping whatever offset the user dragged to.
+  function updateView() {
+    const sun = subsolar();
+    if (markets) markets.sun = sun;
+    if (glide) {
+      const k = Math.min(1, (performance.now() - glide.start) / 700);
+      const ease = 1 - Math.pow(1 - k, 3);
+      view = { lon: sun.lon + wrap(glide.from.lon - sun.lon) * (1 - ease), lat: glide.from.lat + (sun.lat - glide.from.lat) * ease };
+      if (k >= 1) { glide = null; offset = { lon: 0, lat: null }; }
+      return;
+    }
+    view = { lon: sun.lon + offset.lon, lat: offset.lat ?? sun.lat };
+  }
+
+  function recentre() {
+    glide = { from: { ...view }, start: performance.now() };
   }
 
   // -- projection -------------------------------------------------------------------------
@@ -86,7 +125,8 @@
 
   // Night shading at low resolution: each pixel's point on the globe vs the sun's direction.
   function nightLayer(g) {
-    const key = `${g.w}x${g.h}|${view.lon.toFixed(2)}|${view.lat.toFixed(2)}|${markets?.sun.lon.toFixed(2)}`;
+    // The night side moves with the sun: at most a few redraws a minute at this precision.
+    const key = `${g.w}x${g.h}|${view.lon.toFixed(1)}|${view.lat.toFixed(1)}|${markets?.sun.lon.toFixed(1)}`;
     if (nightCache?.key === key) return nightCache.canvas;
     const n = 180, off = document.createElement('canvas');
     off.width = off.height = n;
@@ -192,7 +232,8 @@
     const utc = new Date().toISOString().slice(11, 16);
     info.innerHTML = `<b>${open}</b> exchanges open${brk ? `, <b>${brk}</b> at lunch` : ''} · ${utc} UTC
       <div class="p-muted small">Noon is at ${Math.abs(markets.sun.lon).toFixed(1)}°${markets.sun.lon >= 0 ? 'E' : 'W'}
-      · sun overhead at ${Math.abs(markets.sun.lat).toFixed(1)}°${markets.sun.lat >= 0 ? 'N' : 'S'}${follow ? '' : ' · <a href="#" id="globeNoon">back to noon</a>'}</div>`;
+      · sun overhead at ${Math.abs(markets.sun.lat).toFixed(1)}°${markets.sun.lat >= 0 ? 'N' : 'S'}
+      · turning in real time${following() ? '' : ' · <a href="#" id="globeNoon">back to noon</a>'}</div>`;
   }
 
   // -- list ----------------------------------------------------------------------------
@@ -243,7 +284,14 @@
 
   // -- interaction -----------------------------------------------------------------------
   let dragging = null;
+  function sunHit(e) {
+    if (!markets) return false;
+    const g = geometry(), r = canvas.getBoundingClientRect();
+    const p = project(markets.sun.lon, markets.sun.lat, g);
+    return p.visible && Math.hypot(p.x - (e.clientX - r.left), p.y - (e.clientY - r.top)) < 16;
+  }
   canvas.addEventListener('pointerdown', (e) => {
+    glide = null;
     dragging = { x: e.clientX, y: e.clientY, lon: view.lon, lat: view.lat };
     canvas.setPointerCapture(e.pointerId);
   });
@@ -252,11 +300,15 @@
     if (dragging && (dragging.moved || Math.hypot(e.clientX - dragging.x, e.clientY - dragging.y) > 3)) {
       dragging.moved = true;
       const k = 90 / g.r;
-      view = { lon: dragging.lon - (e.clientX - dragging.x) * k, lat: Math.max(-85, Math.min(85, dragging.lat + (e.clientY - dragging.y) * k)) };
-      follow = false;
+      const lon = dragging.lon - (e.clientX - dragging.x) * k;
+      const lat = Math.max(-85, Math.min(85, dragging.lat + (e.clientY - dragging.y) * k));
+      offset = { lon: wrap(lon - subsolar().lon), lat };
+      updateView();
       draw();
       return;
     }
+    if (sunHit(e)) { if (hover) { hover = null; draw(); } canvas.style.cursor = 'pointer'; canvas.title = 'Back to noon'; return; }
+    canvas.title = '';
     const r = canvas.getBoundingClientRect();
     const x = e.clientX - r.left, y = e.clientY - r.top;
     let best = null, bestD = 12;
@@ -267,23 +319,28 @@
     }
     if (best !== hover) { hover = best; canvas.style.cursor = best ? 'pointer' : 'grab'; draw(); }
   });
-  canvas.addEventListener('pointerup', () => { dragging = null; });
+  let justDragged = false;  // the click that ends a drag is not a click on the sun or a market
+  canvas.addEventListener('pointerup', () => { justDragged = !!dragging?.moved; dragging = null; });
   canvas.addEventListener('pointercancel', () => { dragging = null; });
-  canvas.addEventListener('dblclick', () => { follow = true; if (markets) view = { lon: markets.sun.lon, lat: markets.sun.lat }; draw(); });
-  canvas.addEventListener('click', () => {
+  canvas.addEventListener('dblclick', recentre);
+  canvas.addEventListener('click', (e) => {
+    if (justDragged) { justDragged = false; return; }
+    if (sunHit(e)) { recentre(); return; }
     if (!hover) return;
     const row = list.querySelector(`[data-code="${hover.code}"]`);
     if (row) { row.scrollIntoView({ block: 'center', behavior: 'smooth' }); row.classList.add('flash'); setTimeout(() => row.classList.remove('flash'), 1200); }
   });
   info.addEventListener('click', (e) => {
-    if (e.target.id === 'globeNoon') { e.preventDefault(); follow = true; if (markets) view = { lon: markets.sun.lon, lat: markets.sun.lat }; draw(); }
+    if (e.target.id === 'globeNoon') { e.preventDefault(); recentre(); }
   });
 
-  // Animate while visible: pulse, sun drift (re-fetched every 30 s), countdowns every second.
+  // Animate while visible: the Earth turning, pulses, countdowns every second; market states
+  // are re-fetched every 30 s.
   let lastList = 0;
   function frame() {
     if (document.body.dataset.view === 'markets') {
       if (Date.now() - fetchedAt > 30000) load();
+      updateView();
       draw();
       if (Date.now() - lastList > 1000) { renderList(); lastList = Date.now(); }
     }
@@ -291,6 +348,7 @@
   }
   window.addEventListener('massive:view', (e) => { if (e.detail.view === 'markets') { load(); if (!topo) loadTopo(); } });
   window.addEventListener('resize', () => { nightCache = null; draw(); });
+  window.Globe = { state: () => ({ view: { ...view }, offset: { ...offset }, sun: subsolar(), following: following() }), recentre };
   requestAnimationFrame(frame);
   if (document.body.dataset.view === 'markets') { load(); loadTopo(); }
 })();
