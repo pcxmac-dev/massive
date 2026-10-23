@@ -43,6 +43,7 @@ class ChartApp:
             exchanges = self.store.exchanges()
             snapshot = self.store.daily_snapshot()
             icons = self.store.icon_tickers()
+            profiles = self.store.company_profiles()
             now = datetime.now(timezone.utc).astimezone(activity.ET)
             states = {(r["ticker"]): r for src in {w["source"] for w in watch}
                       for r in activity.symbol_rows(self.store, self.settings, src, now)}
@@ -70,6 +71,8 @@ class ChartApp:
                 "feeds": feeds,
                 "icon": ticker in icons,
                 "market": _market(snapshot, ticker, w),
+                **_sector(ticker, profiles.get(ticker), w.get("asset") or "stock", (snapshot.get(ticker) or {}).get("close")),
+                "changePct": _change(snapshot, ticker),
                 "data": {k: states[ticker][k] for k in ("state", "progress", "last", "expectedThrough", "nextDue")}
                 if ticker in states else None,
             })
@@ -181,12 +184,16 @@ class ChartApp:
         with self._lock:
             rows = self.store.directory()
             watched = {w["ticker"] for w in self.store.watchlist()}
+            profiles = self.store.company_profiles()
+            changes = self.store.snapshot_changes()
         out = []
         for r in rows:
             dv = (r["close"] or 0) * (r["volume"] or 0) if r["close"] and r["volume"] else None
             out.append({"ticker": r["ticker"], "kind": r["kind"], "name": r["name"], "exchange": r["exchange"],
                         "type": r["type"], "close": r["close"], "dollarVolume": dv, "icon": bool(r["icon"]),
-                        "watched": r["ticker"] in watched})
+                        "watched": r["ticker"] in watched, "changePct": changes.get(r["ticker"]),
+                        **_sector(r["ticker"], profiles.get(r["ticker"]), "future" if r["kind"] == "future" else "stock",
+                                  r["close"])})
         return {"items": out}
 
     def watch(self, ticker: str) -> dict:
@@ -329,6 +336,26 @@ class ChartApp:
         with self._lock:
             df = self.store.exchanges()
         return json.loads(df.to_json(orient="records"))
+
+
+def _sector(ticker: str, profile: dict | None, asset: str, close: float | None = None) -> dict:
+    """Sector, industry and market cap for the market map (stocks with reference data). The cap is
+    this share class's own (its shares outstanding x price) where known: a company with two listed
+    classes (GOOG, GOOGL) would otherwise be drawn twice its size."""
+    from .sectors import classify
+
+    if asset != "stock" or not profile:
+        return {"sector": None, "industry": None, "marketCap": None}
+    sector, industry = classify(ticker, profile.get("sic_code"), profile.get("sic_description"))
+    shares = profile.get("class_shares")
+    cap = shares * close if shares and close else profile.get("market_cap")
+    return {"sector": sector, "industry": industry, "marketCap": cap, "companyCap": profile.get("market_cap")}
+
+
+def _change(snapshot: dict, ticker: str) -> float | None:
+    """Last session's change in percent from local daily bars (any asset class)."""
+    d = snapshot.get(ticker)
+    return (d["close"] / d["prevClose"] - 1) * 100 if d and d.get("prevClose") else None
 
 
 def _market(snapshot: dict, ticker: str, watch: dict) -> dict | None:

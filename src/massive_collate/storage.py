@@ -1154,6 +1154,35 @@ class Store:
         cols = ["ticker", "kind", "name", "exchange", "type", "close", "volume", "vwap", "icon"]
         return [dict(zip(cols, r)) for r in self.conn.execute(sql, [source] + ([kind] if kind else []))]
 
+    def company_profiles(self, source: str = "massive") -> dict[str, dict]:
+        """{ticker: {sic_code, sic_description, market_cap}} from stored reference records (one
+        pass, cached until the database changes): the market map's sectors and sizes."""
+        def compute():
+            out = {}
+            for ticker, data in self.conn.execute("SELECT ticker, data FROM instrument_details WHERE source=?", (source,)):
+                try:
+                    d = json.loads(data)
+                except ValueError:
+                    continue
+                if d.get("sic_code") or d.get("market_cap"):
+                    out[ticker] = {"sic_code": d.get("sic_code"), "sic_description": d.get("sic_description"),
+                                   "market_cap": d.get("market_cap"),
+                                   "class_shares": d.get("share_class_shares_outstanding")}
+            return out
+        return self._cached(("company_profiles", source), compute)
+
+    def snapshot_changes(self, source: str = "massive") -> dict[str, float]:
+        """Each ticker's change on the newest day of the whole-market file, in percent."""
+        days = [r[0] for r in self.conn.execute(
+            "SELECT DISTINCT day FROM market_snapshot WHERE source=? ORDER BY day DESC LIMIT 2", (source,))]
+        if len(days) < 2:
+            return {}
+        rows = self.conn.execute(
+            "SELECT a.ticker, a.close, b.close FROM market_snapshot a JOIN market_snapshot b "
+            "ON b.source=a.source AND b.ticker=a.ticker AND b.day=? WHERE a.source=? AND a.day=?",
+            (days[1], source, days[0]))
+        return {t: (c / p - 1) * 100 for t, c, p in rows if c and p}
+
     def directory_icon_queue(self, source: str, types: tuple[str, ...], limit: int) -> list[str]:
         """Companies still without an icon decision, biggest daily dollar volume first."""
         marks = ",".join("?" * len(types))

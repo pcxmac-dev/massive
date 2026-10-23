@@ -960,8 +960,73 @@ function renderDirectoryList(query) {
       </div>`).join('')}</div>`;
 }
 
+// Market map: stocks by sector and industry, sized by market cap, coloured by the day's change.
+state.switcherView = prefs.get('switcherView', 'map');
+let mapPick = null;  // a directory company picked on the map (not watched yet)
+
+function mapMatch(q) {
+  return (s) => !q || [s.ticker, s.name, s.sector, s.industry].some((v) => v && String(v).toLowerCase().includes(q));
+}
+
+function renderMapList(query) {
+  const { esc: e } = window.MassiveIcons;
+  const list = $('symbolList');
+  const q = query.trim().toLowerCase();
+  const dir = state.switcherScope === 'stocks';
+  const toItem = (s) => ({ ticker: s.ticker, name: s.name, sector: s.sector, industry: s.industry, marketCap: s.marketCap,
+    changePct: s.changePct ?? s.market?.changePct ?? null, close: s.close ?? s.market?.close ?? null, icon: s.icon,
+    watched: dir ? s.watched : true });
+  const source = dir ? directory.items.filter((r) => r.kind === 'stock') : state.symbols.filter((s) => s.asset === 'stock');
+  const mapped = source.filter((s) => s.marketCap > 0 && s.sector).map(toItem);
+  const others = dir ? [] : state.symbols.filter((s) => s.asset !== 'stock').map(toItem);
+  const unclassified = source.length - mapped.length;
+  list.innerHTML = `<div id="marketMap" class="market-map" role="listbox" aria-label="Market map"></div>
+    ${others.length ? `<h4>Indices, futures, forex and crypto</h4><div id="marketStrip" class="market-map strip"></div>` : ''}
+    <div class="map-foot">
+      <span class="map-legend">${[-3, -2, -1, 0, 1, 2, 3].map((p) => `<span style="background:${window.MarketMap.changeColor(p)}">${p > 0 ? '+' : ''}${p}%</span>`).join('')}</span>
+      <span class="p-muted small">${mapped.length} companies by market cap · colour: last session's change${unclassified > 0
+        ? ` · ${unclassified.toLocaleString()} ${dir ? 'listings' : 'symbols'} without reference data yet (not shown)` : ''}</span>
+      <span id="mapPick" class="map-pick" ${mapPick ? '' : 'hidden'}></span>
+    </div>`;
+  if (!dir && !source.length && !others.length) {
+    list.innerHTML = '<div class="empty">No symbols yet. Add one with: python -m massive_collate watch add TICKER::EXCHANGE</div>';
+    return;
+  }
+  const opts = { current: state.ticker, isMatch: q ? mapMatch(q) : null, isWatched: dir ? (s) => s.watched : null };
+  window.MarketMap.render($('marketMap'), mapped, opts);
+  if (others.length) window.MarketMap.renderStrip($('marketStrip'), others, opts);
+  renderMapPick();
+}
+
+function renderMapPick() {
+  const el = $('mapPick');
+  if (!el) return;
+  const { esc: e } = window.MassiveIcons;
+  el.hidden = !mapPick;
+  if (!mapPick) return;
+  const p = mapPick;
+  el.innerHTML = `<b>${e(p.ticker)}</b> <span class="p-muted">${e(p.name || '')}</span>
+    <button type="button" class="primary" data-watch="${e(p.ticker)}" title="Add to the watchlist: the fetcher will collect it">+ Watch</button>`;
+}
+
 function renderSymbolList(query) {
   for (const b of $('scopeTabs').querySelectorAll('button')) b.classList.toggle('active', b.dataset.scope === state.switcherScope);
+  const mapOk = state.switcherScope !== 'futures';
+  const useMap = mapOk && state.switcherView === 'map';
+  $('switcherView').hidden = !mapOk;
+  $('switcherView').textContent = state.switcherView === 'map' ? 'Tiles' : 'Map';
+  $('switcherView').title = state.switcherView === 'map' ? 'Show tiles' : 'Show the market map (sector, industry, market cap)';
+  $('sortBtn').hidden = useMap;
+  $('symbolDialog').classList.toggle('map-view', useMap);
+  if (useMap) {
+    if (state.switcherScope === 'stocks' && !directory.at) {
+      $('symbolList').innerHTML = '<div class="empty">Loading the directory…</div>';
+      loadDirectory().then(() => renderSymbolList($('symbolSearch').value)).catch(showError);
+      return;
+    }
+    renderMapList(query);
+    return;
+  }
   if (state.switcherScope !== 'watch') {
     const sort = SORTS.find((x) => x.key === state.switcherSort) || SORTS[0];
     $('sortBtn').textContent = sort.label;
@@ -1023,7 +1088,23 @@ $('sortBtn').addEventListener('click', () => {
   prefs.set('switcherSort', state.switcherSort);
   renderSymbolList($('symbolSearch').value);
 });
+$('switcherView').addEventListener('click', () => {
+  state.switcherView = state.switcherView === 'map' ? 'tiles' : 'map';
+  prefs.set('switcherView', state.switcherView);
+  mapPick = null;
+  renderSymbolList($('symbolSearch').value);
+});
+window.addEventListener('resize', () => { if ($('symbolDialog').open && state.switcherView === 'map') renderSymbolList($('symbolSearch').value); });
 $('symbolList').addEventListener('click', async (e) => {
+  const tile = e.target.closest('.map-tile');
+  if (tile) {
+    const t = tile.dataset.ticker;
+    const item = state.switcherScope === 'stocks' ? directory.items.find((r) => r.ticker === t) : null;
+    if (item && !item.watched) { mapPick = item; renderMapPick(); return; }  // pick, then + Watch
+    $('symbolDialog').close();
+    selectSymbol(t, MERGED).catch(showError);
+    return;
+  }
   const add = e.target.closest('[data-watch]');
   if (add) {  // directory: add to the watchlist; the fetcher collects it from its next run
     e.stopPropagation();
@@ -1033,6 +1114,7 @@ $('symbolList').addEventListener('click', async (e) => {
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
       const item = directory.items.find((r) => r.ticker === add.dataset.watch);
       if (item) item.watched = true;
+      if (mapPick && mapPick.ticker === add.dataset.watch) { mapPick = null; renderSymbolList($('symbolSearch').value); }
       add.replaceWith(Object.assign(document.createElement('span'), { className: 'chip', textContent: 'watched' }));
       loadSymbols().catch(() => {});
     } catch (err) { add.disabled = false; showError(err); }
@@ -1059,7 +1141,8 @@ $('symbolDialog').addEventListener('keydown', (e) => {
     moveTileFocus(...moves[e.key]);
   } else if (e.key === 'Enter' && e.target === $('symbolSearch')) {
     e.preventDefault();
-    const first = $('symbolList').querySelector('.tile-btn');
+    // map: the biggest match (tiles are laid out largest first); tiles: the first one
+    const first = $('symbolList').querySelector('.map-tile:not(.dim)') || $('symbolList').querySelector('.tile-btn');
     if (first) first.click();
   }
 });
