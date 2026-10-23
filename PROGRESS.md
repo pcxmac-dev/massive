@@ -14,7 +14,7 @@ Working notes so work can resume in a fresh session. Newest first.
   under `gui/static/vendor/klinecharts`. Intervals built exactly from the finest stored data; official
   daily bars for D/W/M; regular/extended hours toggle; feed picker (single feed or merged);
   drawing tools incl. custom `measure`; drawings saved per ticker in browser localStorage.
-- Tests: `.venv\Scripts\python.exe -m pytest -q` (147 passing). CI on GitHub: Python 3.12/3.14/3.15,
+- Tests: `.venv\Scripts\python.exe -m pytest -q` (169 passing). CI on GitHub: Python 3.12/3.14/3.15,
   Windows + Ubuntu. Branch `feature/collector`, not merged to `main`.
 
 - **Highlight tool** (sidebar, 2nd; Alt+H): box, dashed center lines, start/center/end labels and
@@ -54,6 +54,16 @@ Working notes so work can resume in a fresh session. Newest first.
 - **Reliability fixes found tonight**: usage is recorded per request so killed runs still count
   against the daily cap; a sync lock left by a dead process is taken over at once; the LOD cache
   key includes chart type + parameters (it once served Renko aggregates for line break).
+
+- **Side panel** (Info button; drag to resize): symbol, highlight statistics (the only place they
+  appear — the highlight draws no text on the chart), key stats from local daily bars, business
+  details from the weekly listing check (`instrument_details` table), data coverage. One highlight
+  at a time.
+- **Models** (`gui/models.py`): Price, 1st derivative, 2nd derivative, Integral; Savitzky–Golay
+  window from the Detail slider (5–401 bars, log scale), basis price/log %, units per
+  bar/minute/hour/day, reset at gaps. Drawings are stored per model (`drawingsKey()` in app.js).
+- Testing without disturbing the user's open app: `.claude/launch.json` in the sessions folder has a
+  `massive-charts-test` config (port 8766) pointing `MASSIVE_DB` at a scratch copy of the database.
 
 ## Next
 
