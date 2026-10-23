@@ -266,7 +266,38 @@
               <div class="sub">${esc(f.symbols.join(', '))}</div></td>
             <td>${badge(f)}</td>
             <td>${f.recording ? '<span class="rec on"></span> recording' : '<span class="p-muted">idle</span>'}</td></tr>`).join('')}
-        </tbody></table></div>`;
+        </tbody></table></div>
+      <h4>Exchange checks</h4>
+      <div class="table-wrap"><table class="act-table">
+        <thead><tr><th>Check</th><th>Found</th><th>Last</th><th>Next</th><th>Cost</th></tr></thead>
+        <tbody>${(live.checks || []).map((c) => `
+          <tr><td><b>${esc(c.name)}</b></td><td>${esc(c.found)}</td>
+            <td>${c.last ? (c.last.length > 10 ? ago(c.last) : esc(c.last)) : '<span class="p-muted">not yet</span>'}</td>
+            <td class="sub">${c.next && /^\d{4}-/.test(c.next) ? (c.next.length > 10 ? when(c.next) : esc(c.next)) : esc(c.next || '')}</td>
+            <td class="sub">${esc(c.cost)}</td></tr>`).join('')}
+        </tbody></table></div>
+      <h4>News</h4>
+      <div id="liveNews" class="news-list">${liveNewsHtml()}</div>`;
+    loadLiveNews();
+  }
+
+  // The newest newsworthy items (headlines, unscheduled closures, early closes, big moves).
+  let liveNews = { items: [], at: 0 };
+  async function loadLiveNews() {
+    if (Date.now() - liveNews.at < 60000) return;
+    liveNews.at = Date.now();
+    try { liveNews.items = (await (await fetch('/api/announcements')).json()).items || []; } catch { return; }
+    const box = el('liveNews');
+    if (box) box.innerHTML = liveNewsHtml();
+  }
+  function liveNewsHtml() {
+    if (!liveNews.items.length) return '<div class="empty">Nothing newsworthy right now. Headlines arrive with the fetcher’s runs.</div>';
+    return liveNews.items.slice(0, 15).map((it) => `
+      <div class="news-row ${esc(it.kind)}">
+        <span class="src">${esc(it.source)}</span>
+        <div class="news-main">${it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener noreferrer">${esc(it.text)}</a>` : `<span>${esc(it.text)}</span>`}
+          <div class="p-muted small">${it.kind === 'news' ? ago(it.time) : 'now'} · ${esc(it.exchange)}${(it.tickers || []).length ? ` · ${esc(it.tickers.join(' '))}` : ''}</div></div>
+      </div>`).join('');
   }
 
   document.addEventListener('click', (e) => {

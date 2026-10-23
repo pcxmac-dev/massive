@@ -147,7 +147,46 @@ def live_feeds(store: Store, settings: Settings, source: str, now: datetime) -> 
             "note": None if live else "your plan has end-of-day data only: no current-session feed",
         })
     return {"recording": recording and any(f["recording"] for f in feeds),
-            "available": any(f["available"] for f in feeds), "feeds": feeds}
+            "available": any(f["available"] for f in feeds), "feeds": feeds,
+            "checks": exchange_checks(store, source, now)}
+
+
+def exchange_checks(store: Store, source: str, now: datetime) -> list[dict]:
+    """The background checks that keep the Markets globe and the news current: when each last
+    ran, what it found, when it runs next and what it costs."""
+    from . import world
+    from ..collector import CALENDAR_REFRESH_DAYS, NEWS_REFRESH_MINUTES
+
+    checks = []
+    try:
+        markets = world.world_markets(now)
+        open_now = sum(m.get("state") == "open" for m in markets)
+        lunch = sum(m.get("state") == "break" for m in markets)
+        checks.append({"name": "World exchange status", "last": now.isoformat(), "next": "continuous",
+                       "found": f"{open_now} of {len(markets)} exchanges open" + (f", {lunch} at lunch" if lunch else ""),
+                       "cost": "free (exchange calendars)"})
+    except Exception as e:  # calendars still loading
+        checks.append({"name": "World exchange status", "last": None, "next": "continuous", "found": str(e), "cost": "free"})
+    days = store.proxy_days(source)
+    moves = store.proxy_moves(source)
+    checks.append({"name": "Market moves (proxy funds)",
+                   "last": days[-1].isoformat() if days else None,
+                   "next": "each sync, once the next session is published (overnight)",
+                   "found": f"{len(moves)} markets, {days[-2].isoformat()} → {days[-1].isoformat()}" if len(days) >= 2
+                   else "waiting for two published days",
+                   "cost": "1 request per trading day"})
+    cal = store.kv_get(f"calendar:{source}")
+    holidays = len(store.market_holidays(source))
+    checks.append({"name": "Exchange holidays & futures schedules", "last": cal,
+                   "next": (date.fromisoformat(cal) + timedelta(days=CALENDAR_REFRESH_DAYS)).isoformat() if cal else "next sync",
+                   "found": f"{holidays} upcoming US closures/early closes; CME session schedules",
+                   "cost": "~5 requests per week"})
+    news = store.kv_get(f"news:{source}")
+    recent = len(store.news(source, since_ms=int((now - timedelta(hours=48)).timestamp() * 1000), limit=500))
+    checks.append({"name": "Headlines", "last": news,
+                   "next": (datetime.fromisoformat(news) + timedelta(minutes=NEWS_REFRESH_MINUTES)).isoformat() if news else "next sync",
+                   "found": f"{recent} in the last 48 h", "cost": f"1 request, at most every {NEWS_REFRESH_MINUTES} min"})
+    return checks
 
 
 def activity(store: Store, settings: Settings, db_path: Path, source: str = "massive",

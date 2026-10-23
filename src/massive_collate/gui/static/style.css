@@ -339,3 +339,5 @@ main > .view[hidden] { display: none; }
 .news-main .small a { color: var(--accent); text-decoration: none; }
 .news-main .tk { font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
 #newsSearch { border-color: var(--border); background: var(--bg); cursor: text; }
+
+.scroll-view > .act-status, .scroll-view > .table-wrap, .scroll-view > .news-list, .scroll-view > .tiles, .scroll-view > .filters { flex: none; }
