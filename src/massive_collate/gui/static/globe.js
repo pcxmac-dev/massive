@@ -249,7 +249,8 @@
   });
   canvas.addEventListener('pointermove', (e) => {
     const g = geometry();
-    if (dragging) {
+    if (dragging && (dragging.moved || Math.hypot(e.clientX - dragging.x, e.clientY - dragging.y) > 3)) {
+      dragging.moved = true;
       const k = 90 / g.r;
       view = { lon: dragging.lon - (e.clientX - dragging.x) * k, lat: Math.max(-85, Math.min(85, dragging.lat + (e.clientY - dragging.y) * k)) };
       follow = false;
@@ -267,6 +268,7 @@
     if (best !== hover) { hover = best; canvas.style.cursor = best ? 'pointer' : 'grab'; draw(); }
   });
   canvas.addEventListener('pointerup', () => { dragging = null; });
+  canvas.addEventListener('pointercancel', () => { dragging = null; });
   canvas.addEventListener('dblclick', () => { follow = true; if (markets) view = { lon: markets.sun.lon, lat: markets.sun.lat }; draw(); });
   canvas.addEventListener('click', () => {
     if (!hover) return;

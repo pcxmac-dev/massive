@@ -276,8 +276,8 @@ main > .view[hidden] { display: none; }
 
 /* markets: globe + list */
 #viewMarkets { background: var(--bg); }
-.globe-wrap { flex: 1; position: relative; min-width: 0; }
-#globe { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+.globe-wrap { flex: 1; position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+#globe { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
 .globe-info { position: absolute; left: 16px; top: 12px; font-size: 13px; }
 .globe-info a { color: var(--accent); }
 .globe-hint { position: absolute; left: 16px; bottom: 10px; }
