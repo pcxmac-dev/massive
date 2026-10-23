@@ -44,6 +44,21 @@ def _fresh(area, item, iso, now, warn_days, fail_days, what, action) -> Check:
     return Check(area, item, status, f"{what}: {age:.1f} days ago", "" if status == "OK" else action)
 
 
+def coverage_overlaps(store: Store) -> list[str]:
+    """Spans of a series held by more than one feed (should never happen: only audits fetch twice)."""
+    rows = store.conn.execute("SELECT ticker, timespan, source, start_ms, end_ms FROM coverage "
+                              "ORDER BY ticker, timespan, start_ms").fetchall()
+    out = []
+    reach: dict[tuple, tuple[str, int]] = {}  # (ticker, timespan) -> (feed, furthest end so far)
+    for ticker, timespan, src, a, b in rows:
+        prev = reach.get((ticker, timespan))
+        if prev and a < prev[1] and prev[0] != src:
+            out.append(f"{ticker} {timespan} {prev[0]}/{src} from {datetime.fromtimestamp(a / 1000, timezone.utc):%Y-%m-%d %H:%M} UTC")
+        if not prev or b > prev[1]:
+            reach[(ticker, timespan)] = (src, b)
+    return out
+
+
 def checks(store: Store, settings, source: str = "massive", now: datetime | None = None) -> list[Check]:
     now = now or datetime.now(timezone.utc)
     out: list[Check] = []
@@ -63,6 +78,30 @@ def checks(store: Store, settings, source: str = "massive", now: datetime | None
     used = store.requests_today(source)
     out.append(Check("Massive API", "Daily request cap", "OK" if used < settings.max_requests_per_day * 0.9 else "WARN",
                      f"{used} of {settings.max_requests_per_day} used today"))
+
+    # -- second feed and the one-feed-per-span rule ---------------------------------
+    a = getattr(settings, "alpaca", None)
+    if a is not None:
+        out.append(Check("Alpaca", "API keys", "OK" if a.has_keys else "WARN",
+                         f"set ({a.tier.name}, feed {a.feed}, crypto from {a.crypto_loc})" if a.has_keys
+                         else "not set: crypto only (it needs no key)",
+                         "" if a.has_keys else "set ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY (environment) "
+                         "for stock history from 2016 and the session up to 15 min ago"))
+        used = store.requests_today("alpaca")
+        out.append(Check("Alpaca", "Daily request cap", "OK" if used < a.max_requests_per_day * 0.9 else "WARN",
+                         f"{used} of {a.max_requests_per_day} used today"))
+    overlaps = coverage_overlaps(store)
+    out.append(Check("Feeds", "One feed per span", "OK" if not overlaps else "FAIL",
+                     "no span is held by two feeds" if not overlaps else
+                     f"{len(overlaps)} overlapping spans, e.g. {overlaps[0]}",
+                     "" if not overlaps else "a second download happened outside an audit: report it"))
+    scores = store.audit_scores()
+    if scores:
+        worst = min(scores.items(), key=lambda kv: kv[1]["accuracy"] if kv[1]["accuracy"] is not None else 1)
+        acc = worst[1]["accuracy"]
+        out.append(Check("Feeds", "Audits (90 days)", "OK" if acc is None or acc >= 0.9 else "WARN",
+                         ", ".join(f"{f}: {s['passed']}/{s['audits']} passed" for f, s in sorted(scores.items())),
+                         "" if acc is None or acc >= 0.9 else "open the Fetcher view's Audits to see where the feeds differ"))
 
     # -- feeds the app keeps itself ------------------------------------------------
     out.append(_fresh("Reference data", "Exchange holidays + futures schedules", store.kv_get(f"calendar:{source}"),

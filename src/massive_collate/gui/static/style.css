@@ -9,15 +9,31 @@
   --up: #26a69a;
   --down: #ef5350;
 }
+/* Light: a soft grey page rather than white (less glare), near-black text and darker secondary
+   text (on the page: body text 15:1, secondary 7:1, up/down colours 4.5:1 or more), borders that are visible. Text areas sit on
+   a lighter surface than the page so they read as fields. */
 body.light {
-  --bg: #ffffff;
-  --panel: #f8f9fd;
-  --border: #e0e3eb;
-  --text: #131722;
-  --muted: #6a6d78;
-  --accent: #2962ff;
-  --hover: #eceff5;
+  --bg: #e4e7ed;
+  --panel: #eef0f4;
+  --field: #f5f6f9;
+  --border: #bfc5d1;
+  --text: #0f1219;
+  --muted: #474c59;
+  --accent: #1f4fd8;
+  --hover: #d6dbe5;
+  --up: #086a60;
+  --down: #c62828;
 }
+body.light .act-log, body.light .params input, body.light input[type="text"], body.light input[type="search"],
+body.light textarea, body.light select, body.light select option { background: var(--field); }
+body.light .kv dd, body.light .act-table td { color: var(--text); }
+.boxplot { vertical-align: middle; margin-right: 4px; }
+.boxplot .tol { fill: var(--up); opacity: .14; }
+.boxplot .zero { stroke: var(--muted); stroke-width: 1; opacity: .6; }
+.boxplot .whisker { stroke: var(--muted); stroke-width: 1; }
+.boxplot .box { fill: var(--panel); stroke: var(--accent); stroke-width: 1; }
+.boxplot .median { stroke: var(--text); stroke-width: 2; }
+.act-table.audits td { vertical-align: middle; }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body {

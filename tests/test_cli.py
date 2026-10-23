@@ -26,7 +26,7 @@ def test_watch_and_status_are_offline(env, capsys):
     assert cli.main(["watch", "add", "spcx"]) == 0
     assert cli.main(["status"]) == 0
     out = capsys.readouterr().out
-    assert "SPCX" in out and "plan: free" in out
+    assert "SPCX" in out and "massive: plan free" in out and "alpaca: plan alpaca-basic" in out
 
 
 def test_watch_accepts_exchange_and_shows_listing(env, capsys):
@@ -89,11 +89,13 @@ def test_pid_alive():
     assert cli.pid_alive(os.getpid()) and not cli.pid_alive(999999) and not cli.pid_alive(0)
 
 
-def test_missing_key_is_a_config_error(env, monkeypatch, capsys):
+def test_missing_key_skips_that_feed_and_says_so(env, monkeypatch, capsys):
     monkeypatch.delenv("MASSIVE_API_KEY")
     cli.main(["watch", "add", "SPCX"])
-    assert cli.main(["sync"]) == 2
-    assert "MASSIVE_API_KEY" in capsys.readouterr().err
+    assert cli.main(["sync"]) == 0  # Alpaca still runs (crypto needs no key) and sends nothing for stocks
+    err = capsys.readouterr().err
+    assert "skipped massive: MASSIVE_API_KEY" in err
+    assert cli.main(["--source", "massive", "sync", "--only"]) == 2  # only an unconfigured feed: an error
 
 
 def test_export_writes_csv(env):

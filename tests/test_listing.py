@@ -71,7 +71,7 @@ def test_backfill_stops_at_listing_date(store):
 
     store.watch("fake", ["SPCX"], "minute")
     sync(Recording(entitled=("minute",), listing=_spcx()), store, FREE, NOW, log=_log)
-    assert calls and min(calls) == LISTED
+    assert calls and min(calls).date() == LISTED
     assert store.watchlist("fake")[0]["backfilled_to"] == LISTED
 
 

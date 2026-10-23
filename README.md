@@ -1,8 +1,23 @@
 # massive
 
 Collects stock market data at the finest resolution your plan allows, keeps it
-in a local database, and analyses and charts it. Massive (massive.com, formerly
-Polygon.io) is the first data source; others plug in behind the same interface.
+in a local database, and analyses and charts it. Two feeds plug in behind the same interface:
+Massive (massive.com, formerly Polygon.io) and Alpaca (alpaca.markets: US stocks from 2016 with
+keys, crypto from Kraken's book without).
+
+## Several feeds, one download per span
+
+Each span of a symbol's series is downloaded by exactly one feed. A ledger (`coverage` table)
+records which feed holds which span; before any request a feed drops what any feed already holds
+and what a better-ranked feed can serve now. Ranking: resolution first (ticks, seconds, minutes),
+then accuracy measured in audits, then `SOURCE_PRIORITY`. The app shows where each bar came from
+(cursor box "Src", the Data panel's Sources).
+
+**Audits** are the only second downloads: another feed's copy of a stored span is compared bar
+by bar (timing to the second, OHLC, high-low range, volume, VWAP, trade count, as box stats with a
+small margin of error) and only the comparison is kept. They run after new data arrives and at
+random (`AUDITS_PER_RUN`, `AUDITS_RANDOM_PER_RUN`), or with `python -m massive_collate audit
+[TICKER] [--day D] [--list]`; results are in the Fetcher view.
 
 ## What it collects
 
@@ -64,8 +79,8 @@ python -m massive_collate gui                  # chart app in your browser (loca
 - Intervals from 1s (when ticks or second bars are stored) to monthly, built exactly from the finest
   stored data; day/week/month use the official daily bars (closing auction included).
 - Regular hours (09:30–16:00 ET) or extended hours (ETH).
-- Feeds: each ticker can be viewed per feed or merged; overlapping slots come from the
-  highest-priority feed only (`SOURCE_PRIORITY`), so nothing is double counted.
+- Feeds: each ticker can be viewed per feed or merged; each span comes from one feed only (see
+  above), and the cursor box shows the source of the bar under the cursor.
 - Drawing tools: trend line, ray, extended/horizontal/vertical lines, price line, parallel and price
   channels, Fibonacci, measure (price change, %, bars, time), notes; magnet mode; lock/hide/delete.
   Drawings are saved per ticker in the browser.
@@ -78,9 +93,12 @@ python -m massive_collate gui                  # chart app in your browser (loca
 | --- | --- |
 | `sources/base.py` | `DataSource` interface every provider implements |
 | `sources/massive.py` | Massive client (auth, rate limit, cap, retries, pagination) and source |
+| `sources/alpaca.py` | Alpaca source: stocks (SIP, keys) and crypto (Kraken, no key), same caps and retries |
+| `coverage.py` | One feed per span: what a feed may download, given the ledger and the ranking |
+| `audit.py` | Feed-against-feed audits: comparison, box stats, verdicts |
 | `models.py` | `Instrument` (`Stock`, `ETF`) → `Exchange` → `Country` |
 | `storage.py` | SQLite: ticks, bars, exchanges, watchlist, run log |
-| `collector.py` | Sync logic: resolution probing, forward update, backfill |
+| `collector.py` | Sync logic: resolution probing, gap filling (newest first), shared listing checks |
 | `analysis.py` | Tick→bar aggregation, per-exchange stats, returns, indicators, risk |
 | `charts.py` | Plotly HTML charts |
 | `cli.py` | Command line |

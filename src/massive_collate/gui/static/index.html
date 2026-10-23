@@ -113,7 +113,8 @@
 
     <div class="view scroll-view" id="viewFetcher" data-view="fetcher" hidden>
       <div class="view-head">
-        <div><h2>Fetcher</h2><div class="p-muted small">History: every session before the current one, within your plan's caps.</div></div>
+        <div><h2>Fetcher</h2><div class="p-muted small">Each span of a symbol is downloaded by one feed only, within that feed's caps.</div></div>
+        <div id="actFeeds" class="scope-tabs" role="tablist" aria-label="Feed"></div>
         <div class="view-actions">
           <button id="scanBtn" class="primary" title="Check which symbols should have new data (free), confirm each with Massive (1 request) and download what is there">Scan for new data</button>
         </div>
@@ -121,6 +122,12 @@
       <div id="actStatus" class="act-status"></div>
       <div id="scanNote" class="small"></div>
       <div id="actTiles" class="tiles"></div>
+      <h4>Audits — feeds compared on the same span <span id="auditScores" class="p-muted small"></span></h4>
+      <div class="p-muted small">A second feed's copy of a stored span, compared bar by bar and never stored. Differences
+        (other feed minus stored) as box plots: whiskers min–max, box quartiles, tick median; shaded band = margin of error.</div>
+      <div class="table-wrap"><table class="act-table audits"><thead><tr><th>When</th><th>Symbol · span</th><th>Stored → checked by</th>
+        <th>Verdict</th><th>Bars</th><th>Close (bps)</th><th>High−low (bps)</th><th>Volume (%)</th><th>Timing</th></tr></thead>
+        <tbody id="actAudits"></tbody></table></div>
       <h4>Live log — what the fetcher is gathering</h4>
       <div id="actLog" class="act-log"></div>
       <h4>Symbols</h4>

@@ -120,8 +120,18 @@
     const prev = i > 0 ? list[i - 1] : null;
     const change = prev ? b.close - prev.close : b.close - b.open;
     const base = prev ? prev.close : b.open;
+    const next = i + 1 < list.length ? list[i + 1].timestamp : b.timestamp + 60000;
     return { bar: b, change, changePct: base ? (change / base) * 100 : null, range: b.high - b.low,
-             vwap: b.volume ? (b.turnover || 0) / b.volume : null, ...visibleHighLow(list), live: cursorIndex == null };
+             vwap: b.volume ? (b.turnover || 0) / b.volume : null, ...visibleHighLow(list), live: cursorIndex == null,
+             feeds: feedsIn(b.timestamp, next) };
+  }
+
+  // Which feed(s) the bar came from: the coverage spans (one feed per span) overlapping it.
+  function feedsIn(a, b) {
+    const att = state.meta?.attribution || {};
+    const daily = ['day', 'week', 'month', 'quarter', 'year'].includes(state.period?.type) && att.day?.length;
+    const spans = (daily ? att.day : att[state.meta?.base]) || [];
+    return [...new Set(spans.filter(([s, e]) => s < b && e > a).map((x) => x[2]))];
   }
 
   function volumePane() {
@@ -149,7 +159,7 @@
           · <span class="p-muted">Min</span> ${priceText(s.lo?.low)} <span class="p-muted">${s.lo ? e(t(s.lo.timestamp)) : ''}</span></div>
         <div><span class="p-muted">${s.live ? 'Last' : e(t(b.timestamp))}</span>
           O ${priceText(b.open)} H ${priceText(b.high)} L ${priceText(b.low)} C ${priceText(b.close)} ${chg}
-          · <span class="p-muted">Rng</span> ${priceText(s.range)} · <span class="p-muted">Vol</span> ${big(b.volume)}${s.vwap && isPrice() ? ` · <span class="p-muted">VWAP</span> ${priceText(s.vwap)}` : ''}</div>`;
+          · <span class="p-muted">Rng</span> ${priceText(s.range)} · <span class="p-muted">Vol</span> ${big(b.volume)}${s.vwap && isPrice() ? ` · <span class="p-muted">VWAP</span> ${priceText(s.vwap)}` : ''}${s.feeds.length ? ` · <span class="p-muted">Src</span> ${e(s.feeds.join('+'))}` : ''}</div>`;
     } else {
       box.hidden = true;
     }
@@ -162,6 +172,7 @@
           ['Change', chg], ['Range', priceText(s.range)], ['Volume', big(b.volume)],
           isPrice() && s.vwap != null && ['VWAP', priceText(s.vwap)],
           ['Trades', big(b.trades)],
+          s.feeds.length && ['Source', e(s.feeds.join(' + '))],
         ])}
         <div class="p-sub">On screen</div>
         ${kv([

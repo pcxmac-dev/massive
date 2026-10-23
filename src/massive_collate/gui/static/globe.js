@@ -659,7 +659,7 @@
 
     // sphere
     ctx.beginPath(); ctx.arc(g.cx, g.cy, g.r, 0, 2 * Math.PI);
-    ctx.fillStyle = dark ? '#0b0f18' : '#f4f6fb'; ctx.fill();  // opaque: the sky stays behind
+    ctx.fillStyle = dark ? '#0b0f18' : '#e9ecf2'; ctx.fill();  // opaque: the sky stays behind
     ctx.beginPath(); ctx.arc(g.cx, g.cy, g.r, 0, 2 * Math.PI);
     const grad = ctx.createRadialGradient(g.cx - g.r * 0.3, g.cy - g.r * 0.35, g.r * 0.1, g.cx, g.cy, g.r);
     grad.addColorStop(0, dark ? 'rgba(41,98,255,0.18)' : 'rgba(41,98,255,0.10)');
@@ -776,7 +776,7 @@
         let lx = p.x + 8, ly = p.y - 6;
         if (placed.some((b) => Math.abs(b.x - lx) < w && Math.abs(b.y - ly) < 13)) ly += 14;  // simple de-overlap
         placed.push({ x: lx, y: ly });
-        ctx.fillStyle = dark ? 'rgba(19,23,34,0.75)' : 'rgba(255,255,255,0.8)';
+        ctx.fillStyle = dark ? 'rgba(19,23,34,0.75)' : 'rgba(238,240,244,0.88)';
         ctx.fillRect(lx - 3, ly - 10, w + 6, 14);
         ctx.fillStyle = m.state === 'open' ? (dark ? '#9ee7dc' : '#0b6b60') : m.state === 'break' ? '#f0a020' : (dark ? '#d1d4dc' : '#131722');
         ctx.fillText(label, lx, ly);
@@ -787,7 +787,7 @@
     const lg = ctx.createLinearGradient(lx, 0, lx + lw, 0);
     for (let i = 0; i <= 10; i++) lg.addColorStop(i / 10, perfColor(-PERF_SCALE + (2 * PERF_SCALE * i) / 10));
     ctx.fillStyle = lg; ctx.fillRect(lx, ly, lw, 6);
-    ctx.font = '10px system-ui, sans-serif'; ctx.fillStyle = dark ? '#9aa0ae' : '#555';
+    ctx.font = '10px system-ui, sans-serif'; ctx.fillStyle = dark ? '#9aa0ae' : '#3a3f4b';
     ctx.fillText(`−${PERF_SCALE}%`, lx, ly - 4); ctx.textAlign = 'center'; ctx.fillText('day', lx + lw / 2, ly - 4);
     ctx.textAlign = 'end'; ctx.fillText(`+${PERF_SCALE}%`, lx + lw, ly - 4); ctx.textAlign = 'start';
     ctx.fillText('ring: open · lunch · closed', lx, ly + 18);

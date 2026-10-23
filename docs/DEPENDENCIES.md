@@ -36,6 +36,33 @@ retries included, counts.
 | **Whole-market daily file** (every US ticker's day bar) | `/v2/aggs/grouped/locale/us/market/stocks/{day}` | `fetch_market_moves` | once per trading day, after it is published (overnight on the free plan; "before end of day" 403 = not out yet) | 1 per day | ✅ feeds the globe colours and the directory ranking |
 | Newest bar (scan probe) | aggs with limit 1, newest first | `collector.scan` | on demand (Scan button, opening a symbol) | 1 per behind symbol | ✅ |
 
+## 1b. Alpaca market data (data.alpaca.markets) — second feed
+
+Plan: Basic (free). Stocks: every US exchange (SIP) from 2016, minute bars and ticks, all but the
+latest 15 minutes; 200 requests/min (we use 190). Crypto: no key needed; `us-1` is Kraken's book
+(about 2,400 BTC/day against ~4 on Alpaca's own venue), minute bars from 2021. No seconds, indices,
+currencies or futures. Caps: 3,000 requests per run, 30,000 per day (`ALPACA_MAX_REQUESTS_PER_RUN/DAY`).
+Keys only in the environment (`ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY`); without them stock
+requests are refused before anything is sent.
+
+| Data | Endpoint | Fetched by | When | Cost | Status |
+|---|---|---|---|---|---|
+| Stock minute/day bars (split-adjusted, like Massive) | `/v2/stocks/bars?feed=sip&adjustment=split` | `sync_bars` | spans no better-ranked feed serves: history before Massive's 2 years, and the current session up to 15 min ago | 10,000 bars per request | ⚠️ waiting for keys |
+| Stock ticks | `/v2/stocks/trades` | `sync_trades` | only for symbols watched with `--resolution trades` (since 2016 they would be terabytes) | 10,000 trades per request | ⚠️ opt-in |
+| Crypto minute/day bars | `/v1beta3/crypto/us-1/bars` | `sync_bars` | spans nobody holds (BTC: 2021 to Massive's start, and today) | 10,000 bars per request | ✅ |
+| Asset record (name, exchange, active) | trading API `/v2/assets/{T}` | `check_listing` | weekly, unless another feed checked the ticker this week (shared) | 1 | ✅ |
+| Exchange codes (trade venues) | `/v2/stocks/meta/exchanges` | `sync_exchanges` | once | 1 | ✅ |
+
+### One feed per span, and audits
+
+The `coverage` table records which feed holds which span of every series. Before a request a feed
+removes what any feed holds and what a better-ranked feed can serve now (ranking: resolution, then
+audited accuracy, then `SOURCE_PRIORITY`); see `coverage.py`. Only audits download a span twice:
+`audit.py` compares the second copy bar by bar (timing to the second, OHLC, high-low range, volume,
+VWAP, trade count; box stats; margin of error 5 bps or 1 cent per price, 5 % volume) and stores the
+comparison, never the bars. Audits run after new data (queued for the other feed) and at random
+(`AUDITS_PER_RUN`, `AUDITS_RANDOM_PER_RUN`), or with `python -m massive_collate audit`.
+
 ## 2. Calendars and time
 
 | Dependency | Used for | Source / version | How it goes stale | Upkeep | Status |
@@ -76,6 +103,8 @@ retries included, counts.
 | News outside the US | the ticker's headlines are US-only, so world exchanges light up only for calendar events and big moves | a non-US news API (cost, licence) | ❌ |
 | Real index levels for non-US markets | colours use US-listed proxy funds (USD, US hours), not the local index | Massive indices plan, or an index data vendor | ❌ |
 | ~20 exchanges without a proxy fund (Prague, Budapest, Baltics, Dhaka...) | they stay uncoloured | local index data | ❌ |
+| Alpaca stock keys | without them Alpaca collects crypto only; with them it serves stock history from 2016 and the current session (15 min delayed) | a free Alpaca account's API keys, as user environment variables | ❌ waiting for keys |
+| Audit referee | with two feeds an audit says how far they differ, not which is right (their scores move together) | a third feed, or official closing prints | ⚠️ |
 | Live recorder (websocket) | the Live view's "recording" is grey; current-session data arrives only with fetcher runs | Massive websockets (paid plans) | ❌ |
 | Icons for futures products and indices | lettered badges only | none from Massive; would need a curated set | ❌ |
 | Directory details refresh | details re-checked every 90 days with spare budget only | — | ⚠️ |

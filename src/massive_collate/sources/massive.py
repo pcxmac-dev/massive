@@ -165,6 +165,8 @@ class MassiveSource(DataSource):
     def _bar_pages(self, ticker, start, end, timespan, multiplier, descending, limit=PAGE_LIMIT):
         if timespan not in TIMESPANS:
             raise ValueError(f"timespan must be one of {TIMESPANS}")
+        # dates are whole days; datetimes are sent as ms timestamps (the endpoint takes either)
+        start, end = (int(x.timestamp() * 1000) if isinstance(x, datetime) else x for x in (start, end))
         path = f"/v2/aggs/ticker/{ticker.upper()}/range/{multiplier}/{timespan}/{start}/{end}"
         params = {"adjusted": "true", "sort": "desc" if descending else "asc", "limit": limit}
         pages = self.client.pages(path, params)

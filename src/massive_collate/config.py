@@ -12,12 +12,27 @@ Settings come from environment variables, optionally loaded from a `.env` file
     MASSIVE_MAX_REQUESTS_PER_DAY   hard cap on API requests per day, all runs (default: 2000)
     MASSIVE_REFRESH_HOURS  extra minimum hours between refreshes of a backfilled symbol (default: 0;
                            symbols are already only refreshed when their plan should have new data)
-    SOURCE_PRIORITY   feed order when sources overlap, e.g. "massive,blueocean" (default: massive)
+    SOURCE_PRIORITY   feed order when sources overlap (default: massive,alpaca); a span is downloaded by
+                      one feed only, ranked by resolution, then audited accuracy, then this order
+    AUDITS_PER_RUN    audits of another feed's newly downloaded data per feed run (default: 2)
+    AUDITS_RANDOM_PER_RUN   audits of a random stored session per feed run (default: 1)
+
+Alpaca (second feed; stocks and crypto). Keys are only ever read from the environment:
+    ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY   (Alpaca's own APCA_API_KEY_ID / APCA_API_SECRET_KEY
+                      also work). Without them only crypto is collected (it needs no key).
+    ALPACA_PLAN       basic | algo_trader_plus   (default: basic)
+    ALPACA_RPM        override the plan's requests-per-minute limit
+    ALPACA_FEED       sip (all US exchanges, default) | iex
+    ALPACA_CRYPTO_LOC us-1 (Kraken, default) | eu-1 (Kraken EU) | us (Alpaca's own venue)
+    ALPACA_PAPER      1 (default): keys are paper-trading keys; 0: live keys (decides the host
+                      asked for reference data; market data is the same either way)
+    ALPACA_MAX_REQUESTS_PER_RUN / ALPACA_MAX_REQUESTS_PER_DAY   hard caps (default: 3000 / 30000)
 """
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+from datetime import date
 from pathlib import Path
 from typing import Mapping, MutableMapping
 
@@ -31,6 +46,7 @@ class Tier:
     name: str
     requests_per_minute: int | None  # None = unlimited
     history_years: int | None  # None = no plan limit
+    history_start: date | None = None  # the source holds nothing older (Alpaca: 2016)
 
 
 # Backfill depth used when a plan has no history limit.
@@ -44,6 +60,18 @@ TIERS: dict[str, Tier] = {
     "developer": Tier("developer", requests_per_minute=None, history_years=10),
     "advanced": Tier("advanced", requests_per_minute=None, history_years=None),
 }
+
+
+# Alpaca market data plans (docs.alpaca.markets, Oct 2026). Basic is free: every US exchange (SIP)
+# except the latest 15 minutes, 200 requests/min; both plans go back to 2016. A little under the
+# published rate so the limiter never meets a 429.
+ALPACA_TIERS: dict[str, Tier] = {
+    "basic": Tier("alpaca-basic", requests_per_minute=190, history_years=None, history_start=date(2016, 1, 1)),
+    "algo_trader_plus": Tier("alpaca-plus", requests_per_minute=9500, history_years=None,
+                             history_start=date(2016, 1, 1)),
+}
+ALPACA_FEEDS = ("sip", "iex")
+ALPACA_CRYPTO_LOCS = ("us-1", "eu-1", "us")
 
 
 class ConfigError(Exception):
@@ -60,7 +88,23 @@ class Settings:
     max_requests_per_day: int = 2000
     refresh_hours: float = 0.0
     # Feed order when several sources cover the same ticker (SOURCE_PRIORITY, comma-separated).
-    source_priority: tuple[str, ...] = ("massive",)
+    source_priority: tuple[str, ...] = ("massive", "alpaca")
+
+    alpaca: "AlpacaSettings | None" = None
+    audits_per_run: int = 2
+    audits_random_per_run: int = 1
+
+    # The settings a feed view was made from, so any view can switch to another feed.
+    origin: "Settings | None" = field(default=None, compare=False, repr=False)
+
+    def for_source(self, name: str) -> "Settings":
+        """These settings as seen by one feed: its plan, rate and request caps."""
+        base = self.origin or self
+        if name == "alpaca" and base.alpaca:
+            a = base.alpaca
+            return replace(base, tier=a.tier, max_requests_per_run=a.max_requests_per_run,
+                           max_requests_per_day=a.max_requests_per_day, origin=base)
+        return base
 
     def require_api_key(self) -> str:
         if not self.api_key:
@@ -69,6 +113,52 @@ class Settings:
                 "(see .env.example)."
             )
         return self.api_key
+
+
+@dataclass(frozen=True)
+class AlpacaSettings:
+    key_id: str | None
+    secret_key: str | None
+    tier: Tier
+    feed: str = "sip"
+    crypto_loc: str = "us-1"
+    paper: bool = True
+    max_requests_per_run: int = 3000
+    max_requests_per_day: int = 30000
+
+    @property
+    def has_keys(self) -> bool:
+        return bool(self.key_id and self.secret_key)
+
+    def __repr__(self) -> str:  # never print the keys
+        return (f"AlpacaSettings(keys={'set' if self.has_keys else 'not set'}, tier={self.tier.name}, "
+                f"feed={self.feed}, crypto_loc={self.crypto_loc}, paper={self.paper})")
+
+
+def _alpaca(merged: Mapping[str, str]) -> AlpacaSettings:
+    plan = (merged.get("ALPACA_PLAN") or "basic").strip().lower()
+    if plan not in ALPACA_TIERS:
+        raise ConfigError(f"Unknown ALPACA_PLAN {plan!r}; choose one of {', '.join(ALPACA_TIERS)}")
+    tier = ALPACA_TIERS[plan]
+    rpm = _int_setting(merged, "ALPACA_RPM")
+    if rpm is not None:
+        tier = replace(tier, requests_per_minute=rpm or None)
+    feed = (merged.get("ALPACA_FEED") or "sip").strip().lower()
+    if feed not in ALPACA_FEEDS:
+        raise ConfigError(f"Unknown ALPACA_FEED {feed!r}; choose one of {', '.join(ALPACA_FEEDS)}")
+    loc = (merged.get("ALPACA_CRYPTO_LOC") or "us-1").strip().lower()
+    if loc not in ALPACA_CRYPTO_LOCS:
+        raise ConfigError(f"Unknown ALPACA_CRYPTO_LOC {loc!r}; choose one of {', '.join(ALPACA_CRYPTO_LOCS)}")
+    per_run = _int_setting(merged, "ALPACA_MAX_REQUESTS_PER_RUN")
+    per_day = _int_setting(merged, "ALPACA_MAX_REQUESTS_PER_DAY")
+    return AlpacaSettings(
+        key_id=merged.get("ALPACA_API_KEY_ID") or merged.get("APCA_API_KEY_ID") or None,
+        secret_key=merged.get("ALPACA_API_SECRET_KEY") or merged.get("APCA_API_SECRET_KEY") or None,
+        tier=tier, feed=feed, crypto_loc=loc,
+        paper=(merged.get("ALPACA_PAPER") or "1").strip().lower() not in ("0", "false", "no"),
+        max_requests_per_run=3000 if per_run is None else per_run,
+        max_requests_per_day=30000 if per_day is None else per_day,
+    )
 
 
 def read_env_file(path: Path) -> dict[str, str]:
@@ -119,9 +209,16 @@ def load_settings(
         max_requests_per_day=2000 if per_day is None else per_day,
         refresh_hours=float(refresh or 0),
         source_priority=tuple(
-            s.strip().lower() for s in (merged.get("SOURCE_PRIORITY") or "massive").split(",") if s.strip()
+            s.strip().lower() for s in (merged.get("SOURCE_PRIORITY") or "massive,alpaca").split(",") if s.strip()
         ),
+        alpaca=_alpaca(merged),
+        audits_per_run=_default(_int_setting(merged, "AUDITS_PER_RUN"), 2),
+        audits_random_per_run=_default(_int_setting(merged, "AUDITS_RANDOM_PER_RUN"), 1),
     )
+
+
+def _default(value: int | None, default: int) -> int:
+    return default if value is None else value
 
 
 def _int_setting(values: Mapping[str, str], name: str) -> int | None:

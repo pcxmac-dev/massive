@@ -86,8 +86,20 @@ class ChartApp:
             "feeds": self.engine.sources_for(ticker) if source == "*" else [source],
             "pricePrecision": s.price_precision, "volumePrecision": s.volume_precision,
             "periods": self.engine.periods(s), "first": first.isoformat(), "last": last.isoformat(),
-            "rows": len(s.frame),
+            "rows": len(s.frame), "attribution": self.attribution(s.ticker, s.kind, s.asset),
         }
+
+    def attribution(self, ticker: str, base: str, asset: str) -> dict:
+        """Which feed each span of the series came from (one feed per span): {timespan: [[start
+        ms, end ms, feed], ...]} for the base series and the official daily bars."""
+        if asset == "future" or base == "trades":
+            return {}
+        with self._lock:
+            out = {}
+            for timespan in dict.fromkeys((base, "day")):
+                spans = [[a, b, src] for src, ss in self.store.coverage(ticker, timespan).items() for a, b in ss]
+                out[timespan] = sorted(spans)
+            return out
 
     def bars(self, q: dict[str, str]) -> dict:
         limit = min(int(q.get("limit", 1000)), MAX_LIMIT)
@@ -132,6 +144,8 @@ class ChartApp:
             "details": details_subset(details),
             "detailsUpdated": (details or {}).get("_updated_at"),
             "stats": key_stats(daily),
+            "attribution": self.attribution(s.ticker, s.kind, s.asset),
+            "audits": self.audit_summary(s.ticker),
             "data": {
                 "feeds": feeds, "base": s.kind, "rows": int(len(s.frame)),
                 "first": s.frame.index[0].isoformat(), "last": s.frame.index[-1].isoformat(),
@@ -184,7 +198,11 @@ class ChartApp:
             if row is None:
                 raise LookupError(f"{ticker} is not in the directory")
             spec = resolve(f"{row['ticker']}::{row['exchange']}" if row["kind"] == "stock" and row["exchange"] else row["ticker"])
-            self.store.watch_spec("massive", spec)
+            from ..sources import SUPPORTED_ASSETS
+
+            for feed, assets in SUPPORTED_ASSETS.items():  # each span is still downloaded by one feed only
+                if spec.asset in assets:
+                    self.store.watch_spec(feed, spec)
         return {"watched": spec.ticker}
 
     def announcements(self) -> dict:
@@ -262,8 +280,27 @@ class ChartApp:
 
     def activity(self, q: dict[str, str]) -> dict:
         with self._lock:
-            return activity.activity(self.store, self.settings, self.store.path, q.get("source", "massive"),
-                                     log_lines=min(int(q.get("lines", 200)), 1000))
+            out = activity.activity(self.store, self.settings, self.store.path, q.get("source", "massive"),
+                                    log_lines=min(int(q.get("lines", 200)), 1000))
+        out["feeds"] = self.feeds()
+        return out
+
+    def audit_summary(self, ticker: str | None = None, limit: int = 40) -> dict:
+        with self._lock:
+            rows = self.store.audits(limit, ticker)
+            return {"audits": rows, "scores": self.store.audit_scores(), "queued": len(self.store.audit_queue())}
+
+    def feeds(self) -> list[dict]:
+        from ..sources import BUILDERS, feed_profiles
+
+        profiles = feed_profiles(self.settings)
+        out = []
+        for name in BUILDERS:
+            p, s = profiles.get(name), self.settings.for_source(name)
+            keys = None if name != "alpaca" or not self.settings.alpaca else self.settings.alpaca.has_keys
+            out.append({"name": name, "configured": p is not None, "assets": sorted(p.assets) if p else [],
+                        "plan": s.tier.name, "keys": keys})
+        return out
 
     def icon(self, ticker: str) -> tuple[str, bytes] | None:
         with self._lock:
@@ -275,7 +312,7 @@ class ChartApp:
         the activity view and the status bar while it runs."""
         if activity.lock_owner(self.store.path):
             raise RuntimeError("a run is already in progress")
-        args = [sys.executable, "-m", "massive_collate", "scan", "--probe", "--fetch"]
+        args = [sys.executable, "-m", "massive_collate", "scan", "--probe", "--fetch", "--all-sources"]
         if ticker:
             with self._lock:
                 watched = {w["ticker"] for w in self.store.watchlist()}
@@ -444,6 +481,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.activity(q))
                 if url.path == "/api/exchanges":
                     return self._json(app.exchanges())
+                if url.path == "/api/audits":
+                    return self._json(app.audit_summary(q.get("ticker")))
             except (KeyError, ValueError) as e:
                 return self._json({"error": f"bad request: {e}"}, HTTPStatus.BAD_REQUEST)
             except LookupError as e:

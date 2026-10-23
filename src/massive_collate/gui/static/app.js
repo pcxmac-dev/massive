@@ -555,9 +555,25 @@ $('gpuBtn').addEventListener('click', () => {
 // −46,479.70) and the plot shifts sideways, so switching models would move the time window.
 const Y_AXIS_WIDTH = 92;
 
+// The chart library's light theme has pale grey axis text and grid; darker here so labels read on
+// the grey page as well as the body text does.
+const LIGHT_CHART = {
+  grid: { horizontal: { color: '#cfd4de' }, vertical: { color: '#cfd4de' } },
+  xAxis: { axisLine: { color: '#9aa1b0' }, tickLine: { color: '#9aa1b0' }, tickText: { color: '#262a35' } },
+  yAxis: { axisLine: { color: '#9aa1b0' }, tickLine: { color: '#9aa1b0' }, tickText: { color: '#262a35' } },
+  separator: { color: '#b3b9c6' },
+  crosshair: {
+    horizontal: { line: { color: '#5a6070' }, text: { backgroundColor: '#2b303c', borderColor: '#2b303c' } },
+    vertical: { line: { color: '#5a6070' }, text: { backgroundColor: '#2b303c', borderColor: '#2b303c' } },
+  },
+  candle: { tooltip: { text: { color: '#1b1f29' } } },
+  indicator: { tooltip: { text: { color: '#1b1f29' } } },
+};
+
 function applyChartType() {
   const custom = !NATIVE[state.chartType];
   chart.setStyles(state.theme);
+  if (state.theme === 'light') chart.setStyles(LIGHT_CHART);
   chart.setStyles({ yAxis: { size: Y_AXIS_WIDTH } });
   chart.setStyles({ candle: { type: NATIVE[state.chartType] || 'candle_solid', ...DEFAULT_CANDLE } });
   chart.removeIndicator({ name: 'GPU_BARS' });
@@ -1726,7 +1742,29 @@ function renderPanel() {
       ['Rows', data.rows.toLocaleString()], ['From', esc(data.first.slice(0, 16).replace('T', ' '))],
       ['To', esc(data.last.slice(0, 16).replace('T', ' '))], ['Price precision', `${data.pricePrecision} dp`],
       ['Times', 'US/Eastern'],
-    ])}`;
+    ])}
+    ${attributionHtml(info.attribution, data.base)}
+    ${auditsHtml(info.audits, info.symbol.ticker)}`;
+}
+
+// Where each span of the series came from (one feed per span), newest first.
+function attributionHtml(att, base) {
+  const spans = (att && att[base]) || [];
+  if (!spans.length) return '';
+  const d = (ms) => new Date(ms).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const rows = [...spans].reverse().slice(0, 8).map(([a, b, src]) => [esc(src), `${d(a)} → ${b > Date.now() - 864e5 ? 'latest' : d(b)}`]);
+  return `<div class="p-sub">Sources (${esc(base)} bars)</div>${kv(rows)}`;
+}
+
+function auditsHtml(au, ticker) {
+  const rows = (au?.audits || []).filter((a) => a.ticker === ticker);
+  if (!rows.length) return '';
+  const n = (v) => rows.filter((a) => a.verdict === v).length;
+  const last = rows[0], c = last.report?.box?.c;
+  return `<div class="p-sub">Audits</div>${kv([
+    ['Verdicts', `${n('pass')} pass · ${n('warn')} warn · ${n('fail')} fail`],
+    ['Latest', `${esc(last.owner)} vs ${esc(last.auditor)}: ${esc(last.verdict)}${c ? ` · close ${c.median >= 0 ? '+' : ''}${c.median.toFixed(2)} bps` : ''}`],
+  ])}`;
 }
 
 // Highlight section: built from the highlight itself (its points and the server's statistics),

@@ -66,9 +66,11 @@ def _utc(text: str | None) -> datetime | None:
 
 
 def symbol_status(item: dict, edges: tuple | None, floor: date, today: date, now: datetime,
-                  tier: Tier, current: str | None, probe: tuple | None = None) -> dict:
+                  tier: Tier, current: str | None, probe: tuple | None = None, newest_any: int | None = None,
+                  bars_per_request: int | None = None) -> dict:
     """One watchlist row: how far back it is stored, whether backfill is done, whether newer
-    data should exist (plan calendar), and what the last scan found at the source."""
+    data should exist (plan calendar), and what the last scan found at the source.
+    `newest_any` is the newest bar any feed holds (each span is downloaded by one feed only)."""
     target = max(floor, item["listed_from"]) if item.get("listed_from") else floor
     first = datetime.fromtimestamp(edges[0] / 1000, ET).date() if edges else None
     last = datetime.fromtimestamp(edges[1] / 1000, ET) if edges else None
@@ -82,9 +84,11 @@ def symbol_status(item: dict, edges: tuple | None, floor: date, today: date, now
     missing_days = 0 if done else (today - target).days if reached is None else max(0, (reached - target).days)
     # calendar days to trading days (crypto trades every day)
     per_day = MINUTES_PER_DAY.get(item["asset"], 960) * (1 if item["asset"] == "crypto" else 5 / 7)
-    left = 0 if done else math.ceil(missing_days * per_day / BARS_PER_REQUEST) + (2 if reached is None else 0)
+    left = 0 if done else math.ceil(missing_days * per_day / (bars_per_request or BARS_PER_REQUEST)) + (
+        2 if reached is None else 0)
 
-    fresh = freshness.assess(item["asset"], tier, last, now)
+    newest = datetime.fromtimestamp(newest_any / 1000, ET) if newest_any else None
+    fresh = freshness.assess(item["asset"], tier, max(t for t in (last, newest) if t) if last or newest else None, now)
     source_through = None
     if probe and probe[1] is not None:
         source_through = datetime.fromtimestamp(probe[1] / 1000, ET)
@@ -109,8 +113,17 @@ def symbol_status(item: dict, edges: tuple | None, floor: date, today: date, now
 
 
 def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, current: str | None = None) -> list[dict]:
+    """The Fetcher's rows for one feed. With several feeds, what a row still needs is the spans
+    this feed should download (coverage.plan: nobody holds them and no better-ranked feed serves
+    them), not everything it lacks itself."""
+    from ..coverage import plan
+    from ..sources import feed_profiles
+
     today = now.date()
+    profiles = feed_profiles(settings)
+    settings = settings.for_source(source)
     floor = history_floor(settings.tier, today)
+    me = profiles.get(source)
     rows = []
     for item in store.watchlist(source):
         if item["asset"] == "future":
@@ -119,8 +132,25 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
             edges = (min(e[0] for e in spans), max(e[1] for e in spans)) if spans else None
         else:
             edges = store.bar_edges(source, item["ticker"])
-        rows.append(symbol_status(item, edges, floor, today, now, settings.tier, current,
-                                  store.probe(source, item["ticker"])))
+        newest = store.newest_any(item["ticker"], "minute") if item["asset"] != "future" else None
+        row = symbol_status(item, edges, floor, today, now, settings.tier, current,
+                            store.probe(source, item["ticker"]), newest[1] if newest else None,
+                            10_000 if source == "alpaca" else None)
+        if me is not None and item["asset"] != "future" and item["resolution"] != "trades":
+            if item["asset"] not in me.assets:
+                row.update(state="blocked", requestsLeft=0,
+                           note="keys not set" if source == "alpaca" else f"{source} has no {item['asset']} data here")
+            elif len(profiles) > 1:
+                item_floor = max(floor, item["listed_from"]) if item.get("listed_from") else floor
+                gaps = plan(store, me, profiles, item["ticker"], item["asset"], "minute", item_floor, now,
+                            item.get("listed_from"))
+                missing_days = sum(b - a for a, b in gaps) / 86_400_000
+                per_day = MINUTES_PER_DAY.get(item["asset"], 960) * (1 if item["asset"] == "crypto" else 5 / 7)
+                row["requestsLeft"] = math.ceil(missing_days * per_day / (10_000 if source == "alpaca" else BARS_PER_REQUEST))
+                row["gapDays"] = round(missing_days, 1)
+                if row["state"] in ("queued", "backfilling") and missing_days < 1:
+                    row.update(state="current", progress=1.0)  # other feeds hold the rest
+        rows.append(row)
     return rows
 
 
@@ -144,6 +174,7 @@ def live_feeds(store: Store, settings: Settings, source: str, now: datetime) -> 
     recorded live right now."""
     beat = store.kv_get(RECORDER_KEY)
     recording = bool(beat and (now - datetime.fromisoformat(beat)).total_seconds() < 120)
+    settings = settings.for_source(source)
     by_asset: dict[str, list[str]] = {}
     for w in store.watchlist(source):
         by_asset.setdefault(w["asset"], []).append(w["ticker"])
@@ -210,6 +241,7 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
              now: datetime | None = None, log_lines: int = 200) -> dict:
     now = (now or datetime.now(timezone.utc)).astimezone(ET)
     today = now.date()
+    settings = settings.for_source(source)  # the feed's own plan, rate and caps
     floor = history_floor(settings.tier, today)
 
     runs = store.runs(25)

@@ -56,6 +56,11 @@ PLAN_DELAYS: dict[str, dict[str, Delay]] = {
 }
 
 
+# Alpaca: Basic serves everything but the latest 15 minutes; crypto is never held back.
+PLAN_DELAYS["alpaca-basic"] = {"stock": Delay("delay", timedelta(minutes=15)), "crypto": Delay("delay")}
+PLAN_DELAYS["alpaca-plus"] = {"stock": Delay("delay"), "crypto": Delay("delay")}
+
+
 def plan_delay(tier: Tier, asset: str) -> Delay:
     return PLAN_DELAYS.get(tier.name, PLAN_DELAYS["free"]).get(asset, Delay("eod"))
 

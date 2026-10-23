@@ -26,6 +26,14 @@ class DataSource(ABC):
     def requests_made(self) -> int:
         """API requests sent so far by this instance."""
 
+    def serves(self, asset: str) -> bool:
+        """Whether this feed collects an asset class on this machine (e.g. keys present)."""
+        return True
+
+    def resolutions(self, asset: str) -> tuple[str, ...]:
+        """Resolutions to try for an asset class, finest first (the first the plan allows is kept)."""
+        return RESOLUTIONS_BY_ASSET.get(asset, RESOLUTIONS)
+
     @abstractmethod
     def is_entitled(self, resolution: str, ticker: str, asset: str = "stock") -> bool:
         """Probe (with as few requests as possible) whether the plan allows a resolution.
@@ -44,7 +52,8 @@ class DataSource(ABC):
         descending: bool = False, asset: str = "stock",
     ) -> Iterator[list[dict]]:
         """OHLCV bars in one shape for every asset class: t (ms bar start; for "day" bars
-        midnight US/Eastern of the trading/settlement date), o, h, l, c, v, vw, n."""
+        midnight US/Eastern of the trading/settlement date), o, h, l, c, v, vw, n.
+        `start`/`end` are whole days (dates, inclusive) or exact times (datetimes)."""
 
     @abstractmethod
     def exchanges(self) -> list[Exchange]:

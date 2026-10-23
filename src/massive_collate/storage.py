@@ -11,8 +11,11 @@ from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Sequence
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+
+_ET = ZoneInfo("America/New_York")
 
 if TYPE_CHECKING:
     from .models import Exchange
@@ -200,6 +203,48 @@ CREATE TABLE IF NOT EXISTS market_snapshot (
 CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT
+);
+
+-- Which feed holds which span of a series. Each span [start, end) of a ticker's series was asked
+-- for by exactly one feed, which stored whatever exists in it: other feeds never download it again
+-- (only an audit may, without storing). Spans of one feed are kept merged.
+CREATE TABLE IF NOT EXISTS coverage (
+    source    TEXT    NOT NULL,
+    ticker    TEXT    NOT NULL,
+    timespan  TEXT    NOT NULL,
+    start_ms  INTEGER NOT NULL,
+    end_ms    INTEGER NOT NULL,
+    PRIMARY KEY (source, ticker, timespan, start_ms)
+);
+CREATE INDEX IF NOT EXISTS coverage_series ON coverage (ticker, timespan);
+
+-- Audits: a second feed's copy of a stored span, compared in memory (see audit.py). Only the
+-- comparison is kept, never the second copy.
+CREATE TABLE IF NOT EXISTS audits (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    at        TEXT    NOT NULL,
+    ticker    TEXT    NOT NULL,
+    asset     TEXT,
+    timespan  TEXT    NOT NULL,
+    start_ms  INTEGER NOT NULL,
+    end_ms    INTEGER NOT NULL,
+    owner     TEXT    NOT NULL,   -- the feed whose stored data was checked
+    auditor   TEXT    NOT NULL,   -- the feed asked for a second copy
+    reason    TEXT,               -- after-download | random | manual
+    verdict   TEXT    NOT NULL,   -- pass | warn | fail | no-data
+    matched   INTEGER, only_owner INTEGER, only_auditor INTEGER,
+    report    TEXT                -- JSON: box stats and pass rates per field, offsets, worst bars
+);
+
+-- Spans waiting to be audited by another feed (queued after a download, done in that feed's run).
+CREATE TABLE IF NOT EXISTS audit_queue (
+    ticker    TEXT    NOT NULL,
+    timespan  TEXT    NOT NULL,
+    start_ms  INTEGER NOT NULL,
+    end_ms    INTEGER NOT NULL,
+    owner     TEXT    NOT NULL,
+    queued_at TEXT    NOT NULL,
+    PRIMARY KEY (ticker, timespan, start_ms, owner)
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -663,6 +708,134 @@ class Store:
                 "UPDATE watchlist SET backfilled_to=? WHERE source=? AND ticker=?",
                 (day.isoformat() if day else None, source, ticker.upper()),
             )
+
+    # -- coverage: which feed holds which span (one feed per span) ----------
+
+    STEP_MS = {"minute": 60_000, "hour": 3_600_000, "day": 86_400_000, "week": 7 * 86_400_000}
+
+    def add_coverage(self, source: str, ticker: str, timespan: str, start_ms: int, end_ms: int) -> None:
+        """Record that `source` holds [start, end) of a series, merged with its touching spans."""
+        if end_ms <= start_ms:
+            return
+        ticker = ticker.upper()
+        key = (source, ticker, timespan)
+        with self.conn:
+            rows = self.conn.execute(
+                "SELECT start_ms, end_ms FROM coverage WHERE source=? AND ticker=? AND timespan=? "
+                "AND end_ms >= ? AND start_ms <= ?", (*key, start_ms, end_ms)).fetchall()
+            lo = min([start_ms] + [r[0] for r in rows])
+            hi = max([end_ms] + [r[1] for r in rows])
+            self.conn.executemany("DELETE FROM coverage WHERE source=? AND ticker=? AND timespan=? AND start_ms=?",
+                                  [(*key, r[0]) for r in rows])
+            self.conn.execute("INSERT INTO coverage VALUES (?, ?, ?, ?, ?)", (*key, lo, hi))
+
+    def coverage(self, ticker: str, timespan: str, source: str | None = None) -> dict[str, list[tuple[int, int]]]:
+        """{feed: [(start, end), ...]} for a series, oldest first. Series stored before the ledger
+        existed are entered from their stored range first (`_seed_coverage`)."""
+        ticker = ticker.upper()
+        self._seed_coverage(ticker, timespan)
+        sql = "SELECT source, start_ms, end_ms FROM coverage WHERE ticker=? AND timespan=?"
+        args: list = [ticker, timespan]
+        if source:
+            sql += " AND source=?"
+            args.append(source)
+        out: dict[str, list[tuple[int, int]]] = {}
+        for src, a, b in self.conn.execute(sql + " ORDER BY start_ms", args):
+            out.setdefault(src, []).append((a, b))
+        return out
+
+    def _seed_coverage(self, ticker: str, timespan: str) -> None:
+        """A series stored before the ledger: its feed holds from its first bar (or the start of
+        the day it was backfilled to) through its last bar."""
+        have = {r[0] for r in self.conn.execute(
+            "SELECT DISTINCT source FROM coverage WHERE ticker=? AND timespan=?", (ticker, timespan))}
+        sources = {r[0] for r in self.conn.execute(
+            "SELECT source FROM watchlist WHERE ticker=?", (ticker,))} | {
+            s for s, t, k in self.stored_series() if t == ticker and k == timespan}
+        for src in sources - have:
+            r = self.bar_edges(src, ticker, timespan)  # two index seeks
+            if not r:
+                continue
+            start = r[0]
+            row = self.conn.execute("SELECT backfilled_to FROM watchlist WHERE source=? AND ticker=?",
+                                    (src, ticker)).fetchone()
+            if row and row[0]:
+                d = date.fromisoformat(row[0])
+                start = min(start, int(datetime(d.year, d.month, d.day, tzinfo=_ET).timestamp() * 1000))
+            self.add_coverage(src, ticker, timespan, start, r[1] + self.STEP_MS.get(timespan, 60_000))
+
+    def newest_any(self, ticker: str, timespan: str) -> tuple[str, int] | None:
+        """(feed, ms) of the newest bar of a series in any feed: one index seek per feed holding it
+        (the bars key starts with the feed, so a query without it would read every bar)."""
+        ticker = ticker.upper()
+        best = None
+        for src in {s for s, t, k in self.stored_series() if t == ticker and k == timespan}:
+            newest = self.conn.execute(  # MAX alone is answered from the index's last entry
+                "SELECT MAX(ts) FROM bars WHERE source=? AND ticker=? AND timespan=? AND multiplier=1",
+                (src, ticker, timespan)).fetchone()[0]
+            if newest is not None and (best is None or newest > best[1]):
+                best = (src, newest)
+        return best
+
+    # -- audits -------------------------------------------------------------
+
+    def save_audit(self, row: dict) -> int:
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO audits (at, ticker, asset, timespan, start_ms, end_ms, owner, auditor, reason, verdict, "
+                "matched, only_owner, only_auditor, report) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (row.get("at") or _now(), row["ticker"].upper(), row.get("asset"), row["timespan"], row["start_ms"],
+                 row["end_ms"], row["owner"], row["auditor"], row.get("reason"), row["verdict"], row.get("matched"),
+                 row.get("only_owner"), row.get("only_auditor"), json.dumps(row.get("report") or {})))
+            return cur.lastrowid
+
+    def audits(self, limit: int = 50, ticker: str | None = None) -> list[dict]:
+        sql = ("SELECT id, at, ticker, asset, timespan, start_ms, end_ms, owner, auditor, reason, verdict, matched, "
+               "only_owner, only_auditor, report FROM audits")
+        args: list = []
+        if ticker:
+            sql += " WHERE ticker=?"
+            args.append(ticker.upper())
+        cols = ("id", "at", "ticker", "asset", "timespan", "start_ms", "end_ms", "owner", "auditor", "reason",
+                "verdict", "matched", "only_owner", "only_auditor", "report")
+        out = []
+        for r in self.conn.execute(sql + " ORDER BY id DESC LIMIT ?", (*args, limit)):
+            d = dict(zip(cols, r))
+            d["report"] = json.loads(d["report"] or "{}")
+            out.append(d)
+        return out
+
+    def audit_scores(self, days: int = 90) -> dict[str, dict]:
+        """Per feed, over recent audits it took part in: how many and the share that passed.
+        Two feeds that disagree score alike (an audit cannot say which is right); a third feed
+        makes the scores differ."""
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        out: dict[str, dict] = {}
+        for owner, auditor, verdict in self.conn.execute(
+                "SELECT owner, auditor, verdict FROM audits WHERE at >= ? AND verdict != 'no-data'", (since,)):
+            for feed in (owner, auditor):
+                s = out.setdefault(feed, {"audits": 0, "passed": 0})
+                s["audits"] += 1
+                s["passed"] += verdict == "pass"
+        for s in out.values():
+            s["accuracy"] = s["passed"] / s["audits"] if s["audits"] else None
+        return out
+
+    def queue_audit(self, ticker: str, timespan: str, start_ms: int, end_ms: int, owner: str) -> None:
+        with self.conn:
+            self.conn.execute("INSERT OR IGNORE INTO audit_queue VALUES (?, ?, ?, ?, ?, ?)",
+                              (ticker.upper(), timespan, start_ms, end_ms, owner, _now()))
+
+    def audit_queue(self, exclude_owner: str | None = None) -> list[dict]:
+        rows = self.conn.execute("SELECT ticker, timespan, start_ms, end_ms, owner, queued_at FROM audit_queue "
+                                 "ORDER BY queued_at").fetchall()
+        cols = ("ticker", "timespan", "start_ms", "end_ms", "owner", "queued_at")
+        return [dict(zip(cols, r)) for r in rows if r[4] != exclude_owner]
+
+    def dequeue_audit(self, ticker: str, timespan: str, start_ms: int, owner: str) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM audit_queue WHERE ticker=? AND timespan=? AND start_ms=? AND owner=?",
+                              (ticker.upper(), timespan, start_ms, owner))
 
     # -- plan entitlements (per asset class) -------------------------------
 

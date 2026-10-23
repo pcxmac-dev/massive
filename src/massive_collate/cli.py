@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import random
 import subprocess
 import sys
 import time
@@ -14,8 +15,9 @@ from typing import Iterator
 from . import analysis, charts, collector
 from .config import ConfigError, Settings, load_settings
 from .errors import SourceError
+from .sessions import ET
 from .symbols import resolve
-from .sources import BUILDERS, DataSource, build_source
+from .sources import BUILDERS, SUPPORTED_ASSETS, DataSource, build_source, feed_profiles
 from .storage import Store
 
 TASK_NAME = "MassiveCollateSync"
@@ -107,6 +109,7 @@ def _budget(settings: Settings, store: Store, source: str) -> int:
 @contextmanager
 def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource, Store, Logger]]:
     """Open the store, take the lock, build a source with a hard request cap, and audit the run."""
+    settings = settings.for_source(args.source)  # each feed has its own plan, rate and caps
     log = Logger(settings.db_path.parent / "logs" / "massive-collate.log")
     with Store(settings.db_path) as store, run_lock(settings.db_path):
         store.close_abandoned_runs()  # we hold the lock, so anything still "running" died
@@ -155,6 +158,10 @@ def cmd_watch(args, settings: Settings) -> int:
             spec = resolve(text)
             if args.action == "add":
                 store.watch_spec(args.source, spec, args.resolution)
+                if getattr(args, "every_feed", False):  # also on every other feed that can collect it
+                    for feed, assets in SUPPORTED_ASSETS.items():
+                        if feed != args.source and spec.asset in assets:
+                            store.watch_spec(feed, spec, "auto")
             elif args.action == "remove":
                 store.unwatch(args.source, [spec.ticker])
         for w in store.watchlist(args.source):
@@ -174,8 +181,11 @@ def cmd_sync(args, settings: Settings) -> int:
                     continue
                 # Directory placeholders and icons get only what the watchlist leaves, and never the
                 # last DAILY_RESERVE requests of the day (later runs need them for updates).
-                reserve_left = settings.max_requests_per_day - collector.DAILY_RESERVE - store.requests_today(name)
-                result = collector.sync(source, store, settings.tier, log=log, refresh_hours=settings.refresh_hours,
+                feed = settings.for_source(name)
+                reserve_left = feed.max_requests_per_day - collector.DAILY_RESERVE - store.requests_today(name)
+                result = collector.sync(source, store, feed.tier, log=log, refresh_hours=settings.refresh_hours,
+                                        feeds=feed_profiles(settings),
+                                        audits=(settings.audits_per_run, settings.audits_random_per_run),
                                         on_item=lambda t: store.set_run_current(args._run_id, t),
                                         directory_allowance=max(0, reserve_left))
                 args._rows = result.rows
@@ -210,24 +220,95 @@ def _only(args) -> set[str] | None:
 
 def cmd_scan(args, settings: Settings) -> int:
     """Which symbols should have new data? Free without --probe; --probe confirms with the
-    source (one request per symbol that looks behind); --fetch then downloads what was found."""
+    source (one request per symbol that looks behind); --fetch then downloads what was found.
+    With --all-sources every configured feed is scanned in turn (each only for its own spans)."""
+    if getattr(args, "all_sources", False):
+        for name in feed_profiles(settings):
+            args.source = name
+            _scan_one(args, settings)
+        return 0
+    return _scan_one(args, settings)
+
+
+def _scan_one(args, settings: Settings) -> int:
+    tier = settings.for_source(args.source).tier
     if not args.probe:
         with Store(settings.db_path) as store:
-            result = collector.scan(None, store, settings.tier, source_name=args.source, only=_only(args))
+            result = collector.scan(None, store, tier, source_name=args.source, only=_only(args))
         _scan_table(result)
         return 0
     label = "scan" + (f" {' '.join(sorted(_only(args)))}" if args.only else "") + (" + fetch" if args.fetch else "")
     with api_run(args, settings, label) as (source, store, log):
         if source is None:  # daily cap reached: still report what is known
-            result = collector.scan(None, store, settings.tier, source_name=args.source, log=log, only=_only(args))
+            result = collector.scan(None, store, tier, source_name=args.source, log=log, only=_only(args))
         else:
-            result = collector.scan(source, store, settings.tier, log=log, probe_limit=args.limit, only=_only(args))
+            result = collector.scan(source, store, tier, log=log, probe_limit=args.limit, only=_only(args),
+                                    feeds=feed_profiles(settings))
             if args.fetch and result.new and not result.stopped:
-                done = collector.sync(source, store, settings.tier, log=log, only=set(result.new),
+                done = collector.sync(source, store, tier, log=log, only=set(result.new), feeds=feed_profiles(settings),
                                       on_item=lambda t: store.set_run_current(args._run_id, t))
                 args._rows = done.rows
                 log(f"scan: fetched {done.rows} new rows for {', '.join(result.new)}")
     _scan_table(result)
+    return 0
+
+
+def _audit_line(r: dict) -> str:
+    rep = r["report"] or {}
+    close, rng, vol = ((rep.get("box") or {}).get(k) or {} for k in ("c", "range", "v"))
+    start = datetime.fromtimestamp(r["start_ms"] / 1000, ET)
+    fmt = lambda b, u: f"{b['median']:+.2f}{u} (p95 {b['p95']:+.2f})" if b else "-"  # noqa: E731
+    return (f"{r['at'][:16]}  {r['ticker']:8} {start:%Y-%m-%d %H:%M} {r['timespan']:6} {r['owner']}->{r['auditor']:8} "
+            f"{r['verdict']:7} matched {r['matched'] or 0:5} only {r['only_owner'] or 0}/{r['only_auditor'] or 0}  "
+            f"close {fmt(close, 'bps')}  high-low {fmt(rng, 'bps')}  volume {fmt(vol, '%')}")
+
+
+def cmd_audit(args, settings: Settings) -> int:
+    """Audit stored spans against another feed: the second copy is compared, never stored."""
+    from . import audit
+
+    if args.list:
+        with Store(settings.db_path) as store:
+            for r in store.audits(30, args.ticker):
+                print(_audit_line(r))
+            scores = store.audit_scores()
+        for feed, s in sorted(scores.items()):
+            print(f"{feed}: {s['passed']} of {s['audits']} audits passed in 90 days")
+        return 0
+    args.source = args.auditor or args.source
+    feeds = feed_profiles(settings)
+    with api_run(args, settings, "audit") as (source, store, log):
+        if source is None:
+            return 0
+        me = feeds.get(source.name)
+        if me is None:
+            log(f"{source.name} is not configured here")
+            return 1
+        now = collector.now_et()
+        if not args.ticker:
+            for _ in range(args.random):
+                pick = audit.random_span(store, source, me, now, random.Random())
+                if pick:
+                    audit.audit_span(source, store, *pick, "manual", log)
+                else:
+                    log("nothing to audit: no other feed holds data this feed can serve")
+            return 0
+        w = next((x for x in store.watchlist(source.name) if x["ticker"] == args.ticker), None)
+        cov = store.coverage(args.ticker, "minute")
+        owners = sorted(o for o in cov if o != source.name)
+        if w is None or not owners:
+            log(f"{args.ticker}: not on {source.name}'s watchlist, or no other feed holds its minute bars")
+            return 1
+        if args.day:
+            span = audit.manual_day(store, args.ticker, args.day, w["asset"])
+        else:
+            pick = audit.random_span(store, source, me, now, random.Random(), {args.ticker: w})
+            span = pick[2:4] if pick else None
+        if not span:
+            log(f"{args.ticker}: no session to audit")
+            return 1
+        owner = next((o for o in owners if any(a <= span[0] < b for a, b in cov[o])), owners[0])
+        audit.audit_span(source, store, args.ticker, "minute", span[0], span[1], owner, "manual", log)
     return 0
 
 
@@ -282,7 +363,7 @@ def cmd_download(args, settings: Settings) -> int:
         rows = 0
         for t in args.tickers:
             rows += collector.download_bars(
-                source, store, settings.tier, t.upper(), args.start, args.end, args.timespan, args.multiplier, log
+                source, store, settings.for_source(args.source).tier, t.upper(), args.start, args.end, args.timespan, args.multiplier, log
             )
         args._rows = rows
     return 0
@@ -292,7 +373,7 @@ def cmd_market_daily(args, settings: Settings) -> int:
     with api_run(args, settings, "market-daily") as (source, store, log):
         if source is None:
             return 0
-        result = collector.sync_market_daily(source, store, settings.tier, log=log)
+        result = collector.sync_market_daily(source, store, settings.for_source(args.source).tier, log=log)
         args._rows = result.rows
     return 0
 
@@ -323,11 +404,14 @@ def cmd_status(args, settings: Settings) -> int:
     with Store(settings.db_path) as store:
         s = store.summary()
         print(f"database: {s['db_path']} ({s['size_bytes'] / 1e6:.1f} MB)")
-        print(f"plan: {settings.tier.name}, {settings.tier.requests_per_minute or 'unlimited'} requests/min, "
-              f"history {settings.tier.history_years or 'unlimited'} years")
-        print(f"caps: {settings.max_requests_per_run}/run, {settings.max_requests_per_day}/day")
         for src in BUILDERS:
-            print(f"requests today ({src}): {store.requests_today(src)}")
+            feed = settings.for_source(src)
+            t = feed.tier
+            history = f"from {t.history_start}" if t.history_start else f"{t.history_years or 'unlimited'} years"
+            keys = "" if src != "alpaca" or not settings.alpaca else                 f", keys {'set' if settings.alpaca.has_keys else 'not set (crypto only)'}"
+            print(f"{src}: plan {t.name}, {t.requests_per_minute or 'unlimited'} requests/min, history {history}, "
+                  f"caps {feed.max_requests_per_run}/run {feed.max_requests_per_day}/day, "
+                  f"requests today {store.requests_today(src)}{keys}")
         print("\nwatchlist:")
         for w in store.watchlist():
             print("  " + _watch_line(w))
@@ -458,6 +542,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("action", choices=["add", "remove", "list"])
     s.add_argument("tickers", nargs="*")
     s.add_argument("--resolution", default="auto", choices=["auto", "trades", "second", "minute"])
+    s.add_argument("--every-feed", action="store_true",
+                   help="add to every feed that can collect it (each span is still downloaded once)")
     s.set_defaults(func=cmd_watch)
 
     s = sub.add_parser("sync", help="scheduled run: update and backfill the watchlist on every feed")
@@ -471,7 +557,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--fetch", action="store_true", help="with --probe: download the new data found")
     s.add_argument("--limit", type=int, default=30, help="most symbols to probe (default 30)")
     s.add_argument("--only", nargs="+", metavar="TICKER", help="only these watched symbols")
+    s.add_argument("--all-sources", action="store_true", help="scan every configured feed in turn")
     s.set_defaults(func=cmd_scan)
+
+    s = sub.add_parser("audit", help="compare stored data with another feed's copy (stores the comparison only)")
+    s.add_argument("ticker", nargs="?", help="a watched symbol (default: random stored sessions)")
+    s.add_argument("--day", type=_date, help="the session to audit (default: a random one)")
+    s.add_argument("--random", type=int, default=1, help="random sessions to audit when no ticker is given")
+    s.add_argument("--auditor", choices=sorted(BUILDERS), help="feed asked for the second copy (default: --source)")
+    s.add_argument("--list", action="store_true", help="show recent audits instead of running one")
+    s.set_defaults(func=cmd_audit)
 
     s = sub.add_parser("deps", help="check every external dependency (data feeds, calendars, icons, files)")
     s.set_defaults(func=cmd_deps)

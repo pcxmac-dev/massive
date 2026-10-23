@@ -56,7 +56,7 @@
 
   const DATA_LABEL = {
     fetching: 'Fetching now', backfilling: 'Backfilling history', queued: 'Queued for download',
-    new: 'New data should be available', current: 'Up to date',
+    new: 'New data should be available', current: 'Up to date', blocked: 'Not collected by this feed',
   };
 
   // `d`: { state, progress } from /api/activity or /api/symbols.

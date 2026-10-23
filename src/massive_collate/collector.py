@@ -19,7 +19,9 @@ from .config import UNLIMITED_BACKFILL_YEARS, Tier
 from .errors import BudgetExhausted, NotEntitled, RateLimited, SourceError
 from . import freshness
 from .futures import candidate_contracts, roll_schedule
-from .sources.base import RESOLUTIONS, RESOLUTIONS_BY_ASSET, DataSource
+from .coverage import STEP_MS, FeedProfile, has_open_time, ms, plan
+from .sources.base import DataSource
+from .symbols import ASSETS
 from .storage import Store
 
 ET = ZoneInfo("America/New_York")
@@ -53,7 +55,8 @@ def history_floor(tier: Tier, today: date) -> date:
         floor = today.replace(year=today.year - years)
     except ValueError:  # 29 February
         floor = today.replace(year=today.year - years, day=28)
-    return floor + timedelta(days=1)
+    floor += timedelta(days=1)
+    return max(floor, tier.history_start) if tier.history_start else floor
 
 
 def _date_ns(d: date) -> int:
@@ -84,7 +87,7 @@ def resolve_resolution(
 
     Entitlements belong to the plan and asset class, not the ticker, so an answer is reused
     for every symbol of that class for a week instead of probing each one again."""
-    for resolution in RESOLUTIONS_BY_ASSET.get(asset, RESOLUTIONS):
+    for resolution in source.resolutions(asset):
         ok = known = store.entitlement(source.name, asset, resolution)
         if ok is None:
             try:
@@ -106,6 +109,8 @@ def resolve_resolution(
 # -- one series ----------------------------------------------------------------
 
 def sync_trades(source: DataSource, store: Store, ticker: str, floor: date, backfilled_to: date | None) -> int:
+    """Ticks are opted into per symbol on one feed (watch --resolution trades), so they are kept
+    out of the minute-bar ledger: a different kind of data, not a second copy of the bars."""
     saved = 0
     stored = store.trade_range(source.name, ticker)
 
@@ -145,49 +150,81 @@ def _store_bars(store: Store, source: DataSource, ticker: str, timespan: str, pa
     return store.upsert_bars(source.name, ticker, timespan, 1, invert_bars(page) if invert else page)
 
 
+def _fill(source: DataSource, store: Store, ticker: str, timespan: str, a: int, b: int, fetch: str,
+          asset: str, invert: bool, frontier: bool) -> tuple[int, int | None]:
+    """Download [a, b) of a series from `source`, newest first, recording in the coverage ledger
+    what it now holds after every page (a run stopped by a cap resumes exactly there).
+    The newest span (`frontier`) counts as held only once the feed has published its last
+    session: a span the feed has not caught up on stays open for the next run.
+    Returns (rows saved, newest bar ms)."""
+    if not has_open_time(asset, a, b):  # nights, weekends, holidays: nothing to ask for
+        store.add_coverage(source.name, ticker, timespan, a, b)
+        return 0, None
+    step = STEP_MS.get(timespan, 60_000)
+    if timespan == "day":
+        last_open = b - step - 6 * 3_600_000  # the last day bar, wherever its day starts (ET or UTC)
+    else:
+        sessions = [x for x in freshness.CALENDAR.sessions(asset, _ms_to_date(a) - timedelta(days=1), _ms_to_date(b))
+                    if ms(x.open) < b]
+        last_open = ms(sessions[-1].open) if sessions else a
+    saved, oldest, newest = 0, None, None
+
+    def top() -> int:
+        if not frontier or (newest is not None and newest >= last_open):
+            return b
+        return newest + step if newest is not None else a
+
+    lo, hi = datetime.fromtimestamp(a / 1000, ET), datetime.fromtimestamp(b / 1000, ET)
+    for page in _guard(source.bar_pages(fetch, lo, hi, timespan, descending=True, asset=asset)):
+        page = [x for x in page if a <= int(x["t"]) < b]
+        if not page:
+            continue
+        saved += _store_bars(store, source, ticker, timespan, page, invert)
+        times = [int(x["t"]) for x in page]
+        oldest = min(times) if oldest is None else min(oldest, min(times))
+        newest = max(times) if newest is None else max(newest, max(times))
+        store.add_coverage(source.name, ticker, timespan, oldest, top())
+    store.add_coverage(source.name, ticker, timespan, a, top())
+    return saved, newest
+
+
 def sync_bars(
-    source: DataSource, store: Store, ticker: str, timespan: str, floor: date, today: date,
-    backfilled_to: date | None, fetch: str | None = None, asset: str = "stock", invert: bool = False,
+    source: DataSource, store: Store, ticker: str, timespan: str, floor: date, now: datetime,
+    me: FeedProfile, feeds: dict[str, FeedProfile], fetch: str | None = None, asset: str = "stock",
+    invert: bool = False, listed_from: date | None = None, log: Log = print,
 ) -> int:
-    """Bring a bar series up to date, then backfill it to the floor. `fetch` is the source's
-    ticker when it differs from the stored one; `invert` stores an fx pair inverted."""
+    """Download every span of a series this feed should hold and nobody holds yet (coverage.plan:
+    one feed per span), newest first, so current data lands before older history. `fetch` is the
+    source's ticker when it differs from the stored one; `invert` stores an fx pair inverted."""
     fetch = fetch or ticker
+    gaps = plan(store, me, feeds, ticker, asset, timespan, floor, now, listed_from)
     saved = 0
-    stored = store.bar_range(source.name, ticker, timespan)
-
-    if stored:  # forward: from the day of the newest stored bar to today
-        for page in _guard(source.bar_pages(fetch, _ms_to_date(stored[1]), today, timespan, asset=asset)):
-            saved += _store_bars(store, source, ticker, timespan, page, invert)
-
-    if backfilled_to is None or backfilled_to > floor:  # backward: to the plan floor
-        stored = store.bar_range(source.name, ticker, timespan)
-        end = _ms_to_date(stored[0]) if stored else today
+    for i, (a, b) in enumerate(reversed(gaps)):
         try:
-            for page in _guard(source.bar_pages(fetch, floor, end, timespan, descending=True, asset=asset)):
-                saved += _store_bars(store, source, ticker, timespan, page, invert)
-        except NotEntitled:
-            pass
-        store.set_backfilled(source.name, ticker, floor)
+            n, newest = _fill(source, store, ticker, timespan, a, b, fetch, asset, invert, frontier=i == 0)
+        except NotEntitled as e:
+            if i == 0:
+                raise
+            log(f"{ticker} {timespan}: {_ms_to_date(a)} to {_ms_to_date(b)} refused by the plan ({e.message})")
+            continue
+        saved += n
+        if i == 0 and n and timespan == "minute":
+            _queue_audit(store, me, feeds, ticker, asset, timespan, newest)
     return saved
 
 
-def sync_daily(
-    source: DataSource, store: Store, ticker: str, floor: date, today: date,
-    fetch: str | None = None, asset: str = "stock", invert: bool = False,
-) -> int:
-    """Official daily bars (include the closing auction), one request per run.
-
-    Day/week/month charts use these rather than bars rebuilt from intraday data.
-    """
-    stored = store.bar_range(source.name, ticker, "day")
-    start = max(floor, _ms_to_date(stored[1])) if stored else floor
-    saved = 0
-    try:
-        for page in _guard(source.bar_pages(fetch or ticker, start, today, "day", asset=asset)):
-            saved += _store_bars(store, source, ticker, "day", page, invert)
-    except NotEntitled:
-        pass
-    return saved
+def _queue_audit(store: Store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, asset: str,
+                 timespan: str, newest: int | None) -> None:
+    """After new data: ask another feed watching the ticker to audit the newest session."""
+    if newest is None:
+        return
+    if not any(f.name != me.name and asset in f.assets for f in feeds.values()):
+        return
+    t = datetime.fromtimestamp(newest / 1000, ET)
+    sessions = [x for x in freshness.CALENDAR.sessions(asset, t.date() - timedelta(days=1), t.date() + timedelta(days=1))
+                if x.open <= t < x.close]
+    if sessions:
+        store.queue_audit(ticker, timespan, ms(sessions[-1].open), newest + STEP_MS[timespan], me.name)
 
 
 # -- futures -------------------------------------------------------------------
@@ -320,6 +357,14 @@ def check_listing(source: DataSource, store: Store, item: dict, today: date, log
     ticker, checked = item["ticker"], item["checked_at"]
     if checked and (today - checked).days < LISTING_RECHECK_DAYS and store.details(source.name, ticker):
         return Listing(True, item["listed_from"])
+    # Another feed checked this ticker this week: share its answer instead of asking again.
+    for other in store.watchlist():
+        if (other["ticker"] == ticker and other["source"] != source.name and other["checked_at"]
+                and (today - other["checked_at"]).days < LISTING_RECHECK_DAYS and store.details(other["source"], ticker)):
+            store.set_listing(source.name, ticker, other["listed_from"], other["figi"], other["checked_at"],
+                              other["name"], other["kind"], other["exchange"])
+            store.set_details(source.name, ticker, {**store.details(other["source"], ticker), "sharedFrom": other["source"]})
+            return Listing(True, other["listed_from"])
     try:
         inst = _guard_call(source.instrument, ticker, resolve_exchange=False)
     except NotEntitled as e:
@@ -376,7 +421,7 @@ def check_reference(source: DataSource, store: Store, item: dict, today: date, l
 # -- scheduled run -----------------------------------------------------------
 
 def sync_exchanges(source: DataSource, store: Store, log: Log = print) -> int:
-    if not store.exchanges(source.name).empty:
+    if not store.exchanges(source.name).empty or not source.serves("stock"):
         return 0
     try:
         n = store.upsert_exchanges(_guard_call(source.exchanges))
@@ -414,7 +459,7 @@ def _due(asset: str, tier: Tier, synced: datetime, now: datetime, refresh_hours:
 def sync(
     source: DataSource, store: Store, tier: Tier, now: datetime | None = None, log: Log = print,
     refresh_hours: float = 0.0, on_item: Callable[[str], None] | None = None, only: set[str] | None = None,
-    directory_allowance: int = 0,
+    directory_allowance: int = 0, feeds: dict[str, FeedProfile] | None = None, audits: tuple[int, int] = (0, 0),
 ) -> SyncResult:
     """One scheduled run over the watchlist for a source.
 
@@ -424,11 +469,19 @@ def sync(
     never skipped. `on_item` is told which symbol is
     being worked on (for the activity view). `only` limits the run to those symbols and
     fetches them whatever the refresh interval (used by `scan --fetch`).
+
+    `feeds` describes every configured feed, so this one downloads only spans no better-ranked
+    feed can serve (see coverage.py); `audits` = (queued, random) audits this run may do for
+    other feeds' data.
     """
     now = (now or now_et()).astimezone(ET)
     today = now.date()
     floor = history_floor(tier, today)
     result = SyncResult()
+    feeds = dict(feeds or {})
+    me = feeds.get(source.name) or FeedProfile(source.name, tier, frozenset(ASSETS))
+    feeds[source.name] = me
+    waiting: dict[str, int] = {}
     try:
         sync_exchanges(source, store, log)
         refresh_calendars(source, store, today, log)
@@ -440,6 +493,9 @@ def sync(
             ticker, asset = item["ticker"], item["asset"]
             synced = item.get("synced_at")
             if only is not None and ticker not in only:
+                continue
+            if not source.serves(asset):  # e.g. Alpaca stocks without keys: nothing is sent
+                waiting[asset] = waiting.get(asset, 0) + 1
                 continue
             if only is None and synced and not _due(asset, tier, synced, now, refresh_hours):
                 result.skipped += 1
@@ -474,20 +530,26 @@ def sync(
                 if resolution is None:
                     log(f"{ticker}: no supported resolution on your plan; skipped")
                     continue
+            span = dict(me=me, feeds=feeds, fetch=fetch, asset=asset, invert=invert,
+                        listed_from=listing.listed_from, log=log)
             try:
                 if resolution == "trades":
                     n = sync_trades(source, store, ticker, item_floor, backfilled_to)
                 else:
-                    n = sync_bars(source, store, ticker, resolution, item_floor, today, backfilled_to,
-                                  fetch=fetch, asset=asset, invert=invert)
+                    n = sync_bars(source, store, ticker, resolution, item_floor, now, **span)
             except NotEntitled as e:
                 log(f"{ticker} {resolution}: refused by your plan ({e.message}); re-checking resolution next run")
                 store.set_resolution(source.name, ticker, "auto")
                 store.clear_entitlements(source.name)  # the plan may have changed: probe again
                 continue
             result.rows += n
+            if resolution != "trades":
+                store.set_backfilled(source.name, ticker, item_floor)  # every span it should hold is in
             if resolution != "day":
-                n_day = sync_daily(source, store, ticker, item_floor, today, fetch=fetch, asset=asset, invert=invert)
+                try:  # official daily bars (closing auction included) for day/week/month charts
+                    n_day = sync_bars(source, store, ticker, "day", item_floor, now, **span)
+                except NotEntitled:
+                    n_day = 0
                 result.rows += n_day
                 log(f"{ticker} {resolution}: {n} rows, daily: {n_day} rows ({source.requests_made - spent} requests)")
             else:
@@ -495,6 +557,12 @@ def sync(
             store.set_synced(source.name, ticker, now)
             if asset == "stock":
                 fetch_icon(source, store, ticker, log)
+        if waiting:
+            log(f"{source.name}: " + ", ".join(f"{n} {a} symbols" for a, n in sorted(waiting.items()))
+                + " not collected by this feed here (see `deps`: keys or plan)")
+        if only is None and any(audits):
+            from .audit import run_audits
+            run_audits(source, store, me, feeds, now, queued=audits[0], random_count=audits[1], log=log)
         if only is None and directory_allowance > 0:  # placeholders and icons: leftover budget only
             spent = source.requests_made
             refresh_directory(source, store, today, log)
@@ -549,7 +617,9 @@ def fetch_market_moves(source: DataSource, store: Store, now: datetime, proxies:
                 continue
             log(f"market moves: {d} not available ({e})")
             break
-        except (SourceError, NotImplementedError) as e:
+        except NotImplementedError:
+            break
+        except SourceError as e:
             log(f"market moves: {d} not available ({e})")
             break
         used += 1
@@ -578,7 +648,9 @@ def fetch_news(source: DataSource, store: Store, now: datetime, log: Log = print
     try:
         n = store.save_news(source.name, _guard_call(source.news, since, 100))
         log(f"news: {n} headlines")
-    except (NotEntitled, SourceError, NotImplementedError) as e:
+    except NotImplementedError:
+        pass
+    except (NotEntitled, SourceError) as e:
         log(f"news: not available ({e})")
     store.kv_set(key, now.isoformat())
     return 1
@@ -597,7 +669,9 @@ def refresh_calendars(source: DataSource, store: Store, today: date, log: Log = 
     try:
         n = store.save_market_holidays(source.name, _guard_call(source.market_holidays))
         log(f"calendar: {n} upcoming exchange holidays and early closes")
-    except (NotEntitled, SourceError, NotImplementedError) as e:
+    except NotImplementedError:
+        pass
+    except (NotEntitled, SourceError) as e:
         log(f"calendar: upcoming holidays not available ({e})")
     products = sorted({w["source_ticker"] for w in store.watchlist(source.name) if w["asset"] == "future"})
     for product in products:
@@ -631,14 +705,18 @@ def refresh_directory(source: DataSource, store: Store, today: date, log: Log = 
         n = store.save_directory(source.name, rows, today)
         gone = store.prune_directory(source.name, "stock", today)
         log(f"directory: {n} listings on {', '.join(DIRECTORY_EXCHANGES)}" + (f", {gone} no longer listed" if gone else ""))
-    except (NotEntitled, SourceError, NotImplementedError) as e:
+    except NotImplementedError:
+        pass
+    except (NotEntitled, SourceError) as e:
         log(f"directory: listings not available ({e})")
     try:
         fut = _guard_call(source.futures_products)
         n = store.save_directory(source.name, fut, today)
         store.prune_directory(source.name, "future", today)
         log(f"directory: {n} futures products")
-    except (NotEntitled, SourceError, NotImplementedError) as e:
+    except NotImplementedError:
+        pass
+    except (NotEntitled, SourceError) as e:
         log(f"directory: futures products not available ({e})")
     store.kv_set(key, today.isoformat())
     return source.requests_made - before
@@ -729,13 +807,19 @@ def _newest_stored(store: Store, source: str, item: dict) -> tuple[datetime | No
     if item["resolution"] == "trades":
         r = store.trade_range(source, item["ticker"])
         return (datetime.fromtimestamp(r[1] / 1e9, ET) if r else None), item["source_ticker"]
-    r = store.bar_edges(source, item["ticker"], "minute" if item["resolution"] == "auto" else item["resolution"])
-    return (datetime.fromtimestamp(r[1] / 1000, ET) if r else None), item["source_ticker"]
+    timespan = "minute" if item["resolution"] == "auto" else item["resolution"]
+    r = store.bar_edges(source, item["ticker"], timespan)
+    newest = r[1] if r else None
+    other = store.newest_any(item["ticker"], timespan)  # one feed per span: any feed's newest counts
+    if other and (newest is None or other[1] > newest):
+        newest = other[1]
+    return (datetime.fromtimestamp(newest / 1000, ET) if newest else None), item["source_ticker"]
 
 
 def scan(
     source: DataSource | None, store: Store, tier: Tier, source_name: str | None = None,
     now: datetime | None = None, log: Log = print, probe_limit: int = 30, only: set[str] | None = None,
+    feeds: dict[str, FeedProfile] | None = None,
 ) -> ScanResult:
     """Check every watched symbol for data that should be available but is not stored.
 
@@ -757,6 +841,12 @@ def scan(
         result.items.append(row)
         if a["state"] != "behind" or source is None or not ask:
             continue
+        if feeds and source.name in feeds and item["asset"] != "future" and item["resolution"] != "trades":
+            if not source.serves(item["asset"]) or not plan(
+                    store, feeds[source.name], feeds, item["ticker"], item["asset"], "minute",
+                    history_floor(tier, now.date()), now, item.get("listed_from")):
+                row["new"] = False  # nothing this feed should fetch: another feed holds or will serve it
+                continue
         if probes >= probe_limit:
             row["new"] = None
             continue
