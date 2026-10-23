@@ -354,3 +354,7 @@ main > .view[hidden] { display: none; }
 
 /* space behind the globe: halfway between the app background (#131722) and black */
 body:not(.light) #viewMarkets { background: #0a0c11; }
+
+/* the globe: GPU layer underneath, 2D overlay (markers, labels, input) on top */
+#globeGL { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
+#globe { z-index: 1; }

@@ -14,6 +14,12 @@
 (() => {
   const canvas = document.getElementById('globe');
   const ctx = canvas.getContext('2d');
+  // GPU renderer (globe-gl.js) for the sky, sphere, shading, lines and Moon; the 2D canvas above
+  // keeps markers and labels. Without WebGL2 everything is drawn on the 2D canvas as before.
+  let glr = null;
+  try { glr = window.GlobeGL ? new window.GlobeGL(document.getElementById('globeGL')) : null; } catch (err) {
+    console.warn('globe: GPU renderer unavailable, drawing on the CPU', err);
+  }
   const list = document.getElementById('marketsList');
   const info = document.getElementById('globeInfo');
   const esc = window.MassiveIcons.esc;
@@ -56,6 +62,7 @@
         for (let k = 0; k < row.length; k += 2) { grid.fill(row[k], c, c + row[k + 1]); c += row[k + 1]; }
       });
       tz = { res: d.res, width: d.width, height: d.height, grid, zones: d.zones, anchors: d.anchors, offsets: [], at: 0 };
+      if (glr) glr.setZones(d.width, d.height, grid, d.res);
       refreshOffsets();
       zoneCache = null;
     } catch { /* fall back to solar bands */ }
@@ -76,6 +83,7 @@
     const now = new Date();
     tz.offsets = [null, ...tz.zones.map((z) => offsetMinutes(z, now))];
     tz.at = Date.now();
+    if (glr) glr.setZoneOffsets(tz.offsets);
   }
 
   function zoneAt(lon, lat) {
@@ -95,8 +103,18 @@
   async function loadTopo50() {
     try {
       const res = await fetch('vendor/world/countries-50m.json');
-      if (res.ok) topo50 = decodeTopo(await res.json());
+      if (res.ok) { topo50 = decodeTopo(await res.json()); if (glr) glr.setLines('o50', topo50); }
     } catch { /* keep the 110m outlines */ }
+  }
+
+  let topo10 = null, loading10 = false;
+  async function loadTopo10() {  // finest outlines, for close zoom (GPU only)
+    if (loading10) return;
+    loading10 = true;
+    try {
+      const res = await fetch('vendor/world/countries-10m.json');
+      if (res.ok) { topo10 = decodeTopo(await res.json()); if (glr) glr.setLines('o10', topo10); }
+    } catch { /* keep the 50m outlines */ }
   }
 
   async function loadTopo() {
@@ -104,6 +122,7 @@
       const res = await fetch('vendor/world/countries-110m.json');
       if (!res.ok) return;
       topo = decodeTopo(await res.json());
+      if (glr) glr.setLines('o110', topo);
       draw();
     } catch { /* no boundary data: graticule only */ }
   }
@@ -178,12 +197,13 @@
       const [lines, stars, names] = await Promise.all([get('constellations.lines.json'), get('stars.6.json'), get('constellations.json')]);
       if (!lines && !stars) return;
       const ra = (x) => (x + 360) % 360;
-      skyData = {
+      skyData = {  // (also handed to the GPU renderer below)
         lines: (lines?.features || []).flatMap((f) => f.geometry.coordinates.map((part) => part.map(([x, y]) => [ra(x), y]))),
         stars: (stars?.features || []).map((f) => [ra(f.geometry.coordinates[0]), f.geometry.coordinates[1], f.properties.mag]),
         names: (names?.features || []).filter((f) => (f.properties.rank ?? 1) <= 2)
           .map((f) => [ra(f.geometry.coordinates[0]), f.geometry.coordinates[1], f.properties.name || f.id]),
       };
+      if (glr && skyData) glr.setSky(skyData.stars, skyData.lines);
     } catch { /* no star data: plain background */ }
   }
 
@@ -290,6 +310,10 @@
     ctx.save(); ctx.beginPath(); ctx.arc(g.cx, g.cy, g.r, 0, 2 * Math.PI); ctx.clip();
     ctx.drawImage(zoneLayer(g), 0, 0, g.w, g.h);
     ctx.restore();
+    drawZoneLabels(g);
+  }
+
+  function drawZoneLabels(g) {
     const sunLon = markets.sun.lon;
     ctx.font = '10px system-ui, sans-serif'; ctx.textAlign = 'center';
     if (tz) {
@@ -338,6 +362,29 @@
     return { x: g.cx + (F * dot(dir, fr.E)) / depth, y: g.cy - (F * dot(dir, fr.N)) / depth };
   }
 
+  // Constellation names and planets in the background sky (2D: a few dozen labels).
+  function drawSkyNames(g, fr, g0, bodies, dark, { names = true, planets = true } = {}) {
+    const F = g.r * 1.15;
+    if (skyData && names) {
+      ctx.font = '9px system-ui, sans-serif';
+      ctx.fillStyle = dark ? 'rgba(140,160,210,0.45)' : 'rgba(60,80,140,0.45)';
+      for (const [ra, dec, name] of skyData.names) {
+        const q = skyXY(unit(ra - g0, dec), fr, g, F);
+        if (q && q.x > 0 && q.y > TOP && q.x < g.w && q.y < g.h && Math.hypot(q.x - g.cx, q.y - g.cy) > g.r) ctx.fillText(name, q.x, q.y);
+      }
+    }
+    if (!planets) return;
+    ctx.font = '10px system-ui, sans-serif';
+    for (const b of bodies) {
+      if (b.id === 'sun' || b.id === 'moon') continue;
+      const q = skyXY(b.dir, fr, g, F);
+      if (!q || Math.hypot(q.x - g.cx, q.y - g.cy) < g.r) continue;
+      ctx.fillStyle = dark ? 'rgba(255,220,160,0.7)' : 'rgba(140,90,20,0.7)';
+      ctx.beginPath(); ctx.arc(q.x, q.y, 1.6, 0, 2 * Math.PI); ctx.fill();
+      ctx.fillText(`${b.symbol} ${b.name}`, q.x + 4, q.y - 3);
+    }
+  }
+
   function drawSky(g, fr, g0, bodies, dark) {
     const F = g.r * 1.15;
     if (skyData) {
@@ -358,13 +405,8 @@
         ctx.fillStyle = dark ? `rgba(230,235,255,${Math.max(0.15, 0.9 - mag * 0.12)})` : `rgba(40,50,90,${Math.max(0.12, 0.7 - mag * 0.1)})`;
         ctx.fillRect(q.x - size / 2, q.y - size / 2, size, size);
       }
-      ctx.font = '9px system-ui, sans-serif';
-      ctx.fillStyle = dark ? 'rgba(140,160,210,0.45)' : 'rgba(60,80,140,0.45)';
-      for (const [ra, dec, name] of skyData.names) {
-        const q = skyXY(unit(ra - g0, dec), fr, g, F);
-        if (q && q.x > 0 && q.y > TOP && q.x < g.w && q.y < g.h) ctx.fillText(name, q.x, q.y);
-      }
     }
+    drawSkyNames(g, fr, g0, bodies, dark, { planets: false });
     // planets in the background sky, as faint dots with their symbol
     ctx.font = '10px system-ui, sans-serif';
     for (const b of bodies) {
@@ -472,11 +514,34 @@
     ctx.fillText(`☾ ${moon.phaseName} ${Math.round(moon.illuminated * 100)}%`, mx - rM, my + rM + 12);
   }
 
+  // Moon parameters for the GPU: position (compressed distance, true direction), its own axes.
+  function moonParams(g, fr, moon) {
+    const m = moon.dir;
+    const f = [-m[0], -m[1], -m[2]];
+    const fz = f[2];
+    let u = [-fz * f[0], -fz * f[1], 1 - fz * f[2]];
+    const ul = Math.hypot(...u); u = u.map((x) => x / ul);
+    const east = [m[1] * u[2] - m[2] * u[1], m[2] * u[0] - m[0] * u[2], m[0] * u[1] - m[1] * u[0]];
+    const D = g.r * 1.22;
+    return {
+      x: g.cx + D * dot(m, fr.E), y: g.cy - D * dot(m, fr.N), r: Math.max(6, g.r * 0.2727),
+      behind: dot(m, fr.C) < 0, f, u, east, maria: MARIA.flat(), bright: BRIGHT.flat(),
+    };
+  }
+
+  function outlineSet() {
+    if (zoom > 6 && !topo10) loadTopo10();
+    if (zoom > 2 && !topo50) loadTopo50();
+    return zoom > 6 && topo10 ? 'o10' : zoom > 2 && topo50 ? 'o50' : 'o110';
+  }
+
   function draw() {
     if (document.body.dataset.view !== 'markets') return;
     const dpr = window.devicePixelRatio || 1;
     const g = geometry();
-    if (canvas.width !== Math.round(g.w * dpr)) { canvas.width = Math.round(g.w * dpr); canvas.height = Math.round(g.h * dpr); }
+    if (canvas.width !== Math.round(g.w * dpr) || canvas.height !== Math.round(g.h * dpr)) {
+      canvas.width = Math.round(g.w * dpr); canvas.height = Math.round(g.h * dpr);
+    }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, g.w, g.h);
     const dark = !document.body.classList.contains('light');
@@ -487,8 +552,27 @@
     const g0 = gmst();
     const bodies = (sky?.bodies || []).map((b) => ({ ...b, dir: unit(b.ra - g0, b.dec) }));
     const sunDir = markets ? unit(markets.sun.lon, markets.sun.lat) : fr.C;
-    drawSky(g, fr, g0, bodies, dark);
     const moon = bodies.find((b) => b.id === 'moon');
+
+    if (glr) {
+      const now = new Date();
+      glr.render({
+        w: g.w, h: g.h, dpr, cx: g.cx, cy: g.cy, r: g.r, E: fr.E, N: fr.N, C: fr.C, S: sunDir, dark,
+        gmst: g0, sunLon: markets?.sun.lon ?? view.lon, utcMin: now.getUTCHours() * 60 + now.getUTCMinutes() + now.getUTCSeconds() / 60,
+        outlines: outlineSet(), moon: moon ? moonParams(g, fr, moon) : null,
+      });
+      drawSkyNames(g, fr, g0, bodies, dark);
+      if (markets) drawZoneLabels(g);
+      if (moon && dot(moon.dir, fr.C) >= 0) {  // phase label under the Moon when it is in view
+        const mp = moonParams(g, fr, moon);
+        ctx.font = '10px system-ui, sans-serif';
+        ctx.fillStyle = dark ? 'rgba(170,175,190,0.3)' : 'rgba(60,60,80,0.3)';
+        ctx.fillText(`☾ ${moon.phaseName} ${Math.round(moon.illuminated * 100)}%`, mp.x - mp.r, mp.y + mp.r + 12);
+      }
+      return drawOverlay(g, fr, g0, bodies, moon, dark);
+    }
+
+    drawSky(g, fr, g0, bodies, dark);
     if (moon && dot(moon.dir, fr.C) < 0) drawMoon(g, fr, moon, sunDir, dark);  // behind the Earth
 
     // sphere
@@ -526,6 +610,12 @@
       ctx.strokeStyle = `${line}0.62)`; ctx.lineWidth = 0.8; ctx.stroke();
     }
 
+    if (moon && dot(moon.dir, fr.C) >= 0) drawMoon(g, fr, moon, sunDir, dark);  // in front
+    drawOverlay(g, fr, g0, bodies, moon, dark);
+  }
+
+  // Markers, labels and the legend: the 2D overlay, on top of either renderer.
+  function drawOverlay(g, fr, g0, bodies, moon, dark) {
     if (!markets) return;
     // planets where they are overhead: small and faint, so they do not compete with markets
     ctx.font = '11px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -537,7 +627,6 @@
       ctx.fillText(b.symbol, p.x, p.y);
     }
     ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
-    if (moon && dot(moon.dir, fr.C) >= 0) drawMoon(g, fr, moon, sunDir, dark);  // in front
     if (moon && dot(moon.dir, fr.C) < 0) {  // behind: say where, faintly, at the limb
       const vx = dot(moon.dir, fr.E), vy = dot(moon.dir, fr.N), len = Math.hypot(vx, vy);
       if (len * g.r * 1.22 + g.r * 0.2727 < g.r) {  // wholly hidden
@@ -571,6 +660,17 @@
       if (m.state === 'open') {
         ctx.beginPath(); ctx.arc(p.x, p.y, 6 + 5 * pulse, 0, 2 * Math.PI);
         ctx.fillStyle = `rgba(38,166,154,${0.12 + 0.12 * (1 - pulse)})`; ctx.fill();
+      }
+      if (perf != null && Math.abs(perf) > 4) {  // shockwave: >4% small, >6% large (two rings)
+        const big = Math.abs(perf) > 6;
+        const reach = big ? 34 : 18;
+        for (const lag of big ? [0, 0.5] : [0]) {
+          const t = ((Date.now() / (big ? 1400 : 1700)) + lag + (m.lon + 180) / 360) % 1;
+          ctx.beginPath(); ctx.arc(p.x, p.y, 5 + t * reach, 0, 2 * Math.PI);
+          ctx.strokeStyle = color; ctx.globalAlpha = (1 - t) * (big ? 0.75 : 0.55);
+          ctx.lineWidth = big ? 2 : 1.4; ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
       }
       const featured = currentItem()?.exchange === m.code;
       if (featured) {  // the exchange the ticker is talking about: a gold beacon
@@ -612,11 +712,13 @@
     const open = markets.world.filter((m) => m.state === 'open').length;
     const brk = markets.world.filter((m) => m.state === 'break').length;
     const utc = new Date().toISOString().slice(11, 19);
-    info.innerHTML = `<b>${open}</b> exchanges open${brk ? `, <b>${brk}</b> at lunch` : ''} · ${utc} GMT${zoom > 1.01 ? ` · ${zoom.toFixed(1)}×` : ''}
+    const infoHtml = `<b>${open}</b> exchanges open${brk ? `, <b>${brk}</b> at lunch` : ''} · ${utc} GMT${zoom > 1.01 ? ` · ${zoom.toFixed(1)}×` : ''}
       <div class="p-muted small">Sun overhead at ${Math.abs(markets.sun.lat).toFixed(1)}°${markets.sun.lat >= 0 ? 'N' : 'S'}
       ${Math.abs(markets.sun.lon).toFixed(1)}°${markets.sun.lon >= 0 ? 'E' : 'W'} · turning in real time
       ${following() && zoom <= 1.01 ? '' : ' · <a href="#" id="globeNoon">recentre</a>'}</div>`;
+    if (infoHtml !== lastInfo) { info.innerHTML = infoHtml; lastInfo = infoHtml; }
   }
+  let lastInfo = '';
 
   // -- list ----------------------------------------------------------------------------
   function untilText(iso) {
@@ -719,7 +821,7 @@
   canvas.addEventListener('pointerdown', (e) => {
     glide = null;
     dragging = { x: e.clientX, y: e.clientY, lon: view.lon, lat: view.lat };
-    canvas.setPointerCapture(e.pointerId);
+    try { canvas.setPointerCapture(e.pointerId); } catch { /* pointer already gone */ }
   });
   canvas.addEventListener('pointermove', (e) => {
     const g = geometry();
