@@ -543,6 +543,24 @@ def fetch_market_moves(source: DataSource, store: Store, now: datetime, proxies:
     return used
 
 
+def fetch_news(source: DataSource, store: Store, now: datetime, log: Log = print) -> int:
+    """Newest headlines (one request, at most every 30 minutes) for the announcements ticker."""
+    key = f"news:{source.name}"
+    last = store.kv_get(key)
+    if last and (now - datetime.fromisoformat(last)).total_seconds() < NEWS_REFRESH_MINUTES * 60:
+        return 0
+    newest = store.latest_news_ms(source.name)
+    since = datetime.fromtimestamp(newest / 1000, timezone.utc) if newest else now - timedelta(days=2)
+    try:
+        n = store.save_news(source.name, _guard_call(source.news, since, 100))
+        log(f"news: {n} headlines")
+    except (NotEntitled, SourceError, NotImplementedError) as e:
+        log(f"news: not available ({e})")
+    store.kv_set(key, now.isoformat())
+    return 1
+
+
+
 def refresh_calendars(source: DataSource, store: Store, today: date, log: Log = print) -> int:
     """Weekly: the source's official upcoming market holidays and the futures schedules of every
     watched product (1 request each). They override the rule-based calendar, so unscheduled
