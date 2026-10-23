@@ -172,8 +172,12 @@ def cmd_sync(args, settings: Settings) -> int:
             with api_run(args, settings, "sync") as (source, store, log):
                 if source is None:
                     continue
+                # Directory placeholders and icons get only what the watchlist leaves, and never the
+                # last DAILY_RESERVE requests of the day (later runs need them for updates).
+                reserve_left = settings.max_requests_per_day - collector.DAILY_RESERVE - store.requests_today(name)
                 result = collector.sync(source, store, settings.tier, log=log, refresh_hours=settings.refresh_hours,
-                                        on_item=lambda t: store.set_run_current(args._run_id, t))
+                                        on_item=lambda t: store.set_run_current(args._run_id, t),
+                                        directory_allowance=max(0, reserve_left))
                 args._rows = result.rows
                 log(f"sync {name}: {result.rows} rows saved"
                     + (f", {result.skipped} symbols refreshed within {settings.refresh_hours:g} h left for later"

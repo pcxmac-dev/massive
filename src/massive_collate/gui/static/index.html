@@ -158,6 +158,11 @@
   <dialog id="symbolDialog" class="switcher" aria-label="Switch symbol">
     <form method="dialog" class="dialog-head">
       <input id="symbolSearch" type="search" placeholder="Search ticker, name or exchange" autocomplete="off">
+      <span id="scopeTabs" class="scope-tabs" role="tablist">
+        <button type="button" data-scope="watch" role="tab">Watchlist</button>
+        <button type="button" data-scope="stocks" role="tab" title="Every Nasdaq and NYSE listing">Nasdaq &amp; NYSE</button>
+        <button type="button" data-scope="futures" role="tab" title="Futures products">Futures</button>
+      </span>
       <button type="button" id="sortBtn" title="Sort order"></button>
       <button value="close" aria-label="Close">&times;</button>
     </form>

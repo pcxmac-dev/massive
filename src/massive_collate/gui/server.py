@@ -156,6 +156,31 @@ class ChartApp:
         out["sky"] = astro.sky()
         return out
 
+    def directory(self) -> dict:
+        """Every listing in the directory (placeholders), with what is known locally."""
+        with self._lock:
+            rows = self.store.directory()
+            watched = {w["ticker"] for w in self.store.watchlist()}
+        out = []
+        for r in rows:
+            dv = (r["close"] or 0) * (r["volume"] or 0) if r["close"] and r["volume"] else None
+            out.append({"ticker": r["ticker"], "kind": r["kind"], "name": r["name"], "exchange": r["exchange"],
+                        "type": r["type"], "close": r["close"], "dollarVolume": dv, "icon": bool(r["icon"]),
+                        "watched": r["ticker"] in watched})
+        return {"items": out}
+
+    def watch(self, ticker: str) -> dict:
+        """Add a directory listing to the watchlist (the fetcher then collects it)."""
+        from ..symbols import resolve
+
+        with self._lock:
+            row = next((r for r in self.store.directory() if r["ticker"] == ticker.upper()), None)
+            if row is None:
+                raise LookupError(f"{ticker} is not in the directory")
+            spec = resolve(f"{row['ticker']}::{row['exchange']}" if row["kind"] == "stock" and row["exchange"] else row["ticker"])
+            self.store.watch_spec("massive", spec)
+        return {"watched": spec.ticker}
+
     def announcements(self) -> dict:
         from .announcements import announcements
 
@@ -329,6 +354,11 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 if not isinstance(body, dict):
                     raise ValueError("body must be a JSON object")
                 parts = urlparse(self.path).path.rstrip("/").split("/")
+                if method == "POST" and parts == ["", "api", "watch"]:
+                    ticker = parse_qs(urlparse(self.path).query).get("ticker", [None])[-1]
+                    if not ticker:
+                        return self._json({"error": "ticker is required"}, HTTPStatus.BAD_REQUEST)
+                    return self._json(app.watch(ticker), HTTPStatus.CREATED)
                 if method == "POST" and parts in (["", "api", "scan"], ["", "api", "fetch"]):
                     ticker = parse_qs(urlparse(self.path).query).get("ticker", [None])[-1] if parts[2] == "fetch" else None
                     if parts[2] == "fetch" and not ticker:
@@ -382,6 +412,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.bars(q))
                 if url.path == "/api/info":
                     return self._json(app.info(q["source"], q["ticker"], q.get("adjust")))
+                if url.path == "/api/directory":
+                    return self._json(app.directory())
                 if url.path == "/api/announcements":
                     return self._json(app.announcements())
                 if url.path == "/api/markets":

@@ -171,6 +171,32 @@ CREATE TABLE IF NOT EXISTS proxy_daily (
     PRIMARY KEY (source, day, ticker)
 );
 
+-- Every listing on the exchanges we cover (placeholders: no market data is collected for them
+-- unless they are added to the watchlist), refreshed weekly.
+CREATE TABLE IF NOT EXISTS directory (
+    source   TEXT NOT NULL,
+    ticker   TEXT NOT NULL,
+    kind     TEXT NOT NULL,                     -- stock | future
+    name     TEXT,
+    exchange TEXT,                              -- MIC (XNAS, XNYS) or futures venue
+    type     TEXT,                              -- CS, ADRC, ETF... / futures sector
+    figi     TEXT,
+    seen     TEXT NOT NULL,                     -- date of the listing that included it
+    PRIMARY KEY (source, ticker)
+);
+
+-- The whole market's latest daily bar (close, volume, VWAP) per ticker, from the market-wide
+-- daily file: ranks the directory and fills placeholder tiles. Only the newest days are kept.
+CREATE TABLE IF NOT EXISTS market_snapshot (
+    source TEXT NOT NULL,
+    day    TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    close  REAL,
+    volume REAL,
+    vwap   REAL,
+    PRIMARY KEY (source, day, ticker)
+);
+
 CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -774,6 +800,67 @@ class Store:
                                              (source, d.isoformat())).fetchall()) for d in days)
         return {t: {"day": days[1].isoformat(), "close": c, "changePct": (c / prev[t] - 1) * 100}
                 for t, c in last.items() if prev.get(t)}
+
+    # -- directory ------------------------------------------------------------
+
+    def save_directory(self, source: str, rows: Iterable[dict], seen: date) -> int:
+        data = [(source, r["ticker"].upper(), r.get("kind", "stock"), r.get("name"), r.get("exchange"),
+                 r.get("type"), r.get("figi"), seen.isoformat()) for r in rows if r.get("ticker")]
+        with self.conn:
+            self.conn.executemany("INSERT OR REPLACE INTO directory VALUES (?, ?, ?, ?, ?, ?, ?, ?)", data)
+        self._wrote()
+        return len(data)
+
+    def prune_directory(self, source: str, kind: str, before: date) -> int:
+        """Drop listings not seen in the latest listing (delisted, or symbol reused)."""
+        with self.conn:
+            return self.conn.execute("DELETE FROM directory WHERE source=? AND kind=? AND seen<?",
+                                     (source, kind, before.isoformat())).rowcount
+
+    def directory(self, source: str = "massive", kind: str | None = None) -> list[dict]:
+        sql = """SELECT d.ticker, d.kind, d.name, d.exchange, d.type, s.close, s.volume, s.vwap,
+                        i.data IS NOT NULL AS has_icon
+                 FROM directory d
+                 LEFT JOIN market_snapshot s ON s.source=d.source AND s.ticker=d.ticker
+                      AND s.day=(SELECT MAX(day) FROM market_snapshot WHERE source=d.source)
+                 LEFT JOIN icons i ON i.source=d.source AND i.ticker=d.ticker
+                 WHERE d.source=?""" + (" AND d.kind=?" if kind else "") + " ORDER BY d.ticker"
+        cols = ["ticker", "kind", "name", "exchange", "type", "close", "volume", "vwap", "icon"]
+        return [dict(zip(cols, r)) for r in self.conn.execute(sql, [source] + ([kind] if kind else []))]
+
+    def directory_icon_queue(self, source: str, types: tuple[str, ...], limit: int) -> list[str]:
+        """Companies still without an icon decision, biggest daily dollar volume first."""
+        marks = ",".join("?" * len(types))
+        sql = f"""SELECT d.ticker FROM directory d
+                  LEFT JOIN icons i ON i.source=d.source AND i.ticker=d.ticker
+                  LEFT JOIN market_snapshot s ON s.source=d.source AND s.ticker=d.ticker
+                       AND s.day=(SELECT MAX(day) FROM market_snapshot WHERE source=d.source)
+                  WHERE d.source=? AND d.kind='stock' AND d.type IN ({marks}) AND i.ticker IS NULL
+                  ORDER BY COALESCE(s.close * s.volume, 0) DESC, d.ticker LIMIT ?"""
+        return [r[0] for r in self.conn.execute(sql, [source, *types, limit])]
+
+    def directory_stats(self, source: str, types: tuple[str, ...]) -> dict:
+        marks = ",".join("?" * len(types))
+        q = self.conn.execute
+        listed = q("SELECT kind, COUNT(*) FROM directory WHERE source=? GROUP BY kind", (source,)).fetchall()
+        companies = q(f"SELECT COUNT(*) FROM directory WHERE source=? AND kind='stock' AND type IN ({marks})",
+                      (source, *types)).fetchone()[0]
+        decided = q(f"""SELECT COUNT(*), SUM(i.data IS NOT NULL) FROM directory d JOIN icons i
+                        ON i.source=d.source AND i.ticker=d.ticker
+                        WHERE d.source=? AND d.kind='stock' AND d.type IN ({marks})""", (source, *types)).fetchone()
+        return {"listed": dict(listed), "companies": companies, "iconsChecked": decided[0] or 0,
+                "icons": int(decided[1] or 0)}
+
+    def save_market_snapshot(self, source: str, day: date, bars: list[dict]) -> int:
+        rows = [(source, day.isoformat(), b["T"].upper(), b.get("c"), b.get("v"), b.get("vw")) for b in bars if b.get("T")]
+        with self.conn:
+            self.conn.executemany("INSERT OR REPLACE INTO market_snapshot VALUES (?, ?, ?, ?, ?, ?)", rows)
+            keep = [d for (d,) in self.conn.execute(
+                "SELECT DISTINCT day FROM market_snapshot WHERE source=? ORDER BY day DESC LIMIT 3", (source,))]
+            if keep:
+                self.conn.execute(f"DELETE FROM market_snapshot WHERE source=? AND day NOT IN ({','.join('?' * len(keep))})",
+                                  (source, *keep))
+        return len(rows)
 
     def kv_get(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()

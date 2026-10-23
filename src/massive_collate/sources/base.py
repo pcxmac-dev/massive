@@ -75,6 +75,14 @@ class DataSource(ABC):
         """Recent news, newest first: dicts with id, published_ms, title, publisher, url, tickers."""
         raise NotImplementedError(f"{self.name} has no news")
 
+    def listings(self, exchange: str) -> list[dict]:
+        """Every active listing on an exchange (MIC): dicts with ticker, name, exchange, type, figi."""
+        raise NotImplementedError(f"{self.name} has no listings directory")
+
+    def futures_products(self) -> list[dict]:
+        """Futures products: dicts with ticker (product code), name, exchange (venue), type (sector)."""
+        raise NotImplementedError(f"{self.name} has no futures products")
+
     def icon(self, url: str) -> tuple[bytes, str]:
         """Download a company icon from the source: (content, content type)."""
         raise NotImplementedError(f"{self.name} has no company icons")

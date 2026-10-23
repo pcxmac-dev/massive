@@ -197,6 +197,9 @@
         <small>${backfill.requestsLeft ? `≈${num(backfill.requestsLeft)} requests left · ~${backfill.runs} run${backfill.runs === 1 ? '' : 's'}` : 'complete'}</small></div>
       <div class="tile"><h5>New data</h5><div class="big">${num(data.newData)} <small>symbols</small></div>
         <small>should be available now (plan calendar)</small></div>
+      <div class="tile"><h5>Directory icons</h5><div class="big">${num(data.directory?.icons)} <small>/ ${num(data.directory?.companies)} companies</small></div>
+        ${meter(data.directory?.companies ? data.directory.iconsChecked / data.directory.companies : 0, 'good')}
+        <small>${data.directory?.companies ? `Nasdaq + NYSE · ≈${num(data.directory.requestsLeft)} requests left (~${data.directory.days} days, leftover budget only)` : 'listing arrives with the next sync'}</small></div>
       <div class="tile"><h5>Plan</h5><div class="big">${esc(plan.tier)}</div>
         <small>history from ${esc(plan.historyFloor)}</small></div>`;
 

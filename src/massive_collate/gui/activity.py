@@ -123,6 +123,17 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
     return rows
 
 
+def _directory(store: Store, source: str, settings: Settings, used_today: int) -> dict:
+    from ..collector import COMPANY_TYPES, DAILY_RESERVE
+
+    s = store.directory_stats(source, COMPANY_TYPES)
+    left = max(0, s["companies"] - s["iconsChecked"])
+    per_day = max(0, settings.max_requests_per_day - DAILY_RESERVE)
+    return {**s, "remaining": left, "requestsLeft": left * 2,
+            "days": round(left * 2 / per_day, 1) if per_day else None,
+            "updated": store.kv_get(f"directory:{source}")}
+
+
 RECORDER_KEY = "live-recorder"  # a live recorder process heartbeats here (kv table) while recording
 
 
@@ -228,6 +239,7 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
             "days": round(left / per_day, 1) if per_day else None,
         },
         "symbols": symbols,
+        "directory": _directory(store, source, settings, used),
         "liveFeeds": live_feeds(store, settings, source, now),
         "runs": runs,
         "log": log_tail(log_path(db_path), log_lines),

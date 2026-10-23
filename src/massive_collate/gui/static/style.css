@@ -341,3 +341,13 @@ main > .view[hidden] { display: none; }
 #newsSearch { border-color: var(--border); background: var(--bg); cursor: text; }
 
 .scroll-view > .act-status, .scroll-view > .table-wrap, .scroll-view > .news-list, .scroll-view > .tiles, .scroll-view > .filters { flex: none; }
+
+/* picker scopes and directory placeholders */
+.scope-tabs { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; flex: none; }
+.scope-tabs button { border-radius: 0; padding: 4px 10px; white-space: nowrap; }
+.scope-tabs button.active { background: var(--accent); color: #fff; }
+.tile-btn.dir { cursor: default; }
+.tile-btn.dir.watched { cursor: pointer; }
+.tile-btn.dir:not(.watched) .tile-tk, .tile-btn.dir:not(.watched) .tile-px { opacity: .75; }
+.watch-btn { font-size: 10px; padding: 1px 6px; border: 1px solid var(--accent); color: var(--accent); border-radius: 10px; }
+.watch-btn:hover { background: var(--accent); color: #fff; }

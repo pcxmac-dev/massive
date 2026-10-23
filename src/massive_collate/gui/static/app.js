@@ -898,7 +898,55 @@ function openSymbolDialog() {
   loadSymbols().then(() => { if (dlg.open) renderSymbolList($('symbolSearch').value); }).catch(() => {});
 }
 
+// Directory scopes: every Nasdaq/NYSE listing and futures product as placeholders (no market
+// data unless added to the watchlist). Without a search the 300 biggest are shown.
+state.switcherScope = prefs.get('switcherScope', 'watch');
+let directory = { items: [], at: 0 };
+async function loadDirectory() {
+  if (Date.now() - directory.at < 600000) return;
+  directory = { items: (await api('/api/directory')).items, at: Date.now() };
+}
+
+function renderDirectoryList(query) {
+  const { symbolIcon, esc: e } = window.MassiveIcons;
+  const list = $('symbolList');
+  const kind = state.switcherScope === 'futures' ? 'future' : 'stock';
+  const q = query.trim().toLowerCase();
+  let rows = directory.items.filter((r) => r.kind === kind
+    && (!q || [r.ticker, r.name, r.exchange, r.type].some((v) => v && String(v).toLowerCase().includes(q))));
+  if (!directory.at) { list.innerHTML = '<div class="empty">Loading the directory…</div>'; return; }
+  if (!rows.length) {
+    list.innerHTML = `<div class="empty">${directory.items.length ? 'No listings match.' : 'The directory arrives with the fetcher\u2019s next sync (about 10 requests, weekly).'}</div>`;
+    return;
+  }
+  const key = state.switcherSort;
+  rows.sort((a, b) => key === 'name' ? a.ticker.localeCompare(b.ticker)
+    : ((key === 'dv-asc' ? 1 : -1) * ((a.dollarVolume ?? -1) - (b.dollarVolume ?? -1))) || a.ticker.localeCompare(b.ticker));
+  if (key === 'dv-asc') rows = [...rows.filter((r) => r.dollarVolume != null), ...rows.filter((r) => r.dollarVolume == null)];
+  const total = rows.length;
+  rows = rows.slice(0, q ? 600 : 300);
+  list.innerHTML = `<h4>${kind === 'future' ? 'Futures products' : 'Nasdaq & NYSE'} <span class="p-muted">${total.toLocaleString()}${total > rows.length ? ` · showing ${rows.length}, search for more` : ''}</span></h4>
+    <div class="tiles-grid">${rows.map((r) => `
+      <div class="tile-btn dir${r.watched ? ' watched' : ''}" role="option" tabindex="0" data-ticker="${e(r.ticker)}" data-watched="${r.watched ? 1 : 0}"
+           title="${e(r.name || r.ticker)}${r.exchange ? ` · ${e(r.exchange)}` : ''}${r.type ? ` · ${e(r.type)}` : ''}">
+        <span class="tile-top">${symbolIcon({ ticker: r.ticker, icon: r.icon, asset: r.kind === 'future' ? 'future' : 'stock' }, 30)}
+          ${r.watched ? '<span class="chip">watched</span>' : `<button type="button" class="watch-btn" data-watch="${e(r.ticker)}" title="Add to the watchlist: the fetcher will collect it">+ Watch</button>`}</span>
+        <b class="tile-tk">${e(r.ticker)}</b>
+        <span class="tile-nm">${e(r.name || '')}</span>
+        <span class="tile-px">${r.close != null ? Number(r.close).toFixed(2) : '<span class="p-muted">–</span>'} <span class="p-muted">${e(r.exchange || '')}</span></span>
+        <span class="tile-dv p-muted">${r.dollarVolume != null ? `${compactMoney(r.dollarVolume)}/day` : e(r.type || '')}</span>
+      </div>`).join('')}</div>`;
+}
+
 function renderSymbolList(query) {
+  for (const b of $('scopeTabs').querySelectorAll('button')) b.classList.toggle('active', b.dataset.scope === state.switcherScope);
+  if (state.switcherScope !== 'watch') {
+    const sort = SORTS.find((x) => x.key === state.switcherSort) || SORTS[0];
+    $('sortBtn').textContent = sort.label;
+    renderDirectoryList(query);
+    if (!directory.at) loadDirectory().then(() => renderDirectoryList($('symbolSearch').value)).catch(showError);
+    return;
+  }
   const { symbolIcon, dataIcon, esc: e } = window.MassiveIcons;
   const sort = SORTS.find((x) => x.key === state.switcherSort) || SORTS[0];
   $('sortBtn').textContent = sort.label;
@@ -953,11 +1001,34 @@ $('sortBtn').addEventListener('click', () => {
   prefs.set('switcherSort', state.switcherSort);
   renderSymbolList($('symbolSearch').value);
 });
-$('symbolList').addEventListener('click', (e) => {
+$('symbolList').addEventListener('click', async (e) => {
+  const add = e.target.closest('[data-watch]');
+  if (add) {  // directory: add to the watchlist; the fetcher collects it from its next run
+    e.stopPropagation();
+    add.disabled = true;
+    try {
+      const res = await fetch(`/api/watch?ticker=${encodeURIComponent(add.dataset.watch)}`, { method: 'POST', headers: { 'X-Massive-Charts': '1' } });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+      const item = directory.items.find((r) => r.ticker === add.dataset.watch);
+      if (item) item.watched = true;
+      add.replaceWith(Object.assign(document.createElement('span'), { className: 'chip', textContent: 'watched' }));
+      loadSymbols().catch(() => {});
+    } catch (err) { add.disabled = false; showError(err); }
+    return;
+  }
   const t = e.target.closest('.tile-btn');
   if (!t) return;
+  if (t.classList.contains('dir') && t.dataset.watched !== '1') return;  // placeholder: nothing collected yet
   $('symbolDialog').close();
   selectSymbol(t.dataset.ticker, MERGED).catch(showError);
+});
+$('scopeTabs').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-scope]');
+  if (!b) return;
+  state.switcherScope = b.dataset.scope;
+  prefs.set('switcherScope', state.switcherScope);
+  renderSymbolList($('symbolSearch').value);
+  $('symbolSearch').focus();
 });
 $('symbolDialog').addEventListener('keydown', (e) => {
   const moves = { ArrowRight: [1, 0], ArrowLeft: [-1, 0], ArrowDown: [0, 1], ArrowUp: [0, -1] };

@@ -249,6 +249,26 @@ class MassiveSource(DataSource):
                         "tickers": r.get("tickers") or []})
         return out
 
+    def listings(self, exchange: str) -> list[dict]:
+        params = {"market": "stocks", "exchange": exchange.upper(), "active": "true", "limit": 1000, "order": "asc",
+                  "sort": "ticker"}
+        out = []
+        for page in self.client.pages("/v3/reference/tickers", params):
+            out += [{"ticker": r["ticker"], "name": r.get("name"), "exchange": r.get("primary_exchange") or exchange,
+                     "type": r.get("type"), "figi": r.get("composite_figi"), "kind": "stock"} for r in page if r.get("ticker")]
+        return out
+
+    def futures_products(self) -> list[dict]:
+        out = []
+        for page in self.client.pages("/futures/v1/products", {"limit": 1000}):
+            for r in page:
+                code = r.get("product_code") or r.get("ticker")
+                if code:
+                    out.append({"ticker": code, "name": r.get("name") or r.get("product_name"),
+                                "exchange": r.get("trading_venue"), "type": r.get("sector") or r.get("asset_class"),
+                                "kind": "future"})
+        return out
+
     def icon(self, url: str) -> tuple[bytes, str]:
         return self.client.get_bytes(url)
 

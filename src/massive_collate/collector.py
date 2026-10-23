@@ -414,6 +414,7 @@ def _due(asset: str, tier: Tier, synced: datetime, now: datetime, refresh_hours:
 def sync(
     source: DataSource, store: Store, tier: Tier, now: datetime | None = None, log: Log = print,
     refresh_hours: float = 0.0, on_item: Callable[[str], None] | None = None, only: set[str] | None = None,
+    directory_allowance: int = 0,
 ) -> SyncResult:
     """One scheduled run over the watchlist for a source.
 
@@ -494,6 +495,10 @@ def sync(
             store.set_synced(source.name, ticker, now)
             if asset == "stock":
                 fetch_icon(source, store, ticker, log)
+        if only is None and directory_allowance > 0:  # placeholders and icons: leftover budget only
+            spent = source.requests_made
+            refresh_directory(source, store, today, log)
+            fill_directory_icons(source, store, directory_allowance - (source.requests_made - spent), today, log)
     except StopRun as e:
         result.stopped = str(e)
         log(f"stopped: {e}")
@@ -531,6 +536,8 @@ def fetch_market_moves(source: DataSource, store: Store, now: datetime, proxies:
             log(f"market moves: {d} not available ({e})")
             break
         used += 1
+        if bars:
+            store.save_market_snapshot(source.name, d, bars)
         closes = {b["T"]: b["c"] for b in bars if b.get("T") in proxies and b.get("c")}
         if closes:
             store.save_proxy_closes(source.name, d, closes)
@@ -584,6 +591,66 @@ def refresh_calendars(source: DataSource, store: Store, today: date, log: Log = 
             log(f"calendar: {product} futures schedule not available ({e})")
     store.kv_set(key, today.isoformat())
     return source.requests_made - before
+
+
+DIRECTORY_EXCHANGES = ("XNAS", "XNYS")
+DIRECTORY_REFRESH_DAYS = 7
+COMPANY_TYPES = ("CS", "ADRC", "OS", "GDR", "NYRS")  # operating companies (not funds, warrants, units...)
+DAILY_RESERVE = 400  # requests of the daily cap kept back for the watchlist's own updates
+
+
+def refresh_directory(source: DataSource, store: Store, today: date, log: Log = print) -> int:
+    """Weekly: every active Nasdaq and NYSE listing and the futures products, as placeholders."""
+    key = f"directory:{source.name}"
+    last = store.kv_get(key)
+    if last and (today - date.fromisoformat(last)).days < DIRECTORY_REFRESH_DAYS:
+        return 0
+    before = source.requests_made
+    try:
+        rows = []
+        for mic in DIRECTORY_EXCHANGES:
+            rows += _guard_call(source.listings, mic)
+        n = store.save_directory(source.name, rows, today)
+        gone = store.prune_directory(source.name, "stock", today)
+        log(f"directory: {n} listings on {', '.join(DIRECTORY_EXCHANGES)}" + (f", {gone} no longer listed" if gone else ""))
+    except (NotEntitled, SourceError, NotImplementedError) as e:
+        log(f"directory: listings not available ({e})")
+    try:
+        fut = _guard_call(source.futures_products)
+        n = store.save_directory(source.name, fut, today)
+        store.prune_directory(source.name, "future", today)
+        log(f"directory: {n} futures products")
+    except (NotEntitled, SourceError, NotImplementedError) as e:
+        log(f"directory: futures products not available ({e})")
+    store.kv_set(key, today.isoformat())
+    return source.requests_made - before
+
+
+def fill_directory_icons(source: DataSource, store: Store, allowance: int, today: date, log: Log = print) -> int:
+    """Company icons for the directory, biggest companies first, within `allowance` requests:
+    each company costs one request for its details (where the logo link is) and one for the
+    logo itself. Only budget the watchlist did not need is used."""
+    if allowance < 2:
+        return 0
+    before = source.requests_made
+    done = 0
+    for ticker in store.directory_icon_queue(source.name, COMPANY_TYPES, allowance // 2 + 1):
+        if source.requests_made - before + 2 > allowance:
+            break
+        if not store.details(source.name, ticker):
+            try:
+                inst = _guard_call(source.instrument, ticker, resolve_exchange=False)
+                store.set_details(source.name, ticker, inst.details or {"unavailable": "no reference record"})
+            except (NotEntitled, SourceError) as e:
+                store.save_icon(source.name, ticker, None, None, None)
+                log(f"{ticker}: details not available ({e})")
+                continue
+        done += fetch_icon(source, store, ticker, lambda m: None)
+    used = source.requests_made - before
+    if used:
+        s = store.directory_stats(source.name, COMPANY_TYPES)
+        log(f"directory icons: +{done} ({used} requests); {s['icons']} of {s['companies']} companies have icons")
+    return used
 
 
 def fetch_icon(source: DataSource, store: Store, ticker: str, log: Log = print) -> bool:
