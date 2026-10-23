@@ -358,3 +358,6 @@ body:not(.light) #viewMarkets { background: #0a0c11; }
 /* the globe: GPU layer underneath, 2D overlay (markers, labels, input) on top */
 #globeGL { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
 #globe { z-index: 1; }
+
+/* GPU button: on = setting on; partial = this chart type is still drawn on the CPU */
+#gpuBtn.on.partial { color: var(--muted); box-shadow: inset 0 -2px 0 var(--accent); }

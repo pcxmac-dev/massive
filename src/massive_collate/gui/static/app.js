@@ -459,7 +459,8 @@ const DEFAULT_CANDLE = (() => {
 // Candle-shaped chart types are drawn by WebGL2 (gpu.js) underneath KLineChart's canvas,
 // which keeps axes, crosshair, indicators and drawings. KLineChart's own candles are
 // switched to an invisible area line so it does no per-candle work.
-const GPU_TYPES = new Set(['candles', 'bars', 'heikin_ashi', 'renko', 'line_break', 'range', 'volume_candles']);
+const GPU_TYPES = new Set(['candles', 'bars', 'heikin_ashi', 'renko', 'line_break', 'range', 'volume_candles',
+                           'line', 'line_markers', 'step', 'area']);
 const GPU_INFO = window.GpuBars ? window.GpuBars.probe() : { supported: false, renderer: null };
 state.gpu = GPU_INFO.supported && prefs.get('gpu', true);
 let gpuBars = null;
@@ -525,15 +526,19 @@ kc.registerIndicator({
       width: bounding.width, height: bounding.height, from: from - 1, to: to + 1,
       xMap: xMapping(c, xAxis, data.length), yMap: yMapping(yAxis),
       bodyWidth: Math.max(1, c.getBarSpace().gapBar), style: state.chartType,
-      upColor: DEFAULT_CANDLE.bar.upColor, downColor: DEFAULT_CANDLE.bar.downColor,
+      upColor: DEFAULT_CANDLE.bar.upColor, downColor: DEFAULT_CANDLE.bar.downColor, lineColor: LINE,
     });
     return true;
   },
 });
 
+// The button shows the setting; when the current chart type is drawn on the CPU anyway it is
+// marked "partial" and its tooltip says so.
 function renderGpuButton() {
   const b = $('gpuBtn');
-  b.classList.toggle('on', gpuActive());
+  b.classList.toggle('on', state.gpu && GPU_INFO.supported);
+  b.classList.toggle('partial', state.gpu && !GPU_TYPES.has(state.chartType));
+  b.setAttribute('aria-pressed', String(!!state.gpu));
   b.disabled = !GPU_INFO.supported;
   b.title = !GPU_INFO.supported ? 'GPU rendering not available in this browser (no WebGL2)'
     : `GPU rendering ${state.gpu ? 'on' : 'off'} — ${GPU_INFO.renderer}${GPU_INFO.software ? ' (software, no hardware acceleration)' : ''}`
@@ -566,7 +571,8 @@ function applyChartType() {
     gpuBars.detach();
   }
   renderGpuButton();
-  if (custom) {
+  const gpuDraws = gpuActive() && !!gpuBars;
+  if (custom && !gpuDraws) {
     // Keep the (invisible) candles for scaling, crosshair and tooltip; draw the type ourselves.
     chart.setStyles({ candle: {
       bar: { upColor: CLEAR, downColor: CLEAR, noChangeColor: CLEAR, upBorderColor: CLEAR, downBorderColor: CLEAR,
@@ -574,9 +580,9 @@ function applyChartType() {
       priceMark: { high: { show: false }, low: { show: false } },
     } });
   }
-  if (state.chartType === 'area') chart.setStyles({ candle: { area: { lineColor: LINE } } });
+  if (state.chartType === 'area' && !gpuDraws) chart.setStyles({ candle: { area: { lineColor: LINE } } });
   chart.removeIndicator({ name: 'CHART_STYLE' });
-  if (custom) chart.createIndicator({ name: 'CHART_STYLE', paneId: 'candle_pane' }, true);
+  if (custom && !gpuDraws) chart.createIndicator({ name: 'CHART_STYLE', paneId: 'candle_pane' }, true);
 }
 
 function px(xAxis, i) { return xAxis.convertToPixel(i); }

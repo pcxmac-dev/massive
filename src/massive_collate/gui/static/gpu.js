@@ -6,7 +6,9 @@
  * Bars are uploaded once (index, open, high, low, close, volume per bar, prices relative
  * to a reference to keep float32 precision). Each frame passes only the x/y mapping as
  * uniforms; the vertex shader places every wick, body and tick, so the CPU does no
- * per-bar work while zooming or scrolling.
+ * per-bar work while zooming or scrolling. Line-type charts (line, step, area, markers)
+ * are drawn the same way: one instance per segment, reading the next bar from the same
+ * buffer.
  */
 (function () {
   const VS = `#version 300 es
@@ -14,17 +16,43 @@
     layout(location = 1) in float idx;        // bar index
     layout(location = 2) in vec4 ohlc;        // open, high, low, close (minus refPrice)
     layout(location = 3) in float vol;
+    layout(location = 4) in vec4 next;        // the next bar's ohlc (line segments only)
     uniform vec2 res;          // canvas size, device px
     uniform float dpr;
     uniform vec2 xMap;         // x(css px) = floor(xMap.x + idx * xMap.y + 0.5), as the 2D chart does
     uniform vec2 yMap;         // y(css px) = yMap.x + price * yMap.y   (price relative to refPrice)
-    uniform int part;          // 0 wick, 1 body, 2 open tick, 3 close tick
+    uniform int part;          // 0 wick, 1 body, 2 open tick, 3 close tick,
+                               // 4 line segment, 5 step across, 6 step down, 7 area fill, 8 marker
+    uniform float lineWidth;   // css px
+    uniform float bottom;      // css px: the pane's bottom, for area fills
     uniform float bodyWidth;   // css px
     uniform float maxVol;      // > 0: body width scales with volume (volume candles)
     out float up;
+    vec2 screen(float x, float price) { return vec2(x, yMap.x + price * yMap.y); }
     void main() {
       float o = ohlc.x, h = ohlc.y, l = ohlc.z, c = ohlc.w;
       up = c >= o ? 1.0 : 0.0;
+      if (part >= 4) {  // line-type charts
+        float x0 = xMap.x + idx * xMap.y, x1 = xMap.x + (idx + 1.0) * xMap.y;
+        vec2 p0 = screen(x0, c), p1 = screen(x1, next.w);
+        if (part == 5) p1 = vec2(x1, p0.y);
+        if (part == 6) { p0 = vec2(x1, p0.y); p1 = screen(x1, next.w); }
+        vec2 pos;
+        if (part == 7) {
+          pos = vec2(mix(p0.x, p1.x, corner.x), corner.y > 0.5 ? bottom : mix(p0.y, p1.y, corner.x));
+        } else if (part == 8) {
+          pos = p0 + (corner - 0.5) * lineWidth * 2.5;
+        } else {
+          vec2 d = p1 - p0;
+          float len = max(length(d), 1e-4);
+          vec2 n = vec2(-d.y, d.x) / len;
+          // extend each segment by half the width so joints have no gaps
+          vec2 t = d / len * lineWidth * 0.5;
+          pos = mix(p0 - t, p1 + t, corner.x) + n * (corner.y - 0.5) * lineWidth;
+        }
+        gl_Position = vec4(pos.x * dpr / res.x * 2.0 - 1.0, 1.0 - pos.y * dpr / res.y * 2.0, 0.0, 1.0);
+        return;
+      }
       float x = floor(xMap.x + idx * xMap.y + 0.5);
       float w = bodyWidth;
       if (maxVol > 0.0) w = max(1.0, bodyWidth * vol / maxVol);
@@ -43,9 +71,10 @@
   const FS = `#version 300 es
     precision mediump float;
     in float up;
-    uniform vec4 upColor, downColor;
+    uniform vec4 upColor, downColor, lineColor;
+    uniform highp int part;  // must match the vertex shader's precision
     out vec4 outColor;
-    void main() { outColor = up > 0.5 ? upColor : downColor; }`;
+    void main() { outColor = part >= 4 ? lineColor : (up > 0.5 ? upColor : downColor); }`;
 
   function compile(gl, type, src) {
     const s = gl.createShader(type);
@@ -69,6 +98,8 @@
     const m = v.match(/[\d.]+/g).map(Number);
     return [m[0] / 255, m[1] / 255, m[2] / 255, m.length > 3 ? m[3] : 1];
   }
+
+  const LINE_STYLES = new Set(['line', 'line_markers', 'step', 'area']);
 
   class GpuBars {
     static probe() {
@@ -96,7 +127,8 @@
       gl.linkProgram(prog);
       if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
       this.prog = prog;
-      this.u = Object.fromEntries(['res', 'dpr', 'xMap', 'yMap', 'part', 'bodyWidth', 'maxVol', 'upColor', 'downColor']
+      this.u = Object.fromEntries(['res', 'dpr', 'xMap', 'yMap', 'part', 'bodyWidth', 'maxVol', 'upColor', 'downColor',
+                                   'lineColor', 'lineWidth', 'bottom']
         .map((n) => [n, gl.getUniformLocation(prog, n)]));
       this.vao = gl.createVertexArray();
       gl.bindVertexArray(this.vao);
@@ -142,7 +174,7 @@
      * Draw bars [from, to). mapX/mapY are the chart's exact linear pixel mappings:
      * x = x0 + i * barSpace, y = y0 + price * yScale (css px).
      */
-    render({ width, height, from, to, xMap, yMap, bodyWidth, style, upColor, downColor }) {
+    render({ width, height, from, to, xMap, yMap, bodyWidth, style, upColor, downColor, lineColor = '#2962ff' }) {
       const gl = this.gl, dpr = window.devicePixelRatio || 1;
       const W = Math.max(1, Math.round(width * dpr)), H = Math.max(1, Math.round(height * dpr));
       if (this.canvas.width !== W || this.canvas.height !== H) {
@@ -166,6 +198,7 @@
         gl.vertexAttribDivisor(loc, 1);
       };
       attr(1, 1, 0); attr(2, 4, 4); attr(3, 1, 20);
+      gl.disableVertexAttribArray(4);
       let maxVol = 0;
       if (style === 'volume_candles') for (let i = from; i < to; i++) maxVol = Math.max(maxVol, this.volumes[i * 6 + 5]);
       gl.uniform2f(this.u.res, W, H);
@@ -176,6 +209,33 @@
       gl.uniform1f(this.u.maxVol, maxVol);
       gl.uniform4fv(this.u.upColor, parseColor(upColor));
       gl.uniform4fv(this.u.downColor, parseColor(downColor));
+      if (LINE_STYLES.has(style)) {
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.uniform1f(this.u.lineWidth, 1.6);
+        gl.uniform1f(this.u.bottom, height);
+        const line = parseColor(lineColor);
+        const segs = Math.max(0, Math.min(this.count - 1, to) - from);  // segment i joins bar i and i + 1
+        if (segs > 0) {
+          gl.enableVertexAttribArray(4);
+          gl.vertexAttribPointer(4, 4, gl.FLOAT, false, stride, base + stride + 4);
+          gl.vertexAttribDivisor(4, 1);
+          const parts = style === 'step' ? [5, 6] : style === 'area' ? [7, 4] : [4];
+          for (const p of parts) {
+            gl.uniform4fv(this.u.lineColor, p === 7 ? [line[0], line[1], line[2], 0.14] : line);
+            gl.uniform1i(this.u.part, p);
+            gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, segs);
+          }
+          gl.disableVertexAttribArray(4);
+        }
+        if (style === 'line_markers' && xMap[1] >= 5) {
+          gl.uniform4fv(this.u.lineColor, line);
+          gl.uniform1i(this.u.part, 8);
+          gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, n);
+        }
+        gl.disable(gl.BLEND);
+        return performance.now() - t0;
+      }
       const parts = style === 'bars' ? [0, 2, 3] : [0, 1];
       for (const p of parts) {
         gl.uniform1i(this.u.part, p);
