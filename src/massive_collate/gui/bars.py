@@ -9,7 +9,8 @@ from __future__ import annotations
 import math
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import time
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
 from threading import RLock
 
 import numpy as np
@@ -58,6 +59,13 @@ class Series:
         """Forex and futures trade nearly 24h: no regular-hours filter applies."""
         return self.asset in ("fx", "future")
 
+    def session_for(self, wanted: str) -> str:
+        """The session actually drawn: around-the-clock markets have one session; an index is
+        only calculated in regular hours (prints outside them are feed errors)."""
+        if self.around_the_clock:
+            return "extended"
+        return "regular" if self.asset == "index" else wanted
+
 
 def decimals(values, cap: int = 6, minimum: int = 0) -> int:
     """Smallest number of decimals that represents every value exactly."""
@@ -89,8 +97,29 @@ def frame_from_bars(bars: pd.DataFrame) -> pd.DataFrame:
 
 
 def regular_session(frame: pd.DataFrame) -> pd.DataFrame:
-    t = frame.index.time
-    return frame[(t >= REGULAR_OPEN) & (t < REGULAR_CLOSE)]
+    """Bars inside US regular trading hours: 09:30-16:00 ET on trading days, 13:00 on early-close
+    days (the rest of those afternoons is after-hours trading), nothing on weekends or holidays
+    (stray prints a feed sometimes has then are not part of any session)."""
+    if frame.empty:
+        return frame
+    local = frame.index.tz_convert(ET)
+    t = local.time
+    days = local.normalize()
+    unique = days.unique()
+    closes = {d: _regular_close(d.date()) for d in unique}
+    close = days.map(lambda d: closes[d])
+    keep = (t >= REGULAR_OPEN) & np.array([c is not None for c in close])
+    keep &= np.array([c is not None and tt < c for tt, c in zip(t, close)])
+    return frame[keep]
+
+
+def _regular_close(d) -> time | None:
+    """Regular-session close of a day by the exchange calendar, None when the market is shut."""
+    from ..sessions import is_nyse_holiday, nyse_early_close
+
+    if d.weekday() >= 5 or is_nyse_holiday(d):
+        return None
+    return time(13, 0) if nyse_early_close(d) else REGULAR_CLOSE
 
 
 def _aggregate(groups) -> pd.DataFrame:
@@ -111,12 +140,33 @@ def resample(
         if frame.empty:
             return frame.copy()
     if period in INTRADAY:
-        rule = f"{span}{INTRADAY[period]}"
         # US equities: hour bars line up with the 09:30 open, like TradingView. Around-the-clock
         # markets (fx, futures) use clock hours.
-        offset = "9h30min" if period == "hour" and align_hours_to_open else None
-        return _aggregate(frame.resample(rule, origin="start_day", offset=offset, label="left", closed="left"))
+        offset = 570 * 60 if period == "hour" and align_hours_to_open else 0
+        return _aggregate(frame.groupby(wall_clock_bins(frame.index, period, span, offset)))
     return _aggregate(frame.groupby(calendar_key(frame.index, period)))
+
+
+_UNIT_SECONDS = {"second": 1, "minute": 60, "hour": 3600}
+_ET_ZONE = ZoneInfo(ET)
+_ET_STANDARD_NS = int(_ET_ZONE.utcoffset(datetime(2001, 1, 15)).total_seconds() * 1e9)
+
+
+def wall_clock_bins(index: pd.DatetimeIndex, period: str, span: int, offset_seconds: int = 0) -> pd.DatetimeIndex:
+    """Start of each timestamp's bar: every `span` units of New York wall-clock time from
+    midnight (+ offset), the same on every day of the year whatever the daylight-saving
+    change and however much data is loaded. The repeated hour when clocks go back keeps its
+    two halves apart (they are different moments)."""
+    local = index.tz_convert(ET)
+    naive = local.tz_localize(None).as_unit("ns")
+    day = naive.normalize()
+    secs = (naive.asi8 - day.asi8) // 1_000_000_000
+    step = span * _UNIT_SECONDS[period]
+    start = (secs - offset_seconds) // step * step + offset_seconds
+    bins = pd.DatetimeIndex(day.asi8 + start * 1_000_000_000).as_unit("ns")
+    utc_offset = naive.asi8 - local.tz_convert("UTC").tz_localize(None).as_unit("ns").asi8
+    is_dst = utc_offset > _ET_STANDARD_NS
+    return bins.tz_localize(ET, ambiguous=is_dst, nonexistent="shift_forward")
 
 
 def calendar_key(index: pd.DatetimeIndex, period: str) -> pd.DatetimeIndex:
@@ -218,6 +268,20 @@ def merge_frames(frames: list[pd.DataFrame], bucket: str | None = None) -> pd.Da
     return both[keep].sort_index(kind="stable").drop(columns="_rank")
 
 
+class _BoundedCache(OrderedDict):
+    """A small LRU dict for projected time axes."""
+
+    def __init__(self, size: int):
+        super().__init__()
+        self._size = size
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self.move_to_end(key)
+        while len(self) > self._size:
+            self.popitem(last=False)
+
+
 class BarEngine:
     """Loads series from the store, caches them, and serves pages of bars.
 
@@ -231,6 +295,7 @@ class BarEngine:
         self._series: dict[tuple, tuple] = {}
         self._bars: OrderedDict[tuple, pd.DataFrame] = OrderedDict()
         self._cache_size = cache_size
+        self._future_cache: OrderedDict = _BoundedCache(16)
         # One SQLite connection is shared by the server's threads: every store access holds this lock.
         self.lock = RLock()
         self._lock = self.lock
@@ -381,7 +446,7 @@ class BarEngine:
         s = self.series(source, ticker, adjust)
         if s is None:
             return {"bars": [], "more": False}
-        session = "extended" if s.around_the_clock else session
+        session = s.session_for(session)
         if not any(p["type"] == period and p["span"] == span for p in self.periods(s)):
             raise ValueError(f"{period}/{span} cannot be built from {s.kind} data")
         if not 1 <= lod <= MAX_LOD:
@@ -417,6 +482,41 @@ class BarEngine:
         if style.type == "range" and s.kind != "trades":
             page["approximate"] = "range bars built from bars, not ticks: intra-bar order of high and low is assumed"
         return page
+
+    def calendar(self):
+        """Trading calendar with the source's official schedules (rebuilt when they change)."""
+        from ..sessions import MarketCalendar, overrides_from_store
+
+        with self._lock:
+            return self.store._cached(("calendar",), lambda: MarketCalendar(overrides_from_store(self.store)))
+
+    def future(
+        self, source: str, ticker: str, period: str, span: int = 1, session: str = "regular",
+        style: Style = Style(), adjust: str = "none", lod: int = 1, model: Model = Model(),
+        offset: int = 0, count: int = 500,
+    ) -> dict:
+        """Start times of the next `count` bar slots after the last real bar (from slot `offset`),
+        at this interval, session, chart type and level of detail: the chart's time axis to the right."""
+        from .projection import project
+
+        s = self.series(source, ticker, adjust)
+        if s is None:
+            return {"timestamps": [], "last": None, "total": 0}
+        session = s.session_for(session)
+        all_bars, _ = self._styled(s, period, span, session, style)
+        if not model.is_price:
+            all_bars = self._modelled(s, all_bars, period, span, session, model)
+        if all_bars.empty:
+            return {"timestamps": [], "last": None, "total": 0}
+        item = next((w for w in self.store.watchlist() if w["ticker"] == s.ticker and w["asset"] == "future"), None)
+        product = item["source_ticker"] if item else None
+        total = len(all_bars)
+        k = lod if (lod > 1 and style.type in LOD_TYPES) else 1
+        last = all_bars.index[(total - 1) // k * k]  # the last drawn slot's stamp (its first bar)
+        ts = project(self.calendar(), s, product, period, span, session, style.type, lod, total,
+                     all_bars.index[-1], offset, count, cache=self._future_cache)
+        return {"timestamps": ts, "last": int(epoch_ms(pd.DatetimeIndex([last]))[0]), "total": total,
+                "lastBar": int(epoch_ms(pd.DatetimeIndex([all_bars.index[-1]]))[0])}
 
     def _styled(self, s: Series, period: str, span: int, session: str, style: Style) -> tuple[pd.DataFrame, dict]:
         from . import charttypes as ct
@@ -500,7 +600,7 @@ class BarEngine:
         s = self.series(source, ticker, adjust)
         if s is None:
             raise LookupError(f"no data stored for {source}:{ticker}")
-        session = "extended" if s.around_the_clock else session
+        session = s.session_for(session)
         lo_ms, hi_ms = sorted((int(from_ms), int(to_ms)))
         bars = self._resampled(s, period, span, session)
         if not model.validate().is_price:
@@ -541,6 +641,8 @@ class BarEngine:
             # Official daily bars (closing auction included); weeks/months group those.
             daily = s.daily.copy()
             daily.index = calendar_key(daily.index, "day")
+            if s.asset in ("stock", "index"):  # no session on weekends/holidays: stray feed rows
+                daily = daily[[_regular_close(d.date()) is not None for d in daily.index]]
             bars = daily if period == "day" else _aggregate(daily.groupby(calendar_key(daily.index, period)))
         else:
             bars = resample(s.frame, period, span, session, align_hours_to_open=s.asset in ("stock", "index"))

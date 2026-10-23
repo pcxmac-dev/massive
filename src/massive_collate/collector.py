@@ -16,7 +16,8 @@ from typing import Callable, Iterator
 from zoneinfo import ZoneInfo
 
 from .config import UNLIMITED_BACKFILL_YEARS, Tier
-from .errors import BudgetExhausted, NotEntitled, RateLimited
+from .errors import BudgetExhausted, NotEntitled, RateLimited, SourceError
+from . import freshness
 from .futures import candidate_contracts, roll_schedule
 from .sources.base import RESOLUTIONS, RESOLUTIONS_BY_ASSET, DataSource
 from .storage import Store
@@ -84,7 +85,7 @@ def resolve_resolution(
     Entitlements belong to the plan and asset class, not the ticker, so an answer is reused
     for every symbol of that class for a week instead of probing each one again."""
     for resolution in RESOLUTIONS_BY_ASSET.get(asset, RESOLUTIONS):
-        ok = store.entitlement(source.name, asset, resolution)
+        ok = known = store.entitlement(source.name, asset, resolution)
         if ok is None:
             try:
                 ok = source.is_entitled(resolution, fetch or ticker, asset)
@@ -97,7 +98,8 @@ def resolve_resolution(
             log(f"{ticker}: finest resolution on your plan is '{resolution}'")
             store.set_resolution(source.name, ticker, resolution)
             return resolution
-        log(f"{ticker}: '{resolution}' not on your plan")
+        if known is None:  # only report what was actually asked; known answers cost nothing
+            log(f"{ticker}: '{resolution}' not on your plan")
     return None
 
 
@@ -286,7 +288,8 @@ def sync_future(
             pages = source.bar_pages(contract, start, end, resolution, asset="future")
         elif _ms_to_date(stored[0]) > start:  # backward fill keeps stored data contiguous
             pages = source.bar_pages(contract, start, _ms_to_date(stored[0]), resolution, descending=True, asset="future")
-        elif _ms_to_date(stored[1]) < end:
+        elif _ms_to_date(stored[1]) < end or contract == schedule[-1][1]:
+            # the held contract keeps trading: always ask from the day of its newest stored bar
             pages = source.bar_pages(contract, _ms_to_date(stored[1]), end, resolution, asset="future")
         else:
             continue
@@ -393,16 +396,33 @@ def _guard_call(fn: Callable, *args, **kwargs):
         raise StopRun(f"rate limited ({e.message}); stopping until the next run") from e
 
 
+def _backfilling(item: dict, floor: date) -> bool:
+    if item["asset"] == "future":
+        return item.get("synced_at") is None
+    return item["backfilled_to"] is None or item["backfilled_to"] > max(floor, item["listed_from"] or floor)
+
+
+def _due(asset: str, tier: Tier, synced: datetime, now: datetime, refresh_hours: float) -> bool:
+    """Whether a fully synced symbol is worth asking again: its plan should have published
+    data since the last sync (stocks on the free plan: once each morning; delayed futures:
+    continuously), and at least `refresh_hours` have passed."""
+    if refresh_hours and (now - synced).total_seconds() < refresh_hours * 3600:
+        return False
+    return freshness.expected(asset, tier, now).latest != freshness.expected(asset, tier, synced).latest
+
+
 def sync(
     source: DataSource, store: Store, tier: Tier, now: datetime | None = None, log: Log = print,
-    refresh_hours: float = 0.0, on_item: Callable[[str], None] | None = None,
+    refresh_hours: float = 0.0, on_item: Callable[[str], None] | None = None, only: set[str] | None = None,
 ) -> SyncResult:
     """One scheduled run over the watchlist for a source.
 
-    A symbol that finished a complete sync less than `refresh_hours` ago is skipped (on the free
-    plan data only arrives at the end of the day, so refreshing every hour would only spend
-    requests). Symbols still backfilling are never skipped. `on_item` is told which symbol is
-    being worked on (for the activity view).
+    A fully synced symbol is skipped until its plan should have published new data (see
+    `freshness`; on the free plan stocks only change once a day, so asking hourly would only
+    spend requests) and, if set, `refresh_hours` have passed. Symbols still backfilling are
+    never skipped. `on_item` is told which symbol is
+    being worked on (for the activity view). `only` limits the run to those symbols and
+    fetches them whatever the refresh interval (used by `scan --fetch`).
     """
     now = (now or now_et()).astimezone(ET)
     today = now.date()
@@ -410,10 +430,14 @@ def sync(
     result = SyncResult()
     try:
         sync_exchanges(source, store, log)
-        for item in store.watchlist(source.name):
+        refresh_calendars(source, store, today, log)
+        # Keep complete symbols current first; backfills take what budget is left.
+        for item in sorted(store.watchlist(source.name), key=lambda w: (_backfilling(w, floor), w["ticker"])):
             ticker, asset = item["ticker"], item["asset"]
             synced = item.get("synced_at")
-            if refresh_hours and synced and (now - synced).total_seconds() < refresh_hours * 3600:
+            if only is not None and ticker not in only:
+                continue
+            if only is None and synced and not _due(asset, tier, synced, now, refresh_hours):
                 result.skipped += 1
                 continue
             if on_item:
@@ -465,9 +489,141 @@ def sync(
             else:
                 log(f"{ticker} {resolution}: {n} rows ({source.requests_made - spent} requests)")
             store.set_synced(source.name, ticker, now)
+            if asset == "stock":
+                fetch_icon(source, store, ticker, log)
     except StopRun as e:
         result.stopped = str(e)
         log(f"stopped: {e}")
+    return result
+
+
+CALENDAR_REFRESH_DAYS = 7
+
+
+def refresh_calendars(source: DataSource, store: Store, today: date, log: Log = print) -> int:
+    """Weekly: the source's official upcoming market holidays and the futures schedules of every
+    watched product (1 request each). They override the rule-based calendar, so unscheduled
+    closures and exchange-specific holiday hours are projected exactly. Returns requests used."""
+    key = f"calendar:{source.name}"
+    last = store.kv_get(key)
+    if last and (today - date.fromisoformat(last)).days < CALENDAR_REFRESH_DAYS:
+        return 0
+    before = source.requests_made
+    try:
+        n = store.save_market_holidays(source.name, _guard_call(source.market_holidays))
+        log(f"calendar: {n} upcoming exchange holidays and early closes")
+    except (NotEntitled, SourceError, NotImplementedError) as e:
+        log(f"calendar: upcoming holidays not available ({e})")
+    products = sorted({w["source_ticker"] for w in store.watchlist(source.name) if w["asset"] == "future"})
+    for product in products:
+        try:
+            n = store.save_futures_schedule(source.name, product, _guard_call(source.futures_schedule, product, today))
+            log(f"calendar: {product} futures schedule, {n} session events")
+        except (NotEntitled, SourceError, NotImplementedError) as e:
+            log(f"calendar: {product} futures schedule not available ({e})")
+    store.kv_set(key, today.isoformat())
+    return source.requests_made - before
+
+
+def fetch_icon(source: DataSource, store: Store, ticker: str, log: Log = print) -> bool:
+    """Download a stock's company icon once (one request) and keep it locally.
+    Asked for only after the symbol's data is complete, so icons never delay a backfill."""
+    if store.icon_checked(source.name, ticker):
+        return False
+    url = ((store.details(source.name, ticker) or {}).get("branding") or {}).get("icon_url")
+    if not url:
+        store.save_icon(source.name, ticker, None, None, None)
+        return False
+    try:
+        data, mime = _guard_call(source.icon, url)
+    except (NotEntitled, SourceError, NotImplementedError) as e:
+        log(f"{ticker}: icon not available ({e})")
+        store.save_icon(source.name, ticker, url, None, None)
+        return False
+    if not mime.startswith("image/") or len(data) > 512 * 1024:
+        store.save_icon(source.name, ticker, url, None, None)
+        return False
+    store.save_icon(source.name, ticker, url, mime.split(";")[0], data)
+    log(f"{ticker}: icon saved ({len(data) // 1024 or 1} KB, 1 request)")
+    return True
+
+
+# -- scan: is there new data? ----------------------------------------------------
+
+@dataclass
+class ScanResult:
+    items: list[dict] = field(default_factory=list)
+    stopped: str | None = None
+
+    @property
+    def new(self) -> list[str]:
+        """Symbols the source confirmed it has newer data for."""
+        return [i["ticker"] for i in self.items if i.get("new")]
+
+
+def _newest_stored(store: Store, source: str, item: dict) -> tuple[datetime | None, str | None]:
+    """(newest stored bar, source ticker to ask) for a watchlist item."""
+    if item["asset"] == "future":
+        rolls = store.rolls(source, item["source_ticker"])
+        edges = [e for e in (store.bar_edges(source, t, "minute") for t in {t for _, t in rolls}) if e]
+        newest = max(e[1] for e in edges) if edges else None
+        return (datetime.fromtimestamp(newest / 1000, ET) if newest else None), (rolls[-1][1] if rolls else None)
+    if item["resolution"] == "trades":
+        r = store.trade_range(source, item["ticker"])
+        return (datetime.fromtimestamp(r[1] / 1e9, ET) if r else None), item["source_ticker"]
+    r = store.bar_edges(source, item["ticker"], "minute" if item["resolution"] == "auto" else item["resolution"])
+    return (datetime.fromtimestamp(r[1] / 1000, ET) if r else None), item["source_ticker"]
+
+
+def scan(
+    source: DataSource | None, store: Store, tier: Tier, source_name: str | None = None,
+    now: datetime | None = None, log: Log = print, probe_limit: int = 30,
+) -> ScanResult:
+    """Check every watched symbol for data that should be available but is not stored.
+
+    Free part: compare each symbol's newest stored bar with what its plan should have
+    published by now (market calendar + publication delay). With a `source`, every symbol
+    that looks behind costs one request (the source's newest bar, limit 1) to confirm the
+    data really exists, up to `probe_limit` symbols.
+    """
+    now = (now or now_et()).astimezone(ET)
+    name = source.name if source else source_name or "massive"
+    result = ScanResult()
+    probes = 0
+    for item in store.watchlist(name):
+        last, ask = _newest_stored(store, name, item)
+        a = freshness.assess(item["asset"], tier, last, now)
+        row = {"ticker": item["ticker"], "asset": item["asset"], "stored": last, **a, "available": None, "new": None}
+        result.items.append(row)
+        if a["state"] != "behind" or source is None or not ask:
+            continue
+        if probes >= probe_limit:
+            row["new"] = None
+            continue
+        try:
+            bar = _guard_call(source.latest_bar, ask, last.date(), item["asset"])
+        except StopRun as e:
+            result.stopped = str(e)
+            log(f"stopped: {e}")
+            break
+        except (NotEntitled, SourceError, NotImplementedError) as e:
+            log(f"{item['ticker']}: could not check ({e})")
+            continue
+        probes += 1
+        newest = datetime.fromtimestamp(bar["t"] / 1000, ET) if bar else None
+        row["available"] = newest
+        row["new"] = bool(newest and newest > last)
+        store.set_probe(name, item["ticker"], now, bar["t"] if bar else None)
+    for row in result.items:
+        if row["state"] == "behind":
+            have = f"source has through {row['available']:%Y-%m-%d %H:%M}" if row["available"] else (
+                "not checked with the source" if row["new"] is None else "source has nothing newer")
+            log(f"{row['ticker']}: stored through {row['stored']:%Y-%m-%d %H:%M}, should have through "
+                f"{row['expectedThrough']:%Y-%m-%d %H:%M} ET ({row['rule']}); {have}"
+                + (" -> new data" if row["new"] else ""))
+    behind = sum(r["state"] == "behind" for r in result.items)
+    log(f"scan: {len(result.items)} symbols, {behind} behind, {len(result.new)} with new data confirmed "
+        f"({probes} requests)")
     return result
 
 

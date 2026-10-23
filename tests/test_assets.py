@@ -145,7 +145,9 @@ def test_recently_synced_symbols_wait_for_the_refresh_interval(store):
     src.bar_calls = []
     soon = sync(src, store, FREE, NOW + timedelta(hours=2), log=_log, refresh_hours=12)
     assert soon.skipped == 1 and src.bar_calls == []
-    later = sync(src, store, FREE, NOW + timedelta(hours=13), log=_log, refresh_hours=12)
+    overnight = sync(src, store, FREE, NOW + timedelta(hours=13), log=_log, refresh_hours=12)
+    assert overnight.skipped == 1  # 01:00: the next session is not published until ~04:00
+    later = sync(src, store, FREE, NOW + timedelta(hours=17), log=_log, refresh_hours=12)
     assert later.skipped == 0 and src.bar_calls
 
 
@@ -156,11 +158,18 @@ def test_unfinished_backfill_is_not_marked_synced(store):
     assert result.stopped and store.watchlist("fake")[0]["synced_at"] is None
 
 
-def test_refresh_hours_default_by_plan():
+def test_symbols_are_refreshed_only_when_new_data_is_due(store):
+    store.watch_spec("fake", resolve("IXIC"))
+    src = FakeSource(entitled=("minute",), bars={"minute": [{"t": _ms(date(2026, 10, 20)), "o": 1, "h": 1, "l": 1, "c": 1}]})
+    sync(src, store, FREE, NOW, log=_log)
+    assert sync(src, store, FREE, NOW + timedelta(hours=3), log=_log).skipped == 1
+    assert sync(src, store, FREE, NOW + timedelta(hours=18), log=_log).skipped == 0
+
+
+def test_refresh_hours_default():
     from massive_collate.config import load_settings
 
-    assert load_settings(env={}, env_file=None).refresh_hours == 12
-    assert load_settings(env={"MASSIVE_TIER": "starter"}, env_file=None).refresh_hours == 0
+    assert load_settings(env={}, env_file=None).refresh_hours == 0
     assert load_settings(env={"MASSIVE_REFRESH_HOURS": "3"}, env_file=None).refresh_hours == 3
 
 

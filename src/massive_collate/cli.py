@@ -189,6 +189,39 @@ def cmd_sync(args, settings: Settings) -> int:
     return 0
 
 
+def _scan_table(result: collector.ScanResult) -> None:
+    order = {"behind": 0, "empty": 1, "current": 2}
+    print()
+    print(f"{'symbol':10} {'state':8} {'stored through':17} {'should have through':20} {'source has':17} next due")
+    for r in sorted(result.items, key=lambda r: (order[r["state"]], r["ticker"])):
+        fmt = lambda t: f"{t:%Y-%m-%d %H:%M}" if t else "-"  # noqa: E731
+        state = "NEW" if r["new"] else r["state"]
+        print(f"{r['ticker']:10} {state:8} {fmt(r['stored']):17} {fmt(r['expectedThrough']):20} "
+              f"{fmt(r['available']):17} {fmt(r['nextDue'])}")
+
+
+def cmd_scan(args, settings: Settings) -> int:
+    """Which symbols should have new data? Free without --probe; --probe confirms with the
+    source (one request per symbol that looks behind); --fetch then downloads what was found."""
+    if not args.probe:
+        with Store(settings.db_path) as store:
+            result = collector.scan(None, store, settings.tier, source_name=args.source)
+        _scan_table(result)
+        return 0
+    with api_run(args, settings, "scan" + (" + fetch" if args.fetch else "")) as (source, store, log):
+        if source is None:  # daily cap reached: still report what is known
+            result = collector.scan(None, store, settings.tier, source_name=args.source, log=log)
+        else:
+            result = collector.scan(source, store, settings.tier, log=log, probe_limit=args.limit)
+            if args.fetch and result.new and not result.stopped:
+                done = collector.sync(source, store, settings.tier, log=log, only=set(result.new),
+                                      on_item=lambda t: store.set_run_current(args._run_id, t))
+                args._rows = done.rows
+                log(f"scan: fetched {done.rows} new rows for {', '.join(result.new)}")
+    _scan_table(result)
+    return 0
+
+
 def cmd_gui(args, settings: Settings) -> int:
     from .gui.server import serve
 
@@ -400,6 +433,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--only", dest="all_sources", action="store_false",
                    help="sync only the feed given by --source instead of all configured feeds")
     s.set_defaults(func=cmd_sync, all_sources=True)
+
+    s = sub.add_parser("scan", help="check which symbols should have new data (free); --probe asks the source")
+    s.add_argument("--probe", action="store_true",
+                   help="confirm with the source: one request per symbol that looks behind")
+    s.add_argument("--fetch", action="store_true", help="with --probe: download the new data found")
+    s.add_argument("--limit", type=int, default=30, help="most symbols to probe (default 30)")
+    s.set_defaults(func=cmd_scan)
 
     s = sub.add_parser("gui", help="open the chart app in your browser")
     s.add_argument("--port", type=int, default=8765)

@@ -10,8 +10,8 @@ Settings come from environment variables, optionally loaded from a `.env` file
     MASSIVE_BASE_URL  API base URL (default: https://api.massive.com)
     MASSIVE_MAX_REQUESTS_PER_RUN   hard cap on API requests in one command (default: 250)
     MASSIVE_MAX_REQUESTS_PER_DAY   hard cap on API requests per day, all runs (default: 2000)
-    MASSIVE_REFRESH_HOURS  refresh each symbol at most this often once backfilled
-                           (default: 12 on the free plan, which only has end-of-day data; 0 on paid plans)
+    MASSIVE_REFRESH_HOURS  extra minimum hours between refreshes of a backfilled symbol (default: 0;
+                           symbols are already only refreshed when their plan should have new data)
     SOURCE_PRIORITY   feed order when sources overlap, e.g. "massive,blueocean" (default: massive)
 """
 from __future__ import annotations
@@ -117,7 +117,7 @@ def load_settings(
         base_url=(merged.get("MASSIVE_BASE_URL") or DEFAULT_BASE_URL).rstrip("/"),
         max_requests_per_run=250 if per_run is None else per_run,
         max_requests_per_day=2000 if per_day is None else per_day,
-        refresh_hours=float(refresh) if refresh is not None else (12.0 if tier.name == "free" else 0.0),
+        refresh_hours=float(refresh or 0),
         source_priority=tuple(
             s.strip().lower() for s in (merged.get("SOURCE_PRIORITY") or "massive").split(",") if s.strip()
         ),

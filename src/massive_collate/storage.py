@@ -118,6 +118,42 @@ CREATE TABLE IF NOT EXISTS layouts (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS icons (
+    source     TEXT NOT NULL,
+    ticker     TEXT NOT NULL,
+    url        TEXT,
+    mime       TEXT,
+    data       BLOB,                            -- NULL = the source had none (retried after 30 days)
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (source, ticker)
+);
+
+-- Official calendars from a source (override the rule-based calendar in sessions.py).
+CREATE TABLE IF NOT EXISTS market_holidays (
+    source   TEXT NOT NULL,
+    day      TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    status   TEXT NOT NULL,                     -- closed | early-close
+    open_ms  INTEGER,
+    close_ms INTEGER,
+    name     TEXT,
+    PRIMARY KEY (source, day, exchange)
+);
+
+CREATE TABLE IF NOT EXISTS futures_schedule (
+    source  TEXT NOT NULL,
+    product TEXT NOT NULL,
+    day     TEXT NOT NULL,                      -- session end (trading) date
+    event   TEXT NOT NULL,                      -- open | close | pre_open | ...
+    ts_ms   INTEGER NOT NULL,
+    PRIMARY KEY (source, product, day, event, ts_ms)
+);
+
+CREATE TABLE IF NOT EXISTS kv (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
+
 CREATE TABLE IF NOT EXISTS runs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     source      TEXT,
@@ -147,6 +183,9 @@ MIGRATIONS = [
     ("layouts", "touched", "INTEGER NOT NULL DEFAULT 0"),
     # The symbol a running sync is working on, for the on-screen activity view.
     ("runs", "current", "TEXT"),
+    # Last scan: when the source was asked for its newest bar, and what it had (ms).
+    ("watchlist", "probed_at", "TEXT"),
+    ("watchlist", "source_through", "INTEGER"),
     # Futures contracts: live | ended | missing (no such contract month); checked = last probe date
     ("futures_contracts", "state", "TEXT"),
     ("futures_contracts", "checked", "TEXT"),
@@ -542,11 +581,27 @@ class Store:
         return self._cached("stored_series", self._stored_series)
 
     def _stored_series(self) -> list[tuple]:
-        rows = self.conn.execute("SELECT DISTINCT source, ticker, 'trades' FROM trades").fetchall()
-        rows += self.conn.execute(
-            "SELECT DISTINCT source, ticker, timespan FROM bars WHERE multiplier=1"
-        ).fetchall()
+        # Loose index scans: one primary-key seek per distinct series instead of reading every row.
+        rows = [(s, t, "trades") for s, t in self._distinct("trades", ("source", "ticker"), ("ts_ns", "seq"))]
+        rows += [(s, t, ts) for s, t, ts, m in self._distinct("bars", ("source", "ticker", "timespan", "multiplier"),
+                                                                ("ts",)) if m == 1]
         return rows
+
+    def _distinct(self, table: str, cols: tuple[str, ...], rest: tuple[str, ...]) -> list[tuple]:
+        """Distinct values of a primary-key prefix `cols`. Each step seeks past the whole key
+        (`rest` = the remaining integer key columns, set to their maximum), so rows sharing a
+        prefix are skipped in the index rather than read."""
+        names = ", ".join(cols)
+        key = ", ".join(cols + rest)
+        top = (2**63 - 1,) * len(rest)
+        out: list[tuple] = []
+        row = self.conn.execute(f"SELECT {names} FROM {table} ORDER BY {names} LIMIT 1").fetchone()
+        while row is not None:
+            out.append(tuple(row))
+            row = self.conn.execute(
+                f"SELECT {names} FROM {table} WHERE ({key}) > ({', '.join('?' * (len(cols) + len(rest)))}) "
+                f"ORDER BY {key} LIMIT 1", tuple(row) + top).fetchone()
+        return out
 
     def set_resolution(self, source: str, ticker: str, resolution: str) -> None:
         self.watch(source, [ticker], resolution)
@@ -581,6 +636,91 @@ class Store:
     def clear_entitlements(self, source: str) -> None:
         with self.conn:
             self.conn.execute("DELETE FROM entitlements WHERE source=?", (source,))
+
+    def set_probe(self, source: str, ticker: str, when: datetime, newest_ms: int | None) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE watchlist SET probed_at=?, source_through=? WHERE source=? AND ticker=?",
+                              (when.astimezone(timezone.utc).isoformat(timespec="seconds"), newest_ms,
+                               source, ticker.upper()))
+
+    def probe(self, source: str, ticker: str) -> tuple[datetime, int | None] | None:
+        row = self.conn.execute("SELECT probed_at, source_through FROM watchlist WHERE source=? AND ticker=?",
+                                (source, ticker.upper())).fetchone()
+        return (datetime.fromisoformat(row[0]), row[1]) if row and row[0] else None
+
+    def save_icon(self, source: str, ticker: str, url: str | None, mime: str | None, data: bytes | None) -> None:
+        with self.conn:
+            self.conn.execute("INSERT OR REPLACE INTO icons VALUES (?, ?, ?, ?, ?, ?)",
+                              (source, ticker.upper(), url, mime, data, _now()))
+
+    def icon(self, ticker: str, source: str | None = None) -> tuple[str, bytes] | None:
+        """(content type, bytes) of a stored company icon, from any source unless one is given."""
+        sql = "SELECT mime, data FROM icons WHERE ticker=? AND data IS NOT NULL"
+        params: list = [ticker.upper()]
+        if source:
+            sql += " AND source=?"
+            params.append(source)
+        row = self.conn.execute(sql + " ORDER BY fetched_at DESC LIMIT 1", params).fetchone()
+        return (row[0], bytes(row[1])) if row else None
+
+    def icon_checked(self, source: str, ticker: str, max_age_days: int = 30) -> bool:
+        """Whether an icon was fetched, or found missing recently enough not to ask again."""
+        row = self.conn.execute("SELECT data IS NOT NULL, fetched_at FROM icons WHERE source=? AND ticker=?",
+                                (source, ticker.upper())).fetchone()
+        if row is None:
+            return False
+        return bool(row[0]) or (datetime.now(timezone.utc) - datetime.fromisoformat(row[1])).days < max_age_days
+
+    def icon_tickers(self) -> set[str]:
+        return {r[0] for r in self.conn.execute("SELECT DISTINCT ticker FROM icons WHERE data IS NOT NULL")}
+
+    # -- official calendars --------------------------------------------------
+
+    def save_market_holidays(self, source: str, rows: Iterable[dict]) -> int:
+        data = [(source, r["date"], r["exchange"], r["status"], r.get("open_ms"), r.get("close_ms"), r.get("name"))
+                for r in rows]
+        with self.conn:
+            self.conn.executemany("INSERT OR REPLACE INTO market_holidays VALUES (?, ?, ?, ?, ?, ?, ?)", data)
+        return len(data)
+
+    def market_holidays(self, source: str) -> list[tuple[date, str, int | None, int | None]]:
+        """NYSE closures and early closes (Nasdaq where NYSE is not listed for a day)."""
+        rows = self.conn.execute(
+            "SELECT day, exchange, status, open_ms, close_ms FROM market_holidays WHERE source=? "
+            "AND exchange IN ('NYSE', 'NASDAQ') ORDER BY day, exchange DESC", (source,)).fetchall()
+        out: dict[str, tuple] = {}
+        for day, exchange, status, o, c in rows:  # NYSE sorts after NASDAQ descending: NYSE wins
+            if day not in out or exchange == "NYSE":
+                out[day] = (date.fromisoformat(day), status, o, c)
+        return list(out.values())
+
+    def save_futures_schedule(self, source: str, product: str, rows: Iterable[tuple[str, str, int]]) -> int:
+        """rows: (session date, event, ms). Replaces what was stored for those dates."""
+        rows = list(rows)
+        days = sorted({d for d, _, _ in rows})
+        with self.conn:
+            self.conn.executemany("DELETE FROM futures_schedule WHERE source=? AND product=? AND day=?",
+                                  [(source, product.upper(), d) for d in days])
+            self.conn.executemany("INSERT OR REPLACE INTO futures_schedule VALUES (?, ?, ?, ?, ?)",
+                                  [(source, product.upper(), d, e, ms) for d, e, ms in rows])
+        return len(rows)
+
+    def futures_schedules(self, source: str) -> list[tuple[str, date, list[tuple[str, int]]]]:
+        out: dict[tuple, list] = {}
+        for product, day, event, ms in self.conn.execute(
+                "SELECT product, day, event, ts_ms FROM futures_schedule WHERE source=? ORDER BY product, day, ts_ms",
+                (source,)):
+            out.setdefault((product, day), []).append((event, ms))
+        return [(p, date.fromisoformat(d), ev) for (p, d), ev in out.items()]
+
+    def kv_get(self, key: str) -> str | None:
+        row = self.conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def kv_set(self, key: str, value: str) -> None:
+        with self.conn:
+            self.conn.execute("INSERT OR REPLACE INTO kv VALUES (?, ?)", (key, value))
+        self._wrote()
 
     def set_synced(self, source: str, ticker: str, when: datetime) -> None:
         with self.conn:
@@ -690,6 +830,23 @@ class Store:
             "FROM runs ORDER BY id DESC LIMIT ?", (limit,))
         cols = [c[0] for c in cur.description]
         return [dict(zip(cols, row)) for row in cur]
+
+    def daily_snapshot(self, source: str | None = None, sessions: int = 30) -> dict[str, dict]:
+        """Per ticker from local daily bars: average dollar volume over the last `sessions`
+        sessions (volume x VWAP, close when VWAP is missing), last close and the one before."""
+        def compute():
+            out: dict[str, dict] = {}
+            for src, ticker, kind in self.stored_series():
+                if kind != "day" or (source and src != source) or ticker in out:
+                    continue
+                rows = self.conn.execute(
+                    "SELECT close, volume * COALESCE(vwap, close) FROM bars WHERE source=? AND ticker=? "
+                    "AND timespan='day' AND multiplier=1 ORDER BY ts DESC LIMIT ?", (src, ticker, sessions)).fetchall()
+                if rows:
+                    out[ticker] = {"close": rows[0][0], "prevClose": rows[1][0] if len(rows) > 1 else None,
+                                   "dollarVolume": sum(v or 0.0 for _, v in rows) / len(rows)}
+            return out
+        return self._cached(("daily_snapshot", source, sessions), compute)
 
     def bar_edges(self, source: str, ticker: str, timespan: str = "minute", multiplier: int = 1) -> tuple | None:
         """(first, last) bar start in ms for one series. Two index lookups, however much is stored."""

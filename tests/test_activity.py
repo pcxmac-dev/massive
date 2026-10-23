@@ -21,8 +21,8 @@ def _item(**kw):
     return base | kw
 
 
-def _status(item, edges=None, current=None, refresh=12):
-    return act.symbol_status(item, edges, FLOOR, TODAY, NOW, refresh, current)
+def _status(item, edges=None, current=None, now=NOW):
+    return act.symbol_status(item, edges, FLOOR, now.date(), now, TIERS["free"], current)
 
 
 def _ms(d: date) -> int:
@@ -48,11 +48,13 @@ def test_backfill_target_is_the_listing_date_for_young_stocks():
     assert s["progress"] == 1 and s["target"] == "2026-06-12" and s["requestsLeft"] == 0
 
 
-def test_finished_symbols_are_fresh_then_due():
-    done = _item(backfilled_to=FLOOR, synced_at=NOW - timedelta(hours=2))
-    assert _status(done)["state"] == "fresh"
-    assert _status(done | {"synced_at": NOW - timedelta(hours=13)})["state"] == "due"
-    assert _status(done, current="AAPL")["state"] == "fetching"
+def test_finished_symbols_are_current_until_the_next_session_is_published():
+    done = _item(backfilled_to=FLOOR)
+    yesterday = (_ms(FLOOR), int(datetime(2026, 10, 20, 19, 59, tzinfo=ET).timestamp() * 1000))
+    s = _status(done, yesterday)
+    assert s["state"] == "current" and s["nextDue"].startswith("2026-10-22T04:00")
+    assert _status(done, yesterday, now=NOW + timedelta(days=1))["state"] == "new"
+    assert _status(done, yesterday, current="AAPL")["state"] == "fetching"
 
 
 def test_log_tail_reads_only_the_end(tmp_path):

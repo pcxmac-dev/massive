@@ -72,7 +72,7 @@ def test_backfilled_series_only_fetches_new_data(store):
     store.watch("fake", ["SPCX"], "trades")
     sync(src, store, FREE, NOW, log=lambda m: None)
     src.trade_calls.clear()
-    sync(src, store, FREE, NOW, log=lambda m: None)
+    sync(src, store, FREE, NOW + timedelta(days=1), log=lambda m: None)  # the next session is out
     assert len(src.trade_calls) == 1 and src.trade_calls[0]["desc"] is False
 
 

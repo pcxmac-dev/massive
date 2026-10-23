@@ -57,6 +57,24 @@ class DataSource(ABC):
         call costs as little as possible (used by the scheduled listing check).
         """
 
+    def latest_bar(self, ticker: str, since: date, asset: str = "stock", timespan: str = "minute") -> dict | None:
+        """The newest bar the source has from `since` on (one cheap request), or None.
+        Used by `scan` to confirm new data exists before fetching it."""
+        raise NotImplementedError(f"{self.name} cannot report its newest bar")
+
+    def market_holidays(self) -> list[dict]:
+        """Upcoming exchange closures / early closes: dicts with date, exchange, status, name,
+        open_ms and close_ms (early closes)."""
+        raise NotImplementedError(f"{self.name} has no market holiday calendar")
+
+    def futures_schedule(self, product: str, since: date) -> list[tuple[str, str, int]]:
+        """Official futures session events from `since` on: (session date, event, ms)."""
+        raise NotImplementedError(f"{self.name} has no futures schedules")
+
+    def icon(self, url: str) -> tuple[bytes, str]:
+        """Download a company icon from the source: (content, content type)."""
+        raise NotImplementedError(f"{self.name} has no company icons")
+
     def market_daily(self, day: date) -> list[dict]:
         """Daily bars for the whole market on one date (dicts also carry T = ticker).
 

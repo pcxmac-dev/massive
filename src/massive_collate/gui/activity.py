@@ -9,7 +9,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from ..collector import ET, history_floor
-from ..config import Settings
+from .. import freshness
+from ..config import Settings, Tier
 from ..storage import Store
 
 LOG_TAIL_BYTES = 64 * 1024
@@ -65,8 +66,9 @@ def _utc(text: str | None) -> datetime | None:
 
 
 def symbol_status(item: dict, edges: tuple | None, floor: date, today: date, now: datetime,
-                  refresh_hours: float, current: str | None) -> dict:
-    """One watchlist row: how far back it is stored, whether backfill is done, and what happens next."""
+                  tier: Tier, current: str | None, probe: tuple | None = None) -> dict:
+    """One watchlist row: how far back it is stored, whether backfill is done, whether newer
+    data should exist (plan calendar), and what the last scan found at the source."""
     target = max(floor, item["listed_from"]) if item.get("listed_from") else floor
     first = datetime.fromtimestamp(edges[0] / 1000, ET).date() if edges else None
     last = datetime.fromtimestamp(edges[1] / 1000, ET) if edges else None
@@ -81,23 +83,44 @@ def symbol_status(item: dict, edges: tuple | None, floor: date, today: date, now
     per_day = MINUTES_PER_DAY.get(item["asset"], 960) * 5 / 7  # calendar days to trading days
     left = 0 if done else math.ceil(missing_days * per_day / BARS_PER_REQUEST) + (2 if reached is None else 0)
 
-    synced = item.get("synced_at")
-    next_at = synced + timedelta(hours=refresh_hours) if synced and refresh_hours else None
+    fresh = freshness.assess(item["asset"], tier, last, now)
+    source_through = None
+    if probe and probe[1] is not None:
+        source_through = datetime.fromtimestamp(probe[1] / 1000, ET)
     if item["ticker"] == current:
         state = "fetching"
     elif not done:
         state = "backfilling" if reached else "queued"
-    elif next_at and next_at > now:
-        state = "fresh"
+    elif fresh["state"] == "behind":
+        state = "new"  # the plan should have published newer data than is stored
     else:
-        state = "due"
+        state = "current"
     return {
         "ticker": item["ticker"], "exchange": item.get("exchange"), "asset": item["asset"],
         "name": item.get("name"), "resolution": item["resolution"], "state": state,
         "first": _iso(first), "last": _iso(last), "target": _iso(target), "backfilledTo": _iso(item.get("backfilled_to")),
         "progress": round(progress, 4), "requestsLeft": left,
-        "syncedAt": _iso(synced), "nextRefresh": _iso(next_at),
+        "syncedAt": _iso(item.get("synced_at")),
+        "expectedThrough": _iso(fresh["expectedThrough"]), "nextDue": _iso(fresh["nextDue"]), "rule": fresh["rule"],
+        "probedAt": _iso(probe[0]) if probe else None, "sourceThrough": _iso(source_through),
+        "confirmed": bool(source_through and last and source_through > last),
     }
+
+
+def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, current: str | None = None) -> list[dict]:
+    today = now.date()
+    floor = history_floor(settings.tier, today)
+    rows = []
+    for item in store.watchlist(source):
+        if item["asset"] == "future":
+            contracts = {t for _, t in store.rolls(source, item["source_ticker"])}  # source_ticker = product
+            spans = [e for e in (store.bar_edges(source, t) for t in contracts) if e]
+            edges = (min(e[0] for e in spans), max(e[1] for e in spans)) if spans else None
+        else:
+            edges = store.bar_edges(source, item["ticker"])
+        rows.append(symbol_status(item, edges, floor, today, now, settings.tier, current,
+                                  store.probe(source, item["ticker"])))
+    return rows
 
 
 def activity(store: Store, settings: Settings, db_path: Path, source: str = "massive",
@@ -116,15 +139,7 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
         if r["status"] == "running" and not owner:
             r["status"] = "abandoned"  # the process died; the next run marks it so in the database
 
-    symbols = []
-    for item in store.watchlist(source):
-        if item["asset"] == "future":
-            contracts = {t for _, t in store.rolls(source, item["source_ticker"])}  # source_ticker = product
-            spans = [e for e in (store.bar_edges(source, t) for t in contracts) if e]
-            edges = (min(e[0] for e in spans), max(e[1] for e in spans)) if spans else None
-        else:
-            edges = store.bar_edges(source, item["ticker"])
-        symbols.append(symbol_status(item, edges, floor, today, now, settings.refresh_hours, current))
+    symbols = symbol_rows(store, settings, source, now, current)
 
     used = store.requests_today(source)
     left = sum(s["requestsLeft"] for s in symbols)
@@ -139,6 +154,8 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
         "today": {"requests": used, "remaining": max(0, per_day - used)},
         "running": live is not None,
         "live": live,
+        "scanning": bool(live and live["command"].startswith("scan")),
+        "newData": sum(x["state"] == "new" for x in symbols),
         "backfill": {
             "done": sum(s["progress"] >= 1 for s in symbols), "total": len(symbols), "requestsLeft": left,
             "runs": math.ceil(left / settings.max_requests_per_run) if settings.max_requests_per_run else None,

@@ -49,6 +49,14 @@ class MassiveClient:
         self.on_request: Callable[[int], None] | None = None
 
     def get(self, path_or_url: str, params: dict[str, Any] | None = None) -> dict:
+        return self._request(path_or_url, params).json()
+
+    def get_bytes(self, url: str) -> tuple[bytes, str]:
+        """A file on the API host (e.g. a company icon): (content, content type). Counts as a request."""
+        resp = self._request(url, None)
+        return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
+
+    def _request(self, path_or_url: str, params: dict[str, Any] | None) -> requests.Response:
         if path_or_url.startswith("http"):
             # Only follow pagination links on the API host, so the key is never sent elsewhere.
             if urlparse(path_or_url).netloc != self._host:
@@ -77,7 +85,7 @@ class MassiveClient:
             if resp.status_code == 429:
                 raise RateLimited(resp.status_code, message)
             raise SourceError(resp.status_code, message)
-        return resp.json()
+        return resp
 
     def pages(self, path: str, params: dict[str, Any] | None = None) -> Iterator[list[dict]]:
         """Yield each page of results, following next_url links."""
@@ -192,6 +200,36 @@ class MassiveSource(DataSource):
             active=bool(r.get("active", True)) and not r.get("delisted_utc"),
             details=r,
         )
+
+    def latest_bar(self, ticker: str, since: date, asset: str = "stock", timespan: str = "minute") -> dict | None:
+        """The newest bar from `since` to today, or None: one request (limit 1, newest first)."""
+        end = datetime.now(timezone.utc).date() + timedelta(days=1)
+        if asset == "future":
+            page = next(iter(self._future_pages(ticker, since, end, timespan, True, limit=1)), [])
+        else:
+            page = next(iter(self._bar_pages(ticker, since, end, timespan, 1, True, limit=1)), [])
+        return page[0] if page else None
+
+    def market_holidays(self) -> list[dict]:
+        data = self.client.get("/v1/marketstatus/upcoming")
+        rows = data if isinstance(data, list) else data.get("results") or []
+        ms = lambda v: int(datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp() * 1000) if v else None  # noqa: E731
+        return [{"date": r["date"], "exchange": r.get("exchange", ""), "status": r.get("status", "closed"),
+                 "name": r.get("name"), "open_ms": ms(r.get("open")), "close_ms": ms(r.get("close"))}
+                for r in rows if r.get("date")]
+
+    def futures_schedule(self, product: str, since: date) -> list[tuple[str, str, int]]:
+        out = []
+        params = {"product_code": product.upper(), "session_end_date.gte": str(since), "limit": 1000,
+                  "sort": "session_end_date.asc"}
+        for page in self.client.pages("/futures/v1/schedules", params):
+            for r in page:
+                t = datetime.fromisoformat(r["timestamp"].replace("Z", "+00:00"))
+                out.append((r["session_end_date"], r["event"], int(t.timestamp() * 1000)))
+        return out
+
+    def icon(self, url: str) -> tuple[bytes, str]:
+        return self.client.get_bytes(url)
 
     def market_daily(self, day: date) -> list[dict]:
         data = self.client.get(f"/v2/aggs/grouped/locale/us/market/stocks/{day}", {"adjusted": "true"})

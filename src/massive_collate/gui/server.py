@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import subprocess
+import sys
+from datetime import datetime, timezone
 import threading
 import webbrowser
 from http import HTTPStatus
@@ -38,6 +41,11 @@ class ChartApp:
             watch = self.store.watchlist()
             stored = self.store.stored_series()
             exchanges = self.store.exchanges()
+            snapshot = self.store.daily_snapshot()
+            icons = self.store.icon_tickers()
+            now = datetime.now(timezone.utc).astimezone(activity.ET)
+            states = {(r["ticker"]): r for src in {w["source"] for w in watch}
+                      for r in activity.symbol_rows(self.store, self.settings, src, now)}
         names = {r.mic: r.name for r in exchanges.itertuples() if r.mic}
         tickers = sorted({t for _, t, _ in stored} | {w["ticker"] for w in watch})
         out = []
@@ -55,6 +63,10 @@ class ChartApp:
                 "exchange": mic, "exchangeName": names.get(mic, mic) if mic else None,
                 "listed": str(w["listed_from"]) if w.get("listed_from") else None,
                 "feeds": feeds,
+                "icon": ticker in icons,
+                "market": _market(snapshot, ticker, w),
+                "data": {k: states[ticker][k] for k in ("state", "progress", "last", "expectedThrough", "nextDue")}
+                if ticker in states else None,
             })
         return out
 
@@ -126,6 +138,14 @@ class ChartApp:
                               "adjust": s.adjust}
         return out
 
+    def future(self, q: dict[str, str]) -> dict:
+        style = Style(type=q.get("type", "candles"))
+        return self.engine.future(
+            q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)), q.get("session", "regular"),
+            style=style, adjust=_adjust(q.get("adjust")), lod=int(q.get("lod", 1)), model=_model(q),
+            offset=max(0, int(q.get("offset", 0))), count=min(int(q.get("count", 500)), 5000),
+        )
+
     def range_stats(self, q: dict[str, str]) -> dict:
         return self.engine.range_stats(
             q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
@@ -174,10 +194,35 @@ class ChartApp:
             return activity.activity(self.store, self.settings, self.store.path, q.get("source", "massive"),
                                      log_lines=min(int(q.get("lines", 200)), 1000))
 
+    def icon(self, ticker: str) -> tuple[str, bytes] | None:
+        with self._lock:
+            return self.store.icon(ticker)
+
+    def start_scan(self) -> dict:
+        """Run `scan --probe --fetch` in its own process: it takes the run lock and the plan caps
+        like a scheduled sync, and shows up in the activity view while it runs."""
+        if activity.lock_owner(self.store.path):
+            raise RuntimeError("a run is already in progress")
+        args = [sys.executable, "-m", "massive_collate", "scan", "--probe", "--fetch"]
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                stdin=subprocess.DEVNULL, creationflags=flags)
+        self._scan = proc  # keep a reference so it is reaped
+        return {"started": True, "pid": proc.pid}
+
     def exchanges(self) -> list[dict]:
         with self._lock:
             df = self.store.exchanges()
         return json.loads(df.to_json(orient="records"))
+
+
+def _market(snapshot: dict, ticker: str, watch: dict) -> dict | None:
+    """Last close, change and 30-session average dollar volume from local daily bars."""
+    d = snapshot.get(ticker)
+    if not d or watch.get("asset", "stock") != "stock":
+        return None  # dollar volume only means something for shares
+    change = (d["close"] / d["prevClose"] - 1) * 100 if d["prevClose"] else None
+    return {"close": d["close"], "changePct": change, "dollarVolume": d["dollarVolume"]}
 
 
 def _model(q: dict[str, str]) -> Model:
@@ -237,6 +282,11 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 if not isinstance(body, dict):
                     raise ValueError("body must be a JSON object")
                 parts = urlparse(self.path).path.rstrip("/").split("/")
+                if method == "POST" and parts == ["", "api", "scan"]:
+                    try:
+                        return self._json(app.start_scan(), HTTPStatus.ACCEPTED)
+                    except RuntimeError as e:
+                        return self._json({"error": str(e)}, HTTPStatus.CONFLICT)
                 if parts[:3] != ["", "api", "layouts"]:
                     return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
                 if method == "POST" and len(parts) == 3:
@@ -282,8 +332,18 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.bars(q))
                 if url.path == "/api/info":
                     return self._json(app.info(q["source"], q["ticker"], q.get("adjust")))
+                if url.path == "/api/future":
+                    return self._json(app.future(q))
                 if url.path == "/api/range":
                     return self._json(app.range_stats(q))
+                if url.path == "/api/icon":
+                    icon = app.icon(q["ticker"])
+                    if icon is None:
+                        return self._send(HTTPStatus.NOT_FOUND, b"no icon", "text/plain")
+                    mime, data = icon
+                    if mime not in ("image/png", "image/jpeg", "image/gif", "image/webp"):
+                        return self._send(HTTPStatus.NOT_FOUND, b"no icon", "text/plain")  # no SVG: it can carry script
+                    return self._send(HTTPStatus.OK, data, mime)
                 if url.path == "/api/activity":
                     return self._json(app.activity(q))
                 if url.path == "/api/exchanges":
