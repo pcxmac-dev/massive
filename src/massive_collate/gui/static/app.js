@@ -277,10 +277,11 @@ function finishLodSwitch() {
   if (sw.atLatest || sw.anchor == null) {
     chart.scrollToRealTime(0);
   } else {
-    // Put the anchor bar back in the centre of the chart.
+    // Put the anchor bar back where it was (model switch) or in the centre (detail-level switch).
     chart.scrollToTimestamp(sw.anchor, 0);
     const x = chart.convertToPixel({ timestamp: sw.anchor }, { paneId: 'candle_pane' }).x;
-    if (Number.isFinite(x)) chart.scrollByDistance(chartWidth() / 2 - x, 0);
+    const target = Number.isFinite(sw.anchorX) ? sw.anchorX : chartWidth() / 2;
+    if (Number.isFinite(x)) chart.scrollByDistance(target - x, 0);
   }
   updateStatus(chart.getDataList().length);
 }
@@ -363,11 +364,38 @@ function setModel(patch) {
   markDirty();
   state.restoredFor = null;
   chart.removeOverlay({ groupId: 'user' });
-  resetLod();
+  // Keep the same time window: same zoom (and detail level) and the same moment in the centre,
+  // or pinned to the latest bar. Model series have exactly the same bars as the price.
+  const data = chart.getDataList();
+  const { to } = chart.getVisibleRange();
+  const edge = data[Math.min(data.length - 1, Math.max(0, to - 1))];  // right-most visible bar
+  state.lodSwitch = {
+    barSpace: chart.getBarSpace().bar, anchor: edge ? edge.timestamp : null,
+    anchorX: edge ? chart.convertToPixel({ timestamp: edge.timestamp }, { paneId: 'candle_pane' }).x : null,
+    atLatest: !data.length || to >= data.length,
+  };
   renderModelControls();
   applyChartType();
   renderTypeParams();
-  chart.resetData();
+  reloadWithModelPrecision();
+}
+
+// Load once: learn the new values' decimals first (a 1-bar request), then set them together
+// with the reload, instead of loading, discovering the precision and loading again.
+async function reloadWithModelPrecision() {
+  const sym = chart.getSymbol();
+  let want = state.meta?.pricePrecision;
+  if (sym && state.model.kind !== 'price') {
+    try {
+      const p = chart.getPeriod();
+      const res = await api('/api/bars', { source: sym.source, ticker: sym.ticker, period: p.type, span: p.span,
+                                           session: state.session, limit: 1, adjust: state.adjust, ...modelQuery() });
+      want = res.model?.precision ?? want;
+      state.modelUnit = res.model?.unit ?? null;
+    } catch (err) { showError(err); }
+  }
+  if (sym && want != null && sym.pricePrecision !== want) chart.setSymbol({ ...sym, pricePrecision: want });  // reloads
+  else chart.resetData();
 }
 
 // Model values need their own decimals; prices go back to the symbol's precision.
@@ -500,9 +528,14 @@ $('gpuBtn').addEventListener('click', () => {
   applyChartType();
 });
 
+// A fixed price-axis width: with "auto" the axis widens for long values (an integral's
+// −46,479.70) and the plot shifts sideways, so switching models would move the time window.
+const Y_AXIS_WIDTH = 92;
+
 function applyChartType() {
   const custom = !NATIVE[state.chartType];
   chart.setStyles(state.theme);
+  chart.setStyles({ yAxis: { size: Y_AXIS_WIDTH } });
   chart.setStyles({ candle: { type: NATIVE[state.chartType] || 'candle_solid', ...DEFAULT_CANDLE } });
   chart.removeIndicator({ name: 'GPU_BARS' });
   if (gpuActive() && ensureGpu()) {

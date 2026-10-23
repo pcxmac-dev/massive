@@ -192,6 +192,25 @@ class Store:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
         self._migrate()
+        # Data-version caches: SQLite's data_version changes when another connection (the
+        # collector) commits; _writes counts this connection's own market-data writes.
+        self._writes = 0
+        self._cache: dict = {}
+
+    def _version(self) -> tuple[int, int]:
+        return self.conn.execute("PRAGMA data_version").fetchone()[0], self._writes
+
+    def _cached(self, key, compute):
+        version = self._version()
+        hit = self._cache.get(key)
+        if hit is not None and hit[0] == version:
+            return hit[1]
+        value = compute()
+        self._cache[key] = (version, value)
+        return value
+
+    def _wrote(self) -> None:
+        self._writes += 1
 
     def _migrate(self) -> None:
         with self.conn:
@@ -224,6 +243,7 @@ class Store:
         ]
         with self.conn:
             self.conn.executemany("INSERT OR REPLACE INTO trades VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+        self._wrote()
         return len(rows)
 
     def trade_range(self, source: str, ticker: str) -> tuple[int, int] | None:
@@ -275,6 +295,7 @@ class Store:
         rows = [_bar_row(source, ticker, timespan, multiplier, b) for b in bars]
         with self.conn:
             self.conn.executemany(_UPSERT_BAR, rows)
+        self._wrote()
         return len(rows)
 
     def bar_range(self, source: str, ticker: str, timespan: str, multiplier: int = 1) -> tuple[int, int] | None:
@@ -344,6 +365,7 @@ class Store:
         with self.conn:
             self.conn.executemany(_UPSERT_BAR, rows)
             self._mark_day(source, day, "ok" if rows else "empty", len(rows))
+        self._wrote()
         return len(rows)
 
     def mark_grouped_day(self, source: str, day: date, status: str) -> None:
@@ -455,6 +477,7 @@ class Store:
             n += self.conn.execute(
                 "DELETE FROM bars WHERE source=? AND ticker=? AND ts < ?", (source, ticker, cutoff_ns // 10**6)
             ).rowcount
+        self._wrote()
         return n
 
     def unwatch(self, source: str, tickers: Iterable[str]) -> None:
@@ -485,7 +508,11 @@ class Store:
         ]
 
     def series_fingerprint(self, source: str, ticker: str) -> tuple:
-        """Cheap value that changes whenever a ticker's stored data changes (for caching)."""
+        """Value that changes whenever a ticker's stored data changes (for caching).
+        Recomputed only after the database has changed."""
+        return self._cached(("fp", source, ticker.upper()), lambda: self._fingerprint(source, ticker))
+
+    def _fingerprint(self, source: str, ticker: str) -> tuple:
         t = self.conn.execute(
             "SELECT COUNT(*), MAX(ts_ns) FROM trades WHERE source=? AND ticker=?", (source, ticker.upper())
         ).fetchone()
@@ -495,7 +522,11 @@ class Store:
         return tuple(t) + tuple(b)
 
     def stored_series(self) -> list[tuple]:
-        """(source, ticker, kind) for every series with data, kind = trades | second | minute | ..."""
+        """(source, ticker, kind) for every series with data, kind = trades | second | minute | ...
+        Scans the tables only after the database has changed."""
+        return self._cached("stored_series", self._stored_series)
+
+    def _stored_series(self) -> list[tuple]:
         rows = self.conn.execute("SELECT DISTINCT source, ticker, 'trades' FROM trades").fetchall()
         rows += self.conn.execute(
             "SELECT DISTINCT source, ticker, timespan FROM bars WHERE multiplier=1"

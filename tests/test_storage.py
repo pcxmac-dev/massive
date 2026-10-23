@@ -83,6 +83,20 @@ def test_client_reports_every_request():
     assert seen == [1, 2, 3]
 
 
+def test_series_caches_refresh_on_own_and_other_writes(tmp_path):
+    a = Store(tmp_path / "m.db")
+    b = Store(tmp_path / "m.db")  # e.g. the collector, writing while the chart app reads
+    assert a.stored_series() == []
+    a.upsert_trades("s", "X", [_trade(1)])
+    assert a.stored_series() == [("s", "X", "trades")]  # own write seen
+    fp = a.series_fingerprint("s", "X")
+    b.upsert_bars("s", "Y", "minute", 1, [{"t": 60_000, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}])
+    b.upsert_trades("s", "X", [_trade(2)])
+    assert ("s", "Y", "minute") in a.stored_series()  # other connection's commit seen
+    assert a.series_fingerprint("s", "X") != fp
+    a.close(); b.close()
+
+
 def test_grouped_days_and_denied(store):
     store.save_grouped_day("s", date(2026, 1, 2), [{"T": "AAA", "t": 1, "c": 1}])
     store.mark_grouped_day("s", date(2024, 1, 2), "denied")
