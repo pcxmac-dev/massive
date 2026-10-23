@@ -105,7 +105,7 @@
         <canvas id="globe" aria-label="Globe: the sun's noon position faces you; open markets glow"></canvas>
         <div id="globeInfo" class="globe-info"></div>
         <div id="newsTicker" class="news-ticker" aria-live="polite" title="Announcements at the world's exchanges"></div>
-        <div class="globe-hint p-muted small">Drag to turn · double-click to return to noon</div>
+        <div class="globe-hint p-muted small">Drag to turn · scroll to zoom · click the sun to recentre</div>
       </div>
       <div id="marketsList" class="markets-list"></div>
     </div>
@@ -137,10 +137,13 @@
 
     <div class="view scroll-view" id="viewLive" data-view="live" hidden></div>
 
+    <div class="view scroll-view" id="viewNews" data-view="news" hidden></div>
+
     <nav id="rail" aria-label="Views">
       <button data-pane="stock" id="railStock" title="Stock: chart with the symbol, key statistics and business"></button>
       <button data-pane="analysis" id="railAnalysis" title="Analysis: chart with the highlight and cursor statistics"></button>
       <button data-pane="markets" id="railMarkets" title="Markets: the world's exchanges on a globe, what is open now"></button>
+      <button data-pane="news" id="railNews" title="News: exchange events and headlines"></button>
       <hr>
       <button data-pane="fetcher" id="railFetcher" title="Fetcher: historical data (past sessions)"></button>
       <button data-pane="live" id="railLive" title="Live feeds: the current session"></button>
@@ -169,5 +172,6 @@
   <script src="activity.js"></script>
   <script src="panels.js"></script>
   <script src="globe.js"></script>
+  <script src="news.js"></script>
 </body>
 </html>

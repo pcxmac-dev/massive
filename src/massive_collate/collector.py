@@ -432,6 +432,8 @@ def sync(
         sync_exchanges(source, store, log)
         refresh_calendars(source, store, today, log)
         fetch_news(source, store, now, log)
+        from .gui.world import PROXIES
+        fetch_market_moves(source, store, now, PROXIES, log)
         # Keep complete symbols current first; backfills take what budget is left.
         for item in sorted(store.watchlist(source.name), key=lambda w: (_backfilling(w, floor), w["ticker"])):
             ticker, asset = item["ticker"], item["asset"]
@@ -500,6 +502,35 @@ def sync(
 
 CALENDAR_REFRESH_DAYS = 7
 NEWS_REFRESH_MINUTES = 30
+
+
+def fetch_market_moves(source: DataSource, store: Store, now: datetime, proxies: list[str], log: Log = print) -> int:
+    """Closes of the market proxy funds for the two newest trading days (one request per new day:
+    the whole-market daily file), so the globe can colour each exchange by its market's move."""
+    now = now.astimezone(ET)
+    newest = now.date() if now.hour >= EOD_READY_HOUR_ET else now.date() - timedelta(days=1)
+    have = set(store.proxy_days(source.name))
+    days, d = [], newest
+    while len(days) < 2 and (newest - d).days < 10:
+        if freshness.is_trading_day(d):
+            days.append(d)
+        d -= timedelta(days=1)
+    used = 0
+    for day in days:
+        if day in have:
+            continue
+        try:
+            bars = _guard_call(source.market_daily, day)
+        except (NotEntitled, SourceError, NotImplementedError) as e:
+            log(f"market moves: {day} not available ({e})")
+            break
+        used += 1
+        closes = {b["T"]: b["c"] for b in bars if b.get("T") in proxies and b.get("c")}
+        if closes:
+            store.save_proxy_closes(source.name, day, closes)
+            log(f"market moves: {day}, {len(closes)} market proxies")
+    return used
+
 
 
 def fetch_news(source: DataSource, store: Store, now: datetime, log: Log = print) -> int:

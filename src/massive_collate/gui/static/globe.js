@@ -94,9 +94,12 @@
   }
 
   // -- projection -------------------------------------------------------------------------
+  const TOP = 64;  // the announcements ticker and the info line sit above the globe
+  let zoom = 1;    // 1 = whole globe; wheel / pinch zooms in up to 12x
   function geometry() {
     const w = canvas.clientWidth, h = canvas.clientHeight;
-    return { w, h, cx: w / 2, cy: h / 2, r: Math.min(w, h) * 0.44 };
+    const r = Math.max(40, Math.min(w * 0.44, (h - TOP - 28) / 2)) * zoom;
+    return { w, h, cx: w / 2, cy: TOP + (h - TOP) / 2, r };
   }
 
   function project(lon, lat, g) {
@@ -127,30 +130,87 @@
   }
 
   // Night shading at low resolution: each pixel's point on the globe vs the sun's direction.
-  function nightLayer(g) {
-    // The night side moves with the sun: at most a few redraws a minute at this precision.
-    const key = `${g.w}x${g.h}|${view.lon.toFixed(1)}|${view.lat.toFixed(1)}|${markets?.sun.lon.toFixed(1)}`;
-    if (nightCache?.key === key) return nightCache.canvas;
-    const n = 180, off = document.createElement('canvas');
-    off.width = off.height = n;
-    const o = off.getContext('2d'), img = o.createImageData(n, n);
-    const sun = markets?.sun || { lon: view.lon, lat: view.lat };
-    const sx = Math.cos(sun.lat * rad) * Math.cos(sun.lon * rad), sy = Math.cos(sun.lat * rad) * Math.sin(sun.lon * rad), sz = Math.sin(sun.lat * rad);
-    const mini = { cx: n / 2, cy: n / 2, r: n / 2 };
-    for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
-      const q = unproject(i + 0.5, j + 0.5, mini);
+  // Shading layers are computed over the visible canvas at a quarter of its resolution, so they
+  // stay sharp however far the globe is zoomed in. `shade(lon, lat)` returns [r, g, b, alpha 0-1].
+  const LAYER_STEP = 4;
+  function raster(g, shade) {
+    const nx = Math.ceil(g.w / LAYER_STEP), ny = Math.ceil(g.h / LAYER_STEP);
+    const off = document.createElement('canvas');
+    off.width = nx; off.height = ny;
+    const o = off.getContext('2d'), img = o.createImageData(nx, ny);
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const q = unproject((i + 0.5) * LAYER_STEP, (j + 0.5) * LAYER_STEP, g);
       if (!q) continue;
-      const d = Math.cos(q.lat * rad) * Math.cos(q.lon * rad) * sx + Math.cos(q.lat * rad) * Math.sin(q.lon * rad) * sy + Math.sin(q.lat * rad) * sz;
-      const a = d < 0 ? Math.min(1, -d * 4) * 0.55 : 0;  // soft twilight edge
-      const k = (j * n + i) * 4;
-      img.data[k] = 6; img.data[k + 1] = 10; img.data[k + 2] = 24; img.data[k + 3] = Math.round(a * 255);
+      const c = shade(q.lon, q.lat);
+      if (!c) continue;
+      const k = (j * nx + i) * 4;
+      img.data[k] = c[0]; img.data[k + 1] = c[1]; img.data[k + 2] = c[2]; img.data[k + 3] = Math.round(c[3] * 255);
     }
     o.putImageData(img, 0, 0);
-    nightCache = { key, canvas: off };
     return off;
   }
 
+  function nightLayer(g) {
+    // The night side moves with the sun: at most a few redraws a minute at this precision.
+    const key = `${g.w}x${g.h}|${g.r.toFixed(0)}|${view.lon.toFixed(1)}|${view.lat.toFixed(1)}|${markets?.sun.lon.toFixed(1)}`;
+    if (nightCache?.key === key) return nightCache.canvas;
+    const sun = markets?.sun || { lon: view.lon, lat: view.lat };
+    const sx = Math.cos(sun.lat * rad) * Math.cos(sun.lon * rad), sy = Math.cos(sun.lat * rad) * Math.sin(sun.lon * rad), sz = Math.sin(sun.lat * rad);
+    const canvasOut = raster(g, (lon, lat) => {
+      const d = Math.cos(lat * rad) * Math.cos(lon * rad) * sx + Math.cos(lat * rad) * Math.sin(lon * rad) * sy + Math.sin(lat * rad) * sz;
+      return d < 0 ? [6, 10, 24, Math.min(1, -d * 4) * 0.55] : null;  // soft twilight edge
+    });
+    nightCache = { key, canvas: canvasOut };
+    return canvasOut;
+  }
+
   const STATE_COLOR = { open: '#26a69a', break: '#f0a020', closed: '#787b86', unknown: '#555' };
+  const ZONES = 8;  // solar time zones shown either side of noon
+
+  // Solar time zones: 15-degree bands centred on the meridian where it is noon now, the noon
+  // band brightest and the 8 either side fading. One low-resolution layer, redrawn as they move.
+  let zoneCache = null;
+  function zoneLayer(g) {
+    const sunLon = markets?.sun.lon ?? view.lon;
+    const key = `${g.w}x${g.h}|${g.r.toFixed(0)}|${view.lon.toFixed(1)}|${view.lat.toFixed(1)}|${sunLon.toFixed(1)}`;
+    if (zoneCache?.key === key) return zoneCache.canvas;
+    const canvasOut = raster(g, (lon) => {
+      const k = Math.round(wrap(lon - sunLon) / 15);
+      if (Math.abs(k) > ZONES) return null;
+      const a = k === 0 ? 0.13 : 0.075 * (1 - (Math.abs(k) - 1) / ZONES) * (k % 2 ? 1 : 0.55);  // alternate so bands read apart
+      return [240, 185, 11, a];
+    });
+    zoneCache = { key, canvas: canvasOut };
+    return canvasOut;
+  }
+
+  function drawZones(g, dark) {
+    ctx.save(); ctx.beginPath(); ctx.arc(g.cx, g.cy, g.r, 0, 2 * Math.PI); ctx.clip();
+    ctx.drawImage(zoneLayer(g), 0, 0, g.w, g.h);
+    ctx.restore();
+    const sunLon = markets.sun.lon;
+    // GMT offset of each band (nautical zones: 15 degrees per hour), along its top
+    const labelLat = Math.min(70, view.lat + 52 / Math.sqrt(zoom));
+    ctx.font = '10px system-ui, sans-serif'; ctx.textAlign = 'center';
+    for (let k = -ZONES; k <= ZONES; k++) {
+      const lon = sunLon + k * 15;
+      const p = project(lon, labelLat, g);
+      if (!p.visible || p.depth < 0.15 || p.x < 0 || p.x > g.w) continue;
+      const off = Math.round(wrap(lon) / 15);
+      ctx.fillStyle = `rgba(240,185,11,${0.85 - Math.abs(k) * 0.07})`;
+      ctx.fillText(off === 0 ? 'GMT' : `GMT${off > 0 ? '+' : '−'}${Math.abs(off)}`, p.x, p.y);
+    }
+    ctx.textAlign = 'start';
+  }
+
+  // Performance colour: a market's daily move around the colour wheel, green (up strongly)
+  // through blue (about average) to red (down hard). +-2% is the full scale.
+  const PERF_SCALE = 2;
+  function perfColor(pct) {
+    const z = Math.max(-1, Math.min(1, pct / PERF_SCALE));
+    const hue = z >= 0 ? 220 - 100 * z : 220 + 140 * -z;  // 120 green ... 220 blue ... 360 red
+    return `hsl(${hue % 360}, 75%, 55%)`;
+  }
 
   function draw() {
     if (document.body.dataset.view !== 'markets') return;
@@ -173,8 +233,10 @@
     // night side
     ctx.save(); ctx.beginPath(); ctx.arc(g.cx, g.cy, g.r, 0, 2 * Math.PI); ctx.clip();
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(nightLayer(g), g.cx - g.r, g.cy - g.r, g.r * 2, g.r * 2);
+    ctx.drawImage(nightLayer(g), 0, 0, g.w, g.h);
     ctx.restore();
+
+    if (markets) drawZones(g, dark);
 
     // graticule
     ctx.beginPath();
@@ -209,7 +271,8 @@
     const items = markets.world.map((m) => ({ m, p: project(m.lon, m.lat, g) })).filter((x) => x.p.visible)
       .sort((a, b) => a.p.depth - b.p.depth);
     for (const { m, p } of items) {
-      const color = STATE_COLOR[m.state] || STATE_COLOR.unknown;
+      const perf = m.performance?.changePct;
+      const color = perf != null ? perfColor(perf) : STATE_COLOR[m.state] || STATE_COLOR.unknown;
       if (m.state === 'open') {
         ctx.beginPath(); ctx.arc(p.x, p.y, 6 + 5 * pulse, 0, 2 * Math.PI);
         ctx.fillStyle = `rgba(38,166,154,${0.12 + 0.12 * (1 - pulse)})`; ctx.fill();
@@ -223,10 +286,13 @@
         ctx.fillStyle = 'rgba(240,185,11,0.35)'; ctx.fill();
       }
       ctx.beginPath(); ctx.arc(p.x, p.y, m === hover ? 5.5 : 4, 0, 2 * Math.PI);
+      ctx.globalAlpha = m.state === 'closed' && perf != null ? 0.7 : 1;
       ctx.fillStyle = color; ctx.fill();
-      ctx.strokeStyle = dark ? '#0b0e15' : '#fff'; ctx.lineWidth = 1; ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = perf != null ? (STATE_COLOR[m.state] || STATE_COLOR.unknown) : (dark ? '#0b0e15' : '#fff');
+      ctx.lineWidth = perf != null ? 1.6 : 1; ctx.stroke();
       if (m.state === 'open' || m.state === 'break' || m === hover || featured) {
-        const label = `${m.city} · ${m.index.split(' · ')[0]}`;
+        const label = `${m.city} · ${m.index.split(' · ')[0]}${perf != null ? ` ${perf >= 0 ? '+' : ''}${perf.toFixed(2)}%` : ''}`;
         ctx.font = '11px system-ui, sans-serif';
         const w = ctx.measureText(label).width;
         let lx = p.x + 8, ly = p.y - 6;
@@ -238,13 +304,23 @@
         ctx.fillText(label, lx, ly);
       }
     }
+    // colour legend
+    const lw = 150, lx = g.w - lw - 18, ly = g.h - 30;
+    const lg = ctx.createLinearGradient(lx, 0, lx + lw, 0);
+    for (let i = 0; i <= 10; i++) lg.addColorStop(i / 10, perfColor(-PERF_SCALE + (2 * PERF_SCALE * i) / 10));
+    ctx.fillStyle = lg; ctx.fillRect(lx, ly, lw, 6);
+    ctx.font = '10px system-ui, sans-serif'; ctx.fillStyle = dark ? '#9aa0ae' : '#555';
+    ctx.fillText(`−${PERF_SCALE}%`, lx, ly - 4); ctx.textAlign = 'center'; ctx.fillText('day', lx + lw / 2, ly - 4);
+    ctx.textAlign = 'end'; ctx.fillText(`+${PERF_SCALE}%`, lx + lw, ly - 4); ctx.textAlign = 'start';
+    ctx.fillText('ring: open · lunch · closed', lx, ly + 18);
+
     const open = markets.world.filter((m) => m.state === 'open').length;
     const brk = markets.world.filter((m) => m.state === 'break').length;
-    const utc = new Date().toISOString().slice(11, 16);
-    info.innerHTML = `<b>${open}</b> exchanges open${brk ? `, <b>${brk}</b> at lunch` : ''} · ${utc} UTC
-      <div class="p-muted small">Noon is at ${Math.abs(markets.sun.lon).toFixed(1)}°${markets.sun.lon >= 0 ? 'E' : 'W'}
-      · sun overhead at ${Math.abs(markets.sun.lat).toFixed(1)}°${markets.sun.lat >= 0 ? 'N' : 'S'}
-      · turning in real time${following() ? '' : ' · <a href="#" id="globeNoon">back to noon</a>'}</div>`;
+    const utc = new Date().toISOString().slice(11, 19);
+    info.innerHTML = `<b>${open}</b> exchanges open${brk ? `, <b>${brk}</b> at lunch` : ''} · ${utc} GMT${zoom > 1.01 ? ` · ${zoom.toFixed(1)}×` : ''}
+      <div class="p-muted small">Sun overhead at ${Math.abs(markets.sun.lat).toFixed(1)}°${markets.sun.lat >= 0 ? 'N' : 'S'}
+      ${Math.abs(markets.sun.lon).toFixed(1)}°${markets.sun.lon >= 0 ? 'E' : 'W'} · turning in real time
+      ${following() && zoom <= 1.01 ? '' : ' · <a href="#" id="globeNoon">recentre</a>'}</div>`;
   }
 
   // -- list ----------------------------------------------------------------------------
@@ -375,7 +451,24 @@
   let justDragged = false;  // the click that ends a drag is not a click on the sun or a market
   canvas.addEventListener('pointerup', () => { justDragged = !!dragging?.moved; dragging = null; });
   canvas.addEventListener('pointercancel', () => { dragging = null; });
-  canvas.addEventListener('dblclick', recentre);
+  canvas.addEventListener('dblclick', () => { recentre(); zoom = 1; nightCache = null; zoneCache = null; });
+  // Zoom with the wheel or a trackpad pinch, towards the point under the cursor.
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const g = geometry(), r = canvas.getBoundingClientRect();
+    const at = unproject(e.clientX - r.left, e.clientY - r.top, g);
+    const next = Math.max(1, Math.min(12, zoom * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015))));
+    if (next === zoom) return;
+    if (at && next > zoom) {  // turn a little towards the cursor so it stays roughly under it
+      const t = 1 - zoom / next;
+      const sun = subsolar();
+      const lon = view.lon + wrap(at.lon - view.lon) * t, lat = view.lat + (at.lat - view.lat) * t;
+      offset = { lon: wrap(lon - sun.lon), lat: Math.max(-85, Math.min(85, lat)) };
+      glide = null;
+    }
+    zoom = next;
+    nightCache = null; zoneCache = null;
+  }, { passive: false });
   canvas.addEventListener('click', (e) => {
     if (justDragged) { justDragged = false; return; }
     if (sunHit(e)) { recentre(); return; }
@@ -384,7 +477,7 @@
     if (row) { row.scrollIntoView({ block: 'center', behavior: 'smooth' }); row.classList.add('flash'); setTimeout(() => row.classList.remove('flash'), 1200); }
   });
   info.addEventListener('click', (e) => {
-    if (e.target.id === 'globeNoon') { e.preventDefault(); recentre(); }
+    if (e.target.id === 'globeNoon') { e.preventDefault(); recentre(); zoom = 1; nightCache = null; zoneCache = null; }
   });
 
   // Animate while visible: the Earth turning, pulses, countdowns every second; market states
@@ -403,6 +496,13 @@
   }
   window.addEventListener('massive:view', (e) => { if (e.detail.view === 'markets') { load(); if (!topo) loadTopo(); } });
   window.addEventListener('resize', () => { nightCache = null; draw(); });
+  // From the News view: feature an exchange (turn the globe to it and light it).
+  window.addEventListener('massive:feature-exchange', (e) => {
+    const m = markets?.world.find((x) => x.code === e.detail);
+    const at = news.items.findIndex((x) => x.exchange === e.detail);
+    if (at >= 0) { news.i = at; news.shownAt = Date.now(); renderTicker(true); }
+    if (m) { offset = { lon: wrap(m.lon - subsolar().lon), lat: Math.max(-60, Math.min(60, m.lat)) }; }
+  });
   window.Globe = { state: () => ({ view: { ...view }, offset: { ...offset }, sun: subsolar(), following: following() }), recentre };
   requestAnimationFrame(frame);
   if (document.body.dataset.view === 'markets') { load(); loadTopo(); }

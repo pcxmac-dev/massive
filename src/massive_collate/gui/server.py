@@ -149,7 +149,9 @@ class ChartApp:
 
         with self._lock:
             out = markets(self.engine.calendar(), self.store.exchanges(), self.store.watchlist())
-        out["world"] = world.world_markets()
+        with self._lock:
+            moves = self.store.proxy_moves()
+        out["world"] = world.world_markets(moves=moves)
         out["sun"] = world.subsolar()
         out["sky"] = astro.sky()
         return out

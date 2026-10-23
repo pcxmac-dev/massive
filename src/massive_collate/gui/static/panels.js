@@ -4,6 +4,7 @@
      Stock     the chart, with the symbol (its own logo), key statistics and business beside it
      Analysis  the chart, with the highlight's measurements and the bar under the cursor beside it
      Markets   the world's exchanges on a globe turned to where it is noon now (globe.js)
+     News      every announcement the globe's ticker shows (news.js)
      Fetcher   historical data (sessions before the current one); coloured while a run is active
      Live      current-session feeds; a red "recording" dot while live data is being recorded
 
@@ -12,7 +13,7 @@
    cursor). */
 (() => {
   const { symbolIcon, icon } = window.MassiveIcons;
-  const VIEWS = { stock: 'chart', analysis: 'chart', markets: 'markets', fetcher: 'fetcher', live: 'live' };
+  const VIEWS = { stock: 'chart', analysis: 'chart', markets: 'markets', news: 'news', fetcher: 'fetcher', live: 'live' };
 
   // -- rail --------------------------------------------------------------------------------
   function showPane(name, { toggle = true } = {}) {
@@ -55,6 +56,7 @@
     $('railStock').innerHTML = state.ticker ? symbolIcon(symbolInfo(state.ticker), 22) : icon('analysis', 20);
     $('railAnalysis').innerHTML = icon('analysis', 20);
     $('railMarkets').innerHTML = icon('globe', 20);
+    $('railNews').innerHTML = icon('news', 20);
     const running = !!activity?.running;
     const fresh = activity?.newData || 0;
     $('railFetcher').innerHTML = `${icon('database', 20)}${running ? `<span class="rail-badge spin">${icon('sync', 11)}</span>` : ''}`

@@ -1,53 +1,44 @@
-"""The announcements ticker on the Markets globe: what is happening at the world's exchanges now.
+"""The announcements ticker on the Markets globe and the News view: newsworthy items only.
 
-Two kinds of item, each naming its source and the exchange it belongs to (lit on the globe):
-- exchange events from each exchange's calendar: just opened, closing soon, lunch break, closed
-  for a holiday today (source: the exchange calendar);
-- news headlines stored by the fetcher (source: the publisher), tied to the exchange of the
-  tickers they mention (US listings: New York).
+Routine calendar items (opening, closing soon, lunch, scheduled holidays) are not news. What is:
+- headlines stored by the fetcher (source: the publisher), tied to the exchange of the tickers
+  they mention (US listings: New York);
+- unscheduled closures today (days of mourning, storms, emergencies: a calendar's ad-hoc
+  holidays) and early closes today;
+- big moves: a market's proxy fund up or down BIG_MOVE_PCT or more on the latest day.
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-import pandas as pd
-
 from . import world
 
 US_MICS = {"XNAS", "XNYS", "ARCX", "BATS", "XASE", "IEXG"}
 NEWS_HOURS = 48
-
-
-def _minutes(a: datetime, b: datetime) -> int:
-    return int(round((b - a).total_seconds() / 60))
+BIG_MOVE_PCT = 2.0
 
 
 def exchange_events(now: datetime, markets: list[dict] | None = None) -> list[dict]:
     markets = markets if markets is not None else world.world_markets(now)
     out = []
+    seen_moves = set()
     for m in markets:
         if m.get("state") in (None, "unknown"):
             continue
-        until = datetime.fromisoformat(m["until"]) if m.get("until") else None
         idx = m["index"].split(" · ")[0]
-        item = None
-        if m["state"] == "open" and m.get("openedAt"):
-            opened = datetime.fromisoformat(m["openedAt"])
-            if _minutes(opened, now) <= 60:
-                item = (f"{m['name']} opened {_minutes(opened, now)} min ago · {idx} trading", opened, 2)
-        if item is None and m["state"] == "open" and until and m.get("event") == "closes" and _minutes(now, until) <= 45:
-            item = (f"{m['city']} closes in {_minutes(now, until)} min · {idx}", now, 2)
-        if item is None and m["state"] == "break" and until:
-            local = pd.Timestamp(until).tz_convert(m["timezone"]).strftime("%H:%M")
-            item = (f"{m['city']} at lunch · {idx} resumes {local} local", now, 1)
-        if item is None and m["state"] == "closed" and m.get("holidayToday"):
-            item = (f"{m['name']} closed today for a holiday", now, 1)
-        if item is None and m["state"] == "closed" and until and 0 < _minutes(now, until) <= 30:
-            item = (f"{m['city']} opens in {_minutes(now, until)} min · {idx}", now, 2)
-        if item:
-            text, when, weight = item
-            out.append({"kind": "event", "text": text, "source": f"{m['code']} calendar",
-                        "time": when.isoformat(), "exchange": m["code"], "weight": weight})
+        if m.get("unscheduledClosure"):
+            out.append({"kind": "event", "text": f"{m['name']} closed today (unscheduled closure)",
+                        "source": f"{m['code']} calendar", "time": now.isoformat(), "exchange": m["code"], "weight": 4})
+        elif m.get("earlyClose") and m.get("today"):
+            out.append({"kind": "event", "text": f"{m['name']} closes early today at {m['today']['close']} local",
+                        "source": f"{m['code']} calendar", "time": now.isoformat(), "exchange": m["code"], "weight": 2})
+        perf = m.get("performance")
+        if perf and abs(perf["changePct"]) >= BIG_MOVE_PCT and (m["country"], perf["proxy"]) not in seen_moves:
+            seen_moves.add((m["country"], perf["proxy"]))
+            pct = perf["changePct"]
+            out.append({"kind": "move", "text": f"{m['country']} {'up' if pct > 0 else 'down'} {abs(pct):.1f}% on {perf['day']} · {idx}",
+                        "source": f"{perf['proxy']} (US-listed proxy)", "time": now.isoformat(), "exchange": m["code"],
+                        "weight": 3, "changePct": pct})
     return out
 
 
@@ -68,9 +59,13 @@ def news_items(store, watch: list[dict], now: datetime) -> list[dict]:
 
 def announcements(store, watch: list[dict], now: datetime | None = None, markets: list[dict] | None = None) -> dict:
     now = now or datetime.now(timezone.utc)
+    if markets is None:
+        markets = world.world_markets(now, moves=store.proxy_moves())
     events = exchange_events(now, markets)
     news = news_items(store, watch, now)
-    # Interleave: exchange events first (they are about right now), then headlines, watched first.
-    news.sort(key=lambda x: (-x["weight"], x["time"]), reverse=False)
+    # Irregular exchange events first (they are about right now), then headlines, watched first,
+    # each newest first.
+    events.sort(key=lambda x: x["weight"], reverse=True)
+    news.sort(key=lambda x: x["time"], reverse=True)
     news.sort(key=lambda x: x["weight"], reverse=True)
     return {"now": now.isoformat(), "items": events + news}

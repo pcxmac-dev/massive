@@ -162,6 +162,15 @@ CREATE TABLE IF NOT EXISTS news (
 );
 CREATE INDEX IF NOT EXISTS news_time ON news (source, published_ms);
 
+-- Daily closes of the market proxy funds (from the whole-market daily file), for the globe's colours.
+CREATE TABLE IF NOT EXISTS proxy_daily (
+    source TEXT NOT NULL,
+    day    TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    close  REAL NOT NULL,
+    PRIMARY KEY (source, day, ticker)
+);
+
 CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -745,6 +754,26 @@ class Store:
 
     def latest_news_ms(self, source: str) -> int | None:
         return self.conn.execute("SELECT MAX(published_ms) FROM news WHERE source=?", (source,)).fetchone()[0]
+
+    def save_proxy_closes(self, source: str, day: date, closes: dict[str, float]) -> int:
+        with self.conn:
+            self.conn.executemany("INSERT OR REPLACE INTO proxy_daily VALUES (?, ?, ?, ?)",
+                                  [(source, day.isoformat(), t, c) for t, c in closes.items()])
+        return len(closes)
+
+    def proxy_days(self, source: str) -> list[date]:
+        return [date.fromisoformat(d) for (d,) in self.conn.execute(
+            "SELECT DISTINCT day FROM proxy_daily WHERE source=? ORDER BY day", (source,))]
+
+    def proxy_moves(self, source: str = "massive") -> dict[str, dict]:
+        """Latest daily change of each proxy: {ticker: {day, close, changePct}}."""
+        days = self.proxy_days(source)[-2:]
+        if len(days) < 2:
+            return {}
+        prev, last = (dict(self.conn.execute("SELECT ticker, close FROM proxy_daily WHERE source=? AND day=?",
+                                             (source, d.isoformat())).fetchall()) for d in days)
+        return {t: {"day": days[1].isoformat(), "close": c, "changePct": (c / prev[t] - 1) * 100}
+                for t, c in last.items() if prev.get(t)}
 
     def kv_get(self, key: str) -> str | None:
         row = self.conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
