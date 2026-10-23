@@ -8,7 +8,7 @@
 </head>
 <body>
   <header id="topbar">
-    <button id="symbolBtn" class="symbol" title="Change symbol (/)">Select symbol</button>
+    <button id="symbolBtn" class="symbol" title="Switch symbol (/)"><span id="symbolLabel">Select symbol</span></button>
     <select id="feedSelect" title="Data feed"></select>
     <div id="periods" class="group" role="toolbar" aria-label="Interval"></div>
     <select id="typeSelect" title="Chart type">
@@ -77,42 +77,49 @@
     <button id="zoomOut" title="Zoom out (-)">&minus;</button>
     <button id="zoomIn" title="Zoom in (+)">+</button>
     <button id="latestBtn" title="Jump to latest bar (End)">Latest</button>
-    <button id="fetchChip" class="fetch-chip" aria-haspopup="dialog"><span class="dot"></span><span id="fetchChipText">Fetchers</span></button>
-    <button id="panelBtn" class="toggle" title="Show / hide the info panel">Info</button>
     <button id="gpuBtn" class="toggle" title="GPU rendering (WebGL2 / OpenGL ES 3)">GPU</button>
     <button id="shotBtn" title="Save a PNG of the chart">PNG</button>
     <button id="themeBtn" title="Light / dark">Theme</button>
   </header>
   <main>
-    <nav id="tools" aria-label="Drawing tools"></nav>
-    <div id="chart"></div>
-    <div id="panelResizer" role="separator" aria-orientation="vertical" aria-label="Resize info panel" tabindex="0"></div>
-    <aside id="sidePanel" aria-label="Symbol information">
-      <section id="pSymbol"></section>
-      <section id="pHighlight"></section>
-      <section id="pStats"></section>
-      <section id="pBusiness"></section>
-      <section id="pData"></section>
-    </aside>
-  </main>
-  <footer id="status"><span id="statusText">Loading…</span><span id="error" role="alert"></span></footer>
+    <div class="view" id="viewChart" data-view="chart">
+      <nav id="tools" aria-label="Drawing tools"></nav>
+      <div id="chart"></div>
+      <div id="panelResizer" role="separator" aria-orientation="vertical" aria-label="Resize side panel" tabindex="0"></div>
+      <aside id="sidePanel" aria-label="Side panel">
+        <div class="pane" id="paneStock" data-pane="stock">
+          <section id="pSymbol"></section>
+          <section id="pStats"></section>
+          <section id="pBusiness"></section>
+          <section id="pData"></section>
+        </div>
+        <div class="pane" id="paneAnalysis" data-pane="analysis" hidden>
+          <section id="pHighlight"></section>
+          <section id="pCursor"></section>
+        </div>
+      </aside>
+    </div>
 
-  <dialog id="symbolDialog">
-    <form method="dialog" class="dialog-head">
-      <input id="symbolSearch" type="search" placeholder="Search ticker, name or exchange" autocomplete="off">
-      <button value="close" aria-label="Close">&times;</button>
-    </form>
-    <div id="symbolList"></div>
-  </dialog>
+    <div class="view" id="viewMarkets" data-view="markets" hidden>
+      <div class="globe-wrap">
+        <canvas id="globe" aria-label="Globe: the sun's noon position faces you; open markets glow"></canvas>
+        <div id="globeInfo" class="globe-info"></div>
+        <div class="globe-hint p-muted small">Drag to turn · double-click to return to noon</div>
+      </div>
+      <div id="marketsList" class="markets-list"></div>
+    </div>
 
-  <dialog id="activityDialog" class="wide" aria-label="Fetcher activity">
-    <form method="dialog" class="dialog-head">
+    <div class="view scroll-view" id="viewFetcher" data-view="fetcher" hidden>
+      <div class="view-head">
+        <div><h2>Fetcher</h2><div class="p-muted small">History: every session before the current one, within your plan's caps.</div></div>
+        <div class="view-actions">
+          <button id="scanBtn" class="primary" title="Check which symbols should have new data (free), confirm each with Massive (1 request) and download what is there">Scan for new data</button>
+        </div>
+      </div>
       <div id="actStatus" class="act-status"></div>
-      <button value="close" aria-label="Close">&times;</button>
-    </form>
-    <div class="act-body">
+      <div id="scanNote" class="small"></div>
       <div id="actTiles" class="tiles"></div>
-      <h4>Live log — what the fetchers are gathering</h4>
+      <h4>Live log — what the fetcher is gathering</h4>
       <div id="actLog" class="act-log"></div>
       <h4>Symbols</h4>
       <div id="actFilters" class="filters"></div>
@@ -126,11 +133,40 @@
         <tbody id="actRuns"></tbody>
       </table></div>
     </div>
+
+    <div class="view scroll-view" id="viewLive" data-view="live" hidden></div>
+
+    <nav id="rail" aria-label="Views">
+      <button data-pane="stock" id="railStock" title="Stock: chart with the symbol, key statistics and business"></button>
+      <button data-pane="analysis" id="railAnalysis" title="Analysis: chart with the highlight and cursor statistics"></button>
+      <button data-pane="markets" id="railMarkets" title="Markets: the world's exchanges on a globe, what is open now"></button>
+      <hr>
+      <button data-pane="fetcher" id="railFetcher" title="Fetcher: historical data (past sessions)"></button>
+      <button data-pane="live" id="railLive" title="Live feeds: the current session"></button>
+    </nav>
+  </main>
+  <footer id="status">
+    <span id="statusText">Loading…</span>
+    <span id="error" role="alert"></span>
+    <span id="netStatus" class="net-status" aria-live="polite"><span id="netText"></span><span id="netBar" class="net-bar" hidden><span></span></span></span>
+  </footer>
+
+  <dialog id="symbolDialog" class="switcher" aria-label="Switch symbol">
+    <form method="dialog" class="dialog-head">
+      <input id="symbolSearch" type="search" placeholder="Search ticker, name or exchange" autocomplete="off">
+      <button type="button" id="sortBtn" title="Sort order"></button>
+      <button value="close" aria-label="Close">&times;</button>
+    </form>
+    <div id="symbolList" role="listbox" aria-label="Symbols"></div>
   </dialog>
 
   <script src="vendor/klinecharts/klinecharts.min.js"></script>
   <script src="gpu.js"></script>
+  <script src="icons.js"></script>
   <script src="app.js"></script>
+  <script src="timeaxis.js"></script>
   <script src="activity.js"></script>
+  <script src="panels.js"></script>
+  <script src="globe.js"></script>
 </body>
 </html>

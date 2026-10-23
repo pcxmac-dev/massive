@@ -200,19 +200,24 @@ def _scan_table(result: collector.ScanResult) -> None:
               f"{fmt(r['available']):17} {fmt(r['nextDue'])}")
 
 
+def _only(args) -> set[str] | None:
+    return {resolve(t).ticker for t in args.only} if getattr(args, "only", None) else None
+
+
 def cmd_scan(args, settings: Settings) -> int:
     """Which symbols should have new data? Free without --probe; --probe confirms with the
     source (one request per symbol that looks behind); --fetch then downloads what was found."""
     if not args.probe:
         with Store(settings.db_path) as store:
-            result = collector.scan(None, store, settings.tier, source_name=args.source)
+            result = collector.scan(None, store, settings.tier, source_name=args.source, only=_only(args))
         _scan_table(result)
         return 0
-    with api_run(args, settings, "scan" + (" + fetch" if args.fetch else "")) as (source, store, log):
+    label = "scan" + (f" {' '.join(sorted(_only(args)))}" if args.only else "") + (" + fetch" if args.fetch else "")
+    with api_run(args, settings, label) as (source, store, log):
         if source is None:  # daily cap reached: still report what is known
-            result = collector.scan(None, store, settings.tier, source_name=args.source, log=log)
+            result = collector.scan(None, store, settings.tier, source_name=args.source, log=log, only=_only(args))
         else:
-            result = collector.scan(source, store, settings.tier, log=log, probe_limit=args.limit)
+            result = collector.scan(source, store, settings.tier, log=log, probe_limit=args.limit, only=_only(args))
             if args.fetch and result.new and not result.stopped:
                 done = collector.sync(source, store, settings.tier, log=log, only=set(result.new),
                                       on_item=lambda t: store.set_run_current(args._run_id, t))
@@ -439,6 +444,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="confirm with the source: one request per symbol that looks behind")
     s.add_argument("--fetch", action="store_true", help="with --probe: download the new data found")
     s.add_argument("--limit", type=int, default=30, help="most symbols to probe (default 30)")
+    s.add_argument("--only", nargs="+", metavar="TICKER", help="only these watched symbols")
     s.set_defaults(func=cmd_scan)
 
     s = sub.add_parser("gui", help="open the chart app in your browser")

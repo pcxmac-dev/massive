@@ -109,3 +109,16 @@ def test_open_minutes_skip_weekends_and_holidays():
     days = sorted({m.date() for m in mins})
     assert days == [date(2026, 11, 25), date(2026, 11, 27)]  # Thanksgiving skipped
     assert max(m for m in mins if m.date() == date(2026, 11, 27)).hour == 16  # 17:00 close on the early close
+
+
+def test_nyse_rules_agree_with_exchange_calendars_every_day_2000_2027():
+    xc = pytest.importorskip("exchange_calendars")
+    x = xc.get_calendar("XNYS", start="2000-01-03", end="2027-12-31")
+    sessions = {d.date(): c.tz_convert("America/New_York") for d, c in zip(x.sessions, x.closes)}
+    d = date(2000, 1, 3)
+    while d <= date(2027, 12, 31):
+        assert CAL.is_trading_day(d) == (d in sessions), d
+        if d in sessions:
+            close = CAL.regular_hours(d)[1]
+            assert (close.hour, close.minute) == (sessions[d].hour, sessions[d].minute), d
+        d += timedelta(days=1)

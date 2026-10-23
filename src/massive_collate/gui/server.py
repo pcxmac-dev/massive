@@ -5,7 +5,7 @@ import json
 import mimetypes
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import threading
 import webbrowser
 from http import HTTPStatus
@@ -47,7 +47,12 @@ class ChartApp:
             states = {(r["ticker"]): r for src in {w["source"] for w in watch}
                       for r in activity.symbol_rows(self.store, self.settings, src, now)}
         names = {r.mic: r.name for r in exchanges.itertuples() if r.mic}
-        tickers = sorted({t for _, t, _ in stored} | {w["ticker"] for w in watch})
+        # Futures contracts are stored only as parts of a continuous series (NQ1!): not symbols of their own.
+        with self._lock:
+            parts = {c["ticker"] for w in watch if w["asset"] == "future"
+                     for c in self.store.contracts(w["source"], w["source_ticker"])}
+        watched = {w["ticker"] for w in watch}
+        tickers = sorted(({t for _, t, _ in stored} - (parts - watched)) | watched)
         out = []
         for ticker in tickers:
             ws = [w for w in watch if w["ticker"] == ticker]
@@ -138,6 +143,31 @@ class ChartApp:
                               "adjust": s.adjust}
         return out
 
+    def markets(self) -> dict:
+        from . import world
+        from .markets import markets
+
+        with self._lock:
+            out = markets(self.engine.calendar(), self.store.exchanges(), self.store.watchlist())
+        out["world"] = world.world_markets()
+        out["sun"] = world.subsolar()
+        return out
+
+    def calendar(self, q: dict[str, str]) -> dict:
+        """Sessions of a symbol between two times (ms), for annotating the chart."""
+        from .markets import symbol_sessions
+
+        with self._lock:
+            item = next((w for w in self.store.watchlist() if w["ticker"] == q["ticker"].upper()), None)
+            s = self.engine.series(q.get("source", "*"), q["ticker"])
+        asset = s.asset if s else (item or {}).get("asset", "stock")
+        product = item["source_ticker"] if item and item["asset"] == "future" else None
+        start = datetime.fromtimestamp(int(q["from"]) / 1000, timezone.utc)
+        end = datetime.fromtimestamp(int(q["to"]) / 1000, timezone.utc)
+        if end - start > timedelta(days=3700):
+            raise ValueError("calendar range is limited to 10 years")
+        return {"asset": asset, "sessions": symbol_sessions(self.engine.calendar(), asset, product, start, end)}
+
     def future(self, q: dict[str, str]) -> dict:
         style = Style(type=q.get("type", "candles"))
         return self.engine.future(
@@ -198,12 +228,19 @@ class ChartApp:
         with self._lock:
             return self.store.icon(ticker)
 
-    def start_scan(self) -> dict:
-        """Run `scan --probe --fetch` in its own process: it takes the run lock and the plan caps
-        like a scheduled sync, and shows up in the activity view while it runs."""
+    def start_scan(self, ticker: str | None = None) -> dict:
+        """Run `scan --probe --fetch` (for one ticker, or every watched symbol) in its own
+        process: it takes the run lock and the plan caps like a scheduled sync, and shows up in
+        the activity view and the status bar while it runs."""
         if activity.lock_owner(self.store.path):
             raise RuntimeError("a run is already in progress")
         args = [sys.executable, "-m", "massive_collate", "scan", "--probe", "--fetch"]
+        if ticker:
+            with self._lock:
+                watched = {w["ticker"] for w in self.store.watchlist()}
+            if ticker.upper() not in watched:
+                raise LookupError(f"{ticker} is not on the watchlist")
+            args += ["--only", ticker.upper()]
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 stdin=subprocess.DEVNULL, creationflags=flags)
@@ -282,9 +319,12 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 if not isinstance(body, dict):
                     raise ValueError("body must be a JSON object")
                 parts = urlparse(self.path).path.rstrip("/").split("/")
-                if method == "POST" and parts == ["", "api", "scan"]:
+                if method == "POST" and parts in (["", "api", "scan"], ["", "api", "fetch"]):
+                    ticker = parse_qs(urlparse(self.path).query).get("ticker", [None])[-1] if parts[2] == "fetch" else None
+                    if parts[2] == "fetch" and not ticker:
+                        return self._json({"error": "ticker is required"}, HTTPStatus.BAD_REQUEST)
                     try:
-                        return self._json(app.start_scan(), HTTPStatus.ACCEPTED)
+                        return self._json(app.start_scan(ticker), HTTPStatus.ACCEPTED)
                     except RuntimeError as e:
                         return self._json({"error": str(e)}, HTTPStatus.CONFLICT)
                 if parts[:3] != ["", "api", "layouts"]:
@@ -332,6 +372,10 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.bars(q))
                 if url.path == "/api/info":
                     return self._json(app.info(q["source"], q["ticker"], q.get("adjust")))
+                if url.path == "/api/markets":
+                    return self._json(app.markets())
+                if url.path == "/api/calendar":
+                    return self._json(app.calendar(q))
                 if url.path == "/api/future":
                     return self._json(app.future(q))
                 if url.path == "/api/range":
@@ -371,6 +415,8 @@ def serve(db_path: Path, port: int = 8765, open_browser: bool = True, priority: 
           settings: Settings | None = None) -> None:
     store = Store(db_path, check_same_thread=False)
     app = ChartApp(store, priority, settings)
+    from . import world
+    threading.Thread(target=world.warm, daemon=True).start()  # world calendars take a few seconds
     port_ref = [port]
     try:
         httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app, port_ref))

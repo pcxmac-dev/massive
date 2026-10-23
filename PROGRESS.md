@@ -72,6 +72,24 @@ Working notes so work can resume in a fresh session. Newest first.
   live run (symbol in progress via `runs.current`, requests vs caps), per-symbol backfill state
   (queued / backfilling / fetching / due / fresh) with stored range and a request estimate, recent
   runs, and the log tail. Read-only; never calls the API. Click a symbol to open it.
+- **Calendars** (`sessions.py`): one market calendar for any date: NYSE rules (checked day by day
+  against exchange_calendars XNYS 2000-2027, 0 mismatches), CME Globex hours with holiday halts per
+  product group and their trade dates, the FX feed's own holiday hours; Massive's upcoming holidays
+  and futures schedules (weekly, ~5 requests) override the rules. Validated against every stored bar.
+- **Forward time axis** (`gui/projection.py`, `/api/future`, `static/timeaxis.js`): slots after the
+  last bar are the starts of the bars that will really exist, through the same binning, daily keying
+  and LOD grouping as real bars. `tools/backtest_projection.py`: 0 missed bars, 1m-1W, five symbols.
+  KLineChart lets you scroll about one screen past the last bar; zoom out for further.
+- **Bars** are binned on New York wall-clock time (fixed DST drift); regular hours follow the calendar
+  (13:00 early closes, no weekend prints); indices are regular-hours only.
+- **Rail = main views**: Stock / Analysis (chart + side panel), Markets (globe.js: wireframe globe at
+  the subsolar point, ~50 world exchanges via exchange_calendars with lunch breaks and holidays),
+  Fetcher (history; Scan button), Live (current-session feeds; red dot when recording). No pop-ups
+  except the symbol switcher (tiles, sorted by 30-session dollar volume).
+- **Opening a symbol** checks it against the calendar; if a newer session should exist it runs
+  `scan --probe --fetch --only TICKER` in the background with progress in the status bar.
+- **Topo data for the globe**: `static/vendor/world/countries-110m.json` (world-atlas, Natural Earth)
+  is optional; without it the globe draws the graticule only.
 - Testing without disturbing the user's open app: `.claude/launch.json` in the sessions folder has a
   `massive-charts-test` config (port 8766) pointing `MASSIVE_DB` at a scratch copy of the database.
 

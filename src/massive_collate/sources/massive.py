@@ -220,10 +220,15 @@ class MassiveSource(DataSource):
 
     def futures_schedule(self, product: str, since: date) -> list[tuple[str, str, int]]:
         out = []
-        params = {"product_code": product.upper(), "session_end_date.gte": str(since), "limit": 1000,
+        # Near term only: official schedules matter for holidays and special sessions ahead; the
+        # calendar's rules cover everything further out.
+        params = {"product_code": product.upper(), "session_end_date.gte": str(since),
+                  "session_end_date.lte": str(since + timedelta(days=60)), "limit": 1000,
                   "sort": "session_end_date.asc"}
         for page in self.client.pages("/futures/v1/schedules", params):
             for r in page:
+                if r.get("product_code", product).upper() != product.upper():
+                    continue
                 t = datetime.fromisoformat(r["timestamp"].replace("Z", "+00:00"))
                 out.append((r["session_end_date"], r["event"], int(t.timestamp() * 1000)))
         return out

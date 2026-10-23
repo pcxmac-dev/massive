@@ -103,10 +103,16 @@ def jobs_report_good_friday(d: date) -> bool:
     return nyse_holidays(d.year).get(d) == "Good Friday" and d.day <= 7
 
 
+# Past early closes that broke the pattern (checked against exchange_calendars' XNYS, 2000-2027).
+NYSE_EARLY_CLOSE_EXCEPTIONS = {date(2002, 7, 3): False, date(2002, 7, 5): True, date(2003, 12, 26): True}
+
+
 def nyse_early_close(d: date) -> bool:
     """13:00 ET close: the day after Thanksgiving, Christmas Eve, and July 3 (when trading days)."""
     if d.weekday() >= 5 or is_nyse_holiday(d):
         return False
+    if d in NYSE_EARLY_CLOSE_EXCEPTIONS:
+        return NYSE_EARLY_CLOSE_EXCEPTIONS[d]
     return (d == _nth_weekday(d.year, 11, 3, 4) + timedelta(days=1)
             or (d.month, d.day) == (12, 24)
             or ((d.month, d.day) == (7, 3) and date(d.year, 7, 4).weekday() < 5))

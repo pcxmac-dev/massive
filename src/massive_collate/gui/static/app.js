@@ -208,7 +208,8 @@ chart.setDataLoader({
   },
   subscribeBar: ({ symbol, period, callback }) => {
     clearInterval(state.poll);
-    state.poll = setInterval(async () => {
+    // Also run at once when a fetch run finishes (panels.js), not only every POLL_MS.
+    state.pollNow = async () => {
       const list = chart.getDataList();
       if (!list.length) return;
       try {
@@ -220,7 +221,8 @@ chart.setDataLoader({
         });
         res.bars.forEach((bar) => callback(bar));
       } catch { /* the next poll will retry */ }
-    }, POLL_MS);
+    };
+    state.poll = setInterval(state.pollNow, POLL_MS);
   },
   unsubscribeBar: () => clearInterval(state.poll),
 });
@@ -254,13 +256,15 @@ function chartWidth() {
 function checkLod() {
   if (state.lodSwitch || !LOD_TYPES.has(state.chartType)) return;
   const bar = chart.getBarSpace().bar;
+  // A hidden chart (another view is showing) has no width: decide when it is shown again.
+  if (!Number.isFinite(bar) || bar <= 0 || !(chart.getSize('candle_pane', 'main')?.width > 0)) return;
   let k = state.lod;
   if (bar < 0.5) k = state.lod * 2 ** Math.ceil(Math.log2(1 / bar));
   else if (bar > 4 && state.lod > 1) k = Math.max(1, state.lod / 2 ** Math.floor(Math.log2(bar)));
   // Never aggregate further than needed: keep at least half the chart width in candles.
   if (state.baseTotal) k = Math.min(k, 2 ** Math.max(0, Math.floor(Math.log2(state.baseTotal / (chartWidth() / 2)))));
   k = Math.min(MAX_LOD, Math.max(1, k));
-  if (k === state.lod) return;
+  if (!Number.isFinite(k) || k === state.lod) return;
   const data = chart.getDataList();
   const { from, to } = chart.getVisibleRange();
   const centre = data[Math.min(data.length - 1, Math.max(0, Math.floor((from + to) / 2)))];
@@ -424,11 +428,25 @@ $('modelSelect').addEventListener('change', (e) => setModel({ kind: e.target.val
 $('modelBasis').addEventListener('change', (e) => setModel({ basis: e.target.value }));
 $('modelPer').addEventListener('change', (e) => setModel({ per: e.target.value }));
 $('modelGaps').addEventListener('change', (e) => setModel({ gaps: e.target.checked }));
-$('modelDetail').addEventListener('input', (e) => {  // live label while dragging
-  state.model.detail = Number(e.target.value);
-  $('modelWindow').textContent = `${windowForDetail(state.model.detail)} bars ≈ ${windowSpan()}`;
+// The chart follows the slider while it is dragged (at most ~4 reloads a second, always ending
+// on the position it was let go at), not only when it is released.
+const detailDrag = { last: 0, timer: 0, applied: null };
+function applyDetail(detail) {
+  clearTimeout(detailDrag.timer);
+  detailDrag.last = performance.now();
+  if (detailDrag.applied === detail) return;
+  detailDrag.applied = detail;
+  setModel({ detail });
+}
+$('modelDetail').addEventListener('input', (e) => {
+  const detail = Number(e.target.value);
+  state.model.detail = detail;
+  $('modelWindow').textContent = `${windowForDetail(detail)} bars ≈ ${windowSpan()}`;
+  clearTimeout(detailDrag.timer);
+  const wait = Math.max(0, 250 - (performance.now() - detailDrag.last));
+  detailDrag.timer = setTimeout(() => applyDetail(detail), wait);
 });
-$('modelDetail').addEventListener('change', (e) => setModel({ detail: Number(e.target.value) }));
+$('modelDetail').addEventListener('change', (e) => applyDetail(Number(e.target.value)));
 
 // The theme's own candle colours, captured before any chart type hides them.
 const DEFAULT_CANDLE = (() => {
@@ -771,7 +789,7 @@ async function selectSymbol(ticker, source = MERGED) {
     state.period = meta.periods.find((p) => p.type === 'minute' && p.span === 1) || meta.periods[0];
   }
   const info = symbolInfo(meta.ticker);
-  $('symbolBtn').textContent = info.exchange ? `${meta.ticker} · ${info.exchangeName || info.exchange}` : meta.ticker;
+  renderSymbolButton();
   renderFeeds(info);
   renderPeriods();
   chart.removeOverlay({ groupId: 'user' });
@@ -781,6 +799,7 @@ async function selectSymbol(ticker, source = MERGED) {
     pricePrecision: meta.pricePrecision, volumePrecision: meta.volumePrecision,
   });
   loadInfo();  // side panel: symbol, statistics, business details
+  window.dispatchEvent(new CustomEvent('massive:symbol', { detail: meta.ticker }));
 }
 
 function renderFeeds(info) {
@@ -831,57 +850,125 @@ function drawRolls() {
   }
 }
 
+// The symbol button shows the symbol's logo, ticker, exchange and its data state, like
+// TradingView; the picker is an app switcher: a grid of tiles with logos, last price, change and
+// average dollar volume, sorted (by default) by dollar volume ascending, with keyboard navigation.
+function renderSymbolButton() {
+  const { symbolIcon, dataIcon, esc: e } = window.MassiveIcons;
+  const info = symbolInfo(state.ticker);
+  const data = window.Activity?.data?.symbols?.find((x) => x.ticker === state.ticker) || info.data;
+  $('symbolLabel').innerHTML = state.ticker
+    ? `${symbolIcon(info, 20)}<b>${e(state.ticker)}</b>${info.exchange ? `<span class="p-muted">${e(info.exchangeName || info.exchange)}</span>` : ''}${dataIcon(data, 14)}`
+    : 'Select symbol';
+}
+window.addEventListener('massive:activity', renderSymbolButton);
+
+const SORTS = [
+  { key: 'dv-asc', label: '$ volume ↑', title: 'Average daily dollar volume (30 sessions), ascending' },
+  { key: 'dv-desc', label: '$ volume ↓', title: 'Average daily dollar volume (30 sessions), descending' },
+  { key: 'name', label: 'A–Z', title: 'Ticker, A to Z' },
+  { key: 'change', label: 'Change', title: 'Last session change, highest first' },
+];
+state.switcherSort = prefs.get('switcherSort', 'dv-asc');
+
+function compactMoney(v) {
+  if (v == null) return '–';
+  const a = Math.abs(v);
+  return a >= 1e12 ? `$${(v / 1e12).toFixed(1)}T` : a >= 1e9 ? `$${(v / 1e9).toFixed(1)}B`
+    : a >= 1e6 ? `$${(v / 1e6).toFixed(0)}M` : `$${Math.round(v).toLocaleString()}`;
+}
+
+function sortedSymbols(list) {
+  const key = state.switcherSort;
+  const dv = (s) => s.market?.dollarVolume ?? -1;
+  const out = [...list];
+  if (key === 'name') out.sort((a, b) => a.ticker.localeCompare(b.ticker));
+  else if (key === 'change') out.sort((a, b) => (b.market?.changePct ?? -1e9) - (a.market?.changePct ?? -1e9));
+  else out.sort((a, b) => (key === 'dv-asc' ? dv(a) - dv(b) : dv(b) - dv(a)) || a.ticker.localeCompare(b.ticker));
+  // Symbols with no daily data yet (still downloading) go last whatever the order.
+  return [...out.filter((s) => s.market), ...out.filter((s) => !s.market)];
+}
+
 function openSymbolDialog() {
   const dlg = $('symbolDialog');
   $('symbolSearch').value = '';
   renderSymbolList('');
   dlg.showModal();
   $('symbolSearch').focus();
+  loadSymbols().then(() => { if (dlg.open) renderSymbolList($('symbolSearch').value); }).catch(() => {});
 }
 
 function renderSymbolList(query) {
+  const { symbolIcon, dataIcon, esc: e } = window.MassiveIcons;
+  const sort = SORTS.find((x) => x.key === state.switcherSort) || SORTS[0];
+  $('sortBtn').textContent = sort.label;
+  $('sortBtn').title = `${sort.title} (click to change)`;
   const q = query.trim().toLowerCase();
   const list = $('symbolList');
-  list.innerHTML = '';
   const matches = state.symbols.filter((s) =>
     !q || [s.ticker, s.name, s.exchange, s.exchangeName].some((v) => v && v.toLowerCase().includes(q)));
   if (!matches.length) {
-    list.innerHTML = '<div class="empty">No stored symbols match. Add one with: python -m massive_collate watch add TICKER::EXCHANGE</div>';
+    list.innerHTML = '<div class="empty">No symbols match. Add one with: python -m massive_collate watch add TICKER::EXCHANGE</div>';
     return;
   }
-  const byExchange = new Map();
-  for (const s of matches) {
-    const key = s.exchangeName || s.exchange || 'Other';
-    if (!byExchange.has(key)) byExchange.set(key, []);
-    byExchange.get(key).push(s);
-  }
-  for (const [exchange, items] of [...byExchange].sort((a, b) => a[0].localeCompare(b[0]))) {
-    const h = document.createElement('h4');
-    h.textContent = exchange;
-    list.append(h);
-    for (const s of items) {
-      const row = document.createElement('div');
-      row.className = 'sym-row';
-      row.tabIndex = 0;
-      const tk = document.createElement('span'); tk.className = 'tk'; tk.textContent = s.ticker;
-      const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = s.name || '';
-      row.append(tk, nm);
-      for (const chipText of [s.kind, ...s.feeds.map((f) => `${f.source}: ${f.data.join('/')}`)]) {
-        if (!chipText) continue;
-        const c = document.createElement('span'); c.className = 'chip'; c.textContent = chipText; row.append(c);
-      }
-      const choose = () => { $('symbolDialog').close(); selectSymbol(s.ticker, MERGED).catch(showError); };
-      row.addEventListener('click', choose);
-      row.addEventListener('keydown', (e) => { if (e.key === 'Enter') choose(); });
-      list.append(row);
-    }
-  }
+  const groups = [
+    ['Stocks', sortedSymbols(matches.filter((s) => s.asset === 'stock'))],
+    ['Futures, indices and forex', matches.filter((s) => s.asset !== 'stock').sort((a, b) => a.ticker.localeCompare(b.ticker))],
+  ];
+  list.innerHTML = groups.filter(([, items]) => items.length).map(([title, items]) => `
+    <h4>${e(title)} <span class="p-muted">${items.length}</span></h4>
+    <div class="tiles-grid">${items.map((s) => {
+      const m = s.market;
+      const chg = m?.changePct;
+      return `<button type="button" class="tile-btn${s.ticker === state.ticker ? ' current' : ''}" role="option" data-ticker="${e(s.ticker)}"
+          title="${e(s.name || s.ticker)}${s.exchangeName ? ` · ${e(s.exchangeName)}` : ''}">
+        <span class="tile-top">${symbolIcon(s, 30)}${dataIcon(s.data, 13)}</span>
+        <b class="tile-tk">${e(s.ticker)}</b>
+        <span class="tile-nm">${e(s.name || s.kind || '')}</span>
+        <span class="tile-px">${m ? `${Number(m.close).toFixed(2)} <span class="${chg == null ? '' : chg >= 0 ? 'up' : 'down'}">${chg == null ? '' : `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%`}</span>` : '<span class="p-muted">–</span>'}</span>
+        <span class="tile-dv p-muted">${m ? `${compactMoney(m.dollarVolume)}/day` : e(s.asset)}</span>
+      </button>`;
+    }).join('')}</div>`).join('');
+}
+
+function moveTileFocus(dx, dy) {
+  const tiles = [...$('symbolList').querySelectorAll('.tile-btn')];
+  if (!tiles.length) return;
+  const i = Math.max(0, tiles.indexOf(document.activeElement));
+  const top = tiles[i].offsetTop;
+  const cols = tiles.filter((t) => t.offsetTop === tiles[0].offsetTop).length || 1;
+  let j = i + dx + dy * cols;
+  if (document.activeElement === $('symbolSearch')) j = 0;
+  j = Math.max(0, Math.min(tiles.length - 1, j));
+  tiles[j].focus();
+  tiles[j].scrollIntoView({ block: 'nearest' });
+  void top;
 }
 
 $('symbolBtn').addEventListener('click', openSymbolDialog);
 $('symbolSearch').addEventListener('input', (e) => renderSymbolList(e.target.value));
-$('symbolSearch').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { const first = $('symbolList').querySelector('.sym-row'); if (first) first.click(); }
+$('sortBtn').addEventListener('click', () => {
+  const i = SORTS.findIndex((x) => x.key === state.switcherSort);
+  state.switcherSort = SORTS[(i + 1) % SORTS.length].key;
+  prefs.set('switcherSort', state.switcherSort);
+  renderSymbolList($('symbolSearch').value);
+});
+$('symbolList').addEventListener('click', (e) => {
+  const t = e.target.closest('.tile-btn');
+  if (!t) return;
+  $('symbolDialog').close();
+  selectSymbol(t.dataset.ticker, MERGED).catch(showError);
+});
+$('symbolDialog').addEventListener('keydown', (e) => {
+  const moves = { ArrowRight: [1, 0], ArrowLeft: [-1, 0], ArrowDown: [0, 1], ArrowUp: [0, -1] };
+  if (moves[e.key] && !(e.target === $('symbolSearch') && ['ArrowLeft', 'ArrowRight'].includes(e.key))) {
+    e.preventDefault();
+    moveTileFocus(...moves[e.key]);
+  } else if (e.key === 'Enter' && e.target === $('symbolSearch')) {
+    e.preventDefault();
+    const first = $('symbolList').querySelector('.tile-btn');
+    if (first) first.click();
+  }
 });
 
 // -- intervals and session -----------------------------------------------------
@@ -1435,7 +1522,6 @@ function setPanelWidth(w, save = true) {
 
 function setPanelHidden(hidden) {
   document.body.classList.toggle('panel-hidden', hidden);
-  $('panelBtn').classList.toggle('on', !hidden);
   prefs.set('panelHidden', hidden);
   requestAnimationFrame(() => chart.resize());
 }
@@ -1443,7 +1529,6 @@ function setPanelHidden(hidden) {
 (function initPanel() {
   setPanelWidth(prefs.get('panelWidth', 320), false);
   setPanelHidden(prefs.get('panelHidden', false));
-  $('panelBtn').addEventListener('click', () => setPanelHidden(!document.body.classList.contains('panel-hidden')));
   const grip = $('panelResizer');
   grip.addEventListener('pointerdown', (e) => {
     e.preventDefault();

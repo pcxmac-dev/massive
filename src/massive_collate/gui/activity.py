@@ -123,6 +123,33 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
     return rows
 
 
+RECORDER_KEY = "live-recorder"  # a live recorder process heartbeats here (kv table) while recording
+
+
+def live_feeds(store: Store, settings: Settings, source: str, now: datetime) -> dict:
+    """Feeds of the current session (the fetcher only handles past sessions): for each asset
+    class on the watchlist, how current its data can be on this plan and whether it is being
+    recorded live right now."""
+    beat = store.kv_get(RECORDER_KEY)
+    recording = bool(beat and (now - datetime.fromisoformat(beat)).total_seconds() < 120)
+    by_asset: dict[str, list[str]] = {}
+    for w in store.watchlist(source):
+        by_asset.setdefault(w["asset"], []).append(w["ticker"])
+    feeds = []
+    for asset, tickers in sorted(by_asset.items()):
+        d = freshness.plan_delay(settings.tier, asset)
+        live = d.kind == "delay"
+        feeds.append({
+            "asset": asset, "symbols": sorted(tickers), "delay": d.describe(),
+            "delayMinutes": int(d.lag.total_seconds() // 60) if live else None,
+            "available": live, "realtime": live and d.lag.total_seconds() == 0,
+            "recording": recording and live,
+            "note": None if live else "your plan has end-of-day data only: no current-session feed",
+        })
+    return {"recording": recording and any(f["recording"] for f in feeds),
+            "available": any(f["available"] for f in feeds), "feeds": feeds}
+
+
 def activity(store: Store, settings: Settings, db_path: Path, source: str = "massive",
              now: datetime | None = None, log_lines: int = 200) -> dict:
     now = (now or datetime.now(timezone.utc)).astimezone(ET)
@@ -162,6 +189,7 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
             "days": round(left / per_day, 1) if per_day else None,
         },
         "symbols": symbols,
+        "liveFeeds": live_feeds(store, settings, source, now),
         "runs": runs,
         "log": log_tail(log_path(db_path), log_lines),
     }

@@ -577,7 +577,7 @@ def _newest_stored(store: Store, source: str, item: dict) -> tuple[datetime | No
 
 def scan(
     source: DataSource | None, store: Store, tier: Tier, source_name: str | None = None,
-    now: datetime | None = None, log: Log = print, probe_limit: int = 30,
+    now: datetime | None = None, log: Log = print, probe_limit: int = 30, only: set[str] | None = None,
 ) -> ScanResult:
     """Check every watched symbol for data that should be available but is not stored.
 
@@ -591,6 +591,8 @@ def scan(
     result = ScanResult()
     probes = 0
     for item in store.watchlist(name):
+        if only is not None and item["ticker"] not in only:
+            continue
         last, ask = _newest_stored(store, name, item)
         a = freshness.assess(item["asset"], tier, last, now)
         row = {"ticker": item["ticker"], "asset": item["asset"], "stored": last, **a, "available": None, "new": None}
