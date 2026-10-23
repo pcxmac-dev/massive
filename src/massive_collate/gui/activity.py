@@ -1,0 +1,150 @@
+"""What the fetchers are doing: the live run, plan usage, each symbol's backfill and the log tail.
+
+Everything here is read from the local database and log file; nothing calls the API.
+"""
+from __future__ import annotations
+
+import math
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+
+from ..collector import ET, history_floor
+from ..config import Settings
+from ..storage import Store
+
+LOG_TAIL_BYTES = 64 * 1024
+# Rough request cost of backfilling minute bars: Massive returns up to 50,000 bars per request and
+# a stock trades ~960 minutes a day including extended hours. Futures and FX trade around the clock.
+BARS_PER_REQUEST = 50_000
+MINUTES_PER_DAY = {"stock": 960, "index": 390, "fx": 1440, "future": 1380}
+
+
+def log_path(db_path: Path) -> Path:
+    return db_path.parent / "logs" / "massive-collate.log"
+
+
+def log_tail(path: Path, lines: int = 200) -> list[str]:
+    """The last lines of the log, reading only its end however large it grows."""
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - LOG_TAIL_BYTES))
+            data = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    out = data.splitlines()
+    if size > LOG_TAIL_BYTES:
+        out = out[1:]  # first line is probably cut
+    return out[-lines:]
+
+
+def lock_owner(db_path: Path) -> int | None:
+    """Process id holding the run lock, if a run is in progress."""
+    from ..cli import pid_alive
+
+    lock = db_path.with_suffix(".lock")
+    try:
+        pid = int(lock.read_text().strip() or 0)
+    except (OSError, ValueError):
+        return None
+    return pid if pid and pid_alive(pid) else None
+
+
+def _iso(v) -> str | None:
+    if v is None:
+        return None
+    return v.isoformat() if isinstance(v, (date, datetime)) else str(v)
+
+
+def _utc(text: str | None) -> datetime | None:
+    if not text:
+        return None
+    t = datetime.fromisoformat(text)
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+def symbol_status(item: dict, edges: tuple | None, floor: date, today: date, now: datetime,
+                  refresh_hours: float, current: str | None) -> dict:
+    """One watchlist row: how far back it is stored, whether backfill is done, and what happens next."""
+    target = max(floor, item["listed_from"]) if item.get("listed_from") else floor
+    first = datetime.fromtimestamp(edges[0] / 1000, ET).date() if edges else None
+    last = datetime.fromtimestamp(edges[1] / 1000, ET) if edges else None
+    reached = item.get("backfilled_to") or first
+    span = max(1, (today - target).days)
+    if item["asset"] == "future":
+        done = first is not None and first <= target + timedelta(days=7)
+    else:
+        done = item.get("backfilled_to") is not None and item["backfilled_to"] <= target
+    progress = 1.0 if done else (0.0 if reached is None else min(1.0, max(0.0, (today - reached).days / span)))
+    missing_days = 0 if done else (today - target).days if reached is None else max(0, (reached - target).days)
+    per_day = MINUTES_PER_DAY.get(item["asset"], 960) * 5 / 7  # calendar days to trading days
+    left = 0 if done else math.ceil(missing_days * per_day / BARS_PER_REQUEST) + (2 if reached is None else 0)
+
+    synced = item.get("synced_at")
+    next_at = synced + timedelta(hours=refresh_hours) if synced and refresh_hours else None
+    if item["ticker"] == current:
+        state = "fetching"
+    elif not done:
+        state = "backfilling" if reached else "queued"
+    elif next_at and next_at > now:
+        state = "fresh"
+    else:
+        state = "due"
+    return {
+        "ticker": item["ticker"], "exchange": item.get("exchange"), "asset": item["asset"],
+        "name": item.get("name"), "resolution": item["resolution"], "state": state,
+        "first": _iso(first), "last": _iso(last), "target": _iso(target), "backfilledTo": _iso(item.get("backfilled_to")),
+        "progress": round(progress, 4), "requestsLeft": left,
+        "syncedAt": _iso(synced), "nextRefresh": _iso(next_at),
+    }
+
+
+def activity(store: Store, settings: Settings, db_path: Path, source: str = "massive",
+             now: datetime | None = None, log_lines: int = 200) -> dict:
+    now = (now or datetime.now(timezone.utc)).astimezone(ET)
+    today = now.date()
+    floor = history_floor(settings.tier, today)
+
+    runs = store.runs(25)
+    owner = lock_owner(db_path)
+    live = next((r for r in runs if r["status"] == "running"), None) if owner else None
+    current = live["current"] if live and live["source"] == source else None
+    for r in runs:
+        start, end = _utc(r["started_at"]), _utc(r["finished_at"])
+        r["seconds"] = round(((end or now) - start).total_seconds()) if start else None
+        if r["status"] == "running" and not owner:
+            r["status"] = "abandoned"  # the process died; the next run marks it so in the database
+
+    symbols = []
+    for item in store.watchlist(source):
+        if item["asset"] == "future":
+            contracts = {t for _, t in store.rolls(source, item["source_ticker"])}  # source_ticker = product
+            spans = [e for e in (store.bar_edges(source, t) for t in contracts) if e]
+            edges = (min(e[0] for e in spans), max(e[1] for e in spans)) if spans else None
+        else:
+            edges = store.bar_edges(source, item["ticker"])
+        symbols.append(symbol_status(item, edges, floor, today, now, settings.refresh_hours, current))
+
+    used = store.requests_today(source)
+    left = sum(s["requestsLeft"] for s in symbols)
+    per_day = settings.max_requests_per_day
+    rpm = settings.tier.requests_per_minute
+    return {
+        "now": now.isoformat(), "source": source,
+        "plan": {
+            "tier": settings.tier.name, "requestsPerMinute": rpm, "historyFloor": floor.isoformat(),
+            "maxPerRun": settings.max_requests_per_run, "maxPerDay": per_day, "refreshHours": settings.refresh_hours,
+        },
+        "today": {"requests": used, "remaining": max(0, per_day - used)},
+        "running": live is not None,
+        "live": live,
+        "backfill": {
+            "done": sum(s["progress"] >= 1 for s in symbols), "total": len(symbols), "requestsLeft": left,
+            "runs": math.ceil(left / settings.max_requests_per_run) if settings.max_requests_per_run else None,
+            "days": round(left / per_day, 1) if per_day else None,
+        },
+        "symbols": symbols,
+        "runs": runs,
+        "log": log_tail(log_path(db_path), log_lines),
+    }

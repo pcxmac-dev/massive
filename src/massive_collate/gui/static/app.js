@@ -741,6 +741,11 @@ $('typeSelect').addEventListener('change', (e) => {
 });
 
 // -- symbol selection ----------------------------------------------------------
+// The fetcher activity dialog opens a symbol it lists; new symbols may have arrived since startup.
+window.addEventListener('massive:open-symbol', (e) => {
+  loadSymbols().then(() => selectSymbol(e.detail, MERGED)).catch(showError);
+});
+
 async function loadSymbols() {
   state.symbols = await api('/api/symbols');
 }
@@ -1371,7 +1376,7 @@ document.addEventListener('keydown', (e) => {
     saveLayout().catch(showError);
     return;
   }
-  if (e.target.matches('input, select, textarea') || $('symbolDialog').open) return;
+  if (e.target.matches('input, select, textarea') || document.querySelector('dialog[open]')) return;
   if (e.key === 'Escape') { cancelDrawing(); setActiveTool('cursor'); }
   else if (e.key === 'h' && e.altKey) { e.preventDefault(); startDrawing('measure'); }
   else if ((e.key === 'Delete' || e.key === 'Backspace') && state.selectedOverlay) {

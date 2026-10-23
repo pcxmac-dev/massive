@@ -117,6 +117,7 @@ def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource
             return
         source = build_source(args.source, settings, request_budget=budget)
         run_id = store.start_run(args.source, command)
+        args._run_id = run_id
         client = getattr(source, "client", None)
         if client is not None:  # record usage as it happens, not only at the end
             client.on_request = lambda n: store.set_run_requests(run_id, n)
@@ -171,7 +172,8 @@ def cmd_sync(args, settings: Settings) -> int:
             with api_run(args, settings, "sync") as (source, store, log):
                 if source is None:
                     continue
-                result = collector.sync(source, store, settings.tier, log=log, refresh_hours=settings.refresh_hours)
+                result = collector.sync(source, store, settings.tier, log=log, refresh_hours=settings.refresh_hours,
+                                        on_item=lambda t: store.set_run_current(args._run_id, t))
                 args._rows = result.rows
                 log(f"sync {name}: {result.rows} rows saved"
                     + (f", {result.skipped} symbols refreshed within {settings.refresh_hours:g} h left for later"
@@ -191,7 +193,7 @@ def cmd_gui(args, settings: Settings) -> int:
     from .gui.server import serve
 
     serve(settings.db_path, port=args.port, open_browser=not args.no_browser,
-          priority=list(settings.source_priority))
+          priority=list(settings.source_priority), settings=settings)
     return 0
 
 

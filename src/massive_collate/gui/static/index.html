@@ -77,6 +77,7 @@
     <button id="zoomOut" title="Zoom out (-)">&minus;</button>
     <button id="zoomIn" title="Zoom in (+)">+</button>
     <button id="latestBtn" title="Jump to latest bar (End)">Latest</button>
+    <button id="fetchChip" class="fetch-chip" aria-haspopup="dialog"><span class="dot"></span><span id="fetchChipText">Fetchers</span></button>
     <button id="panelBtn" class="toggle" title="Show / hide the info panel">Info</button>
     <button id="gpuBtn" class="toggle" title="GPU rendering (WebGL2 / OpenGL ES 3)">GPU</button>
     <button id="shotBtn" title="Save a PNG of the chart">PNG</button>
@@ -104,8 +105,32 @@
     <div id="symbolList"></div>
   </dialog>
 
+  <dialog id="activityDialog" class="wide" aria-label="Fetcher activity">
+    <form method="dialog" class="dialog-head">
+      <div id="actStatus" class="act-status"></div>
+      <button value="close" aria-label="Close">&times;</button>
+    </form>
+    <div class="act-body">
+      <div id="actTiles" class="tiles"></div>
+      <h4>Live log — what the fetchers are gathering</h4>
+      <div id="actLog" class="act-log"></div>
+      <h4>Symbols</h4>
+      <div id="actFilters" class="filters"></div>
+      <div class="table-wrap scroll"><table class="act-table">
+        <thead><tr><th>Symbol</th><th>State</th><th>Stored</th><th>Resolution</th><th class="num">Requests left</th><th>Last synced</th></tr></thead>
+        <tbody id="actSymbols"></tbody>
+      </table></div>
+      <h4>Recent runs</h4>
+      <div class="table-wrap"><table class="act-table">
+        <thead><tr><th>Started</th><th>Command</th><th>Status</th><th class="num">Requests</th><th class="num">Rows</th><th class="num">Took</th><th>Note</th></tr></thead>
+        <tbody id="actRuns"></tbody>
+      </table></div>
+    </div>
+  </dialog>
+
   <script src="vendor/klinecharts/klinecharts.min.js"></script>
   <script src="gpu.js"></script>
   <script src="app.js"></script>
+  <script src="activity.js"></script>
 </body>
 </html>

@@ -62,6 +62,16 @@ Working notes so work can resume in a fresh session. Newest first.
 - **Models** (`gui/models.py`): Price, 1st derivative, 2nd derivative, Integral; Savitzky–Golay
   window from the Detail slider (5–401 bars, log scale), basis price/log %, units per
   bar/minute/hour/day, reset at gaps. Drawings are stored per model (`drawingsKey()` in app.js).
+- **Watchlist**: the top 100 S&P 500 stocks by market cap (stockanalysis.com ranking, Oct 2026;
+  re-rank later from `market_cap` in `instrument_details`) plus SPCX, IXIC, USDEUR, NQ1!, CL1!, NG1!.
+  First backfill ≈1,200 requests (~5 hourly runs at 250/run). `MASSIVE_REFRESH_HOURS` (default 12 on
+  free) skips symbols synced recently so 100+ symbols stay under 2,000 requests/day; plan entitlements
+  are probed once per asset class and kept 7 days (`entitlements` table). A stock's exchange is pinned
+  from its first listing check.
+- **Fetcher activity** (toolbar chip → dialog; `gui/activity.py`, `/api/activity`, `static/activity.js`):
+  live run (symbol in progress via `runs.current`, requests vs caps), per-symbol backfill state
+  (queued / backfilling / fetching / due / fresh) with stored range and a request estimate, recent
+  runs, and the log tail. Read-only; never calls the API. Click a symbol to open it.
 - Testing without disturbing the user's open app: `.claude/launch.json` in the sessions folder has a
   `massive-charts-test` config (port 8766) pointing `MASSIVE_DB` at a scratch copy of the database.
 

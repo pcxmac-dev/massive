@@ -395,13 +395,14 @@ def _guard_call(fn: Callable, *args, **kwargs):
 
 def sync(
     source: DataSource, store: Store, tier: Tier, now: datetime | None = None, log: Log = print,
-    refresh_hours: float = 0.0,
+    refresh_hours: float = 0.0, on_item: Callable[[str], None] | None = None,
 ) -> SyncResult:
     """One scheduled run over the watchlist for a source.
 
     A symbol that finished a complete sync less than `refresh_hours` ago is skipped (on the free
     plan data only arrives at the end of the day, so refreshing every hour would only spend
-    requests). Symbols still backfilling are never skipped.
+    requests). Symbols still backfilling are never skipped. `on_item` is told which symbol is
+    being worked on (for the activity view).
     """
     now = (now or now_et()).astimezone(ET)
     today = now.date()
@@ -415,6 +416,9 @@ def sync(
             if refresh_hours and synced and (now - synced).total_seconds() < refresh_hours * 3600:
                 result.skipped += 1
                 continue
+            if on_item:
+                on_item(ticker)
+            spent = source.requests_made
             if asset == "future":
                 try:
                     n = sync_future(source, store, item, floor, today, log)
@@ -422,7 +426,7 @@ def sync(
                     log(f"{ticker}: futures refused by your plan ({e.message}); skipped")
                     continue
                 result.rows += n
-                log(f"{ticker}: {n} rows")
+                log(f"{ticker}: {n} rows ({source.requests_made - spent} requests)")
                 store.set_synced(source.name, ticker, now)
                 continue
             if asset == "stock":  # listing/identity checks only apply to listed securities
@@ -454,10 +458,12 @@ def sync(
                 store.clear_entitlements(source.name)  # the plan may have changed: probe again
                 continue
             result.rows += n
-            log(f"{ticker} {resolution}: {n} rows")
             if resolution != "day":
-                result.rows += sync_daily(source, store, ticker, item_floor, today, fetch=fetch, asset=asset,
-                                          invert=invert)
+                n_day = sync_daily(source, store, ticker, item_floor, today, fetch=fetch, asset=asset, invert=invert)
+                result.rows += n_day
+                log(f"{ticker} {resolution}: {n} rows, daily: {n_day} rows ({source.requests_made - spent} requests)")
+            else:
+                log(f"{ticker} {resolution}: {n} rows ({source.requests_made - spent} requests)")
             store.set_synced(source.name, ticker, now)
     except StopRun as e:
         result.stopped = str(e)

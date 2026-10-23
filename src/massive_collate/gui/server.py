@@ -10,7 +10,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from ..config import Settings, load_settings
 from ..storage import LayoutLimit, Store
+from . import activity
 from .bars import BarEngine, Style, resample
 from .models import Model
 from .stats import details_subset, key_stats
@@ -24,8 +26,9 @@ WRITE_HEADER = "X-Massive-Charts"
 class ChartApp:
     """The API, independent of HTTP so it can be tested directly."""
 
-    def __init__(self, store: Store, priority: list[str] | None = None):
+    def __init__(self, store: Store, priority: list[str] | None = None, settings: Settings | None = None):
         self.store = store
+        self.settings = settings or load_settings(env={}, env_file=None)
         self.engine = BarEngine(store, priority=priority)
         self._lock = self.engine.lock
 
@@ -166,6 +169,11 @@ class ChartApp:
                 raise LookupError(f"no layout {layout_id}")
         return {"deleted": layout_id}
 
+    def activity(self, q: dict[str, str]) -> dict:
+        with self._lock:
+            return activity.activity(self.store, self.settings, self.store.path, q.get("source", "massive"),
+                                     log_lines=min(int(q.get("lines", 200)), 1000))
+
     def exchanges(self) -> list[dict]:
         with self._lock:
             df = self.store.exchanges()
@@ -276,6 +284,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.info(q["source"], q["ticker"], q.get("adjust")))
                 if url.path == "/api/range":
                     return self._json(app.range_stats(q))
+                if url.path == "/api/activity":
+                    return self._json(app.activity(q))
                 if url.path == "/api/exchanges":
                     return self._json(app.exchanges())
             except (KeyError, ValueError) as e:
@@ -297,9 +307,10 @@ def make_handler(app: ChartApp, port_ref: list[int]):
     return Handler
 
 
-def serve(db_path: Path, port: int = 8765, open_browser: bool = True, priority: list[str] | None = None) -> None:
+def serve(db_path: Path, port: int = 8765, open_browser: bool = True, priority: list[str] | None = None,
+          settings: Settings | None = None) -> None:
     store = Store(db_path, check_same_thread=False)
-    app = ChartApp(store, priority)
+    app = ChartApp(store, priority, settings)
     port_ref = [port]
     try:
         httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app, port_ref))

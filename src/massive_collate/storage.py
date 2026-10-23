@@ -145,6 +145,8 @@ MIGRATIONS = [
     ("watchlist", "rank", "INTEGER NOT NULL DEFAULT 1"),
     # Save order: clocks can tie (Windows), a counter cannot.
     ("layouts", "touched", "INTEGER NOT NULL DEFAULT 0"),
+    # The symbol a running sync is working on, for the on-screen activity view.
+    ("runs", "current", "TEXT"),
     # Futures contracts: live | ended | missing (no such contract month); checked = last probe date
     ("futures_contracts", "state", "TEXT"),
     ("futures_contracts", "checked", "TEXT"),
@@ -660,6 +662,10 @@ class Store:
         with self.conn:
             self.conn.execute("UPDATE runs SET requests=? WHERE id=?", (requests, run_id))
 
+    def set_run_current(self, run_id: int, ticker: str | None) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE runs SET current=? WHERE id=?", (ticker, run_id))
+
     def close_abandoned_runs(self) -> int:
         """Runs still marked 'running' (crashed or killed). Their recorded requests are kept;
         nothing is lowered, so the daily cap stays conservative."""
@@ -677,6 +683,22 @@ class Store:
             (source, today),
         ).fetchone()
         return int(row[0])
+
+    def runs(self, limit: int = 25) -> list[dict]:
+        cur = self.conn.execute(
+            "SELECT id, source, command, started_at, finished_at, requests, rows, status, message, current "
+            "FROM runs ORDER BY id DESC LIMIT ?", (limit,))
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, row)) for row in cur]
+
+    def bar_edges(self, source: str, ticker: str, timespan: str = "minute", multiplier: int = 1) -> tuple | None:
+        """(first, last) bar start in ms for one series. Two index lookups, however much is stored."""
+        key = (source, ticker.upper(), timespan, multiplier)
+        where = "FROM bars WHERE source=? AND ticker=? AND timespan=? AND multiplier=?"
+        first = self.conn.execute(f"SELECT MIN(ts) {where}", key).fetchone()[0]
+        if first is None:
+            return None
+        return first, self.conn.execute(f"SELECT MAX(ts) {where}", key).fetchone()[0]
 
     def recent_runs(self, limit: int = 10) -> list[tuple]:
         return self.conn.execute(
