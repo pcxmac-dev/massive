@@ -169,6 +169,23 @@ def test_audit_compares_without_storing_the_second_copy(store):
     assert store.audit_scores()["other"] == {"audits": 1, "passed": 1, "accuracy": 1.0}
 
 
+def test_cross_venue_crypto_audits_say_so_and_do_not_judge_volume(store):
+    from massive_collate.gui import activity  # noqa: F401  (the GUI reads report["note"])
+
+    class Alpaca(FakeSource):
+        name = "alpaca"
+
+    store.watch_spec("massive", resolve("BTCUSD"))
+    store.watch_spec("alpaca", resolve("BTCUSD"))
+    bars = _minutes(date(2026, 10, 20), (0, 0), 60, 80000.0)
+    store.upsert_bars("massive", "BTCUSD", "minute", 1, bars)
+    kraken = Alpaca(entitled=("minute",), bars={"minute": [dict(b, v=b["v"] * 0.05) for b in bars]})
+    r = audit.audit_span(kraken, store, "BTCUSD", "minute", bars[0]["t"], bars[-1]["t"] + 60_000, "massive",
+                         "manual", log=_log)
+    assert r["verdict"] == "pass"  # 95 % less volume on one exchange is not an error
+    assert "cross-venue" in r["report"]["note"] and r["report"]["volumeJudged"] is False
+
+
 def test_new_data_queues_an_audit_that_the_other_feed_runs(store):
     for feed in ("fake", "other"):
         store.watch_spec(feed, resolve("SPCX"))

@@ -282,9 +282,9 @@
       const tim = r.timing ? (r.timing.bestShiftSeconds ? `<span class="down">shifted ${r.timing.bestShiftSeconds}s</span>` : 'aligned')
         + (r.timing.stampsOffTheGrid ? ` · ${r.timing.stampsOffTheGrid} off-grid` : '') : '–';
       return `<tr title="${esc(a.reason || '')}${r.worst?.length ? ` · worst: ${esc(r.worst.map((w) => `${w.field} ${w.bps} bps`).join(', '))}` : ''}">
-        <td>${ago(a.at.replace(' ', 'T') + 'Z')}</td><td><b>${esc(a.ticker)}</b> <span class="sub">${esc(span)} ET</span></td>
+        <td>${ago(a.at)}</td><td><b>${esc(a.ticker)}</b> <span class="sub">${esc(span)} ET</span></td>
         <td>${esc(a.owner)} → ${esc(a.auditor)}</td><td><span class="state ${vcls[a.verdict] || ''}">${esc(a.verdict)}</span></td>
-        <td class="num">${num(a.matched)}<div class="sub">${num(a.only_owner)}/${num(a.only_auditor)} one-sided</div></td>
+        <td class="num">${num(a.matched)}<div class="sub">${num(a.only_owner)}/${num(a.only_auditor)} one-sided</div>${r.note ? `<div class="sub" title="${esc(r.note)}">cross-venue</div>` : ''}</td>
         <td>${boxSvg(bx.c, tol.price_bps || 5)}</td><td>${boxSvg(bx.range, 2 * (tol.price_bps || 5))}</td>
         <td>${boxSvg(bx.v, tol.volume_pct || 5)}</td><td class="sub">${tim}</td></tr>`;
     }).join('') : '<tr><td colspan="9" class="empty">No audits yet: they run after new data arrives and at random, once a second feed watches the same symbols (or run <code>python -m massive_collate audit</code>).</td></tr>';

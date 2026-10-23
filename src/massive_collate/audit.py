@@ -39,6 +39,8 @@ PRICE_FIELDS = ("o", "h", "l", "c")
 NAMES = {"o": "open", "h": "high", "l": "low", "c": "close", "range": "high-low range", "v": "volume",
          "vw": "VWAP", "n": "trade count"}
 QUEUE_MAX_AGE = timedelta(days=7)
+# What each feed's crypto bars are (the same pair can be different markets).
+VENUES = {("massive", "crypto"): "consolidated across exchanges", ("alpaca", "crypto"): "one exchange's book (Kraken)"}
 
 
 def box(values) -> dict | None:
@@ -162,13 +164,20 @@ def audit_span(auditor, store, ticker: str, timespan: str, a: int, b: int, owner
     # Crypto feeds may cover different venues (consolidated vs one exchange): same prices, other volumes.
     report = compare(_stored(store, owner, ticker, timespan, a, b), theirs, STEP_MS.get(timespan, 60_000),
                      judge_volume=row["asset"] != "crypto")
+    venues = {f: VENUES.get((f, row["asset"])) for f in (owner, auditor.name)}
+    if row["asset"] == "crypto" and venues[owner] != venues[auditor.name]:
+        # Not the same market: a consolidated price takes each minute's extremes across exchanges,
+        # one exchange's book does not. The verdict stands; this says why highs/lows may differ.
+        report["note"] = (f"cross-venue: {owner} is {venues[owner] or 'its own consolidation'}, "
+                          f"{auditor.name} is {venues[auditor.name] or 'its own consolidation'}; highs, lows "
+                          "and volume differ by design, opens, closes and VWAP should agree")
     result = {"ticker": ticker, "asset": row["asset"], "timespan": timespan, "start_ms": a, "end_ms": b,
               "owner": owner, "auditor": auditor.name, "reason": reason, "verdict": report["verdict"],
               "matched": report["matched"], "only_owner": report["onlyOwner"],
               "only_auditor": report["onlyAuditor"], "report": report}
     result["id"] = store.save_audit(result)
     close = (report.get("box") or {}).get("c") or {}
-    log(f"audit {ticker} {lo:%Y-%m-%d %H:%M}-{hi:%H:%M} ET: {owner} vs {auditor.name}: {report['verdict']}, "
+    log(f"audit {ticker} {lo:%Y-%m-%d %H:%M} to {hi:%Y-%m-%d %H:%M} ET: {owner} vs {auditor.name}: {report['verdict']}, "
         f"{report['matched']} bars matched, {report['onlyOwner']}+{report['onlyAuditor']} in one feed only"
         + (f", close median {close['median']:+.2f} bps (p95 {close['p95']:+.2f})" if close else ""))
     return result
