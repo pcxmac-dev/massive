@@ -161,3 +161,16 @@ def test_extended_hours_prints_build_extended_hours_bars():
                        "conditions": ["T", "T", "U"], "tape": [3, 3, 3]})
     bars, _ = build_bars(df, 60 * S, rules)
     assert bars == [{"t": 0, "o": 50.0, "h": 52.0, "l": 50.0, "c": 51.0, "v": 30.0, "vw": 51.0, "n": 3}]
+
+
+def test_merged_daily_bars_combine_feeds_day_by_day(store):
+    from massive_collate.gui.bars import MERGED, BarEngine
+
+    day = lambda d: ms(datetime(2026, 10, d, tzinfo=ET))  # noqa: E731
+    store.upsert_bars("alpaca", "SPCX", "minute", 1, [{"t": day(19) + 36_000_000, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}])
+    store.upsert_trades("alpaca", "SPCX", _ticks(datetime(2026, 10, 19, 10, tzinfo=ET), 3))
+    store.upsert_bars("alpaca", "SPCX", "day", 1, [{"t": day(19), "o": 1, "h": 1, "l": 1, "c": 10, "v": 1}])
+    store.upsert_bars("massive", "SPCX", "minute", 1, [{"t": day(20) + 36_000_000, "o": 2, "h": 2, "l": 2, "c": 2, "v": 1}])
+    store.upsert_bars("massive", "SPCX", "day", 1, [{"t": day(20), "o": 2, "h": 2, "l": 2, "c": 20, "v": 1}])
+    s = BarEngine(store, priority=["massive", "alpaca"]).series(MERGED, "SPCX")
+    assert list(s.daily["close"]) == [10, 20]  # the tick feed ranks first, yet the newest day is kept

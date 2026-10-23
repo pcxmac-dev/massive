@@ -1744,8 +1744,11 @@ function signedPx(v) { return v == null ? '–' : `${v >= 0 ? '+' : ''}${Number(
 function pct(v) { return v == null ? '–' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`; }
 function cls(v) { return v == null ? '' : v >= 0 ? 'up' : 'down'; }
 function big(v) { return v == null ? '–' : compact(v); }
+// A daily bar's date: crypto and forex day bars are UTC days (stamped 00:00 UTC, which is the
+// previous evening in New York), every other market's are New York sessions.
 function dateOnly(ms) {
-  return ms == null ? '–' : new Intl.DateTimeFormat('en-US', { timeZone: TZ, year: 'numeric', month: 'short', day: '2-digit' }).format(new Date(ms));
+  const zone = ['crypto', 'fx'].includes(state.meta?.asset) ? 'UTC' : TZ;
+  return ms == null ? '–' : new Intl.DateTimeFormat('en-US', { timeZone: zone, year: 'numeric', month: 'short', day: '2-digit' }).format(new Date(ms));
 }
 function kv(rows) {
   return `<dl class="kv">${rows.filter(Boolean).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl>`;

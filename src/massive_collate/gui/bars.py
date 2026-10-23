@@ -369,7 +369,10 @@ class BarEngine:
                 frames.append(resample(p.frame, base, 1, session="extended"))
             else:
                 frames.append(_aggregate(p.frame.groupby(calendar_key(p.frame.index, "day"))))
-        daily = next((p.daily for p in parts if p.daily is not None and not p.daily.empty), None)
+        # Official daily bars come from whichever feed holds each day (one feed per span), so they
+        # are combined day by day like the intraday bars, best-ranked feed first.
+        dailies = [p.daily for p in parts if p.daily is not None and not p.daily.empty]
+        daily = merge_frames(dailies) if dailies else None
         return Series(
             MERGED, ticker, base, merge_frames(frames, "1min" if base == "trades" else None), daily,
             max(p.price_precision for p in parts), max(p.volume_precision for p in parts),
