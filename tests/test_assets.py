@@ -127,6 +127,43 @@ def test_untried_naming_is_tried_even_if_the_other_is_pending(store):
     assert {c["ticker"]: c["state"] for c in store.contracts("fake", "NG")}["NGX26"] == "live"
 
 
+def test_entitlements_are_probed_once_per_asset_class(store):
+    store.watch_spec("fake", resolve("AAA"))
+    store.watch_spec("fake", resolve("BBB"))
+    src = FakeSource(entitled=("minute",))
+    sync(src, store, FREE, NOW, log=_log)
+    stock_probes = [p for p in src.probed if p[2] == "stock"]
+    assert [r for r, _, _ in stock_probes] == ["trades", "second", "minute"]  # once, not per ticker
+    assert {w["resolution"] for w in store.watchlist("fake")} == {"minute"}
+
+
+def test_recently_synced_symbols_wait_for_the_refresh_interval(store):
+    store.watch_spec("fake", resolve("IXIC"))
+    src = FakeSource(entitled=("minute",), bars={"minute": [{"t": _ms(date(2026, 10, 20)), "o": 1, "h": 1, "l": 1, "c": 1}]})
+    first = sync(src, store, FREE, NOW, log=_log, refresh_hours=12)
+    assert first.skipped == 0 and store.watchlist("fake")[0]["synced_at"] is not None
+    src.bar_calls = []
+    soon = sync(src, store, FREE, NOW + timedelta(hours=2), log=_log, refresh_hours=12)
+    assert soon.skipped == 1 and src.bar_calls == []
+    later = sync(src, store, FREE, NOW + timedelta(hours=13), log=_log, refresh_hours=12)
+    assert later.skipped == 0 and src.bar_calls
+
+
+def test_unfinished_backfill_is_not_marked_synced(store):
+    store.watch_spec("fake", resolve("IXIC"))
+    src = FakeSource(entitled=("minute",), budget=2)  # runs out mid-way
+    result = sync(src, store, FREE, NOW, log=_log, refresh_hours=12)
+    assert result.stopped and store.watchlist("fake")[0]["synced_at"] is None
+
+
+def test_refresh_hours_default_by_plan():
+    from massive_collate.config import load_settings
+
+    assert load_settings(env={}, env_file=None).refresh_hours == 12
+    assert load_settings(env={"MASSIVE_TIER": "starter"}, env_file=None).refresh_hours == 0
+    assert load_settings(env={"MASSIVE_REFRESH_HOURS": "3"}, env_file=None).refresh_hours == 3
+
+
 def test_futures_never_request_before_floor(store):
     store.watch_spec("fake", resolve("CL1!"))
     src = FakeSource(entitled=("minute",))

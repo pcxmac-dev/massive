@@ -37,6 +37,7 @@ class StopRun(Exception):
 class SyncResult:
     rows: int = 0
     stopped: str | None = None
+    skipped: int = 0  # symbols refreshed recently enough to leave for a later run
     messages: list[str] = field(default_factory=list)
 
 
@@ -78,14 +79,20 @@ def resolve_resolution(
     source: DataSource, store: Store, ticker: str, log: Log = print, asset: str = "stock", fetch: str | None = None,
 ) -> str | None:
     """Find the finest resolution the plan allows for a ticker and remember it.
-    `fetch` is the source's own ticker when it differs (I:COMP, C:EURUSD, a futures contract)."""
+    `fetch` is the source's own ticker when it differs (I:COMP, C:EURUSD, a futures contract).
+
+    Entitlements belong to the plan and asset class, not the ticker, so an answer is reused
+    for every symbol of that class for a week instead of probing each one again."""
     for resolution in RESOLUTIONS_BY_ASSET.get(asset, RESOLUTIONS):
-        try:
-            ok = source.is_entitled(resolution, fetch or ticker, asset)
-        except BudgetExhausted as e:
-            raise StopRun(f"request cap reached ({e})") from e
-        except RateLimited as e:
-            raise StopRun(f"rate limited ({e.message})") from e
+        ok = store.entitlement(source.name, asset, resolution)
+        if ok is None:
+            try:
+                ok = source.is_entitled(resolution, fetch or ticker, asset)
+            except BudgetExhausted as e:
+                raise StopRun(f"request cap reached ({e})") from e
+            except RateLimited as e:
+                raise StopRun(f"rate limited ({e.message})") from e
+            store.set_entitlement(source.name, asset, resolution, ok)
         if ok:
             log(f"{ticker}: finest resolution on your plan is '{resolution}'")
             store.set_resolution(source.name, ticker, resolution)
@@ -386,8 +393,16 @@ def _guard_call(fn: Callable, *args, **kwargs):
         raise StopRun(f"rate limited ({e.message}); stopping until the next run") from e
 
 
-def sync(source: DataSource, store: Store, tier: Tier, now: datetime | None = None, log: Log = print) -> SyncResult:
-    """One scheduled run over the watchlist for a source."""
+def sync(
+    source: DataSource, store: Store, tier: Tier, now: datetime | None = None, log: Log = print,
+    refresh_hours: float = 0.0,
+) -> SyncResult:
+    """One scheduled run over the watchlist for a source.
+
+    A symbol that finished a complete sync less than `refresh_hours` ago is skipped (on the free
+    plan data only arrives at the end of the day, so refreshing every hour would only spend
+    requests). Symbols still backfilling are never skipped.
+    """
     now = (now or now_et()).astimezone(ET)
     today = now.date()
     floor = history_floor(tier, today)
@@ -396,6 +411,10 @@ def sync(source: DataSource, store: Store, tier: Tier, now: datetime | None = No
         sync_exchanges(source, store, log)
         for item in store.watchlist(source.name):
             ticker, asset = item["ticker"], item["asset"]
+            synced = item.get("synced_at")
+            if refresh_hours and synced and (now - synced).total_seconds() < refresh_hours * 3600:
+                result.skipped += 1
+                continue
             if asset == "future":
                 try:
                     n = sync_future(source, store, item, floor, today, log)
@@ -404,6 +423,7 @@ def sync(source: DataSource, store: Store, tier: Tier, now: datetime | None = No
                     continue
                 result.rows += n
                 log(f"{ticker}: {n} rows")
+                store.set_synced(source.name, ticker, now)
                 continue
             if asset == "stock":  # listing/identity checks only apply to listed securities
                 listing = check_listing(source, store, item, today, log)
@@ -431,12 +451,14 @@ def sync(source: DataSource, store: Store, tier: Tier, now: datetime | None = No
             except NotEntitled as e:
                 log(f"{ticker} {resolution}: refused by your plan ({e.message}); re-checking resolution next run")
                 store.set_resolution(source.name, ticker, "auto")
+                store.clear_entitlements(source.name)  # the plan may have changed: probe again
                 continue
             result.rows += n
             log(f"{ticker} {resolution}: {n} rows")
             if resolution != "day":
                 result.rows += sync_daily(source, store, ticker, item_floor, today, fetch=fetch, asset=asset,
                                           invert=invert)
+            store.set_synced(source.name, ticker, now)
     except StopRun as e:
         result.stopped = str(e)
         log(f"stopped: {e}")

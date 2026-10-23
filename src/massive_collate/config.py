@@ -10,6 +10,8 @@ Settings come from environment variables, optionally loaded from a `.env` file
     MASSIVE_BASE_URL  API base URL (default: https://api.massive.com)
     MASSIVE_MAX_REQUESTS_PER_RUN   hard cap on API requests in one command (default: 250)
     MASSIVE_MAX_REQUESTS_PER_DAY   hard cap on API requests per day, all runs (default: 2000)
+    MASSIVE_REFRESH_HOURS  refresh each symbol at most this often once backfilled
+                           (default: 12 on the free plan, which only has end-of-day data; 0 on paid plans)
     SOURCE_PRIORITY   feed order when sources overlap, e.g. "massive,blueocean" (default: massive)
 """
 from __future__ import annotations
@@ -56,6 +58,7 @@ class Settings:
     base_url: str = DEFAULT_BASE_URL
     max_requests_per_run: int = 250
     max_requests_per_day: int = 2000
+    refresh_hours: float = 0.0
     # Feed order when several sources cover the same ticker (SOURCE_PRIORITY, comma-separated).
     source_priority: tuple[str, ...] = ("massive",)
 
@@ -105,6 +108,7 @@ def load_settings(
 
     per_run = _int_setting(merged, "MASSIVE_MAX_REQUESTS_PER_RUN")
     per_day = _int_setting(merged, "MASSIVE_MAX_REQUESTS_PER_DAY")
+    refresh = _int_setting(merged, "MASSIVE_REFRESH_HOURS")
 
     return Settings(
         api_key=merged.get("MASSIVE_API_KEY") or None,
@@ -113,6 +117,7 @@ def load_settings(
         base_url=(merged.get("MASSIVE_BASE_URL") or DEFAULT_BASE_URL).rstrip("/"),
         max_requests_per_run=250 if per_run is None else per_run,
         max_requests_per_day=2000 if per_day is None else per_day,
+        refresh_hours=float(refresh) if refresh is not None else (12.0 if tier.name == "free" else 0.0),
         source_priority=tuple(
             s.strip().lower() for s in (merged.get("SOURCE_PRIORITY") or "massive").split(",") if s.strip()
         ),

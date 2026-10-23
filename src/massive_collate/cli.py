@@ -171,9 +171,11 @@ def cmd_sync(args, settings: Settings) -> int:
             with api_run(args, settings, "sync") as (source, store, log):
                 if source is None:
                     continue
-                result = collector.sync(source, store, settings.tier, log=log)
+                result = collector.sync(source, store, settings.tier, log=log, refresh_hours=settings.refresh_hours)
                 args._rows = result.rows
                 log(f"sync {name}: {result.rows} rows saved"
+                    + (f", {result.skipped} symbols refreshed within {settings.refresh_hours:g} h left for later"
+                       if result.skipped else "")
                     + (f" (stopped: {result.stopped})" if result.stopped else ""))
             ran += 1
         except ConfigError as e:

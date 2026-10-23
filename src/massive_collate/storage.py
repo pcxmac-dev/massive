@@ -94,6 +94,15 @@ CREATE TABLE IF NOT EXISTS futures_rolls (
     PRIMARY KEY (source, product, rank, session)
 );
 
+CREATE TABLE IF NOT EXISTS entitlements (
+    source     TEXT NOT NULL,
+    asset      TEXT NOT NULL,        -- stock | index | fx | future
+    resolution TEXT NOT NULL,        -- trades | second | minute
+    allowed    INTEGER NOT NULL,
+    checked_at TEXT NOT NULL,
+    PRIMARY KEY (source, asset, resolution)
+);
+
 CREATE TABLE IF NOT EXISTS instrument_details (
     source     TEXT NOT NULL,
     ticker     TEXT NOT NULL,
@@ -139,6 +148,8 @@ MIGRATIONS = [
     # Futures contracts: live | ended | missing (no such contract month); checked = last probe date
     ("futures_contracts", "state", "TEXT"),
     ("futures_contracts", "checked", "TEXT"),
+    # When a symbol last finished syncing completely (for the per-symbol refresh interval).
+    ("watchlist", "synced_at", "TEXT"),
 ]
 
 BAR_COLUMNS = ["open", "high", "low", "close", "volume", "vwap", "transactions"]
@@ -489,7 +500,7 @@ class Store:
     def watchlist(self, source: str | None = None) -> list[dict]:
         sql = (
             "SELECT source, ticker, resolution, backfilled_to, exchange, listed_from, figi, checked_at, "
-            "name, kind, asset, source_ticker, invert, rank FROM watchlist"
+            "name, kind, asset, source_ticker, invert, rank, synced_at FROM watchlist"
         )
         params: list = []
         if source:
@@ -502,8 +513,9 @@ class Store:
         return [
             {"source": s, "ticker": t, "resolution": r, "backfilled_to": d(b), "exchange": e,
              "listed_from": d(lf), "figi": f, "checked_at": d(c), "name": n, "kind": k,
-             "asset": a or "stock", "source_ticker": st or t, "invert": bool(inv), "rank": rk or 1}
-            for s, t, r, b, e, lf, f, c, n, k, a, st, inv, rk
+             "asset": a or "stock", "source_ticker": st or t, "invert": bool(inv), "rank": rk or 1,
+             "synced_at": datetime.fromisoformat(sy) if sy else None}
+            for s, t, r, b, e, lf, f, c, n, k, a, st, inv, rk, sy
             in self.conn.execute(sql + " ORDER BY source, ticker", params)
         ]
 
@@ -545,6 +557,32 @@ class Store:
                 "UPDATE watchlist SET backfilled_to=? WHERE source=? AND ticker=?",
                 (day.isoformat() if day else None, source, ticker.upper()),
             )
+
+    # -- plan entitlements (per asset class) -------------------------------
+
+    def set_entitlement(self, source: str, asset: str, resolution: str, allowed: bool) -> None:
+        with self.conn:
+            self.conn.execute("INSERT OR REPLACE INTO entitlements VALUES (?, ?, ?, ?, ?)",
+                              (source, asset, resolution, int(allowed), _now()))
+
+    def entitlement(self, source: str, asset: str, resolution: str, max_age_days: int = 7) -> bool | None:
+        """Known answer for this plan, or None if never checked or older than max_age_days."""
+        row = self.conn.execute(
+            "SELECT allowed, checked_at FROM entitlements WHERE source=? AND asset=? AND resolution=?",
+            (source, asset, resolution)).fetchone()
+        if row is None:
+            return None
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(row[1])
+        return bool(row[0]) if age.days < max_age_days else None
+
+    def clear_entitlements(self, source: str) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM entitlements WHERE source=?", (source,))
+
+    def set_synced(self, source: str, ticker: str, when: datetime) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE watchlist SET synced_at=? WHERE source=? AND ticker=?",
+                              (when.astimezone(timezone.utc).isoformat(timespec="seconds"), source, ticker.upper()))
 
     # -- reference details -------------------------------------------------
 
