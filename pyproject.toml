@@ -27,7 +27,7 @@ massive-collate = "massive_collate.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-massive_collate = ["gui/static/*", "gui/static/vendor/klinecharts/*", "gui/static/vendor/world/*"]
+massive_collate = ["gui/static/*", "gui/static/vendor/klinecharts/*", "gui/static/vendor/world/*", "gui/static/vendor/sky/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

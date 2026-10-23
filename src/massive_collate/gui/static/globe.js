@@ -41,6 +41,64 @@
     } catch (err) { showError(err); }
   }
 
+  // Civil time zones: a 0.1-degree grid of IANA zone names (tools/build_timezones.py). Each
+  // zone's offset right now comes from the browser's own time-zone database, so daylight saving
+  // and every rule change are included.
+  let tz = null;  // { res, width, height, grid: Uint16Array, zones: [name], offsets: [minutes], at }
+  async function loadZones() {
+    try {
+      const res = await fetch('vendor/world/time-zones.json');
+      if (!res.ok) return;
+      const d = await res.json();
+      const grid = new Uint16Array(d.width * d.height);
+      d.rows.forEach((row, r) => {
+        let c = r * d.width;
+        for (let k = 0; k < row.length; k += 2) { grid.fill(row[k], c, c + row[k + 1]); c += row[k + 1]; }
+      });
+      tz = { res: d.res, width: d.width, height: d.height, grid, zones: d.zones, anchors: d.anchors, offsets: [], at: 0 };
+      refreshOffsets();
+      zoneCache = null;
+    } catch { /* fall back to solar bands */ }
+  }
+
+  function offsetMinutes(name, when) {
+    if (name.startsWith('fixed:')) return Math.round(parseFloat(name.slice(6)) * 60);
+    try {
+      const part = new Intl.DateTimeFormat('en-US', { timeZone: name, timeZoneName: 'longOffset' })
+        .formatToParts(when).find((x) => x.type === 'timeZoneName')?.value || 'GMT';
+      const m = part.match(/GMT([+\-−])(\d{1,2})(?::(\d{2}))?/);
+      return m ? (m[1] === '+' ? 1 : -1) * (Number(m[2]) * 60 + Number(m[3] || 0)) : 0;
+    } catch { return null; }
+  }
+
+  function refreshOffsets() {
+    if (!tz) return;
+    const now = new Date();
+    tz.offsets = [null, ...tz.zones.map((z) => offsetMinutes(z, now))];
+    tz.at = Date.now();
+  }
+
+  function zoneAt(lon, lat) {
+    if (!tz) return 0;
+    const row = Math.min(tz.height - 1, Math.max(0, Math.floor((90 - lat) / tz.res)));
+    const col = ((Math.floor((lon + 180) / tz.res) % tz.width) + tz.width) % tz.width;
+    return tz.grid[row * tz.width + col];
+  }
+
+  function gmtLabel(min) {
+    if (min === 0) return 'GMT';
+    const a = Math.abs(min), h = Math.floor(a / 60), m = a % 60;
+    return `GMT${min > 0 ? '+' : '−'}${h}${m ? `:${String(m).padStart(2, '0')}` : ''}`;
+  }
+
+  let topo50 = null;
+  async function loadTopo50() {
+    try {
+      const res = await fetch('vendor/world/countries-50m.json');
+      if (res.ok) topo50 = decodeTopo(await res.json());
+    } catch { /* keep the 110m outlines */ }
+  }
+
   async function loadTopo() {
     try {
       const res = await fetch('vendor/world/countries-110m.json');
@@ -134,7 +192,7 @@
   let zoom = 1;    // 1 = whole globe; wheel / pinch zooms in up to 12x
   function geometry() {
     const w = canvas.clientWidth, h = canvas.clientHeight;
-    const r = Math.max(40, Math.min(w * 0.40, ((h - TOP - 28) / 2) * 0.9)) * zoom;  // room for the Moon
+    const r = Math.max(40, Math.min(w * 0.36, ((h - TOP - 28) / 2) * 0.78)) * zoom;  // room for the Moon's orbit
     return { w, h, cx: w / 2, cy: TOP + (h - TOP) / 2, r };
   }
 
@@ -208,12 +266,20 @@
   let zoneCache = null;
   function zoneLayer(g) {
     const sunLon = markets?.sun.lon ?? view.lon;
-    const key = `${g.w}x${g.h}|${g.r.toFixed(0)}|${view.lon.toFixed(1)}|${view.lat.toFixed(1)}|${sunLon.toFixed(1)}`;
+    const key = `${g.w}x${g.h}|${g.r.toFixed(0)}|${view.lon.toFixed(1)}|${view.lat.toFixed(1)}|${sunLon.toFixed(1)}|${tz ? tz.at : 0}|${new Date().getUTCMinutes()}`;
     if (zoneCache?.key === key) return zoneCache.canvas;
-    const canvasOut = raster(g, (lon) => {
-      const k = Math.round(wrap(lon - sunLon) / 15);
+    const utcMin = new Date().getUTCHours() * 60 + new Date().getUTCMinutes();
+    const canvasOut = raster(g, (lon, lat) => {
+      let k;
+      if (tz) {  // civil zones: hours between local clock time and noon
+        const off = tz.offsets[zoneAt(lon, lat)];
+        if (off == null) return null;
+        k = Math.floor((((utcMin + off) % 1440) + 1440) % 1440 / 60) - 12;
+      } else {   // until the zone grid loads: solar bands
+        k = Math.round(wrap(lon - sunLon) / 15);
+      }
       if (Math.abs(k) > ZONES) return null;
-      const a = k === 0 ? 0.13 : 0.075 * (1 - (Math.abs(k) - 1) / ZONES) * (k % 2 ? 1 : 0.55);  // alternate so bands read apart
+      const a = k === 0 ? 0.11 : 0.07 * (1 - (Math.abs(k) - 1) / ZONES) * (k % 2 ? 1 : 0.55);  // alternate so zones read apart
       return [240, 185, 11, a];
     });
     zoneCache = { key, canvas: canvasOut };
@@ -225,16 +291,31 @@
     ctx.drawImage(zoneLayer(g), 0, 0, g.w, g.h);
     ctx.restore();
     const sunLon = markets.sun.lon;
-    // GMT offset of each band (nautical zones: 15 degrees per hour), along its top
-    const labelLat = Math.min(70, view.lat + 52 / Math.sqrt(zoom));
     ctx.font = '10px system-ui, sans-serif'; ctx.textAlign = 'center';
-    for (let k = -ZONES; k <= ZONES; k++) {
-      const lon = sunLon + k * 15;
-      const p = project(lon, labelLat, g);
-      if (!p.visible || p.depth < 0.15 || p.x < 0 || p.x > g.w) continue;
-      const off = Math.round(wrap(lon) / 15);
-      ctx.fillStyle = `rgba(240,185,11,${0.85 - Math.abs(k) * 0.07})`;
-      ctx.fillText(off === 0 ? 'GMT' : `GMT${off > 0 ? '+' : '−'}${Math.abs(off)}`, p.x, p.y);
+    if (tz) {
+      if (Date.now() - tz.at > 60000) refreshOffsets();
+      // each zone's offset right now (daylight saving included), at anchors inside the zone
+      const placed = [];
+      for (const [lon, lat] of tz.anchors) {
+        const p = project(lon, lat, g);
+        if (!p.visible || p.depth < 0.2 || p.x < 0 || p.x > g.w || p.y < TOP) continue;
+        const off = tz.offsets[zoneAt(lon, lat)];
+        if (off == null) continue;
+        const text = gmtLabel(off);
+        if (placed.some((q) => Math.hypot(q.x - p.x, q.y - p.y) < 46)) continue;
+        placed.push(p);
+        ctx.fillStyle = 'rgba(240,185,11,0.7)';
+        ctx.fillText(text, p.x, p.y);
+      }
+    } else {
+      const labelLat = Math.min(70, view.lat + 52 / Math.sqrt(zoom));
+      for (let k = -ZONES; k <= ZONES; k++) {
+        const lon = sunLon + k * 15;
+        const p = project(lon, labelLat, g);
+        if (!p.visible || p.depth < 0.15 || p.x < 0 || p.x > g.w) continue;
+        ctx.fillStyle = `rgba(240,185,11,${0.85 - Math.abs(k) * 0.07})`;
+        ctx.fillText(gmtLabel(Math.round(wrap(lon) / 15) * 60), p.x, p.y);
+      }
     }
     ctx.textAlign = 'start';
   }
@@ -345,30 +426,11 @@
   let moonCache = null;
   function drawMoon(g, fr, moon, sunDir, dark) {
     const rM = Math.max(6, g.r * 0.2727);
-    let vx = dot(moon.dir, fr.E), vy = dot(moon.dir, fr.N);
-    const len = Math.hypot(vx, vy);
-    if (len < 0.12) { vx = Math.SQRT1_2; vy = Math.SQRT1_2; } else { vx /= len; vy /= len; }
-    // Just outside the limb in its real direction; if that is off-screen, the nearest angle
-    // around the limb that is on-screen (never across the Earth).
-    const fits = (t, d) => {
-      const x = g.cx + Math.cos(t) * d, y = g.cy - Math.sin(t) * d;
-      return x - rM > 4 && x + rM < g.w - 4 && y - rM > TOP + 40 && y + rM + 16 < g.h - 40;  // clear of the info text and legend
-    };
-    const base = Math.atan2(vy, vx);
-    let angle = base, d = g.r + rM * 1.6, found = false;
-    for (const dd of [g.r + rM * 1.6, g.r + rM * 1.3, g.r + rM * 1.08]) {  // as near the limb as needed
-      for (let step = 0; step <= 180 && !found; step += 5) {
-        const hit = [base + step * rad, base - step * rad].find((t) => fits(t, dd));
-        if (hit !== undefined) { angle = hit; d = dd; found = true; }
-      }
-      if (found) break;
-    }
-    let mx = g.cx + Math.cos(angle) * d, my = g.cy - Math.sin(angle) * d;
-    if (!found) {  // zoomed in: keep it on screen at the edge nearest its direction
-      mx = Math.max(rM + 4, Math.min(g.w - rM - 4, mx));
-      my = Math.max(TOP + 40 + rM, Math.min(g.h - rM - 56, my));
-    }
-
+    // A real 3D position: its true direction from the Earth, at a compressed distance (the real
+    // one is 60 Earth radii), projected like the globe. It circles smoothly as the Earth turns,
+    // and on the far side the (opaque) globe drawn after it hides it.
+    const D = g.r * 1.22;
+    const mx = g.cx + D * dot(moon.dir, fr.E), my = g.cy - D * dot(moon.dir, fr.N);
     // The Moon's own axes: its near side faces the Earth (f = -direction), north roughly
     // along the Earth's axis, selenographic east to the right as seen from the Earth.
     const m = moon.dir;
@@ -455,9 +517,11 @@
     ctx.strokeStyle = `${line}0.30)`; ctx.stroke();
 
     // coastlines and borders
-    if (topo) {
+    const outlines = zoom > 2 && topo50 ? topo50 : topo;
+    if (zoom > 2 && !topo50) loadTopo50();
+    if (outlines) {
       ctx.beginPath();
-      for (const arc of topo) polyline(arc, g);
+      for (const arc of outlines) polyline(arc, g);
       ctx.strokeStyle = `${line}0.62)`; ctx.lineWidth = 0.8; ctx.stroke();
     }
 
@@ -473,6 +537,17 @@
     }
     ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
     if (moon && dot(moon.dir, fr.C) >= 0) drawMoon(g, fr, moon, sunDir, dark);  // in front
+    if (moon && dot(moon.dir, fr.C) < 0) {  // behind: say where, faintly, at the limb
+      const vx = dot(moon.dir, fr.E), vy = dot(moon.dir, fr.N), len = Math.hypot(vx, vy);
+      if (len * g.r * 1.22 + g.r * 0.2727 < g.r) {  // wholly hidden
+        const ux = len > 1e-3 ? vx / len : 0.7, uy = len > 1e-3 ? vy / len : 0.7;
+        const lx = g.cx + ux * (g.r + 14), ly = g.cy - uy * (g.r + 14);
+        ctx.font = '10px system-ui, sans-serif'; ctx.textAlign = ux < 0 ? 'end' : 'start';
+        ctx.fillStyle = dark ? 'rgba(170,175,190,0.35)' : 'rgba(60,60,80,0.35)';
+        ctx.fillText(`☾ behind the Earth · ${moon.phaseName} ${Math.round(moon.illuminated * 100)}%`, lx, ly);
+        ctx.textAlign = 'start';
+      }
+    }
     // noon marker (subsolar point)
     const sun = project(markets.sun.lon, markets.sun.lat, g);
     if (sun.visible) {
@@ -725,5 +800,6 @@
   window.Globe = { state: () => ({ view: { ...view }, offset: { ...offset }, sun: subsolar(), following: following() }), recentre, perfColor };
   requestAnimationFrame(frame);
   loadSky();
+  loadZones();
   if (document.body.dataset.view === 'markets') { load(); loadTopo(); }
 })();

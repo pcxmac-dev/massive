@@ -1,2 +1,4 @@
-world-atlas 2.0.2 (ISC), https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json
-Data: Natural Earth 1:110m (public domain), https://www.naturalearthdata.com/
+world-atlas 2.0.2 (ISC), countries-110m.json and countries-50m.json: https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/
+Data: Natural Earth (public domain), https://www.naturalearthdata.com/
+time-zones.json: built by tools/build_timezones.py from Natural Earth 1:10m time zones v5.1.2 (public domain),
+https://cdn.jsdelivr.net/gh/nvkelso/natural-earth-vector@v5.1.2/geojson/ne_10m_time_zones.geojson, and the tz database.
