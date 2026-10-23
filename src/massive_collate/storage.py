@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Sequence
 
@@ -711,13 +711,37 @@ class Store:
         row = self.conn.execute(sql + " ORDER BY fetched_at DESC LIMIT 1", params).fetchone()
         return (row[0], bytes(row[1])) if row else None
 
-    def icon_checked(self, source: str, ticker: str, max_age_days: int = 30) -> bool:
-        """Whether an icon was fetched, or found missing recently enough not to ask again."""
-        row = self.conn.execute("SELECT data IS NOT NULL, fetched_at FROM icons WHERE source=? AND ticker=?",
+    def icon_checked(self, source: str, ticker: str, max_age_days: int = 30, url: str | None = None) -> bool:
+        """Whether an icon was fetched, or found missing recently enough not to ask again. With
+        `url` (the logo link in the company's current details), a stored icon from a different
+        link does not count: the company has a new logo."""
+        row = self.conn.execute("SELECT data IS NOT NULL, fetched_at, url FROM icons WHERE source=? AND ticker=?",
                                 (source, ticker.upper())).fetchone()
         if row is None:
             return False
-        return bool(row[0]) or (datetime.now(timezone.utc) - datetime.fromisoformat(row[1])).days < max_age_days
+        if row[0]:
+            return url is None or row[2] == url
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(row[1])).days < max_age_days
+
+    def stale_details(self, source: str, tickers_types: tuple[str, ...], max_age_days: int, limit: int) -> list[str]:
+        """Directory companies whose stored details (and so logo link) are older than max_age_days."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat(timespec="seconds")
+        marks = ",".join("?" * len(tickers_types))
+        return [r[0] for r in self.conn.execute(
+            f"""SELECT d.ticker FROM directory d JOIN instrument_details x ON x.source=d.source AND x.ticker=d.ticker
+                WHERE d.source=? AND d.kind='stock' AND d.type IN ({marks}) AND x.updated_at < ?
+                ORDER BY x.updated_at LIMIT ?""", (source, *tickers_types, cutoff, limit))]
+
+    def icon_link_changes(self, source: str) -> list[str]:
+        """Tickers whose stored icon came from a different logo link than their details now give."""
+        out = []
+        for ticker, url, data in self.conn.execute(
+                "SELECT i.ticker, i.url, x.data FROM icons i JOIN instrument_details x "
+                "ON x.source=i.source AND x.ticker=i.ticker WHERE i.source=? AND i.data IS NOT NULL", (source,)):
+            current = ((json.loads(data).get("branding") or {}).get("icon_url"))
+            if current and current != url:
+                out.append(ticker)
+        return out
 
     def icon_tickers(self) -> set[str]:
         return {r[0] for r in self.conn.execute("SELECT DISTINCT ticker FROM icons WHERE data IS NOT NULL")}
@@ -786,6 +810,16 @@ class Store:
             self.conn.executemany("INSERT OR REPLACE INTO proxy_daily VALUES (?, ?, ?, ?)",
                                   [(source, day.isoformat(), t, c) for t, c in closes.items()])
         return len(closes)
+
+    def proxy_closes(self, source: str, day: date) -> dict[str, float]:
+        return dict(self.conn.execute("SELECT ticker, close FROM proxy_daily WHERE source=? AND day=?",
+                                      (source, day.isoformat())).fetchall())
+
+    def snapshot_closes(self, source: str, day: date, tickers: list[str]) -> dict[str, float]:
+        marks = ",".join("?" * len(tickers))
+        return dict(self.conn.execute(
+            f"SELECT ticker, close FROM market_snapshot WHERE source=? AND day=? AND ticker IN ({marks}) AND close IS NOT NULL",
+            (source, day.isoformat(), *tickers)).fetchall())
 
     def proxy_days(self, source: str) -> list[date]:
         return [date.fromisoformat(d) for (d,) in self.conn.execute(

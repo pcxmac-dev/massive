@@ -516,6 +516,14 @@ def fetch_market_moves(source: DataSource, store: Store, now: datetime, proxies:
     is asked again at most every 3 hours. The globe colours each exchange by this move."""
     now = now.astimezone(ET)
     have = set(store.proxy_days(source.name))
+    # A proxy added or replaced later is filled from the stored market snapshot (no request).
+    for day in have:
+        known = store.proxy_closes(source.name, day)
+        missing = [p for p in proxies if p not in known]
+        if missing:
+            closes = store.snapshot_closes(source.name, day, missing)
+            if closes:
+                store.save_proxy_closes(source.name, day, closes)
     used, found, d = 0, 0, now.date()
     while found < 2 and used < max_requests and (now.date() - d).days < 10:
         if not freshness.is_trading_day(d):
@@ -532,7 +540,16 @@ def fetch_market_moves(source: DataSource, store: Store, now: datetime, proxies:
             continue
         try:
             bars = _guard_call(source.market_daily, d)
-        except (NotEntitled, SourceError, NotImplementedError) as e:
+        except NotEntitled as e:
+            used += 1
+            if "before end of day" in str(e).lower():  # free plan: the day is not out yet
+                store.kv_set(key, now.isoformat())
+                log(f"market moves: {d} not published yet")
+                d -= timedelta(days=1)
+                continue
+            log(f"market moves: {d} not available ({e})")
+            break
+        except (SourceError, NotImplementedError) as e:
             log(f"market moves: {d} not available ({e})")
             break
         used += 1
@@ -597,6 +614,7 @@ DIRECTORY_EXCHANGES = ("XNAS", "XNYS")
 DIRECTORY_REFRESH_DAYS = 7
 COMPANY_TYPES = ("CS", "ADRC", "OS", "GDR", "NYRS")  # operating companies (not funds, warrants, units...)
 DAILY_RESERVE = 400  # requests of the daily cap kept back for the watchlist's own updates
+DETAILS_REFRESH_DAYS = 90  # directory companies' details (and logo links) are re-checked this often
 
 
 def refresh_directory(source: DataSource, store: Store, today: date, log: Log = print) -> int:
@@ -646,6 +664,18 @@ def fill_directory_icons(source: DataSource, store: Store, allowance: int, today
                 log(f"{ticker}: details not available ({e})")
                 continue
         done += fetch_icon(source, store, ticker, lambda m: None)
+    # With budget to spare: re-check details older than DETAILS_REFRESH_DAYS, so new logos are found
+    # (the link changes when a company's branding does); fetch_icon then fetches only changed ones.
+    for ticker in store.stale_details(source.name, COMPANY_TYPES, DETAILS_REFRESH_DAYS, allowance):
+        if source.requests_made - before + 2 > allowance:
+            break
+        try:
+            inst = _guard_call(source.instrument, ticker, resolve_exchange=False)
+        except (NotEntitled, SourceError):
+            continue
+        if inst.details:
+            store.set_details(source.name, ticker, inst.details)
+        done += fetch_icon(source, store, ticker, lambda m: None)
     used = source.requests_made - before
     if used:
         s = store.directory_stats(source.name, COMPANY_TYPES)
@@ -656,9 +686,9 @@ def fill_directory_icons(source: DataSource, store: Store, allowance: int, today
 def fetch_icon(source: DataSource, store: Store, ticker: str, log: Log = print) -> bool:
     """Download a stock's company icon once (one request) and keep it locally.
     Asked for only after the symbol's data is complete, so icons never delay a backfill."""
-    if store.icon_checked(source.name, ticker):
-        return False
     url = ((store.details(source.name, ticker) or {}).get("branding") or {}).get("icon_url")
+    if store.icon_checked(source.name, ticker, url=url):  # fetched from this link already (or none lately)
+        return False
     if not url:
         store.save_icon(source.name, ticker, None, None, None)
         return False

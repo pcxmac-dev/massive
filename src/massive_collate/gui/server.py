@@ -156,6 +156,12 @@ class ChartApp:
         out["sky"] = astro.sky()
         return out
 
+    def deps(self) -> dict:
+        from .. import deps
+
+        with self._lock:
+            return {"checks": deps.as_rows(deps.checks(self.store, self.settings))}
+
     def directory(self) -> dict:
         """Every listing in the directory (placeholders), with what is known locally."""
         with self._lock:
@@ -412,6 +418,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.bars(q))
                 if url.path == "/api/info":
                     return self._json(app.info(q["source"], q["ticker"], q.get("adjust")))
+                if url.path == "/api/deps":
+                    return self._json(app.deps())
                 if url.path == "/api/directory":
                     return self._json(app.directory())
                 if url.path == "/api/announcements":

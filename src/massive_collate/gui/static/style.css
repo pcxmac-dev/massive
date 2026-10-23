@@ -351,3 +351,6 @@ main > .view[hidden] { display: none; }
 .tile-btn.dir:not(.watched) .tile-tk, .tile-btn.dir:not(.watched) .tile-px { opacity: .75; }
 .watch-btn { font-size: 10px; padding: 1px 6px; border: 1px solid var(--accent); color: var(--accent); border-radius: 10px; }
 .watch-btn:hover { background: var(--accent); color: #fff; }
+
+/* space behind the globe: halfway between the app background (#131722) and black */
+body:not(.light) #viewMarkets { background: #0a0c11; }

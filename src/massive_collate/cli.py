@@ -231,6 +231,28 @@ def cmd_scan(args, settings: Settings) -> int:
     return 0
 
 
+def cmd_deps(args, settings: Settings) -> int:
+    """Dependency health (see docs/DEPENDENCIES.md): exits 1 if anything has failed."""
+    from . import deps
+
+    with Store(settings.db_path) as store:
+        rows = deps.checks(store, settings, args.source)
+    area = None
+    for c in rows:
+        if c.area != area:
+            area = c.area
+            print()
+            print(area)
+        print(f"  {c.status:4}  {c.item:40} {c.found}")
+        if c.action:
+            print(f"        -> {c.action}")
+    worst = "FAIL" if any(c.status == "FAIL" for c in rows) else "WARN" if any(c.status == "WARN" for c in rows) else "OK"
+    print()
+    print(f"{worst}: {sum(c.status == 'OK' for c in rows)} OK, {sum(c.status == 'WARN' for c in rows)} WARN, "
+          f"{sum(c.status == 'FAIL' for c in rows)} FAIL")
+    return 1 if worst == "FAIL" else 0
+
+
 def cmd_gui(args, settings: Settings) -> int:
     from .gui.server import serve
 
@@ -450,6 +472,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--limit", type=int, default=30, help="most symbols to probe (default 30)")
     s.add_argument("--only", nargs="+", metavar="TICKER", help="only these watched symbols")
     s.set_defaults(func=cmd_scan)
+
+    s = sub.add_parser("deps", help="check every external dependency (data feeds, calendars, icons, files)")
+    s.set_defaults(func=cmd_deps)
 
     s = sub.add_parser("gui", help="open the chart app in your browser")
     s.add_argument("--port", type=int, default=8765)

@@ -41,7 +41,7 @@ EXCHANGES: tuple[Exchange, ...] = (
     E("XBUE", "Bolsas y Mercados Argentinos", "Buenos Aires", "Argentina", "Americas", -34.60, -58.38, "S&P Merval", proxy="ARGT"),
     E("XSGO", "Santiago Stock Exchange", "Santiago", "Chile", "Americas", -33.45, -70.67, "S&P IPSA", proxy="ECH"),
     E("XLIM", "Bolsa de Valores de Lima", "Lima", "Peru", "Americas", -12.05, -77.04, "S&P/BVL Peru General", proxy="EPU"),
-    E("XBOG", "Bolsa de Valores de Colombia", "Bogotá", "Colombia", "Americas", 4.71, -74.07, "MSCI COLCAP", proxy="GXG"),
+    E("XBOG", "Bolsa de Valores de Colombia", "Bogotá", "Colombia", "Americas", 4.71, -74.07, "MSCI COLCAP", proxy="COLO"),
     # Europe
     E("XLON", "London Stock Exchange", "London", "United Kingdom", "Europe", 51.51, -0.09, "FTSE 100", proxy="EWU"),
     E("XETR", "Xetra (Deutsche Börse)", "Frankfurt", "Germany", "Europe", 50.11, 8.68, "DAX", proxy="EWG"),

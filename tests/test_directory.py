@@ -79,3 +79,17 @@ def test_sync_does_directory_work_only_after_the_watchlist_and_only_when_allowed
     assert store.directory("fake") == []
     sync(src, store, TIERS["free"], datetime(2026, 10, 23, 13, tzinfo=ET), log=lambda m: None, directory_allowance=20)
     assert len(store.directory("fake")) == 8 and src.icons_asked
+
+
+def test_a_new_logo_link_is_fetched_again(store):
+    src = DirSource()
+    collector.refresh_directory(src, store, TODAY, log=lambda m: None)
+    collector.fill_directory_icons(src, store, allowance=100, today=TODAY, log=lambda m: None)
+    asked = len(src.icons_asked)
+    # unchanged details: nothing fetched
+    assert collector.fetch_icon(src, store, "AAPL", log=lambda m: None) is False
+    # the company rebrands: its details now carry a different logo link
+    store.set_details("fake", "AAPL", {"branding": {"icon_url": "https://api.massive.com/icon/AAPL-2027.png"}})
+    assert store.icon_link_changes("fake") == ["AAPL"]
+    assert collector.fetch_icon(src, store, "AAPL", log=lambda m: None) is True
+    assert len(src.icons_asked) == asked + 1 and store.icon_link_changes("fake") == []

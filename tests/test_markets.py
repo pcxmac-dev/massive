@@ -139,3 +139,23 @@ def test_market_moves_skip_an_unpublished_day(tmp_path):
         assert round(store.proxy_moves()["EWJ"]["changePct"], 4) == round((121 / 120 - 1) * 100, 4)
         src.calls.clear()
         assert fetch_market_moves(src, store, now, ["EWJ"], log=lambda m: None) == 0  # nothing re-asked
+
+
+def test_market_moves_treat_before_end_of_day_as_not_published(tmp_path):
+    from datetime import date
+
+    from massive_collate.collector import ET, fetch_market_moves
+    from massive_collate.errors import NotEntitled
+    from massive_collate.storage import Store
+
+    class Src:
+        name = "massive"
+
+        def market_daily(self, day):
+            if day == date(2026, 10, 22):
+                raise NotEntitled(403, "Attempted to request today's data before end of day.")
+            return [{"T": "EWJ", "c": 100.0 + day.day}]
+
+    with Store(tmp_path / "m.db") as store:
+        fetch_market_moves(Src(), store, datetime(2026, 10, 22, 23, tzinfo=ET), ["EWJ"], log=lambda m: None)
+        assert store.proxy_days("massive") == [date(2026, 10, 20), date(2026, 10, 21)]

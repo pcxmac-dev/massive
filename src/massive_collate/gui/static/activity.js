@@ -180,6 +180,7 @@
   }
 
   function renderFetcherView() {
+    loadDeps();
     if (!data) { el('actStatus').innerHTML = statusLine(); return; }
     const { plan, today, backfill } = data;
     el('actStatus').innerHTML = statusLine();
@@ -231,6 +232,23 @@
     const log = el('actLog');
     log.innerHTML = logHtml(data.log);
     if (followLog) log.scrollTop = log.scrollHeight;
+  }
+
+  // Dependency health (deps.py), refreshed every few minutes while the Fetcher view is open.
+  let deps = { rows: [], at: 0 };
+  async function loadDeps() {
+    if (Date.now() - deps.at < 180000) return;
+    deps.at = Date.now();
+    try { deps.rows = (await (await fetch('/api/deps')).json()).checks || []; } catch { return; }
+    renderDeps();
+  }
+  function renderDeps() {
+    const cls = { OK: 'fresh', WARN: 'backfilling', FAIL: 'run-error' };
+    const order = { FAIL: 0, WARN: 1, OK: 2 };
+    el('depsRows').innerHTML = [...deps.rows].sort((a, b) => order[a.status] - order[b.status]).map((c) => `
+      <tr><td class="sub">${esc(c.area)}</td><td><b>${esc(c.item)}</b></td>
+        <td><span class="state ${cls[c.status] || ''}">${esc(c.status)}</span></td>
+        <td>${esc(c.found)}</td><td class="sub">${esc(c.action || '')}</td></tr>`).join('');
   }
 
   async function startScan() {
