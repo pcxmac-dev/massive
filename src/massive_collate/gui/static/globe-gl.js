@@ -255,6 +255,13 @@
       this.buffers[name] = { vao: this._vao(this.lines.prog, [['aP', 3]], data), count: data.length / 3 };
     }
 
+    deleteLines(name) {
+      const b = this.buffers[name];
+      if (!b) return;
+      this.gl.deleteVertexArray(b.vao);
+      delete this.buffers[name];
+    }
+
     setSky(stars, lines) {
       const s = new Float32Array(stars.length * 4);
       stars.forEach(([ra, dec, mag], i) => { s.set([...toUnit(ra, dec), mag], i * 4); });
@@ -362,7 +369,10 @@
       gl.useProgram(L.prog);
       this._camera(p, L.u);
       const tone = p.dark ? [0.63, 0.67, 0.78] : [0.16, 0.2, 0.31];
-      for (const [name, alpha] of [['graticule', 0.16], ['equator', 0.3], [p.outlines, 0.62]]) {
+      const sets = [['graticule', 0.16], ['equator', 0.3]];
+      if (p.tiles && p.tiles.length) for (const t of p.tiles) sets.push([t, 0.62]);
+      else sets.push([p.outlines, 0.62]);
+      for (const [name, alpha] of sets) {
         const b = this.buffers[name];
         if (!b) continue;
         gl.uniform4fv(L.u.uColor, [...tone, alpha]);

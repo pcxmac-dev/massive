@@ -139,6 +139,8 @@ def checks(store: Store, settings, source: str = "massive", now: datetime | None
     for rel, what in (("vendor/klinecharts/klinecharts.min.js", "KLineChart (charting)"),
                       ("vendor/world/countries-110m.json", "world-atlas 110m outlines"),
                       ("vendor/world/countries-50m.json", "world-atlas 50m outlines"),
+                      ("vendor/world/countries-10m.json", "world-atlas 10m outlines"),
+                      ("vendor/world/coast-h/index.json", "GSHHG high-resolution coast tiles"),
                       ("vendor/world/time-zones.json", "civil time-zone grid"),
                       ("vendor/sky/stars.6.json", "d3-celestial stars"),
                       ("vendor/sky/constellations.lines.json", "d3-celestial constellations")):

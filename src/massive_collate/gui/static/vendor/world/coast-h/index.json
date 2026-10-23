@@ -1,0 +1,2172 @@
+{
+"source": "GSHHG 2.3.7 high resolution (LGPL-3.0), shorelines + WDBII national borders",
+"tile": 10,
+"margin": 5,
+"tiles": {
+"-90_-180": {
+"shore": 296,
+"borders": 0,
+"bytes": 1224
+},
+"-90_-170": {
+"shore": 766,
+"borders": 0,
+"bytes": 3124
+},
+"-90_-160": {
+"shore": 536,
+"borders": 0,
+"bytes": 2196
+},
+"-90_-150": {
+"shore": 216,
+"borders": 0,
+"bytes": 896
+},
+"-90_-80": {
+"shore": 365,
+"borders": 0,
+"bytes": 1488
+},
+"-90_-70": {
+"shore": 812,
+"borders": 0,
+"bytes": 3284
+},
+"-90_-60": {
+"shore": 383,
+"borders": 0,
+"bytes": 1556
+},
+"-90_-50": {
+"shore": 323,
+"borders": 0,
+"bytes": 1328
+},
+"-90_-40": {
+"shore": 282,
+"borders": 0,
+"bytes": 1164
+},
+"-90_-30": {
+"shore": 73,
+"borders": 0,
+"bytes": 308
+},
+"-90_150": {
+"shore": 109,
+"borders": 0,
+"bytes": 460
+},
+"-90_160": {
+"shore": 859,
+"borders": 0,
+"bytes": 3464
+},
+"-90_170": {
+"shore": 254,
+"borders": 0,
+"bytes": 1032
+},
+"-80_-180": {
+"shore": 85,
+"borders": 0,
+"bytes": 360
+},
+"-80_-170": {
+"shore": 340,
+"borders": 0,
+"bytes": 1384
+},
+"-80_-160": {
+"shore": 1989,
+"borders": 0,
+"bytes": 8080
+},
+"-80_-150": {
+"shore": 2337,
+"borders": 0,
+"bytes": 9580
+},
+"-80_-140": {
+"shore": 907,
+"borders": 0,
+"bytes": 3660
+},
+"-80_-130": {
+"shore": 1429,
+"borders": 0,
+"bytes": 5752
+},
+"-80_-120": {
+"shore": 1289,
+"borders": 0,
+"bytes": 5188
+},
+"-80_-110": {
+"shore": 2106,
+"borders": 0,
+"bytes": 8520
+},
+"-80_-100": {
+"shore": 2215,
+"borders": 0,
+"bytes": 9076
+},
+"-80_-90": {
+"shore": 1630,
+"borders": 0,
+"bytes": 6560
+},
+"-80_-80": {
+"shore": 4410,
+"borders": 0,
+"bytes": 17860
+},
+"-80_-70": {
+"shore": 3474,
+"borders": 0,
+"bytes": 14064
+},
+"-80_-60": {
+"shore": 396,
+"borders": 0,
+"bytes": 1632
+},
+"-80_-50": {
+"shore": 453,
+"borders": 0,
+"bytes": 1844
+},
+"-80_-40": {
+"shore": 1111,
+"borders": 0,
+"bytes": 4524
+},
+"-80_-30": {
+"shore": 1131,
+"borders": 0,
+"bytes": 4572
+},
+"-80_-20": {
+"shore": 1446,
+"borders": 0,
+"bytes": 5844
+},
+"-80_-10": {
+"shore": 1308,
+"borders": 0,
+"bytes": 5296
+},
+"-80_0": {
+"shore": 1156,
+"borders": 0,
+"bytes": 4708
+},
+"-80_10": {
+"shore": 698,
+"borders": 0,
+"bytes": 2840
+},
+"-80_20": {
+"shore": 911,
+"borders": 0,
+"bytes": 3692
+},
+"-80_30": {
+"shore": 174,
+"borders": 0,
+"bytes": 728
+},
+"-80_60": {
+"shore": 617,
+"borders": 0,
+"bytes": 2492
+},
+"-80_70": {
+"shore": 458,
+"borders": 0,
+"bytes": 1860
+},
+"-80_150": {
+"shore": 49,
+"borders": 0,
+"bytes": 216
+},
+"-80_160": {
+"shore": 6630,
+"borders": 0,
+"bytes": 26660
+},
+"-80_170": {
+"shore": 577,
+"borders": 0,
+"bytes": 2344
+},
+"-70_-100": {
+"shore": 38,
+"borders": 0,
+"bytes": 168
+},
+"-70_-80": {
+"shore": 894,
+"borders": 0,
+"bytes": 3624
+},
+"-70_-70": {
+"shore": 12129,
+"borders": 0,
+"bytes": 49704
+},
+"-70_-60": {
+"shore": 3667,
+"borders": 0,
+"bytes": 14852
+},
+"-70_-50": {
+"shore": 275,
+"borders": 0,
+"bytes": 1124
+},
+"-70_-10": {
+"shore": 63,
+"borders": 0,
+"bytes": 268
+},
+"-70_0": {
+"shore": 236,
+"borders": 0,
+"bytes": 1000
+},
+"-70_10": {
+"shore": 540,
+"borders": 0,
+"bytes": 2200
+},
+"-70_20": {
+"shore": 494,
+"borders": 0,
+"bytes": 2084
+},
+"-70_30": {
+"shore": 1833,
+"borders": 0,
+"bytes": 7424
+},
+"-70_40": {
+"shore": 1882,
+"borders": 0,
+"bytes": 7572
+},
+"-70_50": {
+"shore": 1991,
+"borders": 0,
+"bytes": 7984
+},
+"-70_60": {
+"shore": 1269,
+"borders": 0,
+"bytes": 5108
+},
+"-70_70": {
+"shore": 1281,
+"borders": 0,
+"bytes": 5156
+},
+"-70_80": {
+"shore": 1212,
+"borders": 0,
+"bytes": 4900
+},
+"-70_90": {
+"shore": 1351,
+"borders": 0,
+"bytes": 5440
+},
+"-70_100": {
+"shore": 1437,
+"borders": 0,
+"bytes": 5788
+},
+"-70_110": {
+"shore": 1436,
+"borders": 0,
+"bytes": 5776
+},
+"-70_120": {
+"shore": 1370,
+"borders": 0,
+"bytes": 5524
+},
+"-70_130": {
+"shore": 1245,
+"borders": 0,
+"bytes": 5000
+},
+"-70_140": {
+"shore": 1742,
+"borders": 0,
+"bytes": 6988
+},
+"-70_150": {
+"shore": 1689,
+"borders": 0,
+"bytes": 6788
+},
+"-70_160": {
+"shore": 353,
+"borders": 0,
+"bytes": 1456
+},
+"-60_-80": {
+"shore": 42373,
+"borders": 112,
+"bytes": 185704
+},
+"-60_-70": {
+"shore": 12890,
+"borders": 13,
+"bytes": 56160
+},
+"-60_-60": {
+"shore": 5152,
+"borders": 0,
+"bytes": 21940
+},
+"-60_-40": {
+"shore": 1344,
+"borders": 0,
+"bytes": 5692
+},
+"-60_-30": {
+"shore": 233,
+"borders": 0,
+"bytes": 1020
+},
+"-60_0": {
+"shore": 29,
+"borders": 0,
+"bytes": 136
+},
+"-60_60": {
+"shore": 13,
+"borders": 0,
+"bytes": 76
+},
+"-60_70": {
+"shore": 134,
+"borders": 0,
+"bytes": 588
+},
+"-60_150": {
+"shore": 115,
+"borders": 0,
+"bytes": 496
+},
+"-60_160": {
+"shore": 515,
+"borders": 0,
+"bytes": 2192
+},
+"-50_-180": {
+"shore": 340,
+"borders": 0,
+"bytes": 1468
+},
+"-50_-80": {
+"shore": 35420,
+"borders": 588,
+"bytes": 154564
+},
+"-50_-70": {
+"shore": 2804,
+"borders": 0,
+"bytes": 11860
+},
+"-50_-20": {
+"shore": 10,
+"borders": 0,
+"bytes": 60
+},
+"-50_-10": {
+"shore": 55,
+"borders": 0,
+"bytes": 260
+},
+"-50_30": {
+"shore": 93,
+"borders": 0,
+"bytes": 408
+},
+"-50_50": {
+"shore": 192,
+"borders": 0,
+"bytes": 832
+},
+"-50_60": {
+"shore": 2616,
+"borders": 0,
+"bytes": 11292
+},
+"-50_70": {
+"shore": 429,
+"borders": 0,
+"bytes": 1912
+},
+"-50_140": {
+"shore": 4987,
+"borders": 0,
+"bytes": 20788
+},
+"-50_160": {
+"shore": 4349,
+"borders": 0,
+"bytes": 18472
+},
+"-50_170": {
+"shore": 4960,
+"borders": 0,
+"bytes": 20584
+},
+"-40_-180": {
+"shore": 18,
+"borders": 0,
+"bytes": 96
+},
+"-40_-90": {
+"shore": 18,
+"borders": 0,
+"bytes": 88
+},
+"-40_-80": {
+"shore": 2290,
+"borders": 461,
+"bytes": 11504
+},
+"-40_-70": {
+"shore": 1656,
+"borders": 97,
+"bytes": 7496
+},
+"-40_-60": {
+"shore": 4017,
+"borders": 392,
+"bytes": 18324
+},
+"-40_-20": {
+"shore": 69,
+"borders": 0,
+"bytes": 312
+},
+"-40_10": {
+"shore": 917,
+"borders": 0,
+"bytes": 3804
+},
+"-40_20": {
+"shore": 1066,
+"borders": 102,
+"bytes": 4792
+},
+"-40_30": {
+"shore": 150,
+"borders": 0,
+"bytes": 616
+},
+"-40_70": {
+"shore": 30,
+"borders": 0,
+"bytes": 140
+},
+"-40_110": {
+"shore": 2041,
+"borders": 0,
+"bytes": 8972
+},
+"-40_120": {
+"shore": 1916,
+"borders": 0,
+"bytes": 8752
+},
+"-40_130": {
+"shore": 4330,
+"borders": 0,
+"bytes": 18444
+},
+"-40_140": {
+"shore": 3567,
+"borders": 0,
+"bytes": 15092
+},
+"-40_150": {
+"shore": 2891,
+"borders": 0,
+"bytes": 12080
+},
+"-40_170": {
+"shore": 7772,
+"borders": 0,
+"bytes": 32820
+},
+"-30_-180": {
+"shore": 448,
+"borders": 0,
+"bytes": 2056
+},
+"-30_-160": {
+"shore": 129,
+"borders": 0,
+"bytes": 588
+},
+"-30_-150": {
+"shore": 295,
+"borders": 0,
+"bytes": 1376
+},
+"-30_-140": {
+"shore": 680,
+"borders": 0,
+"bytes": 3148
+},
+"-30_-130": {
+"shore": 32,
+"borders": 0,
+"bytes": 156
+},
+"-30_-110": {
+"shore": 72,
+"borders": 0,
+"bytes": 316
+},
+"-30_-90": {
+"shore": 25,
+"borders": 0,
+"bytes": 128
+},
+"-30_-80": {
+"shore": 1809,
+"borders": 8,
+"bytes": 7740
+},
+"-30_-70": {
+"shore": 19,
+"borders": 680,
+"bytes": 2828
+},
+"-30_-60": {
+"shore": 668,
+"borders": 1350,
+"bytes": 8172
+},
+"-30_-50": {
+"shore": 9013,
+"borders": 0,
+"bytes": 38320
+},
+"-30_-30": {
+"shore": 34,
+"borders": 0,
+"bytes": 164
+},
+"-30_10": {
+"shore": 961,
+"borders": 237,
+"bytes": 4984
+},
+"-30_20": {
+"shore": 499,
+"borders": 1083,
+"bytes": 6436
+},
+"-30_30": {
+"shore": 2381,
+"borders": 215,
+"bytes": 10768
+},
+"-30_40": {
+"shore": 2157,
+"borders": 0,
+"bytes": 9004
+},
+"-30_50": {
+"shore": 440,
+"borders": 0,
+"bytes": 1840
+},
+"-30_110": {
+"shore": 5747,
+"borders": 0,
+"bytes": 24716
+},
+"-30_140": {
+"shore": 3102,
+"borders": 0,
+"bytes": 13728
+},
+"-30_150": {
+"shore": 5266,
+"borders": 0,
+"bytes": 22900
+},
+"-30_160": {
+"shore": 3734,
+"borders": 0,
+"bytes": 16072
+},
+"-30_170": {
+"shore": 15,
+"borders": 0,
+"bytes": 80
+},
+"-20_-180": {
+"shore": 2573,
+"borders": 0,
+"bytes": 11340
+},
+"-20_-170": {
+"shore": 273,
+"borders": 0,
+"bytes": 1252
+},
+"-20_-160": {
+"shore": 898,
+"borders": 0,
+"bytes": 4000
+},
+"-20_-150": {
+"shore": 5629,
+"borders": 0,
+"bytes": 26672
+},
+"-20_-140": {
+"shore": 380,
+"borders": 0,
+"bytes": 1752
+},
+"-20_-80": {
+"shore": 1711,
+"borders": 33,
+"bytes": 7368
+},
+"-20_-70": {
+"shore": 941,
+"borders": 966,
+"bytes": 7724
+},
+"-20_-60": {
+"shore": 56,
+"borders": 93,
+"bytes": 624
+},
+"-20_-50": {
+"shore": 830,
+"borders": 0,
+"bytes": 3344
+},
+"-20_-40": {
+"shore": 2257,
+"borders": 0,
+"bytes": 9584
+},
+"-20_-10": {
+"shore": 67,
+"borders": 0,
+"bytes": 292
+},
+"-20_10": {
+"shore": 855,
+"borders": 216,
+"bytes": 4344
+},
+"-20_20": {
+"shore": 929,
+"borders": 1321,
+"bytes": 9076
+},
+"-20_30": {
+"shore": 2765,
+"borders": 1284,
+"bytes": 16720
+},
+"-20_40": {
+"shore": 9222,
+"borders": 20,
+"bytes": 38920
+},
+"-20_50": {
+"shore": 444,
+"borders": 0,
+"bytes": 1936
+},
+"-20_60": {
+"shore": 144,
+"borders": 0,
+"bytes": 640
+},
+"-20_90": {
+"shore": 116,
+"borders": 0,
+"bytes": 532
+},
+"-20_100": {
+"shore": 50,
+"borders": 0,
+"bytes": 216
+},
+"-20_110": {
+"shore": 118,
+"borders": 0,
+"bytes": 536
+},
+"-20_120": {
+"shore": 16350,
+"borders": 0,
+"bytes": 70628
+},
+"-20_130": {
+"shore": 10049,
+"borders": 0,
+"bytes": 42448
+},
+"-20_140": {
+"shore": 6290,
+"borders": 0,
+"bytes": 27316
+},
+"-20_150": {
+"shore": 2996,
+"borders": 0,
+"bytes": 13256
+},
+"-20_160": {
+"shore": 3970,
+"borders": 0,
+"bytes": 16772
+},
+"-20_170": {
+"shore": 3932,
+"borders": 0,
+"bytes": 16772
+},
+"-10_-180": {
+"shore": 382,
+"borders": 0,
+"bytes": 1764
+},
+"-10_-170": {
+"shore": 7,
+"borders": 0,
+"bytes": 44
+},
+"-10_-160": {
+"shore": 271,
+"borders": 0,
+"bytes": 1284
+},
+"-10_-150": {
+"shore": 346,
+"borders": 0,
+"bytes": 1492
+},
+"-10_-140": {
+"shore": 272,
+"borders": 0,
+"bytes": 1148
+},
+"-10_-100": {
+"shore": 872,
+"borders": 0,
+"bytes": 3724
+},
+"-10_-90": {
+"shore": 1689,
+"borders": 95,
+"bytes": 7464
+},
+"-10_-80": {
+"shore": 1467,
+"borders": 1246,
+"bytes": 11200
+},
+"-10_-70": {
+"shore": 1568,
+"borders": 167,
+"bytes": 6992
+},
+"-10_-60": {
+"shore": 4349,
+"borders": 0,
+"bytes": 18268
+},
+"-10_-50": {
+"shore": 11515,
+"borders": 0,
+"bytes": 48732
+},
+"-10_-40": {
+"shore": 2251,
+"borders": 0,
+"bytes": 9592
+},
+"-10_-20": {
+"shore": 59,
+"borders": 0,
+"bytes": 256
+},
+"-10_0": {
+"shore": 928,
+"borders": 0,
+"bytes": 3960
+},
+"-10_10": {
+"shore": 2066,
+"borders": 1271,
+"bytes": 13692
+},
+"-10_20": {
+"shore": 1469,
+"borders": 583,
+"bytes": 8368
+},
+"-10_30": {
+"shore": 5892,
+"borders": 625,
+"bytes": 26912
+},
+"-10_40": {
+"shore": 2418,
+"borders": 3,
+"bytes": 10800
+},
+"-10_50": {
+"shore": 515,
+"borders": 0,
+"bytes": 2316
+},
+"-10_70": {
+"shore": 493,
+"borders": 0,
+"bytes": 2304
+},
+"-10_90": {
+"shore": 1666,
+"borders": 0,
+"bytes": 7152
+},
+"-10_100": {
+"shore": 9364,
+"borders": 0,
+"bytes": 40172
+},
+"-10_110": {
+"shore": 12261,
+"borders": 0,
+"bytes": 52152
+},
+"-10_120": {
+"shore": 19248,
+"borders": 0,
+"bytes": 81568
+},
+"-10_130": {
+"shore": 20761,
+"borders": 0,
+"bytes": 88508
+},
+"-10_140": {
+"shore": 9542,
+"borders": 69,
+"bytes": 40880
+},
+"-10_150": {
+"shore": 14645,
+"borders": 0,
+"bytes": 64064
+},
+"-10_160": {
+"shore": 1970,
+"borders": 0,
+"bytes": 8448
+},
+"-10_170": {
+"shore": 748,
+"borders": 0,
+"bytes": 3388
+},
+"0_-180": {
+"shore": 15,
+"borders": 0,
+"bytes": 80
+},
+"0_-170": {
+"shore": 67,
+"borders": 0,
+"bytes": 308
+},
+"0_-160": {
+"shore": 462,
+"borders": 0,
+"bytes": 2024
+},
+"0_-100": {
+"shore": 155,
+"borders": 0,
+"bytes": 684
+},
+"0_-90": {
+"shore": 4653,
+"borders": 129,
+"bytes": 20508
+},
+"0_-80": {
+"shore": 8314,
+"borders": 539,
+"bytes": 37476
+},
+"0_-70": {
+"shore": 2466,
+"borders": 1277,
+"bytes": 15448
+},
+"0_-60": {
+"shore": 2967,
+"borders": 1192,
+"bytes": 17296
+},
+"0_-50": {
+"shore": 409,
+"borders": 0,
+"bytes": 1772
+},
+"0_-20": {
+"shore": 2261,
+"borders": 390,
+"bytes": 11220
+},
+"0_-10": {
+"shore": 2784,
+"borders": 1323,
+"bytes": 16656
+},
+"0_0": {
+"shore": 6955,
+"borders": 734,
+"bytes": 31820
+},
+"0_10": {
+"shore": 537,
+"borders": 1717,
+"bytes": 9116
+},
+"0_20": {
+"shore": 301,
+"borders": 1401,
+"bytes": 6852
+},
+"0_30": {
+"shore": 2252,
+"borders": 857,
+"bytes": 12636
+},
+"0_40": {
+"shore": 489,
+"borders": 152,
+"bytes": 2748
+},
+"0_50": {
+"shore": 114,
+"borders": 0,
+"bytes": 492
+},
+"0_70": {
+"shore": 6104,
+"borders": 0,
+"bytes": 28420
+},
+"0_80": {
+"shore": 1455,
+"borders": 0,
+"bytes": 6096
+},
+"0_90": {
+"shore": 10391,
+"borders": 27,
+"bytes": 45664
+},
+"0_100": {
+"shore": 13399,
+"borders": 247,
+"bytes": 60056
+},
+"0_110": {
+"shore": 10313,
+"borders": 619,
+"bytes": 46616
+},
+"0_120": {
+"shore": 17300,
+"borders": 0,
+"bytes": 74556
+},
+"0_130": {
+"shore": 1333,
+"borders": 0,
+"bytes": 5996
+},
+"0_140": {
+"shore": 274,
+"borders": 0,
+"bytes": 1308
+},
+"0_150": {
+"shore": 1390,
+"borders": 0,
+"bytes": 6504
+},
+"0_160": {
+"shore": 1561,
+"borders": 0,
+"bytes": 7448
+},
+"0_170": {
+"shore": 1904,
+"borders": 0,
+"bytes": 8896
+},
+"10_-170": {
+"shore": 26,
+"borders": 0,
+"bytes": 132
+},
+"10_-160": {
+"shore": 302,
+"borders": 0,
+"bytes": 1244
+},
+"10_-120": {
+"shore": 119,
+"borders": 0,
+"bytes": 540
+},
+"10_-110": {
+"shore": 1008,
+"borders": 0,
+"bytes": 4268
+},
+"10_-100": {
+"shore": 2388,
+"borders": 215,
+"bytes": 10804
+},
+"10_-90": {
+"shore": 9602,
+"borders": 818,
+"bytes": 44984
+},
+"10_-80": {
+"shore": 5691,
+"borders": 162,
+"bytes": 24608
+},
+"10_-70": {
+"shore": 9407,
+"borders": 0,
+"bytes": 40512
+},
+"10_-60": {
+"shore": 56,
+"borders": 0,
+"bytes": 240
+},
+"10_-30": {
+"shore": 1056,
+"borders": 0,
+"bytes": 4368
+},
+"10_-20": {
+"shore": 6331,
+"borders": 1264,
+"bytes": 31408
+},
+"10_-10": {
+"shore": 1880,
+"borders": 1126,
+"bytes": 12284
+},
+"10_0": {
+"shore": 452,
+"borders": 769,
+"bytes": 4972
+},
+"10_10": {
+"shore": 460,
+"borders": 569,
+"bytes": 4156
+},
+"10_20": {
+"shore": 0,
+"borders": 394,
+"bytes": 1616
+},
+"10_30": {
+"shore": 2427,
+"borders": 585,
+"bytes": 12876
+},
+"10_40": {
+"shore": 7910,
+"borders": 318,
+"bytes": 35880
+},
+"10_50": {
+"shore": 1175,
+"borders": 8,
+"bytes": 4860
+},
+"10_70": {
+"shore": 3795,
+"borders": 0,
+"bytes": 16036
+},
+"10_80": {
+"shore": 1462,
+"borders": 0,
+"bytes": 6164
+},
+"10_90": {
+"shore": 18501,
+"borders": 715,
+"bytes": 84316
+},
+"10_100": {
+"shore": 9357,
+"borders": 1969,
+"bytes": 47844
+},
+"10_110": {
+"shore": 4925,
+"borders": 0,
+"bytes": 21684
+},
+"10_120": {
+"shore": 17987,
+"borders": 0,
+"bytes": 77500
+},
+"10_130": {
+"shore": 50,
+"borders": 0,
+"bytes": 256
+},
+"10_140": {
+"shore": 449,
+"borders": 0,
+"bytes": 1864
+},
+"10_160": {
+"shore": 960,
+"borders": 0,
+"bytes": 4612
+},
+"10_170": {
+"shore": 33,
+"borders": 0,
+"bytes": 168
+},
+"20_-180": {
+"shore": 78,
+"borders": 0,
+"bytes": 376
+},
+"20_-170": {
+"shore": 164,
+"borders": 0,
+"bytes": 764
+},
+"20_-160": {
+"shore": 1046,
+"borders": 0,
+"bytes": 4424
+},
+"20_-120": {
+"shore": 7372,
+"borders": 0,
+"bytes": 31392
+},
+"20_-110": {
+"shore": 4517,
+"borders": 329,
+"bytes": 20376
+},
+"20_-100": {
+"shore": 13392,
+"borders": 244,
+"bytes": 59692
+},
+"20_-90": {
+"shore": 25002,
+"borders": 0,
+"bytes": 110036
+},
+"20_-80": {
+"shore": 25963,
+"borders": 0,
+"bytes": 115836
+},
+"20_-20": {
+"shore": 2063,
+"borders": 28,
+"bytes": 8588
+},
+"20_-10": {
+"shore": 16,
+"borders": 125,
+"bytes": 592
+},
+"20_0": {
+"shore": 0,
+"borders": 148,
+"bytes": 620
+},
+"20_10": {
+"shore": 0,
+"borders": 43,
+"bytes": 196
+},
+"20_20": {
+"shore": 10,
+"borders": 43,
+"bytes": 248
+},
+"20_30": {
+"shore": 9291,
+"borders": 54,
+"bytes": 40396
+},
+"20_40": {
+"shore": 1524,
+"borders": 51,
+"bytes": 6652
+},
+"20_50": {
+"shore": 8802,
+"borders": 221,
+"bytes": 38260
+},
+"20_60": {
+"shore": 4786,
+"borders": 366,
+"bytes": 21360
+},
+"20_70": {
+"shore": 1954,
+"borders": 195,
+"bytes": 8968
+},
+"20_80": {
+"shore": 3054,
+"borders": 1759,
+"bytes": 19736
+},
+"20_90": {
+"shore": 3454,
+"borders": 2196,
+"bytes": 23232
+},
+"20_100": {
+"shore": 9942,
+"borders": 1173,
+"bytes": 49428
+},
+"20_110": {
+"shore": 17308,
+"borders": 60,
+"bytes": 75864
+},
+"20_120": {
+"shore": 11805,
+"borders": 0,
+"bytes": 52288
+},
+"20_130": {
+"shore": 51,
+"borders": 0,
+"bytes": 236
+},
+"20_140": {
+"shore": 402,
+"borders": 0,
+"bytes": 1868
+},
+"20_150": {
+"shore": 7,
+"borders": 0,
+"bytes": 44
+},
+"30_-130": {
+"shore": 1400,
+"borders": 0,
+"bytes": 5752
+},
+"30_-120": {
+"shore": 2497,
+"borders": 17,
+"bytes": 10300
+},
+"30_-110": {
+"shore": 302,
+"borders": 107,
+"bytes": 1704
+},
+"30_-100": {
+"shore": 530,
+"borders": 0,
+"bytes": 2180
+},
+"30_-90": {
+"shore": 5719,
+"borders": 0,
+"bytes": 23860
+},
+"30_-80": {
+"shore": 13951,
+"borders": 0,
+"bytes": 59008
+},
+"30_-70": {
+"shore": 242,
+"borders": 0,
+"bytes": 1092
+},
+"30_-40": {
+"shore": 96,
+"borders": 0,
+"bytes": 428
+},
+"30_-30": {
+"shore": 609,
+"borders": 0,
+"bytes": 2552
+},
+"30_-20": {
+"shore": 245,
+"borders": 0,
+"bytes": 1072
+},
+"30_-10": {
+"shore": 4042,
+"borders": 411,
+"bytes": 18588
+},
+"30_0": {
+"shore": 3212,
+"borders": 180,
+"bytes": 14328
+},
+"30_10": {
+"shore": 3828,
+"borders": 94,
+"bytes": 16544
+},
+"30_20": {
+"shore": 20068,
+"borders": 203,
+"bytes": 87172
+},
+"30_30": {
+"shore": 6627,
+"borders": 730,
+"bytes": 31880
+},
+"30_40": {
+"shore": 2946,
+"borders": 1341,
+"bytes": 17520
+},
+"30_50": {
+"shore": 551,
+"borders": 276,
+"bytes": 3344
+},
+"30_60": {
+"shore": 190,
+"borders": 1370,
+"bytes": 6320
+},
+"30_70": {
+"shore": 626,
+"borders": 2002,
+"bytes": 10648
+},
+"30_80": {
+"shore": 2436,
+"borders": 182,
+"bytes": 10808
+},
+"30_90": {
+"shore": 1195,
+"borders": 0,
+"bytes": 4924
+},
+"30_100": {
+"shore": 157,
+"borders": 0,
+"bytes": 676
+},
+"30_110": {
+"shore": 3939,
+"borders": 0,
+"bytes": 16120
+},
+"30_120": {
+"shore": 34408,
+"borders": 118,
+"bytes": 151092
+},
+"30_130": {
+"shore": 18317,
+"borders": 0,
+"bytes": 78572
+},
+"30_140": {
+"shore": 1628,
+"borders": 0,
+"bytes": 6952
+},
+"40_-130": {
+"shore": 10574,
+"borders": 0,
+"bytes": 44876
+},
+"40_-120": {
+"shore": 1074,
+"borders": 0,
+"bytes": 4436
+},
+"40_-110": {
+"shore": 1449,
+"borders": 0,
+"bytes": 5920
+},
+"40_-100": {
+"shore": 4325,
+"borders": 202,
+"bytes": 18888
+},
+"40_-90": {
+"shore": 4496,
+"borders": 121,
+"bytes": 18832
+},
+"40_-80": {
+"shore": 11841,
+"borders": 195,
+"bytes": 50272
+},
+"40_-70": {
+"shore": 21576,
+"borders": 116,
+"bytes": 93376
+},
+"40_-60": {
+"shore": 14993,
+"borders": 0,
+"bytes": 64616
+},
+"40_-10": {
+"shore": 8970,
+"borders": 358,
+"bytes": 40164
+},
+"40_0": {
+"shore": 6066,
+"borders": 1632,
+"bytes": 32508
+},
+"40_10": {
+"shore": 13368,
+"borders": 2948,
+"bytes": 69968
+},
+"40_20": {
+"shore": 5574,
+"borders": 3108,
+"bytes": 35948
+},
+"40_30": {
+"shore": 6463,
+"borders": 253,
+"bytes": 27972
+},
+"40_40": {
+"shore": 2515,
+"borders": 1408,
+"bytes": 15976
+},
+"40_50": {
+"shore": 1962,
+"borders": 248,
+"bytes": 8988
+},
+"40_60": {
+"shore": 1488,
+"borders": 413,
+"bytes": 7808
+},
+"40_70": {
+"shore": 1472,
+"borders": 1109,
+"bytes": 10460
+},
+"40_80": {
+"shore": 1094,
+"borders": 801,
+"bytes": 7684
+},
+"40_90": {
+"shore": 746,
+"borders": 317,
+"bytes": 4360
+},
+"40_100": {
+"shore": 134,
+"borders": 146,
+"bytes": 1164
+},
+"40_110": {
+"shore": 705,
+"borders": 491,
+"bytes": 4940
+},
+"40_120": {
+"shore": 1548,
+"borders": 611,
+"bytes": 8844
+},
+"40_130": {
+"shore": 3433,
+"borders": 631,
+"bytes": 16728
+},
+"40_140": {
+"shore": 4770,
+"borders": 0,
+"bytes": 19576
+},
+"40_150": {
+"shore": 742,
+"borders": 0,
+"bytes": 3164
+},
+"50_-180": {
+"shore": 3297,
+"borders": 0,
+"bytes": 14416
+},
+"50_-170": {
+"shore": 8005,
+"borders": 0,
+"bytes": 35168
+},
+"50_-160": {
+"shore": 12072,
+"borders": 0,
+"bytes": 51572
+},
+"50_-150": {
+"shore": 1091,
+"borders": 0,
+"bytes": 4696
+},
+"50_-140": {
+"shore": 35512,
+"borders": 163,
+"bytes": 156056
+},
+"50_-130": {
+"shore": 16662,
+"borders": 3,
+"bytes": 71684
+},
+"50_-120": {
+"shore": 1677,
+"borders": 0,
+"bytes": 6924
+},
+"50_-110": {
+"shore": 7222,
+"borders": 0,
+"bytes": 29552
+},
+"50_-100": {
+"shore": 8202,
+"borders": 0,
+"bytes": 33756
+},
+"50_-90": {
+"shore": 3809,
+"borders": 0,
+"bytes": 16284
+},
+"50_-80": {
+"shore": 23921,
+"borders": 0,
+"bytes": 104704
+},
+"50_-70": {
+"shore": 27223,
+"borders": 0,
+"bytes": 118044
+},
+"50_-60": {
+"shore": 17603,
+"borders": 0,
+"bytes": 78092
+},
+"50_-50": {
+"shore": 2055,
+"borders": 0,
+"bytes": 9592
+},
+"50_-20": {
+"shore": 1355,
+"borders": 0,
+"bytes": 6072
+},
+"50_-10": {
+"shore": 25012,
+"borders": 233,
+"bytes": 108900
+},
+"50_0": {
+"shore": 13756,
+"borders": 797,
+"bytes": 62784
+},
+"50_10": {
+"shore": 44428,
+"borders": 795,
+"bytes": 205520
+},
+"50_20": {
+"shore": 19481,
+"borders": 1770,
+"bytes": 97512
+},
+"50_30": {
+"shore": 2019,
+"borders": 791,
+"bytes": 11772
+},
+"50_40": {
+"shore": 1795,
+"borders": 109,
+"bytes": 7684
+},
+"50_50": {
+"shore": 1144,
+"borders": 486,
+"bytes": 6584
+},
+"50_60": {
+"shore": 2418,
+"borders": 565,
+"bytes": 12400
+},
+"50_70": {
+"shore": 1727,
+"borders": 277,
+"bytes": 8368
+},
+"50_80": {
+"shore": 1116,
+"borders": 183,
+"bytes": 5316
+},
+"50_90": {
+"shore": 634,
+"borders": 263,
+"bytes": 3676
+},
+"50_100": {
+"shore": 1852,
+"borders": 205,
+"bytes": 8284
+},
+"50_110": {
+"shore": 477,
+"borders": 152,
+"bytes": 2648
+},
+"50_120": {
+"shore": 0,
+"borders": 458,
+"bytes": 1852
+},
+"50_130": {
+"shore": 2387,
+"borders": 0,
+"bytes": 9800
+},
+"50_140": {
+"shore": 3534,
+"borders": 0,
+"bytes": 14664
+},
+"50_150": {
+"shore": 2911,
+"borders": 0,
+"bytes": 12332
+},
+"50_160": {
+"shore": 1841,
+"borders": 0,
+"bytes": 7620
+},
+"50_170": {
+"shore": 1397,
+"borders": 0,
+"bytes": 6164
+},
+"60_-180": {
+"shore": 2769,
+"borders": 0,
+"bytes": 11364
+},
+"60_-170": {
+"shore": 9379,
+"borders": 0,
+"bytes": 39836
+},
+"60_-160": {
+"shore": 2022,
+"borders": 0,
+"bytes": 8664
+},
+"60_-150": {
+"shore": 7095,
+"borders": 5,
+"bytes": 30416
+},
+"60_-140": {
+"shore": 4538,
+"borders": 6,
+"bytes": 19188
+},
+"60_-130": {
+"shore": 3372,
+"borders": 0,
+"bytes": 13872
+},
+"60_-120": {
+"shore": 10253,
+"borders": 0,
+"bytes": 42620
+},
+"60_-110": {
+"shore": 17668,
+"borders": 0,
+"bytes": 75064
+},
+"60_-100": {
+"shore": 25615,
+"borders": 0,
+"bytes": 110616
+},
+"60_-90": {
+"shore": 15855,
+"borders": 0,
+"bytes": 68624
+},
+"60_-80": {
+"shore": 29405,
+"borders": 0,
+"bytes": 131148
+},
+"60_-70": {
+"shore": 31223,
+"borders": 0,
+"bytes": 136208
+},
+"60_-60": {
+"shore": 33118,
+"borders": 0,
+"bytes": 150324
+},
+"60_-50": {
+"shore": 22275,
+"borders": 0,
+"bytes": 99040
+},
+"60_-40": {
+"shore": 6576,
+"borders": 0,
+"bytes": 28416
+},
+"60_-30": {
+"shore": 8190,
+"borders": 0,
+"bytes": 36608
+},
+"60_-20": {
+"shore": 3157,
+"borders": 0,
+"bytes": 13488
+},
+"60_-10": {
+"shore": 2648,
+"borders": 0,
+"bytes": 11372
+},
+"60_0": {
+"shore": 21510,
+"borders": 0,
+"bytes": 95844
+},
+"60_10": {
+"shore": 48015,
+"borders": 140,
+"bytes": 217824
+},
+"60_20": {
+"shore": 70297,
+"borders": 559,
+"bytes": 325124
+},
+"60_30": {
+"shore": 13808,
+"borders": 150,
+"bytes": 59632
+},
+"60_40": {
+"shore": 2048,
+"borders": 0,
+"bytes": 8444
+},
+"60_50": {
+"shore": 2319,
+"borders": 0,
+"bytes": 9692
+},
+"60_60": {
+"shore": 3514,
+"borders": 0,
+"bytes": 14516
+},
+"60_70": {
+"shore": 3564,
+"borders": 0,
+"bytes": 15020
+},
+"60_80": {
+"shore": 1183,
+"borders": 0,
+"bytes": 4844
+},
+"60_90": {
+"shore": 745,
+"borders": 0,
+"bytes": 3076
+},
+"60_100": {
+"shore": 13,
+"borders": 0,
+"bytes": 68
+},
+"60_110": {
+"shore": 184,
+"borders": 0,
+"bytes": 768
+},
+"60_120": {
+"shore": 1120,
+"borders": 0,
+"bytes": 4524
+},
+"60_130": {
+"shore": 554,
+"borders": 0,
+"bytes": 2244
+},
+"60_140": {
+"shore": 913,
+"borders": 0,
+"bytes": 3956
+},
+"60_150": {
+"shore": 5306,
+"borders": 0,
+"bytes": 22976
+},
+"60_160": {
+"shore": 3586,
+"borders": 0,
+"bytes": 15252
+},
+"60_170": {
+"shore": 2567,
+"borders": 0,
+"bytes": 10536
+},
+"70_-180": {
+"shore": 415,
+"borders": 0,
+"bytes": 1720
+},
+"70_-170": {
+"shore": 478,
+"borders": 0,
+"bytes": 2064
+},
+"70_-160": {
+"shore": 2802,
+"borders": 0,
+"bytes": 12076
+},
+"70_-150": {
+"shore": 1774,
+"borders": 0,
+"bytes": 7980
+},
+"70_-140": {
+"shore": 296,
+"borders": 0,
+"bytes": 1216
+},
+"70_-130": {
+"shore": 3499,
+"borders": 0,
+"bytes": 14696
+},
+"70_-120": {
+"shore": 7894,
+"borders": 0,
+"bytes": 33488
+},
+"70_-110": {
+"shore": 10448,
+"borders": 0,
+"bytes": 44712
+},
+"70_-100": {
+"shore": 11249,
+"borders": 0,
+"bytes": 47532
+},
+"70_-90": {
+"shore": 8074,
+"borders": 0,
+"bytes": 33196
+},
+"70_-80": {
+"shore": 6119,
+"borders": 0,
+"bytes": 25504
+},
+"70_-70": {
+"shore": 3065,
+"borders": 0,
+"bytes": 13180
+},
+"70_-60": {
+"shore": 9913,
+"borders": 0,
+"bytes": 43708
+},
+"70_-30": {
+"shore": 7306,
+"borders": 0,
+"bytes": 30616
+},
+"70_-20": {
+"shore": 3198,
+"borders": 0,
+"bytes": 14108
+},
+"70_-10": {
+"shore": 129,
+"borders": 0,
+"bytes": 568
+},
+"70_10": {
+"shore": 4865,
+"borders": 0,
+"bytes": 20668
+},
+"70_20": {
+"shore": 6778,
+"borders": 18,
+"bytes": 29124
+},
+"70_30": {
+"shore": 240,
+"borders": 0,
+"bytes": 1024
+},
+"70_40": {
+"shore": 22,
+"borders": 0,
+"bytes": 108
+},
+"70_50": {
+"shore": 6345,
+"borders": 0,
+"bytes": 26468
+},
+"70_60": {
+"shore": 1524,
+"borders": 0,
+"bytes": 6312
+},
+"70_70": {
+"shore": 2084,
+"borders": 0,
+"bytes": 8692
+},
+"70_80": {
+"shore": 5101,
+"borders": 0,
+"bytes": 21512
+},
+"70_90": {
+"shore": 4815,
+"borders": 0,
+"bytes": 20368
+},
+"70_100": {
+"shore": 4108,
+"borders": 0,
+"bytes": 17224
+},
+"70_110": {
+"shore": 2021,
+"borders": 0,
+"bytes": 8412
+},
+"70_120": {
+"shore": 6312,
+"borders": 0,
+"bytes": 27420
+},
+"70_130": {
+"shore": 2634,
+"borders": 0,
+"bytes": 11028
+},
+"70_140": {
+"shore": 4539,
+"borders": 0,
+"bytes": 19180
+},
+"70_150": {
+"shore": 2431,
+"borders": 0,
+"bytes": 10784
+},
+"70_160": {
+"shore": 161,
+"borders": 0,
+"bytes": 696
+},
+"70_170": {
+"shore": 192,
+"borders": 0,
+"bytes": 812
+},
+"80_-110": {
+"shore": 19,
+"borders": 0,
+"bytes": 100
+},
+"80_-100": {
+"shore": 1164,
+"borders": 0,
+"bytes": 4912
+},
+"80_-90": {
+"shore": 1465,
+"borders": 0,
+"bytes": 6028
+},
+"80_-80": {
+"shore": 540,
+"borders": 0,
+"bytes": 2224
+},
+"80_-70": {
+"shore": 1235,
+"borders": 0,
+"bytes": 5072
+},
+"80_-60": {
+"shore": 454,
+"borders": 0,
+"bytes": 1888
+},
+"80_-50": {
+"shore": 1031,
+"borders": 0,
+"bytes": 4284
+},
+"80_-40": {
+"shore": 619,
+"borders": 0,
+"bytes": 2584
+},
+"80_-30": {
+"shore": 1065,
+"borders": 0,
+"bytes": 4484
+},
+"80_-20": {
+"shore": 715,
+"borders": 0,
+"bytes": 2984
+},
+"80_10": {
+"shore": 478,
+"borders": 0,
+"bytes": 2068
+},
+"80_20": {
+"shore": 922,
+"borders": 0,
+"bytes": 4016
+},
+"80_30": {
+"shore": 73,
+"borders": 0,
+"bytes": 316
+},
+"80_40": {
+"shore": 607,
+"borders": 0,
+"bytes": 2484
+},
+"80_50": {
+"shore": 2129,
+"borders": 0,
+"bytes": 8988
+},
+"80_60": {
+"shore": 364,
+"borders": 0,
+"bytes": 1544
+},
+"80_70": {
+"shore": 16,
+"borders": 0,
+"bytes": 84
+},
+"80_80": {
+"shore": 9,
+"borders": 0,
+"bytes": 52
+},
+"80_90": {
+"shore": 935,
+"borders": 0,
+"bytes": 3960
+}
+}
+}

@@ -107,6 +107,85 @@
     } catch { /* keep the 110m outlines */ }
   }
 
+  // Finest coastlines and borders: GSHHG high resolution (~200 m) in 10-degree tiles
+  // (tools/build_coastlines.py), loaded for the region on screen past HIRES_ZOOM and kept on the
+  // GPU for the most recently used MAX_TILES.
+  const HIRES_ZOOM = 12, MAX_TILES = 120;
+  let hires = null;  // { tile, margin, names: Set }
+  const tiles = new Map();  // name -> 'loading' | 'ready' (insertion order = use order)
+  async function loadHiresIndex() {
+    try {
+      const res = await fetch('vendor/world/coast-h/index.json');
+      if (res.ok) { const d = await res.json(); hires = { tile: d.tile, margin: d.margin, names: new Set(Object.keys(d.tiles)) }; }
+    } catch { /* stay at 1:10m */ }
+  }
+
+  function decodeTile(buf, name) {
+    const [lat0, lon0] = name.split('_').map(Number);
+    const span = hires.tile + 2 * hires.margin;
+    const dv = new DataView(buf);
+    let off = 4;  // "GSH1"
+    const lines = [];
+    for (let section = 0; section < 2; section++) {
+      const count = dv.getUint32(off, true); off += 4;
+      for (let i = 0; i < count; i++) {
+        const n = dv.getUint32(off, true); off += 4;
+        const line = new Array(n);
+        for (let k = 0; k < n; k++) {
+          line[k] = [lon0 - hires.margin + (dv.getUint16(off, true) / 65535) * span,
+                     lat0 - hires.margin + (dv.getUint16(off + 2, true) / 65535) * span];
+          off += 4;
+        }
+        lines.push(line);
+      }
+    }
+    return lines;
+  }
+
+  // Tiles whose area can be on screen: within the visible cap around the view centre.
+  function visibleTiles(g) {
+    const half = Math.hypot(g.w, g.h) / 2;
+    const cap = Math.asin(Math.min(1, half / g.r)) / rad + hires.tile * 0.75;
+    const c = unit(view.lon, view.lat);
+    const out = [];
+    for (let lat0 = -90; lat0 < 90; lat0 += hires.tile) {
+      for (let lon0 = -180; lon0 < 180; lon0 += hires.tile) {
+        const name = `${lat0}_${lon0}`;
+        if (!hires.names.has(name)) continue;
+        const d = Math.acos(Math.max(-1, Math.min(1, dot(unit(lon0 + hires.tile / 2, lat0 + hires.tile / 2), c)))) / rad;
+        if (d <= cap) out.push(name);
+      }
+    }
+    return out;
+  }
+
+  function hiresTiles(g) {
+    if (!glr || zoom <= HIRES_ZOOM) return null;
+    if (!hires) { loadHiresIndex(); return null; }
+    const want = visibleTiles(g);
+    let loading = 0;
+    for (const name of want) {
+      const state = tiles.get(name);
+      if (state) { tiles.delete(name); tiles.set(name, state); continue; }  // mark as recently used
+      if (loading >= 4) continue;
+      tiles.set(name, 'loading');
+      loading++;
+      fetch(`vendor/world/coast-h/${name}.bin`).then((r) => (r.ok ? r.arrayBuffer() : null)).then((buf) => {
+        if (!buf) { tiles.delete(name); return; }
+        glr.setLines(`hires:${name}`, decodeTile(buf, name));
+        tiles.set(name, 'ready');
+        while (tiles.size > MAX_TILES) {  // evict the least recently used
+          const [old] = tiles.keys();
+          tiles.delete(old);
+          glr.deleteLines(`hires:${old}`);
+        }
+      }).catch(() => tiles.delete(name));
+    }
+    const ready = want.filter((n) => tiles.get(n) === 'ready');
+    // until every visible tile is in, draw the 1:10m outlines underneath as well
+    return { names: ready.map((n) => `hires:${n}`), complete: ready.length === want.length };
+  }
+
   let topo10 = null, loading10 = false;
   async function loadTopo10() {  // finest outlines, for close zoom (GPU only)
     if (loading10) return;
@@ -556,10 +635,13 @@
 
     if (glr) {
       const now = new Date();
+      const hi = hiresTiles(g);
       glr.render({
         w: g.w, h: g.h, dpr, cx: g.cx, cy: g.cy, r: g.r, E: fr.E, N: fr.N, C: fr.C, S: sunDir, dark,
         gmst: g0, sunLon: markets?.sun.lon ?? view.lon, utcMin: now.getUTCHours() * 60 + now.getUTCMinutes() + now.getUTCSeconds() / 60,
-        outlines: outlineSet(), moon: moon ? moonParams(g, fr, moon) : null,
+        outlines: outlineSet(),
+        tiles: hi && hi.names.length ? (hi.complete ? hi.names : [outlineSet(), ...hi.names]) : null,
+        moon: moon ? moonParams(g, fr, moon) : null,
       });
       drawSkyNames(g, fr, g0, bodies, dark);
       if (markets) drawZoneLabels(g);
@@ -712,7 +794,7 @@
     const open = markets.world.filter((m) => m.state === 'open').length;
     const brk = markets.world.filter((m) => m.state === 'break').length;
     const utc = new Date().toISOString().slice(11, 19);
-    const infoHtml = `<b>${open}</b> exchanges open${brk ? `, <b>${brk}</b> at lunch` : ''} · ${utc} GMT${zoom > 1.01 ? ` · ${zoom.toFixed(1)}×` : ''}
+    const infoHtml = `<b>${open}</b> exchanges open${brk ? `, <b>${brk}</b> at lunch` : ''} · ${utc} GMT${zoom > 1.01 ? ` · ${zoom >= 10 ? zoom.toFixed(0) : zoom.toFixed(1)}×` : ''}
       <div class="p-muted small">Sun overhead at ${Math.abs(markets.sun.lat).toFixed(1)}°${markets.sun.lat >= 0 ? 'N' : 'S'}
       ${Math.abs(markets.sun.lon).toFixed(1)}°${markets.sun.lon >= 0 ? 'E' : 'W'} · turning in real time
       ${following() && zoom <= 1.01 ? '' : ' · <a href="#" id="globeNoon">recentre</a>'}</div>`;
@@ -856,7 +938,8 @@
     e.preventDefault();
     const g = geometry(), r = canvas.getBoundingClientRect();
     const at = unproject(e.clientX - r.left, e.clientY - r.top, g);
-    const next = Math.max(1, Math.min(12, zoom * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015))));
+    const maxZoom = glr && hires ? 150 : 12;  // ~160 m per pixel at 150x: the GSHHG data's detail
+    const next = Math.max(1, Math.min(maxZoom, zoom * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015))));
     if (next === zoom) return;
     if (at && next > zoom) {  // turn a little towards the cursor so it stays roughly under it
       const t = 1 - zoom / next;
@@ -902,9 +985,17 @@
     if (at >= 0) { news.i = at; news.shownAt = Date.now(); renderTicker(true); }
     if (m) { offset = { lon: wrap(m.lon - subsolar().lon), lat: Math.max(-60, Math.min(60, m.lat)) }; }
   });
-  window.Globe = { state: () => ({ view: { ...view }, offset: { ...offset }, sun: subsolar(), following: following() }), recentre, perfColor };
+  window.Globe = { state: () => ({ view: { ...view }, offset: { ...offset }, sun: subsolar(), following: following() }), recentre, perfColor,
+    // Turn the globe to a place (it keeps turning with the Earth from there) and zoom in.
+    lookAt(lon, lat, z = zoom) {
+      glide = null;
+      offset = { lon: wrap(lon - subsolar().lon), lat: Math.max(-85, Math.min(85, lat)) };
+      zoom = Math.max(1, Math.min(glr && hires ? 150 : 12, z));
+      nightCache = null; zoneCache = null;
+    } };
   requestAnimationFrame(frame);
   loadSky();
+  if (glr) loadHiresIndex();
   loadZones();
   if (document.body.dataset.view === 'markets') { load(); loadTopo(); }
 })();

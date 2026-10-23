@@ -53,6 +53,7 @@ retries included, counts.
 |---|---|---|---|
 | `klinecharts/klinecharts.min.js` | KLineChart 10.1.0 (npm) | Apache-2.0 | manual; the app patches two store methods (`timeaxis.js`), re-test the time axis on upgrade |
 | `world/countries-110m.json`, `countries-50m.json`, `countries-10m.json` (3.7 MB, 477k points; used past 6x zoom) | world-atlas 2.0.2 (Natural Earth) | ISC / public domain | rarely |
+| `world/coast-h/*.bin` + `index.json` (433 tiles of 10°, 2.0M points, 8.7 MB; used past 12x zoom, GPU only) | **built** by `tools/build_coastlines.py` from GSHHG 2.3.7 high resolution (~200 m): `gshhs_h.b` shorelines + `wdb_borders_h.b` national borders. The 119 MB archive stays outside the repo (`~/MassiveData/sources/`), from https://www.soest.hawaii.edu/pwessel/gshhg/ | LGPL-3.0 (`LICENSE.TXT`, `COPYING.LESSERv3` alongside) | rarely (GSHHG updates every few years) |
 | `world/time-zones.json` | **built** by `tools/build_timezones.py` from Natural Earth 1:10m time zones v5.1.2 + countries-50m + tz database | public domain | rebuild when zone borders change (rare); offsets are live anyway |
 | `sky/stars.6.json`, `constellations*.json` | d3-celestial 0.7.35 | BSD-3-Clause | never needed |
 
@@ -73,7 +74,6 @@ retries included, counts.
 | Real index levels for non-US markets | colours use US-listed proxy funds (USD, US hours), not the local index | Massive indices plan, or an index data vendor | ❌ |
 | ~20 exchanges without a proxy fund (Prague, Budapest, Baltics, Dhaka...) | they stay uncoloured | local index data | ❌ |
 | Live recorder (websocket) | the Live view's "recording" is grey; current-session data arrives only with fetcher runs | Massive websockets (paid plans) | ❌ |
-| Coastlines finer than 1:10m | Natural Earth stops at 1:10m (~2 km); closer zoom needs GSHHG "high" (~200 m) or OSM land polygons, tiled so only the visible region is drawn | GSHHG 2.3.7 (LGPL, 119 MB archive) | ❌ awaiting approval |
 | Icons for futures products and indices | lettered badges only | none from Massive; would need a curated set | ❌ |
 | Directory details refresh | details re-checked every 90 days with spare budget only | — | ⚠️ |
 | Exchange holidays beyond what exchange_calendars records | China/Singapore/India: to year end until the package updates | the exchanges' own announcements | ⚠️ `deps` warns |
