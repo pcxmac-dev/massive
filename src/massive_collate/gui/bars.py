@@ -6,6 +6,7 @@ intervals are left out (as TradingView does).
 """
 from __future__ import annotations
 
+import math
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import time
@@ -15,6 +16,17 @@ import numpy as np
 import pandas as pd
 
 from ..storage import Store
+from .models import Model, apply_model
+
+
+def model_precision(values) -> int:
+    """Decimals that show model values to about 5 significant digits."""
+    v = np.abs(np.asarray(values, dtype=float))
+    v = v[np.isfinite(v) & (v > 0)]
+    if not len(v):
+        return 2
+    scale = float(np.percentile(v, 95))
+    return int(min(10, max(2, 4 - math.floor(math.log10(scale)))))
 
 ET = "America/New_York"
 # Finest first
@@ -361,10 +373,11 @@ class BarEngine:
     def bars(
         self, source: str, ticker: str, period: str, span: int = 1, session: str = "regular",
         to_ms: int | None = None, since_ms: int | None = None, limit: int = 1000,
-        style: Style = Style(), adjust: str = "none", lod: int = 1,
+        style: Style = Style(), adjust: str = "none", lod: int = 1, model: Model = Model(),
     ) -> dict:
         """`lod` > 1 returns exact aggregates of `lod` consecutive bars (time-based chart types
-        only) for drawing far zoomed-out views; statistics never use it."""
+        only) for drawing far zoomed-out views; statistics never use it. `model` turns the
+        price into its 1st/2nd derivative or integral (time-based chart types only)."""
         s = self.series(source, ticker, adjust)
         if s is None:
             return {"bars": [], "more": False}
@@ -373,7 +386,13 @@ class BarEngine:
             raise ValueError(f"{period}/{span} cannot be built from {s.kind} data")
         if not 1 <= lod <= MAX_LOD:
             raise ValueError(f"lod must be 1-{MAX_LOD}")
+        model.validate()
+        if not model.is_price and style.type not in TIME_TYPES:
+            raise ValueError("derivatives and integrals apply to time-based chart types")
         all_bars, used = self._styled(s, period, span, session, style)
+        if not model.is_price:
+            all_bars = self._modelled(s, all_bars, period, span, session, model)
+            used = {**used, "model": model.kind, "window": model.window, "basis": model.basis, "per": model.per}
         if lod > 1 and style.type in LOD_TYPES:
             # The chart type and its parameters are part of the key: aggregates of Renko bricks
             # must never be served for line break (or candles) and vice versa.
@@ -392,6 +411,9 @@ class BarEngine:
         page = self._page(all_bars, to_ms, since_ms, limit)
         page["style"] = used
         page["total"] = int(len(all_bars))
+        if not model.is_price:
+            page["model"] = {"kind": model.kind, "unit": model.unit_label(),
+                             "precision": model_precision(all_bars["close"].to_numpy())}
         if style.type == "range" and s.kind != "trades":
             page["approximate"] = "range bars built from bars, not ticks: intra-bar order of high and low is assumed"
         return page
@@ -443,6 +465,20 @@ class BarEngine:
                 self._bars.popitem(last=False)
         return out, used
 
+    def _modelled(self, s: Series, bars: pd.DataFrame, period: str, span: int, session: str, model: Model) -> pd.DataFrame:
+        key = ("model", s.source, s.ticker, s.adjust, period, span, session, model,
+               self._series[(s.source, s.ticker, s.adjust)][0])
+        with self._lock:
+            if key in self._bars:
+                self._bars.move_to_end(key)
+                return self._bars[key]
+        out = apply_model(bars, model, PERIOD_SECONDS[period] * span)
+        with self._lock:
+            self._bars[key] = out
+            if len(self._bars) > self._cache_size:
+                self._bars.popitem(last=False)
+        return out
+
     @staticmethod
     def _page(all_bars: pd.DataFrame, to_ms: int | None, since_ms: int | None, limit: int) -> dict:
         ts = epoch_ms(all_bars.index)
@@ -457,16 +493,18 @@ class BarEngine:
 
     def range_stats(
         self, source: str, ticker: str, period: str, span: int, session: str, from_ms: int, to_ms: int,
-        adjust: str = "none",
+        adjust: str = "none", model: Model = Model(),
     ) -> dict:
         """Statistics over the bars whose start lies in [from_ms, to_ms] (either order),
-        computed from exactly the bars the chart shows."""
+        computed from exactly the bars the chart shows (in the model's units)."""
         s = self.series(source, ticker, adjust)
         if s is None:
             raise LookupError(f"no data stored for {source}:{ticker}")
         session = "extended" if s.around_the_clock else session
         lo_ms, hi_ms = sorted((int(from_ms), int(to_ms)))
         bars = self._resampled(s, period, span, session)
+        if not model.validate().is_price:
+            bars = self._modelled(s, bars, period, span, session, model)
         ts = epoch_ms(bars.index)
         sel = bars[(ts >= lo_ms) & (ts <= hi_ms)]
         if sel.empty:
@@ -486,8 +524,10 @@ class BarEngine:
             "low": float(sel["low"].iloc[lo_i]), "lowTime": int(sel_ts[lo_i]),
             "rangePct": (float(sel["high"].max()) / float(sel["low"].min()) - 1) * 100 if sel["low"].min() else None,
             "volume": volume,
-            "vwap": turnover / volume if volume else None,
+            # VWAP and range % are price concepts: not shown for derivatives or integrals.
+            "vwap": turnover / volume if volume and model.is_price else None,
             "trades": int(sel["trades"].sum()),
+            **({} if model.is_price else {"rangePct": None, "model": model.kind, "unit": model.unit_label()}),
         }
 
     def _resampled(self, s: Series, period: str, span: int, session: str) -> pd.DataFrame:

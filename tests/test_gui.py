@@ -302,6 +302,31 @@ def test_info_for_futures_reports_contract(tmp_path):
     assert info["symbol"]["asset"] == "future" and info["stats"]["last"] == 113.0
 
 
+def test_models_through_the_engine_and_api(tmp_path):
+    from massive_collate.gui.bars import Style
+    from massive_collate.gui.models import Model
+
+    s = _store_with_bars(tmp_path)  # opens rise 0.001 per minute, close constant 10.25
+    eng = BarEngine(s)
+    d1 = eng.bars("massive", "SPCX", "minute", 1, limit=1000, model=Model("d1", per="bar"))
+    assert d1["model"]["kind"] == "d1" and d1["model"]["unit"] == "price/bar"
+    assert all(abs(b["close"]) < 1e-9 for b in d1["bars"])  # constant close: zero slope
+    integ = eng.bars("massive", "SPCX", "minute", 1, limit=1000, model=Model("integral", per="bar"))
+    assert integ["bars"][-1]["close"] == pytest.approx(0.0)
+    # zoomed-out aggregates of a model are its envelope; statistics are in model units
+    lod = eng.bars("massive", "SPCX", "minute", 1, limit=1000, lod=8, model=Model("d1", per="bar"))
+    assert lod["style"]["lod"] == 8 and lod["style"]["model"] == "d1"
+    st = eng.range_stats("massive", "SPCX", "minute", 1, "regular", d1["bars"][0]["timestamp"],
+                         d1["bars"][9]["timestamp"], model=Model("d1", per="bar"))
+    assert st["bars"] == 10 and st["vwap"] is None and st["unit"] == "price/bar"
+    with pytest.raises(ValueError):  # price-based chart types have no derivative
+        eng.bars("massive", "SPCX", "minute", 1, style=Style(type="renko", box=0.1), model=Model("d1"))
+    app = ChartApp(s)
+    assert app.bars({"source": "massive", "ticker": "SPCX", "model": "d2", "per": "minute", "window": "21"})["model"]["unit"] == "price/minute²"
+    with pytest.raises(ValueError):
+        app.bars({"source": "massive", "ticker": "SPCX", "model": "d1", "window": "4"})
+
+
 def test_daily_uses_official_bars(tmp_path):
     s = _store_with_bars(tmp_path)
     day = int(pd.Timestamp("2026-10-20 00:00", tz=ET).timestamp() * 1000)

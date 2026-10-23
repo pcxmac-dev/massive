@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 from ..storage import LayoutLimit, Store
 from .bars import BarEngine, Style, resample
+from .models import Model
 from .stats import details_subset, key_stats
 
 STATIC = Path(__file__).parent / "static"
@@ -84,7 +85,7 @@ class ChartApp:
             q.get("session", "regular"),
             to_ms=int(q["to"]) if q.get("to") else None,
             since_ms=int(q["since"]) if q.get("since") else None,
-            limit=limit, style=style, adjust=_adjust(q.get("adjust")), lod=int(q.get("lod", 1)),
+            limit=limit, style=style, adjust=_adjust(q.get("adjust")), lod=int(q.get("lod", 1)), model=_model(q),
         )
 
     def info(self, source: str, ticker: str, adjust: str = "none") -> dict:
@@ -126,6 +127,7 @@ class ChartApp:
         return self.engine.range_stats(
             q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
             q.get("session", "regular"), int(q["from"]), int(q["to"]), adjust=_adjust(q.get("adjust")),
+            model=_model(q),
         )
 
     # -- layouts (saved markups) ----------------------------------------------
@@ -168,6 +170,14 @@ class ChartApp:
         with self._lock:
             df = self.store.exchanges()
         return json.loads(df.to_json(orient="records"))
+
+
+def _model(q: dict[str, str]) -> Model:
+    """Model from query parameters: model, basis, per, window, order, gaps."""
+    return Model(
+        kind=q.get("model", "price"), basis=q.get("basis", "price"), per=q.get("per", "hour"),
+        window=int(q.get("window", 9)), order=int(q.get("order", 3)), reset_gaps=q.get("gaps", "1") != "0",
+    ).validate()
 
 
 def _adjust(value: str | None) -> str:

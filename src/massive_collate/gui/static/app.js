@@ -90,7 +90,7 @@ function compact(v) {
 
 function statsKey(pa, pb) {
   const p = chart.getPeriod() || {};
-  return `${p.type}:${p.span}|${state.session}|${pa.timestamp}|${pb.timestamp}`;
+  return `${p.type}:${p.span}|${state.session}|${JSON.stringify(modelQuery())}|${pa.timestamp}|${pb.timestamp}`;
 }
 
 function requestRangeStats(overlay, key, pa, pb) {
@@ -102,9 +102,9 @@ function requestRangeStats(overlay, key, pa, pb) {
     try {
       const stats = await api('/api/range', {
         source: sym.source, ticker: sym.ticker, period: p.type, span: p.span, session: state.session,
-        from: pa.timestamp, to: pb.timestamp, adjust: state.adjust,
+        from: pa.timestamp, to: pb.timestamp, adjust: state.adjust, ...modelQuery(),
       });
-        chart.overrideOverlay({ id: overlay.id, extendData: { ...(overlay.extendData || {}), key, stats } });
+      chart.overrideOverlay({ id: overlay.id, extendData: { ...(overlay.extendData || {}), key, stats } });
       scheduleHighlightPanel();  // also when the highlight is off-screen and not redrawn
     } catch (err) { showError(err); }
   }, 150));
@@ -127,59 +127,18 @@ function highlightSummary(pa, pb, st) {
   };
 }
 
-const LABEL_SIZE = 12;
-const LABEL_PAD = 5;
-
-function textWidth(text) {
-  return (kc.utils?.calcTextWidth ? kc.utils.calcTextWidth(text, LABEL_SIZE) : text.length * 7) + LABEL_PAD * 2;
-}
-
-const LINE_H = 17;
-
-// A block of text lines, positioned relative to (x, y) and kept inside the pane.
-function label(x, y, lines, bounding, { align = 'left', color = '#ffffff', bg = 'rgba(19,23,34,0.85)', baseline = 'middle' } = {}) {
-  const w = Math.max(...lines.map(textWidth));
-  const h = LINE_H * lines.length;
-  let left = align === 'left' ? x : align === 'right' ? x - w : x - w / 2;
-  let top = baseline === 'bottom' ? y - h : baseline === 'top' ? y : y - h / 2;
-  left = Math.min(Math.max(left, 2), Math.max(2, bounding.width - w - 2));
-  top = Math.min(Math.max(top, 2), Math.max(2, bounding.height - h - 2));
-  return { left, top, w, h, lines, color, bg };
-}
-
-// Place blocks in order; a block overlapping one already placed moves below it
-// (or above, if there is no room below), so labels never cover each other.
-function layoutLabels(blocks, bounding) {
-  const placed = [];
-  const hits = (b) => placed.find((p) => b.left < p.left + p.w && p.left < b.left + b.w && b.top < p.top + p.h && p.top < b.top + b.h);
-  for (const b of blocks) {
-    for (let i = 0, p; i < 12 && (p = hits(b)); i++) {
-      const below = p.top + p.h + 2;
-      b.top = below + b.h <= bounding.height ? below : Math.max(2, p.top - b.h - 2);
-    }
-    placed.push(b);
-  }
-  return placed.flatMap((b) => b.lines.map((text, i) => ({
-    type: 'text',
-    ignoreEvent: true,
-    attrs: { x: b.left, y: b.top + i * LINE_H, text, align: 'left', baseline: 'top' },
-    styles: { color: b.color, backgroundColor: b.bg, size: LABEL_SIZE, borderRadius: 2,
-              paddingLeft: LABEL_PAD, paddingRight: LABEL_PAD, paddingTop: 2, paddingBottom: 2 },
-  })));
-}
-
 kc.registerOverlay({
   name: 'measure',
   totalStep: 3,
   needDefaultPointFigure: true,
   needDefaultXAxisFigure: true,
   needDefaultYAxisFigure: true,
-  createPointFigures: ({ chart: c, overlay, coordinates, bounding }) => {
+  // Graphics only: every number is shown in the side panel's Highlight section.
+  createPointFigures: ({ overlay, coordinates }) => {
     if (coordinates.length < 2 || overlay.points.length < 2) return [];
     const [a, b] = coordinates;
     const [pa, pb] = overlay.points;
     if (pa.value == null || pb.value == null || pa.timestamp == null || pb.timestamp == null) return [];
-    const prec = c.getSymbol()?.pricePrecision ?? 2;
     const left = Math.min(a.x, b.x), right = Math.max(a.x, b.x);
     const top = Math.min(a.y, b.y), bottom = Math.max(a.y, b.y);
     const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
@@ -187,17 +146,10 @@ kc.registerOverlay({
     const key = statsKey(pa, pb);
     const ext = overlay.extendData || {};
     if (ext.key !== key) requestRangeStats(overlay, key, pa, pb);
-    const st = ext.key === key ? ext.stats : null;
-    // One summary feeds both these labels and the side panel, so they always agree.
-    const sum = highlightSummary(pa, pb, st);
-    scheduleHighlightPanel();
-    const { up } = sum;
-    const color = up ? UP : DOWN;
-    const midPrice = sum.mid.price, midTime = sum.mid.time, bars = sum.end.bars;
-
-    const aLeft = a.x <= b.x;
-    const shapes = [
-      { type: 'rect', attrs: { x: left, y: top, width: right - left, height: bottom - top },
+    scheduleHighlightPanel();  // the panel follows live while the highlight is drawn or dragged
+    const up = pb.value >= pa.value;
+    return [
+      { type: 'rect', attrs: { x: left, y: top, width: right - left, height: Math.max(1, bottom - top) },
         styles: { style: 'fill', color: up ? 'rgba(38,166,154,0.15)' : 'rgba(239,83,80,0.15)' } },
       { type: 'line', ignoreEvent: true, attrs: { coordinates: [{ x: left, y: cy }, { x: right, y: cy }] },
         styles: { style: 'dashed', dashedValue: [5, 4], color: MID, size: 1 } },
@@ -205,32 +157,6 @@ kc.registerOverlay({
         styles: { style: 'dashed', dashedValue: [2, 4], color: MID, size: 1 } },
       { type: 'circle', ignoreEvent: true, attrs: { x: cx, y: cy, r: 3.5 }, styles: { style: 'fill', color: MID } },
     ];
-    if (right < 0 || left > bounding.width) return shapes; // scrolled out of view: no labels
-    // Placement order = priority: the statistics line first, then start, end, center.
-    const blocks = [];
-    if (st && st.bars) {
-      const above = top - 6 - 2 * LINE_H > 0;
-      blocks.push(label(cx, above ? top - 6 : bottom + 6, [
-        `O ${st.open.toFixed(prec)}  H ${st.high.toFixed(prec)} (${fmtTime(st.highTime)})  `
-          + `L ${st.low.toFixed(prec)} (${fmtTime(st.lowTime)})  C ${st.close.toFixed(prec)}`,
-        `${st.bars} bars  ·  Vol ${compact(st.volume)}  ·  VWAP ${st.vwap != null ? st.vwap.toFixed(prec) : '-'}`
-          + `  ·  Trades ${compact(st.trades)}  ·  H/L range ${st.rangePct != null ? st.rangePct.toFixed(2) + '%' : '-'}`,
-      ], bounding, { align: 'center', baseline: above ? 'bottom' : 'top' }));
-    }
-    blocks.push(label(a.x + (aLeft ? -8 : 8), a.y + (a.y <= cy ? 4 : -4), [
-      `Start  ${pa.value.toFixed(prec)}`, fmtTime(pa.timestamp),
-    ], bounding, { align: aLeft ? 'right' : 'left', baseline: a.y <= cy ? 'top' : 'bottom' }));
-    blocks.push(label(b.x + (aLeft ? 8 : -8), b.y + (b.y <= cy ? 4 : -4), [
-      `End  ${pb.value.toFixed(prec)}`, fmtTime(pb.timestamp),
-      change(pa.value, pb.value, prec),
-      `${bars} bars · ${fmtDuration(pb.timestamp - pa.timestamp)}`,
-    ], bounding, { align: aLeft ? 'left' : 'right', color, baseline: b.y <= cy ? 'top' : 'bottom' }));
-    blocks.push(label(cx + 8, cy, [
-      `Mid  ${midPrice.toFixed(prec)}  ·  ${fmtTime(midTime)}`,
-      `start→mid ${change(pa.value, midPrice, prec)}`,
-      `mid→end ${change(midPrice, pb.value, prec)}`,
-    ], bounding, { color: MID }));
-    return [...shapes, ...layoutLabels(blocks, bounding)];
   },
 });
 
@@ -250,7 +176,7 @@ chart.setDataLoader({
     const token = type === 'init' ? ++state.loadToken : state.loadToken;
     const params = {
       source: symbol.source, ticker: symbol.ticker, period: period.type, span: period.span,
-      session: state.session, limit: PAGE, adjust: state.adjust, lod: lodFor(), ...typeQuery(),
+      session: state.session, limit: PAGE, adjust: state.adjust, lod: lodFor(), ...typeQuery(), ...modelQuery(),
     };
     if (type === 'forward' && timestamp) params.to = timestamp;
     try {
@@ -262,6 +188,11 @@ chart.setDataLoader({
         state.styleUsed = res.style;
         state.approximate = res.approximate || null;
         state.baseTotal = (res.total || 0) * lodFor();  // bars at full detail
+        if (applyModelPrecision(res)) return;  // reloads once with the right precision
+        // A new model or chart type can change the value range completely; KLineChart only
+        // re-fits the price scale on a symbol change, so ask it to re-fit now.
+        if (typeof chart._resetYAxisAutoCalcTickFlag === 'function') chart._resetYAxisAutoCalcTickFlag();
+        requestAnimationFrame(drawModelGuides);
         renderTypeParams();
         requestAnimationFrame(drawRolls);
         if (state.lodSwitch) finishLodSwitch();
@@ -285,7 +216,7 @@ chart.setDataLoader({
         const res = await api('/api/bars', {
           source: symbol.source, ticker: symbol.ticker, period: period.type, span: period.span,
           session: state.session, since: list[list.length - 1].timestamp, adjust: state.adjust, lod: lodFor(),
-          ...typeQuery(),
+          ...typeQuery(), ...modelQuery(),
         });
         res.bars.forEach((bar) => callback(bar));
       } catch { /* the next poll will retry */ }
@@ -371,6 +302,105 @@ function typeQuery() {
   const p = state.typeParams[state.chartType] || {};
   return { type: state.chartType, box: p.box || undefined, reversal: p.reversal || undefined, lines: p.lines || undefined };
 }
+
+// -- models: price, 1st / 2nd derivative, integral (computed by the server) ------------
+const MODEL_DEFAULTS = { kind: 'price', basis: 'price', per: 'hour', detail: 80, gaps: true };
+state.model = { ...MODEL_DEFAULTS, ...prefs.get('model', {}) };
+// Chart types that only make sense for prices (bricks, Heikin Ashi, Kagi, P&F).
+const PRICE_ONLY_TYPES = new Set([...TRANSFORMED]);
+const CANDLE_LIKE = new Set(['candles', 'bars', 'hollow', 'volume_candles']);
+
+// Detail slider: 100 = a 5-bar Savitzky-Golay window (full resolution), 0 = 401 bars (very smooth).
+function windowForDetail(detail) {
+  const w = Math.round(5 * Math.pow(401 / 5, (100 - detail) / 100));
+  return w % 2 ? w : w + 1;
+}
+
+function modelQuery() {
+  const m = state.model;
+  if (m.kind === 'price') return {};
+  return { model: m.kind, basis: m.basis, per: m.per, window: windowForDetail(m.detail), gaps: m.gaps ? 1 : 0 };
+}
+
+// Drawings are kept per model (a trend line on prices means nothing on a slope chart).
+function drawingsKey() {
+  const m = state.model;
+  return m.kind === 'price' ? state.ticker : `${state.ticker}|${m.kind}|${m.basis}|${m.per}`;
+}
+
+function windowSpan() {
+  const p = state.period || { type: 'minute', span: 1 };
+  const seconds = { second: 1, minute: 60, hour: 3600, day: 86400, week: 604800, month: 2592000 }[p.type] * p.span;
+  return fmtDuration(windowForDetail(state.model.detail) * seconds * 1000);
+}
+
+function renderModelControls() {
+  const m = state.model;
+  $('modelSelect').value = m.kind;
+  $('modelParams').hidden = m.kind === 'price';
+  $('modelBasis').value = m.basis;
+  $('modelPer').value = m.per;
+  $('modelDetail').value = m.detail;
+  $('modelGaps').checked = m.gaps;
+  $('modelDetail').disabled = m.kind === 'integral';
+  $('modelWindow').textContent = m.kind === 'integral' ? '' : `${windowForDetail(m.detail)} bars ≈ ${windowSpan()}`;
+  for (const opt of $('typeSelect').options) opt.disabled = m.kind !== 'price' && PRICE_ONLY_TYPES.has(opt.value);
+}
+
+function setModel(patch) {
+  saveDrawings();
+  const wasPrice = state.model.kind === 'price';
+  state.model = { ...state.model, ...patch };
+  prefs.set('model', state.model);
+  if (wasPrice && state.model.kind !== 'price' && (CANDLE_LIKE.has(state.chartType) || PRICE_ONLY_TYPES.has(state.chartType))) {
+    state.priceChartType = state.chartType;  // a value series reads best as a line; restored on return
+    state.chartType = 'line';
+  } else if (!wasPrice && state.model.kind === 'price' && state.priceChartType) {
+    state.chartType = state.priceChartType;
+    state.priceChartType = null;
+  }
+  $('typeSelect').value = state.chartType;
+  markDirty();
+  state.restoredFor = null;
+  chart.removeOverlay({ groupId: 'user' });
+  resetLod();
+  renderModelControls();
+  applyChartType();
+  renderTypeParams();
+  chart.resetData();
+}
+
+// Model values need their own decimals; prices go back to the symbol's precision.
+function applyModelPrecision(res) {
+  const sym = chart.getSymbol();
+  if (!sym || !state.meta) return false;
+  const want = res.model ? res.model.precision : state.meta.pricePrecision;
+  state.modelUnit = res.model ? res.model.unit : null;
+  if (sym.pricePrecision === want) return false;
+  chart.setSymbol({ ...sym, pricePrecision: want });  // reloads once
+  return true;
+}
+
+// Zero line for derivatives: above = rising (accelerating), below = falling (decelerating).
+function drawModelGuides() {
+  chart.removeOverlay({ groupId: 'model' });
+  if (state.model.kind !== 'd1' && state.model.kind !== 'd2') return;
+  const d = chart.getDataList();
+  if (!d.length) return;
+  chart.createOverlay({ name: 'horizontalStraightLine', groupId: 'model', lock: true,
+                        points: [{ timestamp: d[0].timestamp, value: 0 }],
+                        styles: { line: { style: 'dashed', dashedValue: [4, 4], color: '#787b86', size: 1 } } });
+}
+
+$('modelSelect').addEventListener('change', (e) => setModel({ kind: e.target.value }));
+$('modelBasis').addEventListener('change', (e) => setModel({ basis: e.target.value }));
+$('modelPer').addEventListener('change', (e) => setModel({ per: e.target.value }));
+$('modelGaps').addEventListener('change', (e) => setModel({ gaps: e.target.checked }));
+$('modelDetail').addEventListener('input', (e) => {  // live label while dragging
+  state.model.detail = Number(e.target.value);
+  $('modelWindow').textContent = `${windowForDetail(state.model.detail)} bars ≈ ${windowSpan()}`;
+});
+$('modelDetail').addEventListener('change', (e) => setModel({ detail: Number(e.target.value) }));
 
 // The theme's own candle colours, captured before any chart type hides them.
 const DEFAULT_CANDLE = (() => {
@@ -1010,10 +1040,10 @@ function renderTools() {
 // Drawings belong to the current layout, per ticker, as (timestamp, price) points so they
 // line up on every interval.
 function saveDrawings() {
-  if (!state.ticker || state.restoredFor !== state.ticker || !layout.current) return;
+  if (!state.ticker || state.restoredFor !== drawingsKey() || !layout.current) return;
   const user = chart.getOverlays({ groupId: 'user' }).filter((o) => o.id !== state.drawingId);
   const drawings = layout.current.data.drawings || (layout.current.data.drawings = {});
-  drawings[state.ticker] = user.map((o) => ({
+  drawings[drawingsKey()] = user.map((o) => ({
     name: o.name, lock: o.lock, visible: o.visible, extendData: o.extendData ?? null, styles: o.styles ?? null,
     points: o.points.map((p) => ({ timestamp: p.timestamp, value: p.value })),
   }));
@@ -1021,9 +1051,9 @@ function saveDrawings() {
 }
 
 function restoreDrawings() {
-  if (state.restoredFor === state.ticker) return;
+  if (state.restoredFor === drawingsKey()) return;
   chart.removeOverlay({ groupId: 'user' });
-  const saved = layout.current?.data.drawings?.[state.ticker] || [];
+  const saved = layout.current?.data.drawings?.[drawingsKey()] || [];
   const lastHighlight = saved.map((d) => d.name).lastIndexOf('measure');  // one highlight at a time
   for (const [i, d] of saved.entries()) {
     if (d.name === 'measure' && i !== lastHighlight) continue;
@@ -1032,7 +1062,7 @@ function restoreDrawings() {
       extendData: d.extendData ?? undefined, styles: d.styles ?? undefined, ...overlayEvents(),
     });
   }
-  state.restoredFor = state.ticker;
+  state.restoredFor = drawingsKey();
   scheduleHighlightPanel();
 }
 
@@ -1069,6 +1099,7 @@ function snapshot() {
     chartType: state.chartType,
     typeParams: state.typeParams,
     adjust: state.adjust,
+    model: { ...state.model },
     indicators: [...state.indicators],
     drawings: layout.current?.data.drawings || {},
   };
@@ -1118,6 +1149,8 @@ async function applyLayout(l) {
     if (d.chartType) state.chartType = d.chartType;
     if (d.typeParams) state.typeParams = d.typeParams;
     if (d.adjust) state.adjust = d.adjust;
+    state.model = { ...MODEL_DEFAULTS, ...(d.model || {}) };
+    renderModelControls();
     if (Array.isArray(d.indicators)) {
       for (const name of state.indicators) chart.removeIndicator({ name });
       state.indicators = [...d.indicators];
@@ -1324,8 +1357,11 @@ function updateStatus(loaded) {
   const m = state.meta;
   if (!m) return;
   const info = symbolInfo(m.ticker);
+  const mo = state.model;
   const parts = [
     `${m.ticker}${info.name ? ' · ' + info.name : ''}`,
+    ...(mo.kind === 'price' ? [] : [`model: ${$('modelSelect').selectedOptions[0].text} in ${state.modelUnit || '…'}`
+      + (mo.kind === 'integral' ? '' : `, Savitzky-Golay window ${windowForDetail(mo.detail)} bars`)]),
     `feed: ${m.feeds.join(' > ')} (${m.base} data${m.hasDaily ? ' + official daily' : ''})`,
     `${m.rows.toLocaleString()} rows`,
     `${m.first.slice(0, 10)} → ${m.last.slice(0, 10)}`,
@@ -1391,7 +1427,7 @@ function setPanelHidden(hidden) {
 })();
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
-function prec() { return state.meta?.pricePrecision ?? 2; }
+function prec() { return chart.getSymbol()?.pricePrecision ?? state.meta?.pricePrecision ?? 2; }
 function priceText(v) { return v == null ? '–' : Number(v).toFixed(prec()); }
 function signedPx(v) { return v == null ? '–' : `${v >= 0 ? '+' : ''}${Number(v).toFixed(prec())}`; }
 function pct(v) { return v == null ? '–' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`; }
@@ -1507,10 +1543,13 @@ function renderHighlightPanel() {
     box.innerHTML = `<h3>Highlight</h3><div class="p-muted">Draw a highlight (Alt+H) to see its statistics here.</div>`;
     return;
   }
-  const chgCell = (c) => `<span class="${cls(c.abs)}">${signedPx(c.abs)} (${pct(c.pct)})</span>`;
+  // Percent change is only meaningful for prices (a slope or an area can cross zero).
+  const isPrice = state.model.kind === 'price';
+  const chgCell = (c) => `<span class="${cls(c.abs)}">${signedPx(c.abs)}${isPrice ? ` (${pct(c.pct)})` : ''}</span>`;
   const st = s.stats;
   box.innerHTML = `
-    <h3>Highlight <button id="hlRemove" title="Remove the highlight">Remove</button></h3>
+    <h3>Highlight${state.model.kind !== 'price' && state.modelUnit ? ` <span class="p-muted">(${esc(state.modelUnit)})</span>` : ''}
+      <button id="hlRemove" title="Remove the highlight">Remove</button></h3>
     ${kv([
       ['Start', `${priceText(s.start.price)} <small>${esc(fmtTime(s.start.time))}</small>`],
       ['Mid', `<span class="mid">${priceText(s.mid.price)}</span> <small>${esc(fmtTime(s.mid.time))}</small>`],
@@ -1527,10 +1566,11 @@ function renderHighlightPanel() {
       ['High', `${priceText(st.high)} <small>${esc(fmtTime(st.highTime))}</small>`],
       ['Low', `${priceText(st.low)} <small>${esc(fmtTime(st.lowTime))}</small>`],
       ['Close', priceText(st.close)],
-      ['Open → close', `<span class="${cls(st.change)}">${signedPx(st.change)} (${pct(st.changePct)})</span>`],
-      ['High/low range', st.rangePct == null ? '–' : `${st.rangePct.toFixed(2)}%`],
+      ['Open → close', `<span class="${cls(st.change)}">${signedPx(st.change)}${isPrice ? ` (${pct(st.changePct)})` : ''}</span>`],
+      isPrice && ['High/low range', st.rangePct == null ? '–' : `${st.rangePct.toFixed(2)}%`],
+      !isPrice && ['High − low', priceText(st.high - st.low)],
       ['Volume', big(st.volume)],
-      ['VWAP', priceText(st.vwap)],
+      isPrice && ['VWAP', priceText(st.vwap)],
       ['Trades', big(st.trades)],
     ]) : ''}`;
   $('hlRemove')?.addEventListener('click', () => chart.removeOverlay({ groupId: 'user', name: 'measure' }));
@@ -1542,6 +1582,7 @@ function renderHighlightPanel() {
   renderTools();
   renderIndicatorMenu();
   renderSession();
+  renderModelControls();
   applyChartType();
   renderTypeParams();
   state.indicators.forEach(addIndicator);

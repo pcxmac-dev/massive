@@ -58,6 +58,8 @@ select option { background: var(--panel); }
 .params { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
 .params input { width: 72px; border-color: var(--border); background: var(--bg); padding: 3px 6px; cursor: text; }
 .params .approx { color: #f0b90b; }
+.params select { padding: 2px 4px; }
+#modelDetail { width: 110px; vertical-align: middle; accent-color: var(--accent); }
 
 .menu { position: relative; }
 .dropdown {

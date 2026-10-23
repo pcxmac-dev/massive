@@ -36,6 +36,27 @@
       </optgroup>
     </select>
     <span id="typeParams" class="params"></span>
+    <select id="modelSelect" title="Model: the price, its derivatives, or its integral">
+      <option value="price">Price</option>
+      <option value="d1">1st derivative (slope)</option>
+      <option value="d2">2nd derivative (acceleration)</option>
+      <option value="integral">Integral (area)</option>
+    </select>
+    <span id="modelParams" class="params" hidden>
+      <select id="modelBasis" title="Differentiate the price itself, or log price (percent terms)">
+        <option value="price">price</option><option value="log">log %</option>
+      </select>
+      <label>per <select id="modelPer" title="Time unit of slopes and areas">
+        <option value="bar">bar</option><option value="minute">minute</option>
+        <option value="hour">hour</option><option value="day">day</option>
+      </select></label>
+      <label title="Detail: smooth (left) to full resolution (right)">smooth
+        <input id="modelDetail" type="range" min="0" max="100" step="1">
+      detail</label>
+      <span id="modelWindow" class="p-muted"></span>
+      <label title="Start fresh after overnight/weekend gaps so they never show as spikes">
+        <input id="modelGaps" type="checkbox"> gaps</label>
+    </span>
     <select id="adjustSelect" title="Continuous futures: back-adjust at contract rolls" hidden>
       <option value="none">Unadjusted (as traded)</option>
       <option value="difference">Back-adjusted (difference)</option>
