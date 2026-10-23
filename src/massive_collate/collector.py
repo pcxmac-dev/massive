@@ -341,7 +341,7 @@ def check_listing(source: DataSource, store: Store, item: dict, today: date, log
             log(f"{ticker}: removed {n} rows from before its {inst.list_date} listing (another instrument)")
         if item["backfilled_to"] and item["backfilled_to"] < inst.list_date:
             store.set_backfilled(source.name, ticker, inst.list_date)
-    store.set_listing(source.name, ticker, inst.list_date, inst.figi, today, inst.name, inst.kind)
+    store.set_listing(source.name, ticker, inst.list_date, inst.figi, today, inst.name, inst.kind, mic)
     store.set_details(source.name, ticker, inst.details or {"unavailable": "no reference record"})
     return Listing(True, inst.list_date)
 

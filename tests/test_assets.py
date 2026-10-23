@@ -170,3 +170,13 @@ def test_futures_never_request_before_floor(store):
     sync(src, store, FREE, NOW, log=_log)
     floor = history_floor(FREE, NOW.date())
     assert src.bar_calls and all(c[1] >= floor for c in src.bar_calls)
+
+
+def test_listing_check_fills_in_the_exchange_when_none_was_given(store):
+    from massive_collate.models import Exchange, Instrument
+
+    store.watch_spec("fake", resolve("NVDA"))
+    nasdaq = Exchange("fake", 1, "Nasdaq", None, mic="XNAS")
+    src = FakeSource(entitled=("minute",), listing=Instrument("NVDA", name="NVIDIA", primary_exchange=nasdaq))
+    sync(src, store, FREE, NOW, log=_log)
+    assert store.watchlist("fake")[0]["exchange"] == "XNAS"

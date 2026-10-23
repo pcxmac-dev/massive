@@ -467,14 +467,15 @@ class Store:
 
     def set_listing(
         self, source: str, ticker: str, listed_from: date | None, figi: str | None, checked: date,
-        name: str | None = None, kind: str | None = None,
+        name: str | None = None, kind: str | None = None, exchange: str | None = None,
     ) -> None:
+        """Record a listing check. `exchange` pins the primary exchange if none was set yet."""
         with self.conn:
             self.conn.execute(
                 "UPDATE watchlist SET listed_from=?, figi=?, checked_at=?, name=COALESCE(?, name), "
-                "kind=COALESCE(?, kind) WHERE source=? AND ticker=?",
+                "kind=COALESCE(?, kind), exchange=COALESCE(exchange, ?) WHERE source=? AND ticker=?",
                 (listed_from.isoformat() if listed_from else None, figi, checked.isoformat(), name, kind,
-                 source, ticker.upper()),
+                 exchange, source, ticker.upper()),
             )
 
     def delete_before(self, source: str, ticker: str, cutoff_ns: int | None = None) -> int:
