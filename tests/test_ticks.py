@@ -152,3 +152,12 @@ def test_charts_read_seconds_by_window_on_a_minute_base(store):
     assert len(older_page["bars"]) == 70 and older_page["more"] is False  # 600 s / 5 = 120 bars in all
     minutes = engine.bars(MERGED, "SPCX", "minute", 1, session="extended", limit=100)
     assert len(minutes["bars"]) == 15
+
+
+def test_extended_hours_prints_build_extended_hours_bars():
+    # consolidated rules say Form T sets no high/low/last; bars of extended hours are built from them
+    rules = {("utp", "T"): (False, False, True), ("utp", "U"): (False, False, True)}
+    df = pd.DataFrame({"ts_ns": [0, 10 * S, 20 * S], "price": [50.0, 51.0, 52.0], "size": [10, 10, 10],
+                       "conditions": ["T", "T", "U"], "tape": [3, 3, 3]})
+    bars, _ = build_bars(df, 60 * S, rules)
+    assert bars == [{"t": 0, "o": 50.0, "h": 52.0, "l": 50.0, "c": 51.0, "v": 30.0, "vw": 51.0, "n": 3}]

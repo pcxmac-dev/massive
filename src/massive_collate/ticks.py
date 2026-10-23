@@ -17,6 +17,12 @@ import pandas as pd
 
 TAPE_FAMILY = {1: "cta", 2: "cta", 3: "utp"}
 REGULAR = ("", "@", " ")  # no condition: a regular trade
+# The consolidated last-sale rules leave extended-hours prints (Form T) out of the high/low and the
+# last price, which would make every pre-market and after-hours bar flat. Bars of those hours are
+# built from them (as the feeds' own bars are): T counts as regular, and U (extended hours, sold out
+# of sequence) as out of sequence (high/low and volume, not open/close). Audits check the result.
+BAR_RULES = {("cta", "T"): (True, True, True), ("utp", "T"): (True, True, True),
+             ("cta", "U"): (True, False, True), ("utp", "U"): (True, False, True)}
 
 
 def eligibility(trades: pd.DataFrame, rules: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray, set]:
@@ -41,7 +47,7 @@ def eligibility(trades: pd.DataFrame, rules: dict) -> tuple[np.ndarray, np.ndarr
             for code in (str(conds[i]).split(",") if fam else ()):
                 if code in REGULAR:
                     continue
-                rule = rules.get((fam, code))
+                rule = BAR_RULES.get((fam, code)) or rules.get((fam, code))
                 if rule is None:
                     unknown.add(f"{fam or '?'}:{code}")
                     continue
