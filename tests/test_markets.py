@@ -97,3 +97,19 @@ def test_scan_only_and_fetch_endpoint(tmp_path):
         assert [r["ticker"] for r in result.items] == ["AAPL"]
         with pytest.raises(LookupError):
             ChartApp(store).start_scan("NOPE")  # only watched symbols can be fetched
+
+
+def test_proxy_moves_colour_the_exchanges(tmp_path):
+    from datetime import date
+
+    from massive_collate.storage import Store
+
+    with Store(tmp_path / "m.db") as store:
+        store.save_proxy_closes("massive", date(2026, 10, 21), {"EWJ": 100.0, "EWY": 50.0, "SPY": 600.0})
+        store.save_proxy_closes("massive", date(2026, 10, 22), {"EWJ": 103.0, "EWY": 48.5, "SPY": 600.0})
+        moves = store.proxy_moves()
+    assert round(moves["EWJ"]["changePct"], 6) == 3.0 and round(moves["EWY"]["changePct"], 6) == -3.0
+    out = {m["code"]: m for m in world.world_markets(datetime(2026, 10, 23, 2, 0, tzinfo=timezone.utc), moves=moves)}
+    assert out["XTKS"]["performance"] == {"proxy": "EWJ", "day": "2026-10-22", "close": 103.0, "changePct": moves["EWJ"]["changePct"]}
+    assert out["XKRX"]["performance"]["changePct"] < 0 and out["XNYS"]["performance"]["changePct"] == 0
+    assert "performance" not in out["XPRA"]  # no US-listed proxy for Prague

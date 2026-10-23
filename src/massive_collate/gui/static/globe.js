@@ -5,7 +5,11 @@
    are drawn when vendor/world/countries-110m.json (Natural Earth, public domain) is present.
    The globe turns in real time (the sun's position is computed every frame, so the Earth
    rotates under it at 15 degrees an hour), wherever it has been dragged to. Drag to turn it;
-   click the sun (or double-click anywhere) to glide back to noon. Beside it: every exchange by region
+   click the sun (or double-click anywhere) to glide back to noon.
+   The Moon is drawn at its true size relative to the Earth, lit from the Sun's real direction,
+   off the globe's edge in its real direction (in front of or behind the Earth); planets show
+   where they are overhead, faintly. Behind the globe is the real sky in that direction: stars
+   and constellation figures (vendor/sky, from d3-celestial) turning with the Earth. Beside it: every exchange by region
    with its local time, state, countdown, today's hours (lunch breaks included) and holidays. */
 (() => {
   const canvas = document.getElementById('globe');
@@ -93,12 +97,44 @@
     glide = { from: { ...view }, start: performance.now() };
   }
 
+  // -- the sky ------------------------------------------------------------------------------
+  // Greenwich mean sidereal time turns sky coordinates (RA/Dec) into Earth-fixed directions:
+  // a body at RA/Dec is overhead at longitude RA - GMST, latitude Dec.
+  function gmst(t = Date.now()) {
+    const jd = t / 864e5 + 2440587.5;
+    return (((280.46061837 + 360.98564736629 * (jd - 2451545.0)) % 360) + 360) % 360;
+  }
+  const unit = (lon, lat) => [Math.cos(lat * rad) * Math.cos(lon * rad), Math.cos(lat * rad) * Math.sin(lon * rad), Math.sin(lat * rad)];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  // The camera frame: C points from the Earth's centre at the viewer, E to screen-right, N up.
+  function camera() {
+    const l = view.lon * rad, p = view.lat * rad;
+    return { C: [Math.cos(p) * Math.cos(l), Math.cos(p) * Math.sin(l), Math.sin(p)],
+             E: [-Math.sin(l), Math.cos(l), 0], N: [-Math.sin(p) * Math.cos(l), -Math.sin(p) * Math.sin(l), Math.cos(p)] };
+  }
+  let skyData = null;  // { lines: [[ [ra,dec], ... ]], stars: [[ra, dec, mag]], names: [[ra, dec, name]] }
+
+  async function loadSky() {
+    try {
+      const get = async (f) => { const r = await fetch(`vendor/sky/${f}`); return r.ok ? r.json() : null; };
+      const [lines, stars, names] = await Promise.all([get('constellations.lines.json'), get('stars.6.json'), get('constellations.json')]);
+      if (!lines && !stars) return;
+      const ra = (x) => (x + 360) % 360;
+      skyData = {
+        lines: (lines?.features || []).flatMap((f) => f.geometry.coordinates.map((part) => part.map(([x, y]) => [ra(x), y]))),
+        stars: (stars?.features || []).map((f) => [ra(f.geometry.coordinates[0]), f.geometry.coordinates[1], f.properties.mag]),
+        names: (names?.features || []).filter((f) => (f.properties.rank ?? 1) <= 2)
+          .map((f) => [ra(f.geometry.coordinates[0]), f.geometry.coordinates[1], f.properties.name || f.id]),
+      };
+    } catch { /* no star data: plain background */ }
+  }
+
   // -- projection -------------------------------------------------------------------------
   const TOP = 64;  // the announcements ticker and the info line sit above the globe
   let zoom = 1;    // 1 = whole globe; wheel / pinch zooms in up to 12x
   function geometry() {
     const w = canvas.clientWidth, h = canvas.clientHeight;
-    const r = Math.max(40, Math.min(w * 0.44, (h - TOP - 28) / 2)) * zoom;
+    const r = Math.max(40, Math.min(w * 0.40, ((h - TOP - 28) / 2) * 0.9)) * zoom;  // room for the Moon
     return { w, h, cx: w / 2, cy: TOP + (h - TOP) / 2, r };
   }
 
@@ -212,6 +248,167 @@
     return `hsl(${hue % 360}, 75%, 55%)`;
   }
 
+  // Background sky: the directions behind the globe, as a camera at the viewer's side sees them
+  // (gnomonic projection towards -C). Stars by magnitude, constellation figures, planets.
+  function skyXY(dir, fr, g, F) {
+    const depth = -dot(dir, fr.C);
+    if (depth < 0.08) return null;
+    return { x: g.cx + (F * dot(dir, fr.E)) / depth, y: g.cy - (F * dot(dir, fr.N)) / depth };
+  }
+
+  function drawSky(g, fr, g0, bodies, dark) {
+    const F = g.r * 1.15;
+    if (skyData) {
+      ctx.beginPath();
+      for (const line of skyData.lines) {
+        let pen = false;
+        for (const [ra, dec] of line) {
+          const q = skyXY(unit(ra - g0, dec), fr, g, F);
+          if (!q) { pen = false; continue; }
+          if (!pen) { ctx.moveTo(q.x, q.y); pen = true; } else ctx.lineTo(q.x, q.y);
+        }
+      }
+      ctx.strokeStyle = dark ? 'rgba(120,150,220,0.22)' : 'rgba(60,80,140,0.18)'; ctx.lineWidth = 0.8; ctx.stroke();
+      for (const [ra, dec, mag] of skyData.stars) {
+        const q = skyXY(unit(ra - g0, dec), fr, g, F);
+        if (!q || q.x < 0 || q.y < 0 || q.x > g.w || q.y > g.h) continue;
+        const size = Math.max(0.4, 2.2 - mag * 0.32);
+        ctx.fillStyle = dark ? `rgba(230,235,255,${Math.max(0.15, 0.9 - mag * 0.12)})` : `rgba(40,50,90,${Math.max(0.12, 0.7 - mag * 0.1)})`;
+        ctx.fillRect(q.x - size / 2, q.y - size / 2, size, size);
+      }
+      ctx.font = '9px system-ui, sans-serif';
+      ctx.fillStyle = dark ? 'rgba(140,160,210,0.45)' : 'rgba(60,80,140,0.45)';
+      for (const [ra, dec, name] of skyData.names) {
+        const q = skyXY(unit(ra - g0, dec), fr, g, F);
+        if (q && q.x > 0 && q.y > TOP && q.x < g.w && q.y < g.h) ctx.fillText(name, q.x, q.y);
+      }
+    }
+    // planets in the background sky, as faint dots with their symbol
+    ctx.font = '10px system-ui, sans-serif';
+    for (const b of bodies) {
+      if (b.id === 'sun' || b.id === 'moon') continue;
+      const q = skyXY(b.dir, fr, g, F);
+      if (!q) continue;
+      ctx.fillStyle = dark ? 'rgba(255,220,160,0.7)' : 'rgba(140,90,20,0.7)';
+      ctx.beginPath(); ctx.arc(q.x, q.y, 1.6, 0, 2 * Math.PI); ctx.fill();
+      ctx.fillText(`${b.symbol} ${b.name}`, q.x + 4, q.y - 3);
+    }
+  }
+
+  // The Moon at its true size (0.273 Earth radii), just off the globe in its real direction, as
+  // it looks: the near side (which always faces the Earth) with its maria and bright craters at
+  // their selenographic positions, lit from the Sun's real direction. Kept dim so it does not
+  // compete with the markets.
+  // [latitude, longitude, angular radius, darkness]: the large maria and two bright rayed craters.
+  const MARIA = [
+    [32.8, -15.6, 19, 0.42], [28.0, 17.5, 11, 0.40], [8.5, 31.4, 13, 0.42], [17.0, 59.1, 8, 0.40],
+    [-7.8, 51.3, 12, 0.36], [-15.2, 35.5, 6, 0.36], [-21.3, -16.6, 11, 0.32], [-24.4, -38.6, 6, 0.34],
+    [18.4, -57.4, 22, 0.38], [5.0, -45.0, 18, 0.30], [56.0, 1.4, 8, 0.28], [58.0, -25.0, 7, 0.24],
+    [13.3, 3.6, 4, 0.28], [-10.0, -23.0, 5, 0.26], [7.5, -30.9, 8, 0.28], [-3.0, 3.0, 4, 0.22],
+  ];
+  const BRIGHT = [[-43.3, -11.2, 1.6, 0.5], [9.6, -20.1, 1.4, 0.35], [23.7, -47.4, 1.0, 0.45]];  // Tycho, Copernicus, Aristarchus
+
+  // Small deterministic texture so the surface is not flat (value noise on the sphere).
+  function hash(x, y, z) {
+    let h = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453;
+    return h - Math.floor(h);
+  }
+  function noise(v, scale) {
+    const x = v[0] * scale, y = v[1] * scale, z = v[2] * scale;
+    const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+    const xf = x - xi, yf = y - yi, zf = z - zi;
+    const sm = (t) => t * t * (3 - 2 * t);
+    let total = 0;
+    for (let dx = 0; dx <= 1; dx++) for (let dy = 0; dy <= 1; dy++) for (let dz = 0; dz <= 1; dz++) {
+      const w = (dx ? sm(xf) : 1 - sm(xf)) * (dy ? sm(yf) : 1 - sm(yf)) * (dz ? sm(zf) : 1 - sm(zf));
+      total += w * hash(xi + dx, yi + dy, zi + dz);
+    }
+    return total;
+  }
+
+  function albedo(lat, lon, v) {
+    let a = 0.78 + 0.10 * (noise(v, 9) - 0.5) + 0.06 * (noise(v, 23) - 0.5);
+    for (const [mlat, mlon, r, dark] of MARIA) {
+      const dist = Math.acos(Math.max(-1, Math.min(1, Math.sin(lat * rad) * Math.sin(mlat * rad)
+        + Math.cos(lat * rad) * Math.cos(mlat * rad) * Math.cos((lon - mlon) * rad)))) / rad;
+      const edge = r * (0.8 + 0.4 * noise(v, 5));  // ragged, soft shores
+      if (dist < edge * 1.25) a -= dark * 0.8 * Math.min(1, Math.max(0, (edge * 1.25 - dist) / (edge * 0.7)));
+    }
+    for (const [clat, clon, r, glow] of BRIGHT) {
+      const dist = Math.acos(Math.max(-1, Math.min(1, Math.sin(lat * rad) * Math.sin(clat * rad)
+        + Math.cos(lat * rad) * Math.cos(clat * rad) * Math.cos((lon - clon) * rad)))) / rad;
+      if (dist < r * 6) a += glow * 0.6 * Math.exp(-dist / r) * (dist < r ? 1 : 0.35);  // crater and its rays
+    }
+    return Math.max(0.15, Math.min(1, a));
+  }
+
+  let moonCache = null;
+  function drawMoon(g, fr, moon, sunDir, dark) {
+    const rM = Math.max(6, g.r * 0.2727);
+    let vx = dot(moon.dir, fr.E), vy = dot(moon.dir, fr.N);
+    const len = Math.hypot(vx, vy);
+    if (len < 0.12) { vx = Math.SQRT1_2; vy = Math.SQRT1_2; } else { vx /= len; vy /= len; }
+    // Just outside the limb in its real direction; if that is off-screen, the nearest angle
+    // around the limb that is on-screen (never across the Earth).
+    const fits = (t, d) => {
+      const x = g.cx + Math.cos(t) * d, y = g.cy - Math.sin(t) * d;
+      return x - rM > 4 && x + rM < g.w - 4 && y - rM > TOP + 40 && y + rM + 16 < g.h - 40;  // clear of the info text and legend
+    };
+    const base = Math.atan2(vy, vx);
+    let angle = base, d = g.r + rM * 1.6, found = false;
+    for (const dd of [g.r + rM * 1.6, g.r + rM * 1.3, g.r + rM * 1.08]) {  // as near the limb as needed
+      for (let step = 0; step <= 180 && !found; step += 5) {
+        const hit = [base + step * rad, base - step * rad].find((t) => fits(t, dd));
+        if (hit !== undefined) { angle = hit; d = dd; found = true; }
+      }
+      if (found) break;
+    }
+    let mx = g.cx + Math.cos(angle) * d, my = g.cy - Math.sin(angle) * d;
+    if (!found) {  // zoomed in: keep it on screen at the edge nearest its direction
+      mx = Math.max(rM + 4, Math.min(g.w - rM - 4, mx));
+      my = Math.max(TOP + 40 + rM, Math.min(g.h - rM - 56, my));
+    }
+
+    // The Moon's own axes: its near side faces the Earth (f = -direction), north roughly
+    // along the Earth's axis, selenographic east to the right as seen from the Earth.
+    const m = moon.dir;
+    const f = [-m[0], -m[1], -m[2]];
+    let u = [0 - dot([0, 0, 1], f) * f[0], 0 - dot([0, 0, 1], f) * f[1], 1 - dot([0, 0, 1], f) * f[2]];
+    const ul = Math.hypot(...u); u = u.map((x) => x / ul);
+    const east = [m[1] * u[2] - m[2] * u[1], m[2] * u[0] - m[0] * u[2], m[0] * u[1] - m[1] * u[0]];  // m x u
+
+    const size = Math.ceil(rM * 2);
+    const key = `${size}|${sunDir.map((v) => v.toFixed(3))}|${fr.C.map((v) => v.toFixed(3))}|${m.map((v) => v.toFixed(3))}|${dark}`;
+    if (moonCache?.key !== key) {
+      const off = document.createElement('canvas');
+      off.width = off.height = size;
+      const o = off.getContext('2d'), img = o.createImageData(size, size);
+      for (let j = 0; j < size; j++) for (let i = 0; i < size; i++) {
+        const x = (i + 0.5) / rM - 1, y = 1 - (j + 0.5) / rM;
+        const rr = x * x + y * y;
+        if (rr > 1) continue;
+        const z = Math.sqrt(1 - rr);
+        const n = [x * fr.E[0] + y * fr.N[0] + z * fr.C[0], x * fr.E[1] + y * fr.N[1] + z * fr.C[1], x * fr.E[2] + y * fr.N[2] + z * fr.C[2]];
+        const lat = Math.asin(Math.max(-1, Math.min(1, dot(n, u)))) / rad;
+        const lon = Math.atan2(dot(n, east), dot(n, f)) / rad;
+        const sun = dot(n, sunDir);
+        // Lunar regolith barely darkens towards the limb: mostly flat lighting with a soft terminator.
+        const light = sun > 0 ? Math.min(1, 0.25 + sun * 0.9) : Math.max(0, 0.04 + sun * 0.2);
+        const v = 120 * albedo(lat, lon, n) * light;  // dim on purpose: background, not foreground
+        const edge = Math.min(1, (1 - Math.sqrt(rr)) * rM * 0.8);  // anti-aliased rim
+        const k = (j * size + i) * 4;
+        img.data[k] = v; img.data[k + 1] = v * 0.98; img.data[k + 2] = v * 0.94;
+        img.data[k + 3] = Math.round(255 * edge * (dark ? 0.42 : 0.32));
+      }
+      o.putImageData(img, 0, 0);
+      moonCache = { key, canvas: off };
+    }
+    ctx.drawImage(moonCache.canvas, mx - rM, my - rM, size, size);
+    ctx.font = '10px system-ui, sans-serif';
+    ctx.fillStyle = dark ? 'rgba(170,175,190,0.3)' : 'rgba(60,60,80,0.3)';
+    ctx.fillText(`☾ ${moon.phaseName} ${Math.round(moon.illuminated * 100)}%`, mx - rM, my + rM + 12);
+  }
+
   function draw() {
     if (document.body.dataset.view !== 'markets') return;
     const dpr = window.devicePixelRatio || 1;
@@ -222,7 +419,18 @@
     const dark = !document.body.classList.contains('light');
     const line = dark ? 'rgba(160,170,200,' : 'rgba(40,50,80,';
 
+    const fr = camera();
+    const sky = markets?.sky;
+    const g0 = gmst();
+    const bodies = (sky?.bodies || []).map((b) => ({ ...b, dir: unit(b.ra - g0, b.dec) }));
+    const sunDir = markets ? unit(markets.sun.lon, markets.sun.lat) : fr.C;
+    drawSky(g, fr, g0, bodies, dark);
+    const moon = bodies.find((b) => b.id === 'moon');
+    if (moon && dot(moon.dir, fr.C) < 0) drawMoon(g, fr, moon, sunDir, dark);  // behind the Earth
+
     // sphere
+    ctx.beginPath(); ctx.arc(g.cx, g.cy, g.r, 0, 2 * Math.PI);
+    ctx.fillStyle = dark ? '#0b0f18' : '#f4f6fb'; ctx.fill();  // opaque: the sky stays behind
     ctx.beginPath(); ctx.arc(g.cx, g.cy, g.r, 0, 2 * Math.PI);
     const grad = ctx.createRadialGradient(g.cx - g.r * 0.3, g.cy - g.r * 0.35, g.r * 0.1, g.cx, g.cy, g.r);
     grad.addColorStop(0, dark ? 'rgba(41,98,255,0.18)' : 'rgba(41,98,255,0.10)');
@@ -254,6 +462,17 @@
     }
 
     if (!markets) return;
+    // planets where they are overhead: small and faint, so they do not compete with markets
+    ctx.font = '11px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (const b of bodies) {
+      if (b.id === 'sun' || b.id === 'moon') continue;
+      const p = project(b.ra - g0, b.dec, g);
+      if (!p.visible) continue;
+      ctx.fillStyle = dark ? 'rgba(200,190,255,0.55)' : 'rgba(80,60,140,0.55)';
+      ctx.fillText(b.symbol, p.x, p.y);
+    }
+    ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
+    if (moon && dot(moon.dir, fr.C) >= 0) drawMoon(g, fr, moon, sunDir, dark);  // in front
     // noon marker (subsolar point)
     const sun = project(markets.sun.lon, markets.sun.lat, g);
     if (sun.visible) {
@@ -503,7 +722,8 @@
     if (at >= 0) { news.i = at; news.shownAt = Date.now(); renderTicker(true); }
     if (m) { offset = { lon: wrap(m.lon - subsolar().lon), lat: Math.max(-60, Math.min(60, m.lat)) }; }
   });
-  window.Globe = { state: () => ({ view: { ...view }, offset: { ...offset }, sun: subsolar(), following: following() }), recentre };
+  window.Globe = { state: () => ({ view: { ...view }, offset: { ...offset }, sun: subsolar(), following: following() }), recentre, perfColor };
   requestAnimationFrame(frame);
+  loadSky();
   if (document.body.dataset.view === 'markets') { load(); loadTopo(); }
 })();
