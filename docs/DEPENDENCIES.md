@@ -126,6 +126,50 @@ a mirror of someone else's data 0.80.
 | IMF primary commodity prices (53 commodities, 10 indexes, 2005 = 100) | submodule datasets/commodity-prices (mirror of IMF data, frozen) | 1980-02 to 2017-06; 4 versions | none (frozen) | IMF terms: personal, non-commercial use |
 | CFTC Commitments of Traders, legacy futures-only | cftc.gov (public domain) | 1986-01 to the latest Tuesday | weekly; past years closed | values are as of Tuesday, published Friday 15:30 ET |
 
+### Sources by class: history, live, keys and where each is kept
+
+Each source keeps its own files: a feed's bars in `feeds/<feed>.db` and its ticks in
+`feeds/<feed>-ticks.db`, a dataset provider's values in `datasets/<provider>.db`; live data from a
+source goes to that source's files (ticks raw, bars built from them in `built_bars` with a
+derivation record). Keys are read from user environment variables only. Plan prices are approximate
+(Oct 2026 listings); check the providers' pricing pages before buying.
+
+| Class – source | History here | Live stream | Key | Kept in | Quality |
+|---|---|---|---|---|---|
+| stock – massive | minute and daily, 2 years; published end of day (free plan, 5 req/min) | none on the free plan; 15-min delayed from Stocks Starter (~$29/mo), real-time SIP on Advanced (~$199/mo) | `MASSIVE_API_KEY` set | feeds/massive.db | 0.90 prior (consolidated) |
+| stock – alpaca | SIP minute and daily from 2016, latest 15 min held back | IEX real time, 30 symbols, 1 connection (free Basic); SIP real time on Algo Trader Plus (paid) | `ALPACA_API_KEY_ID` + `ALPACA_API_SECRET_KEY` **not set** | feeds/alpaca.db | 0.90 prior |
+| stock – tiingo | daily from 1962 (split-adjusted); IEX intraday | IEX stream (free-tier access unconfirmed) | `TIINGO_API_KEY` **not set** | feeds/tiingo.db | 0.90 prior |
+| index – massive | end of day (free plan) | paid Indices plans | set | feeds/massive.db | 0.90 prior |
+| index – cboe | daily CSV archive (VIX family), closed feed | none | none | feeds/cboe.db | 1.00 prior (official) |
+| fx – massive | previous UTC day (free plan) | paid Currencies plans | set | feeds/massive.db | 0.90 prior |
+| fx – tiingo | daily and intraday | forex stream (free-tier access unconfirmed) | **not set** | feeds/tiingo.db | — |
+| crypto – coinbase | 1-minute from 2015 (90-day window here) | **public WebSocket, no key** (`ws-feed.exchange.coinbase.com`: ticker, matches) | none | feeds/coinbase.db (+ -ticks.db) | 0.93 measured; the reference exchange |
+| crypto – kraken (via alpaca) | trades and minute bars (Alpaca's crypto REST needs no key) | Alpaca's crypto stream needs keys; Kraken's own public WebSocket v2 needs none (not wired yet) | none for REST | feeds/alpaca.db (+ -ticks.db, 1.7 GB) | 0.95 measured |
+| crypto – bitstamp | 1-minute from 2011 | **public WebSocket, no key** (`live_trades_<pair>`) | none | feeds/bitstamp.db | 0.93 measured |
+| crypto – bitfinex | 1-minute | public WebSocket, no key | none | feeds/bitfinex.db | 0.14 measured: a steady premium, not for live |
+| crypto – massive | consolidated, previous UTC day (free plan) | paid Crypto plans | set | feeds/massive.db | 0.90 prior |
+| crypto – composite | built here from the exchanges above | follows its exchanges | — | feeds/composite.db (derived) | — |
+| future – massive | 8 hours delayed; CME Group product list daily | paid Futures plans (CME licensing) | set | feeds/massive.db | 0.90 prior |
+| factors – french | daily/monthly, 1926–; month M around the 15th of M+2 | none (monthly release) | none | datasets/french.db | 0.85 prior |
+| valuation – shiller | monthly, 1871–; git mirror (lags) | none | none | datasets/shiller.db | 0.80 prior |
+| commodities – imf | monthly 1980–2017, frozen git mirror | none | none | datasets/imf.db | 0.80 prior |
+| positioning – cftc | weekly, 1986–; as of Tuesday, released Friday 15:30 ET | none (weekly release) | none | datasets/cftc.db | 1.00 prior (official) |
+| membership – sp500 | git mirror, 200 versions | none | none | datasets/sp500.db | 0.80 prior |
+
+**Best live source per class, without a paid plan:**
+- **Crypto: Coinbase's public WebSocket** (no key; the reference exchange), with Kraken's and
+  Bitstamp's public WebSockets for a live composite. Not Bitfinex (its premium). Well-known coins
+  only: BTC, ETH, SOL, XRP, ADA, DOGE, LTC, LINK (listed on all three).
+- **Stocks: Alpaca's IEX stream**, once the free Alpaca keys are set: real-time prices for up to 30
+  symbols. IEX is one exchange (a few % of volume): prices are sound, volumes partial. Consolidated
+  real time (SIP) needs a paid plan (Alpaca Algo Trader Plus, Massive Stocks Advanced).
+- **Indices:** no free live index; their ETFs (SPY, QQQ, DIA, IWM) on Alpaca's IEX stream as proxies.
+- **Currencies:** Tiingo's forex stream if its free tier allows (key needed; to be confirmed), else
+  a paid Massive Currencies plan.
+- **Futures:** no free source; Massive's free data stays 8 hours delayed.
+- **Datasets:** no live data; each refreshes on its release schedule (the COT report, Fridays 15:30
+  ET, is the time-critical one).
+
 ## 2. Calendars and time
 
 | Dependency | Used for | Source / version | How it goes stale | Upkeep | Status |
