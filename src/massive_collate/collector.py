@@ -823,8 +823,9 @@ def sync(
                 result.skipped += 1
                 continue
             floor = floors[asset]
-            if (only is None or published_only) and synced and not _due(
+            if (only is None or published_only) and synced and not _backfilling(item, floors[asset]) and not _due(
                     asset, tier, synced, now, 0.0 if urgent or only is not None else refresh_hours):
+                # nothing new published since its last sync (a symbol still backfilling is never skipped)
                 result.skipped += 1
                 continue
             if on_item:

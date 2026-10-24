@@ -208,3 +208,15 @@ def test_the_chart_pauses_and_resumes_fetching(tmp_path):
     assert collector.pause_state(store) is not None
     assert app.set_fetching({"paused": False}) == {"paused": None}
     store.close()
+
+
+def test_a_symbol_still_backfilling_is_never_skipped_for_want_of_new_data(store):
+    """A plan reaching further back (Massive Advanced: from 2003) leaves synced symbols with history
+    to fill: nothing new published must not keep them waiting for the next session."""
+    src = FakeSource(trades=_trades())
+    store.watch("fake", ["AAA"], "minute")
+    sync(src, store, FREE, NOW, log=lambda m: None)
+    later = NOW + timedelta(minutes=5)  # nothing published since
+    assert sync(src, store, FREE, later, log=lambda m: None).skipped == 1  # complete: left alone
+    store.reset_backfill("fake", "AAA")  # as a plan with more history leaves it
+    assert sync(src, store, FREE, later, log=lambda m: None).skipped == 0
