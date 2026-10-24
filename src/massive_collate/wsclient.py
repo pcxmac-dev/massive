@@ -1,7 +1,10 @@
 """A small WebSocket client (RFC 6455) on the standard library, for the exchanges' public streams.
 
 Text frames in and out, fragmented messages reassembled, pings answered (and sent, with the
-server's pongs counted), close honoured. Client
+server's pongs counted), close honoured. A frame is taken from the buffer only once all of it has
+arrived, and a message's fragments are kept on the object: a read timeout part way through either
+(a quiet stream's keepalive wait) leaves the stream where it was, so the next read goes on from
+there instead of taking payload bytes for a frame header. Client
 frames are masked as the protocol requires. No compression extensions are offered, so servers send
 plain frames.
 """
@@ -35,8 +38,13 @@ def encode_frame(opcode: int, payload: bytes, mask: bytes | None = None) -> byte
     return head + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
 
 
+MAX_FRAME = 64 * 1024 * 1024  # a frame claiming more is a broken stream, not a message
+
+
 class WebSocket:
     pongs = 0  # pongs received (answers to `ping`)
+    _kind: int | None = None  # the message being reassembled: its opcode ...
+    _parts: list = []  # ... and its fragments so far (replaced, never changed in place)
 
     def __init__(self, url: str, timeout: float = 30.0, user_agent: str = "massive-collate/1"):
         u = urlparse(url)
@@ -68,14 +76,13 @@ class WebSocket:
         head, _, self._buf = self._buf.partition(marker)
         return head
 
-    def _read(self, n: int) -> bytes:
+    def _fill(self, n: int) -> None:
+        """Make the buffer hold at least n bytes (a timeout leaves what arrived in it)."""
         while len(self._buf) < n:
             chunk = self.sock.recv(max(65536, n - len(self._buf)))
             if not chunk:
                 raise WebSocketClosed("connection closed")
             self._buf += chunk
-        out, self._buf = self._buf[:n], self._buf[n:]
-        return out
 
     def send(self, text: str) -> None:
         self.sock.sendall(encode_frame(OP_TEXT, text.encode()))
@@ -85,22 +92,31 @@ class WebSocket:
         self.sock.sendall(encode_frame(OP_PING, payload))
 
     def _frame(self) -> tuple[bool, int, bytes]:
-        b0, b1 = self._read(2)
+        """The next whole frame, taken from the buffer only once all of it is there."""
+        self._fill(2)
+        b0, b1 = self._buf[0], self._buf[1]
         fin, opcode = bool(b0 & 0x80), b0 & 0x0F
-        n = b1 & 0x7F
+        n, at = b1 & 0x7F, 2
         if n == 126:
-            n = struct.unpack("!H", self._read(2))[0]
+            self._fill(4)
+            n, at = struct.unpack("!H", self._buf[2:4])[0], 4
         elif n == 127:
-            n = struct.unpack("!Q", self._read(8))[0]
-        mask = self._read(4) if b1 & 0x80 else None
-        payload = self._read(n)
+            self._fill(10)
+            n, at = struct.unpack("!Q", self._buf[2:10])[0], 10
+        if n > MAX_FRAME:
+            raise WebSocketClosed(f"a frame of {n:,} bytes: the stream is broken")
+        mask = None
+        if b1 & 0x80:
+            self._fill(at + 4)
+            mask, at = self._buf[at:at + 4], at + 4
+        self._fill(at + n)
+        payload, self._buf = self._buf[at:at + n], self._buf[at + n:]
         if mask:
             payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
         return fin, opcode, payload
 
     def recv(self) -> str:
         """The next text (or binary, decoded) message; pings are answered on the way."""
-        parts, kind = [], None
         while True:
             fin, opcode, payload = self._frame()
             if opcode == OP_PING:
@@ -116,11 +132,12 @@ class WebSocket:
                     self.sock.close()
                 raise WebSocketClosed(f"closed by the server ({struct.unpack('!H', payload[:2])[0] if len(payload) >= 2 else 'no code'})")
             if opcode in (OP_TEXT, OP_BINARY):
-                kind, parts = opcode, [payload]
+                self._kind, self._parts = opcode, [payload]
             elif opcode == OP_CONT:
-                parts.append(payload)
-            if fin and kind is not None:
-                return b"".join(parts).decode("utf-8", errors="replace")
+                self._parts = [*self._parts, payload]
+            if fin and self._kind is not None:
+                message, self._kind, self._parts = b"".join(self._parts), None, []
+                return message.decode("utf-8", errors="replace")
 
     def close(self) -> None:
         try:

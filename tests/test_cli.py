@@ -74,7 +74,7 @@ def test_lock_left_by_a_dead_process_is_taken_over(env):
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text("999999")  # no such process
     with cli.run_lock(db):
-        assert lock.read_text() == str(os.getpid())
+        assert lock.read_text().split()[0] == str(os.getpid())  # its id and its start
     assert not lock.exists()
 
 

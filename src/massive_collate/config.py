@@ -355,13 +355,19 @@ def load_settings(
 
 
 def _live_coins(value: str | None) -> tuple[str, ...]:
+    """LIVE_CRYPTO: coins every live exchange stream lists (LIVE_COINS); another would be refused
+    by Coinbase (taking its whole stream down) and entered as covered by Bitstamp."""
     from .live import LIVE_COINS
 
     if value is None or not value.strip():
         return LIVE_COINS
     if value.strip().lower() in ("off", "none", "0", "false"):
         return ()
-    return tuple(c.strip().upper() for c in value.split(",") if c.strip())
+    coins = tuple(c.strip().upper() for c in value.split(",") if c.strip())
+    unknown = [c for c in coins if c not in LIVE_COINS]
+    if unknown:
+        raise ConfigError(f"LIVE_CRYPTO: {', '.join(unknown)} not streamed live; choose from {', '.join(LIVE_COINS)}")
+    return coins
 
 
 def _default(value: int | None, default: int) -> int:

@@ -167,8 +167,44 @@ def test_only_one_recorder_runs_on_a_machine_whatever_database_it_uses(tmp_path)
     assert not live.running(first) and not live.running(second)
     locks = live.take_locks(first)
     assert live.running(first) and live.running(second)  # another database's recorder must not start
-    assert live.machine_lock().read_text() == str(os.getpid())
+    assert live.machine_lock().read_text().split()[0] == str(os.getpid())
+    assert live.take_locks(second) is None  # taken atomically: a second recorder gets neither
     live.release_locks(locks)
     assert not live.running(second) and not live.machine_lock().exists()
     live.machine_lock().write_text("999999999")  # a recorder that died without cleaning up
     assert not live.running(second)
+
+
+
+def test_a_read_timeout_inside_a_frame_or_a_message_does_not_desync_the_stream():
+    text = "y" * 300
+
+    class Stutter(_Sock):
+        """Hands out the stream in pieces, timing out where told."""
+
+        def __init__(self, data, cuts):
+            super().__init__(data)
+            self.cuts = list(cuts)
+
+        def recv(self, n):
+            if self.cuts and len(self.data) <= self.cuts[0]:
+                self.cuts.pop(0)
+                raise socket.timeout()
+            take = 7 if self.cuts else n  # small reads, so a cut falls inside a frame
+            out, self.data = self.data[:take], self.data[take:]
+            return out
+
+    first = _server_frame(OP_TEXT, text[:200].encode(), fin=False)
+    rest = _server_frame(0x0, text[200:].encode())
+    after = _server_frame(OP_TEXT, b"next")
+    data = first + rest + after
+    # time out half way into the first frame, then between the two fragments
+    ws = _client(b"")
+    ws.sock = Stutter(data, [len(data) - 50, len(data) - len(first) - 2])
+    for _ in range(2):
+        try:
+            ws.recv()
+        except socket.timeout:
+            continue
+        raise AssertionError("the cuts should have timed out")
+    assert ws.recv() == text and ws.recv() == "next"

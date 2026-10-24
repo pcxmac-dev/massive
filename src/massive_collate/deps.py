@@ -44,17 +44,19 @@ def _fresh(area, item, iso, now, warn_days, fail_days, what, action) -> Check:
     return Check(area, item, status, f"{what}: {age:.1f} days ago", "" if status == "OK" else action)
 
 
-def coverage_overlaps(store: Store) -> list[str]:
-    """Downloaded spans of a series held by more than one feed (should never happen: only audits
-    fetch twice). Bars built here from a feed's ticks may cover a span another feed downloaded at a
-    coarser resolution: that is an upgrade, not a second download."""
+def coverage_overlaps(store: Store, same_market=None) -> list[str]:
+    """Downloaded spans of a series held by more than one feed of the same market (should never
+    happen: only audits fetch twice). `same_market(feed_a, feed_b, ticker)`: two exchanges'
+    streams of one pair (Coinbase's and Bitstamp's Bitcoin) are different markets, so both hold
+    it. Bars built here from a feed's ticks may cover a span another feed downloaded at a coarser
+    resolution: that is an upgrade, not a second download."""
     rows = store.conn.execute("SELECT ticker, timespan, source, start_ms, end_ms FROM coverage "
                               "WHERE origin='download' ORDER BY ticker, timespan, start_ms").fetchall()
     out = []
     reach: dict[tuple, tuple[str, int]] = {}  # (ticker, timespan) -> (feed, furthest end so far)
     for ticker, timespan, src, a, b in rows:
         prev = reach.get((ticker, timespan))
-        if prev and a < prev[1] and prev[0] != src:
+        if prev and a < prev[1] and prev[0] != src and (same_market is None or same_market(prev[0], src, ticker)):
             out.append(f"{ticker} {timespan} {prev[0]}/{src} from {datetime.fromtimestamp(a / 1000, timezone.utc):%Y-%m-%d %H:%M} UTC")
         if not prev or b > prev[1]:
             reach[(ticker, timespan)] = (src, b)
@@ -120,7 +122,13 @@ def checks(store: Store, settings, source: str = "massive", now: datetime | None
         out.append(Check("Public archives", name, status, found + ("; TIINGO_API_KEY not set" if keyless else ""),
                          "a free tiingo.com account key (TIINGO_API_KEY) adds stock daily history from 1962"
                          if keyless and rows else ""))
-    overlaps = coverage_overlaps(store)
+    from .coverage import same_market
+    from .sources import feed_profiles
+
+    profiles = feed_profiles(settings)
+    assets = {w["ticker"]: w["asset"] for w in store.watchlist()}
+    overlaps = coverage_overlaps(store, lambda a, b, t: same_market(profiles, a, b, assets.get(t, "stock"))
+                                 and a in profiles and b in profiles)
     out.append(Check("Feeds", "One feed per span", "OK" if not overlaps else "FAIL",
                      "no span is held by two feeds" if not overlaps else
                      f"{len(overlaps)} overlapping spans, e.g. {overlaps[0]}",

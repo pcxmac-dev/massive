@@ -42,15 +42,10 @@ def log_tail(path: Path, lines: int = 200) -> list[str]:
 
 
 def lock_owner(db_path: Path) -> int | None:
-    """Process id holding the run lock, if a run is in progress."""
-    from ..cli import pid_alive
+    """Process id holding the run lock, if a run is in progress (its owner alive, the same process)."""
+    from ..proc import holder
 
-    lock = db_path.with_suffix(".lock")
-    try:
-        pid = int(lock.read_text().strip() or 0)
-    except (OSError, ValueError):
-        return None
-    return pid if pid and pid_alive(pid) else None
+    return holder(db_path.with_suffix(".lock"))
 
 
 def _iso(v) -> str | None:

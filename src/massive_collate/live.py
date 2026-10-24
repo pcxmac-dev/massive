@@ -41,6 +41,11 @@ FLUSH_SECONDS = 2.0
 DERIVE_SECONDS = 60.0  # the time frames above a minute are rebuilt this often for the symbols streamed
 RULES_SECONDS = 3600.0  # trade condition rules (stocks) are reread this often
 RECV_TIMEOUT = 20.0
+# A connected stream's span is entered in the ledger up to the last time it was heard from (a
+# message, or the answer to a keepalive) plus this: a connection that died quietly, or a machine
+# that slept with it open, adds nothing (a quiet market still answers the keepalive).
+HEARD_SLACK_MS = int(RECV_TIMEOUT * 1.5 * 1000)
+LOCK_CHECK_SECONDS = 30.0  # how often the recorder makes sure it still holds its locks
 # Sanity check for a stream that keeps failing: the wait before connecting again doubles with each
 # failure in a row (1 s up to MAX_BACKOFF) and starts over only after a connection that held for
 # STABLE_SECONDS. A server that accepts and at once drops the connection (Coinbase: "subscription
@@ -228,6 +233,7 @@ class Recorder:
     coins: tuple[str, ...] = LIVE_COINS
     sources: tuple[str, ...] = ("coinbase", "bitstamp")
     stock_keys: tuple[str, str] | None = field(default=None, repr=False)  # Alpaca's: the IEX stream
+    locks: list = field(default_factory=list)  # the lock files it holds (cli.cmd_live): lost, it stops
     log: object = print
     connect: object = None  # WebSocket factory (tests pass a fake)
     stop: threading.Event = field(default_factory=threading.Event)
@@ -239,6 +245,7 @@ class Recorder:
         self._lock = threading.Lock()
         self._buffer: dict[tuple[str, str], list[dict]] = defaultdict(list)
         self._since: dict[str, int] = {}  # source -> connected since (ms)
+        self._heard: dict[str, int] = {}  # source -> last heard from (ms): a message or a keepalive answer
         self._status: dict[str, dict] = {s.source: {"connected": False, "pairs": {}} for s in self.streams}
         self._wanted: tuple[str, ...] = ()  # stock symbols to stream (wanted_stocks)
         self._subs: dict[str, dict[str, int]] = {s.source: {} for s in self.streams}  # symbol -> asked for since (ms)
@@ -287,6 +294,7 @@ class Recorder:
                                                        error=None)
                 self.log(f"live: {stream.source} connected ({'stocks' if dynamic else f'{len(self.coins)} coins'})")
                 connected_at, misses, pongs = time.monotonic(), 0, 0
+                self._heard[stream.source] = int(time.time() * 1000)
                 while not self.stop.is_set():
                     if dynamic and not self._follow(stream, ws):
                         with self._lock:  # none wanted any more: the connection is closed
@@ -299,12 +307,14 @@ class Recorder:
                     except socket.timeout:
                         if getattr(ws, "pongs", 0) != pongs:  # the server answered the last ping
                             pongs, misses = ws.pongs, 0
+                            self._heard[stream.source] = int(time.time() * 1000)
                         misses += 1
                         if not stream.keepalive or misses > 2:
                             raise ConnectionError("no messages")
                         ws.ping() if stream.keepalive == PING else ws.send(stream.keepalive)
                         continue
                     misses = 0
+                    self._heard[stream.source] = int(time.time() * 1000)
                     try:
                         trades = stream.parse(json.loads(raw))
                     except Notice as e:
@@ -316,7 +326,9 @@ class Recorder:
                         with self._lock:
                             for ticker, t in trades:
                                 self._buffer[(stream.source, ticker)].append(t)
-            except (OSError, ConnectionError, ValueError, KeyError) as e:
+            except Exception as e:  # noqa: BLE001 - any error: down, logged, tried again (a dead thread stayed "connected")
+                if not isinstance(e, (OSError, ConnectionError, ValueError, KeyError)):
+                    e = ConnectionError(f"{type(e).__name__}: {e}")
                 if connected_at is not None and time.monotonic() - connected_at >= STABLE_SECONDS:
                     backoff, failures = 1.0, 0  # it had been working: a new failure, not more of the same
                 failures += 1
@@ -380,7 +392,19 @@ class Recorder:
         with self._lock:
             batch, self._buffer = self._buffer, defaultdict(list)
             since = dict(self._since)
+            heard = dict(self._heard)
             subs = {k: dict(v) for k, v in self._subs.items()}
+        try:
+            return self._store(store, batch, since, heard, subs, now_ms)
+        except Exception:
+            with self._lock:  # kept for the next flush (a locked database, say), ahead of what came since
+                for key, trades in batch.items():
+                    self._buffer[key][:0] = trades
+            raise
+
+    def _store(self, store, batch, since, heard, subs, now_ms) -> int:
+        from .ticks import build_bars
+
         stored = 0
         streams = {s.source: s for s in self.streams}
         for (source, ticker), trades in batch.items():
@@ -388,8 +412,10 @@ class Recorder:
             if kept:
                 stored += store.upsert_trades(source, ticker, kept)
         for source, start in since.items():
+            end = min(now_ms, heard.get(source, start) + HEARD_SLACK_MS)  # not past the last time it was heard
             for ticker, t0 in self._streamed(streams[source], start, subs.get(source, {})).items():
-                store.add_coverage(source, ticker, "trades", t0, now_ms)
+                if t0 < end:
+                    store.add_coverage(source, ticker, "trades", t0, end)
         for (source, ticker), trades in batch.items():
             stream = streams[source]
             lo_ns = min(t["sip_timestamp"] for t in trades)
@@ -399,7 +425,10 @@ class Recorder:
             lo = lo_ns // 1_000_000 // 60_000 * 60_000  # the minute it starts in
             if gone:  # a bar whose only trades were withdrawn must go
                 store.drop_built_between(source, ticker, ("second", "minute"), lo, now_ms)
-            ticks = store.trades_between(source, ticker, lo * 1_000_000, now_ms * 1_000_000)
+            # up to the newest trade of the batch too: an exchange clock ahead of this one's must not
+            # leave a trade out of its minute (the next flush starts at its own first trade's minute)
+            hi_ns = max(now_ms * 1_000_000, max(t["sip_timestamp"] for t in trades) + 1)
+            ticks = store.trades_between(source, ticker, lo * 1_000_000, hi_ns)
             rules = self._tape_rules(store) if getattr(stream, "tape_rules", False) else {}
             did = self._derivation(store, stream, ticker, now_ms // DAY_MS, rules)
             for step, timespan in ((1_000_000_000, "second"), (60_000_000_000, "minute")):
@@ -434,24 +463,42 @@ class Recorder:
             t.start()
         stocks = any(getattr(s, "dynamic", False) for s in self.streams)
         with Store(self.db_path) as store:
-            total, last_log, last_derive, last_want = 0, time.time(), time.time(), 0.0
+            total, last_log, last_derive, last_want, last_lock = 0, time.time(), time.time(), 0.0, time.time()
             while True:
-                if stocks and time.time() - last_want > WANT_SECONDS:
-                    self.set_wanted(wanted_stocks(store, int(time.time() * 1000)))
-                    last_want = time.time()
-                if self.stop.wait(FLUSH_SECONDS):
-                    break
-                total += self.flush(store)
-                if time.time() - last_derive > DERIVE_SECONDS:
-                    from . import derive
+                if self.locks and time.time() - last_lock > LOCK_CHECK_SECONDS:
+                    last_lock = time.time()
+                    if not self.holds_locks():
+                        self.log("live: another recorder holds this one's lock now; stopping")
+                        self.stop.set()
+                try:
+                    if stocks and time.time() - last_want > WANT_SECONDS:
+                        self.set_wanted(wanted_stocks(store, int(time.time() * 1000)))
+                        last_want = time.time()
+                    if self.stop.wait(FLUSH_SECONDS):
+                        break
+                    total += self.flush(store)
+                    if time.time() - last_derive > DERIVE_SECONDS:
+                        from . import derive
 
-                    derive.run(store, sources={s.source for s in self.streams},
-                               tickers={f"{c}USD" for c in self.coins} | set(self._wanted), log=lambda *_: None)
-                    last_derive = time.time()
+                        derive.run(store, sources={s.source for s in self.streams},
+                                   tickers={f"{c}USD" for c in self.coins} | set(self._wanted), log=lambda *_: None)
+                        last_derive = time.time()
+                except Exception as e:  # noqa: BLE001 - a locked database, say: logged, the trades kept, tried again
+                    self.log(f"live: {type(e).__name__}: {e}; trying again")
+                    self.stop.wait(FLUSH_SECONDS)
                 if time.time() - last_log > 600:
                     self.log(f"live: {total:,} trades recorded in the last 10 min")
                     total, last_log = 0, time.time()
-            self.flush(store)
+            try:
+                self.flush(store)
+            except Exception as e:  # noqa: BLE001
+                self.log(f"live: the last flush failed: {e}")
+
+    def holds_locks(self) -> bool:
+        """Whether every lock this recorder took still names it."""
+        from .proc import owns
+
+        return all(owns(p) for p in self.locks)
 
 
 # -- one recorder at a time, on the database and on the machine --------------------------------
@@ -468,39 +515,33 @@ def machine_lock() -> Path:
     return Path(os.environ.get("MASSIVE_LIVE_LOCK") or Path.home() / ".massive-collate" / "live.lock")
 
 
-def _holder(path: Path) -> int | None:
-    """The live process holding a lock file, if any."""
-    from .cli import pid_alive
-
-    try:
-        pid = int(path.read_text().strip())
-    except (OSError, ValueError):
-        return None
-    return pid if pid_alive(pid) else None
-
-
 def running(db_path: Path) -> bool:
     """Whether a recorder runs for this database, or any recorder on this machine."""
-    return any(_holder(p) for p in (lock_path(db_path), machine_lock()))
+    from .proc import holder
+
+    return any(holder(p) for p in (lock_path(db_path), machine_lock()))
 
 
-def take_locks(db_path: Path) -> list[Path]:
-    """Hold both locks for this process (the caller checked `running` first). Returns them."""
-    locks = [lock_path(db_path), machine_lock()]
-    for path in locks:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(str(os.getpid()))
-    return locks
+def take_locks(db_path: Path) -> list[Path] | None:
+    """Take both locks for this process, atomically (proc.acquire): None, holding neither, when
+    another recorder holds one."""
+    from .proc import acquire
+
+    taken = []
+    for path in (lock_path(db_path), machine_lock()):
+        if not acquire(path):
+            release_locks(taken)
+            return None
+        taken.append(path)
+    return taken
 
 
 def release_locks(locks: list[Path]) -> None:
     """Remove the locks this process holds (not one another recorder took since)."""
+    from .proc import release
+
     for path in locks:
-        try:
-            if int(path.read_text().strip()) == os.getpid():
-                path.unlink()
-        except (OSError, ValueError):
-            pass
+        release(path)
 
 
 def start_detached(db_path: Path) -> bool:

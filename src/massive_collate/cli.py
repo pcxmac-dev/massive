@@ -21,7 +21,6 @@ from .sources import ARCHIVAL, BUILDERS, DataSource, build_source, feed_profiles
 from .storage import Store, feeds_backup_dir
 
 TASK_NAME = "MassiveCollateSync"
-LOCK_STALE_SECONDS = 6 * 3600
 
 
 # -- helpers -------------------------------------------------------------------
@@ -42,67 +41,31 @@ class Logger:
                 f.write(line + "\n")
 
 
-def pid_alive(pid: int) -> bool:
-    """Whether a process with this id is running (Windows and POSIX)."""
-    if pid <= 0:
-        return False
-    if sys.platform == "win32":
-        import ctypes
-
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not handle:
-            return False
-        try:
-            code = ctypes.c_ulong()
-            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
-        finally:
-            kernel32.CloseHandle(handle)
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
-def _lock_is_stale(lock: Path) -> bool:
-    """A lock is stale if its owner process has died (crash or kill), or it is very old."""
-    try:
-        owner = int(lock.read_text().strip() or 0)
-    except (OSError, ValueError):
-        owner = 0
-    if owner and not pid_alive(owner):
-        return True
-    return time.time() - lock.stat().st_mtime > LOCK_STALE_SECONDS
-
+from .proc import pid_alive  # noqa: E402,F401  (kept here for callers that import it from cli)
 
 _HELD: set[str] = set()  # run locks this process holds
 
 
 @contextmanager
 def run_lock(db_path: Path) -> Iterator[None]:
-    """Only one downloading run at a time, so two runs can never double the request rate."""
+    """Only one downloading run at a time, so two runs can never double the request rate. The
+    lock names its owner by id and start (proc.py): a run that crashed, or whose id the system
+    gave to another process since, does not hold it; one that is alive does, however long it
+    has run (a laptop asleep mid-sync wakes holding it)."""
+    from . import proc
+
     lock = db_path.with_suffix(".lock")
-    lock.parent.mkdir(parents=True, exist_ok=True)
     if str(lock) in _HELD:  # this process holds it already (a whole sync holds it across its feeds)
         yield
         return
-    if lock.exists() and _lock_is_stale(lock):
-        lock.unlink(missing_ok=True)
-    try:
-        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        raise SystemExit(f"another run is in progress (lock file {lock}); exiting") from None
+    if not proc.acquire(lock):
+        raise SystemExit(f"another run is in progress (lock file {lock}); exiting")
     _HELD.add(str(lock))
     try:
-        os.write(fd, str(os.getpid()).encode())
-        os.close(fd)
         yield
     finally:
         _HELD.discard(str(lock))
-        lock.unlink(missing_ok=True)
+        proc.release(lock)
 
 
 def _date(s: str) -> date:
@@ -153,6 +116,9 @@ def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource
             log(f"error: {e}")
         except Exception as e:
             status, message = "error", repr(e)
+            raise
+        except BaseException as e:  # Ctrl+C, or the process told to exit: not a run that went through
+            status, message = "interrupted", type(e).__name__
             raise
         finally:
             store.finish_run(run_id, source.requests_made, getattr(args, "_rows", 0), status, message)
@@ -226,20 +192,26 @@ def cmd_watch(args, settings: Settings) -> int:
 TIER_KEY = "tier:massive"
 
 
+def tier_key(settings: Settings) -> str:
+    """The Massive plans in force, every asset class's: what a plan change is noticed by."""
+    return ",".join([settings.tier.name, *(f"{a}={t.name}" for a, t in sorted(settings.tier.by_asset))])
+
+
 def _note_tier(store: Store, settings: Settings, log) -> None:
     """When MASSIVE_TIER changes, what the old plan refused may be allowed now (or the reverse):
     Massive's cached entitlements and the market days it refused are asked again, and each
     symbol's resolution is found again (the old plan's finest was remembered)."""
     seen = store.kv_get(TIER_KEY)
-    if seen == settings.tier.name:
+    key = tier_key(settings)
+    if seen == key or (seen == settings.tier.name and not settings.tier.by_asset):
         return
     if seen:
         store.clear_entitlements("massive")
         days = store.clear_denied_days("massive")
         n = reresolve(store, "massive")
-        log(f"massive plan changed ({seen} -> {settings.tier.name}): entitlements, {days} refused days "
+        log(f"massive plan changed ({seen} -> {key}): entitlements, {days} refused days "
             f"and {n} symbols' resolutions asked again")
-    store.kv_set(TIER_KEY, settings.tier.name)
+    store.kv_set(TIER_KEY, key)
 
 
 def reresolve(store: Store, feed: str) -> int:
@@ -444,13 +416,13 @@ def cmd_live(args, settings: Settings) -> int:
         print("recorder started in the background" if live.start_detached(settings.db_path)
               else "a recorder is already running")
         return 0
-    if live.running(settings.db_path):
+    locks = live.take_locks(settings.db_path)
+    if locks is None:
         print("a recorder is already running (one per database, and one per machine: the exchanges "
               "count every connection from this address)")
         return 0
-    locks = live.take_locks(settings.db_path)
     recorder = live.Recorder(settings.db_path, coins=settings.live_coins, stock_keys=live.stock_keys(settings),
-                             log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
+                             locks=locks, log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
     try:
         recorder.run()
     except KeyboardInterrupt:
