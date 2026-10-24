@@ -50,3 +50,15 @@ def test_profiles_and_day_changes_from_the_store(store):
     store.save_market_snapshot("massive", date(2026, 10, 20), [{"T": "AAPL", "c": 200.0, "v": 1}])
     store.save_market_snapshot("massive", date(2026, 10, 21), [{"T": "AAPL", "c": 210.0, "v": 1}])
     assert round(store.snapshot_changes()["AAPL"], 6) == 5.0
+
+
+def test_sp500_members_take_their_gics_sector():
+    profile = {"sic_code": "3571", "sic_description": "ELECTRONIC COMPUTERS", "market_cap": 3.0e12}
+    same = _sector("AAPL", profile, "stock", member={"sector": "Technology", "industry": "Technology Hardware"})
+    assert same["sector"] == "Technology" and same["industry"] == "Consumer Electronics"  # the map's own name kept
+    assert same["sectorBasis"] == "GICS (S&P 500 list)"
+    bank = {"sic_code": "7374", "sic_description": "SERVICES-COMPUTER PROCESSING & DATA PREPARATION"}
+    moved = _sector("FIS", bank, "stock", member={"sector": "Financial", "industry": "Transaction & Payment Processing"})
+    assert (moved["sector"], moved["industry"]) == ("Financial", "Transaction & Payment Processing")  # GICS both
+    assert _sector("NEW", None, "stock", member={"sector": "Energy", "industry": "Oil & Gas Refining"})["sector"] == "Energy"
+    assert _sector("X", profile, "stock", member={"sector": "Unknown"})["sectorBasis"] == "SIC"

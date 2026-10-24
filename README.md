@@ -94,6 +94,7 @@ python -m massive_collate exchanges --refresh  # exchange list
 python -m massive_collate analyze SPCX         # statistics + per-exchange breakdown
 python -m massive_collate chart SPCX --rule 1s --sma 20 50 --ticks
 python -m massive_collate export SPCX --kind trades --out spcx.csv
+python -m massive_collate datasets [list|fetch [NAME...]|show NAME [SERIES]]  # research datasets
 python -m massive_collate admin check|vacuum|backup [--ticks]|split-feeds
 python -m massive_collate gui                  # chart app in your browser (localhost only)
 ```

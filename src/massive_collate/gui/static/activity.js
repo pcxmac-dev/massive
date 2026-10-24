@@ -186,6 +186,7 @@
 
   function renderFetcherView() {
     loadDeps();
+    loadDatasets();
     if (!data) { el('actStatus').innerHTML = statusLine(); return; }
     const { plan, today, backfill } = data;
     el('actStatus').innerHTML = statusLine();
@@ -307,6 +308,27 @@
       <tr><td class="sub">${esc(c.area)}</td><td><b>${esc(c.item)}</b></td>
         <td><span class="state ${cls[c.status] || ''}">${esc(c.status)}</span></td>
         <td>${esc(c.found)}</td><td class="sub">${esc(c.action || '')}</td></tr>`).join('');
+  }
+
+  // Research datasets (datasets.py): refreshed every few minutes while the Fetcher view is open.
+  let datasets = { rows: [], at: 0 };
+  async function loadDatasets() {
+    if (Date.now() - datasets.at < 180000) return;
+    datasets.at = Date.now();
+    try { datasets.rows = (await (await fetch('/api/datasets')).json()).datasets || []; } catch { return; }
+    renderDatasets();
+  }
+  function renderDatasets() {
+    const day = (ms) => (ms == null ? '–' : new Date(ms).toLocaleDateString('en-CA', { timeZone: 'America/New_York' }));
+    el('datasetRows').innerHTML = datasets.rows.map((d) => `
+      <tr><td><b>${esc(d.name)}</b><div class="sub">${esc(d.title)}</div></td>
+        <td>${esc(d.provider)} <span class="sub">(${esc(d.kind)})</span><div class="sub">${esc(d.licence)}</div></td>
+        <td>${d.files ? (d.members ? 'current members' : `${day(d.first)} → ${day(d.last)}`) : '–'}</td>
+        <td class="num">${d.files ? (d.members ? `${num(d.members)} members` : `${num(d.values)}<div class="sub">${num(d.series)} series</div>`) : '–'}</td>
+        <td>${d.files ? `${num(d.files)}${d.closed ? ` <span class="chip">${num(d.closed)} closed</span>` : ''}<div class="sub">${(d.bytes / 1e6).toFixed(1)} MB${d.due ? ` · ${num(d.due)} due` : ''}</div>`
+          : '<span class="sub">not fetched: <code>datasets fetch ' + esc(d.name) + '</code></span>'}</td>
+        <td>${d.fetched ? ago(d.fetched) : '–'}</td>
+        <td class="num">${d.quality == null ? '–' : d.quality.toFixed(2)}</td></tr>`).join('');
   }
 
   async function startScan() {

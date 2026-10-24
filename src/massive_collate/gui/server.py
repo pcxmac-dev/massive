@@ -68,6 +68,7 @@ class ChartApp:
             snapshot = self.store.daily_snapshot()
             icons = self.store.icon_tickers()
             profiles = self.store.company_profiles()
+            members = self.store.constituents("sp500", "S&P 500")
             now = datetime.now(timezone.utc).astimezone(activity.ET)
             states = {(r["ticker"]): r for src in {w["source"] for w in watch}
                       for r in activity.symbol_rows(self.store, self.settings, src, now)}
@@ -96,7 +97,8 @@ class ChartApp:
                 "models": self.models(ticker, w.get("asset") or "stock", [f["source"] for f in feeds]),
                 "icon": ticker in icons,
                 "market": _market(snapshot, ticker, w),
-                **_sector(ticker, profiles.get(ticker), w.get("asset") or "stock", (snapshot.get(ticker) or {}).get("close")),
+                **_sector(ticker, profiles.get(ticker), w.get("asset") or "stock", (snapshot.get(ticker) or {}).get("close"),
+                          members.get(ticker)),
                 "changePct": _change(snapshot, ticker),
                 "data": {k: states[ticker][k] for k in ("state", "progress", "last", "expectedThrough", "nextDue")}
                 if ticker in states else None,
@@ -210,6 +212,7 @@ class ChartApp:
             rows = self.store.directory()
             watched = {w["ticker"] for w in self.store.watchlist()}
             profiles = self.store.company_profiles()
+            members = self.store.constituents("sp500", "S&P 500")
             changes = self.store.snapshot_changes()
         out = []
         for r in rows:
@@ -218,7 +221,7 @@ class ChartApp:
                         "type": r["type"], "close": r["close"], "dollarVolume": dv, "icon": bool(r["icon"]),
                         "watched": r["ticker"] in watched, "changePct": changes.get(r["ticker"]),
                         **_sector(r["ticker"], profiles.get(r["ticker"]), "future" if r["kind"] == "future" else "stock",
-                                  r["close"])})
+                                  r["close"], members.get(r["ticker"]))})
         return {"items": out}
 
     def watch(self, ticker: str) -> dict:
@@ -317,6 +320,16 @@ class ChartApp:
         out["feeds"] = self.feeds()
         return out
 
+    def datasets(self) -> dict:
+        """The research datasets: what is held, its span, files fetched and closed, quality."""
+        from .. import datasets
+
+        with self._lock:
+            rows = datasets.status(self.store)
+        for r in rows:
+            r["fetched"] = r["fetched"].isoformat() if r["fetched"] else None
+        return {"datasets": rows}
+
     def audit_summary(self, ticker: str | None = None, limit: int = 40) -> dict:
         with self._lock:
             rows = self.store.audits(limit, ticker)
@@ -369,18 +382,28 @@ class ChartApp:
         return json.loads(df.to_json(orient="records"))
 
 
-def _sector(ticker: str, profile: dict | None, asset: str, close: float | None = None) -> dict:
+def _sector(ticker: str, profile: dict | None, asset: str, close: float | None = None,
+            member: dict | None = None) -> dict:
     """Sector, industry and market cap for the market map (stocks with reference data). The cap is
     this share class's own (its shares outstanding x price) where known: a company with two listed
-    classes (GOOG, GOOGL) would otherwise be drawn twice its size."""
-    from .sectors import classify
+    classes (GOOG, GOOGL) would otherwise be drawn twice its size. An S&P 500 member takes its
+    sector from the index list's GICS classification; its industry keeps the map's own name unless
+    that belongs to another sector, when the GICS sub-industry is used."""
+    from .sectors import SECTORS, classify
 
-    if asset != "stock" or not profile:
+    profile = profile or {}
+    if asset != "stock" or not (profile or member):
         return {"sector": None, "industry": None, "marketCap": None}
     sector, industry = classify(ticker, profile.get("sic_code"), profile.get("sic_description"))
+    basis = "SIC"
+    if member and member.get("sector") in SECTORS:
+        if member["sector"] != sector:
+            industry = member.get("industry") or industry
+        sector, basis = member["sector"], "GICS (S&P 500 list)"
     shares = profile.get("class_shares")
     cap = shares * close if shares and close else profile.get("market_cap")
-    return {"sector": sector, "industry": industry, "marketCap": cap, "companyCap": profile.get("market_cap")}
+    return {"sector": sector, "industry": industry, "sectorBasis": basis, "marketCap": cap,
+            "companyCap": profile.get("market_cap")}
 
 
 def _change(snapshot: dict, ticker: str) -> float | None:
@@ -541,6 +564,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.exchanges())
                 if url.path == "/api/audits":
                     return self._json(app.audit_summary(q.get("ticker")))
+                if url.path == "/api/datasets":
+                    return self._json(app.datasets())
             except (KeyError, ValueError) as e:
                 return self._json({"error": f"bad request: {e}"}, HTTPStatus.BAD_REQUEST)
             except LookupError as e:

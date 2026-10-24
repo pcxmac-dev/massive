@@ -202,14 +202,64 @@ def cmd_sync(args, settings: Settings) -> int:
     if ran:  # composite models and exchange quality from what the feeds hold (no requests)
         from . import composite
 
+        logger = Logger(settings.db_path.parent / "logs" / "massive-collate.log")
         with Store(settings.db_path) as store:
-            composite.refresh(store, feed_profiles(settings), collector.now_et(),
-                              log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
+            composite.refresh(store, feed_profiles(settings), collector.now_et(), log=logger)
+            if args.all_sources:  # research datasets fetched before, when due (never starts one)
+                from . import datasets
+
+                datasets.fetch(store, log=logger, only_started=True)
     if not ran and errors:
         raise ConfigError("; ".join(errors))
     for e in errors:
         print(f"skipped {e}", file=sys.stderr)
     return 0
+
+
+def cmd_datasets(args, settings: Settings) -> int:
+    """Research datasets: list them, fetch (or refresh) them, show a dataset's series or values."""
+    from . import datasets
+
+    with Store(settings.db_path) as store:
+        if args.action == "fetch":
+            unknown = [n for n in args.names if n not in datasets.DATASETS]
+            if unknown:
+                print(f"unknown datasets: {', '.join(unknown)} (see `datasets list`)")
+                return 1
+            datasets.fetch(store, args.names or None, force=args.force,
+                           log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
+            return 0
+        if args.action == "show":
+            if len(args.names) not in (1, 2) or args.names[0] not in datasets.DATASETS:
+                print("usage: datasets show NAME [SERIES]")
+                return 1
+            ds = datasets.DATASETS[args.names[0]]
+            if len(args.names) == 1:
+                for r in store.dataset_series(ds.provider, ds.name):
+                    span = f"{_day(r['first_ts'])} -> {_day(r['last_ts'])}" if r["n"] else "no values"
+                    print(f"{r['series']:28} {r['n'] or 0:>7,} {r['freq']:5} {r['unit']:14} {span}  {r['title']}")
+                for t, m in sorted(store.constituents(ds.provider, "S&P 500").items()):
+                    print(f"{t:6} {m['sector'] or '':22} {m['industry'] or '':40} {m['name']}")
+                return 0
+            df = store.dataset_values(ds.provider, ds.name, args.names[1])
+            for ts, v in df.tail(args.tail).itertuples(index=False):
+                print(f"{_day(ts)}  {v:g}")
+            return 0
+        for d in datasets.status(store):
+            if not d["files"]:
+                state = "not fetched (datasets fetch " + d["name"] + ")"
+            else:
+                state = (f"{d['files']} files ({d['closed']} closed), {d['bytes'] / 1e6:.1f} MB, "
+                         + (f"{d['members']} members" if d["members"] else
+                            f"{d['series']:,} series, {d['values']:,} values {_day(d['first'])} -> {_day(d['last'])}")
+                         + f", fetched {d['fetched']:%Y-%m-%d}, quality {d['quality']:.2f}"
+                         + (f", {d['due']} due" if d["due"] else ""))
+            print(f"{d['name']:31} {d['provider']:9} {state}")
+    return 0
+
+
+def _day(ms: int | None) -> str:
+    return datetime.fromtimestamp(ms / 1000, ET).strftime("%Y-%m-%d") if ms is not None else "-"
 
 
 def _feed_closed(settings: Settings, name: str) -> bool:
@@ -656,6 +706,13 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("info", help="reference details for a ticker")
     s.add_argument("ticker")
     s.set_defaults(func=cmd_info)
+
+    s = sub.add_parser("datasets", help="research datasets: list, fetch (or refresh), show NAME [SERIES]")
+    s.add_argument("action", choices=["list", "fetch", "show"], nargs="?", default="list")
+    s.add_argument("names", nargs="*", help="fetch: datasets (default all); show: a dataset and one of its series")
+    s.add_argument("--force", action="store_true", help="fetch: also files fetched recently (closed files never)")
+    s.add_argument("--tail", type=int, default=12, help="show: how many of the newest values")
+    s.set_defaults(func=cmd_datasets)
 
     s = sub.add_parser("status", help="what is stored, limits, and recent runs")
     s.add_argument("--runs", type=int, default=10)

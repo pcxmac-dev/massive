@@ -96,6 +96,22 @@ VWAP, trade count; box stats; margin of error 5 bps or 1 cent per price, 5 % vol
 comparison, never the bars. Audits run after new data (queued for the other feed) and at random
 (`AUDITS_PER_RUN`, `AUDITS_RANDOM_PER_RUN`), or with `python -m massive_collate audit`.
 
+### Research datasets (`datasets.py`)
+
+Free public files, downloaded whole (`datasets fetch`), each provider in its own file
+(`datasets/<provider>.db`). A file that will not change again is closed and never fetched again;
+the others refresh on their own cadence in the hourly sync, but only once fetched by hand the first
+time. Each dataset carries a quality prior by provenance: official 1.00, the researcher's own
+library 0.85, a mirror of someone else's data 0.80.
+
+| Dataset | Source | Span (Oct 2026) | Refresh | Notes |
+|---|---|---|---|---|
+| S&P 500 constituents | datasets/s-and-p-500-companies (GitHub mirror of the Wikipedia list, ODC PDDL) | 503 current members | weekly | GICS sector of members drives the market map's sectors |
+| Fama/French 3 factors (daily, monthly), 5 factors (daily), 49 industries (daily, value-weighted) | Kenneth R. French Data Library (Tuck) | 1926-07 (5 factors 1963-07) to 2026-08 | monthly; revised history replaces the old | percent returns; -99.99 = missing |
+| Shiller US market (S&P composite, dividends, earnings, CPI, long rate, CAPE) | datasets/s-and-p-500 (mirror of shillerdata.com) | price 1871-01 to 2026-09; the other series stop in 2023 (mirror lags) | monthly | the mirror writes 0 for missing; read as missing |
+| IMF primary commodity prices (53 commodities, 10 indexes, 2005 = 100) | datasets/commodity-prices (mirror of IMF data, frozen) | 1980-02 to 2017-06 | closed | IMF terms: personal, non-commercial use |
+| CFTC Commitments of Traders, legacy futures-only | cftc.gov (public domain) | 1986-01 to the latest Tuesday | weekly; past years closed | values are as of Tuesday, published Friday 15:30 ET |
+
 ## 2. Calendars and time
 
 | Dependency | Used for | Source / version | How it goes stale | Upkeep | Status |
@@ -142,5 +158,8 @@ comparison, never the bars. Audits run after new data (queued for the other feed
 | Live recorder (websocket) | the Live view's "recording" is grey; current-session data arrives only with fetcher runs | Massive websockets (paid plans) | ❌ |
 | Icons for futures products and indices | lettered badges only | none from Massive; would need a curated set | ❌ |
 | Directory details refresh | details re-checked every 90 days with spare budget only | — | ⚠️ |
+| Shiller fundamentals after 2023 | the mirror stops dividends, earnings, CPI and CAPE in 2023 | Shiller's own `ie_data.xls` (shillerdata.com; needs an .xls reader) | ⚠️ mirror lags |
+| Current commodity prices | the IMF mirror ends in 2017 | World Bank Pink Sheet (`CMO-Historical-Data-Monthly.xlsx`) or the IMF's own PCPS | ❌ |
+| Dataset series in charts | datasets are listed and queryable (`datasets show`), not yet drawn | a dataset viewer in the chart app | ❌ |
 | Exchange holidays beyond what exchange_calendars records | China/Singapore/India: to year end until the package updates | the exchanges' own announcements | ⚠️ `deps` warns |
 | Corporate actions (splits, ticker changes) for watched stocks | prices are split-adjusted by Massive (`adjusted=true`); ticker reuse is caught by the weekly FIGI check | `/v3/reference/splits`, `/v3/reference/dividends` | ⚠️ adjustments not stored separately |

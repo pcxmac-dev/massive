@@ -4,7 +4,9 @@ Unlike the feeds these are not price bars of watched symbols: factor and portfol
 market-level history, futures positioning, commodity prices, index membership with sector
 classes. Each file is fetched once; a file that will not change again (a finished year, an
 archive) is then closed and never fetched again, the others refresh on their own cadence (only
-once they have been fetched the first time with `datasets fetch`).
+once they have been fetched the first time with `datasets fetch`). Each provider's values are kept
+in a file of their own (datasets/<provider>.db), and each dataset has a quality prior by provenance
+(an official publisher, the researcher's own library, or a mirror of someone else's data).
 
 - S&P 500 constituents with GICS sector and sub-industry (datasets/s-and-p-500-companies, ODC
   PDDL): the market map's sectors for S&P 500 members.
@@ -12,7 +14,9 @@ once they have been fetched the first time with `datasets fetch`).
   portfolios; daily and monthly, from 1926 (1963 for 5 factors). Returns in percent.
 - Robert J. Shiller's US stock market data (S&P composite, dividends, earnings, CPI, rates, CAPE),
   monthly from 1871, via the datasets/s-and-p-500 CSV (ODC PDDL).
-- World Bank commodity prices ("Pink Sheet"), monthly from 1960, via datasets/commodity-prices.
+- IMF primary commodity prices (53 commodities, 10 indexes, 2005 = 100), monthly 1980-2017, via
+  datasets/commodity-prices: a mirror frozen since 2017, so an archive (closed once imported). IMF
+  terms: personal, non-commercial use.
 - CFTC Commitments of Traders, legacy futures-only report, weekly from 1986: open interest and
   commercial / non-commercial / small trader positions for every market.
 
@@ -22,6 +26,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import re
 import zipfile
 from dataclasses import dataclass, field
@@ -52,10 +57,21 @@ class Dataset:
     files: Callable[[date], list[tuple[str, bool]]]  # today -> [(url, final: closes once imported)]
     parse: Callable[[str, bytes], Parsed]
     refresh_days: int  # how often the files that are not final are fetched again
+    provider: str      # whose data it is: names its file, datasets/<provider>.db
+    kind: str          # provenance for the quality prior (composite.PRIORS): official | research | mirror
 
 
 def _ms(d: date) -> int:
     return int(datetime(d.year, d.month, d.day, tzinfo=ET).timestamp() * 1000)
+
+
+def _num(cell) -> float | None:
+    """A finite number from a cell, else None (blank, 'nan', text)."""
+    try:
+        v = float(cell)
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
 
 
 def _text(blob: bytes, url: str) -> str:
@@ -94,11 +110,8 @@ def parse_french(url: str, blob: bytes, section: str | None = None, unit: str = 
         else:
             break  # the annual table that follows the monthly one
         for name, cell in zip(header[1:], cells[1:]):
-            try:
-                v = float(cell)
-            except ValueError:
-                continue
-            if v in (-99.99, -999):
+            v = _num(cell)
+            if v is None or v in (-99.99, -999):
                 continue  # the library's missing-value markers
             out.values.append((name, _ms(d), v))
     for name in (header or [])[1:]:
@@ -107,15 +120,15 @@ def parse_french(url: str, blob: bytes, section: str | None = None, unit: str = 
 
 
 def parse_shiller(url: str, blob: bytes) -> Parsed:
+    """The mirror writes 0 where Shiller has no value yet (recent dividends, earnings, CPI; CAPE's
+    first ten years): none of these series is ever really 0, so a 0 is left out as missing."""
     out = Parsed()
     rows = csv.DictReader(io.StringIO(_text(blob, url)))
     for r in rows:
         d = date.fromisoformat(r.pop("Date")[:10])
         for k, v in r.items():
-            try:
-                out.values.append((k, _ms(d), float(v)))
-            except (TypeError, ValueError):
-                continue
+            if (x := _num(v)) is not None and x != 0:
+                out.values.append((k, _ms(d), x))
     units = {"SP500": "index", "Dividend": "USD", "Earnings": "USD", "Consumer Price Index": "index",
              "Long Interest Rate": "%", "Real Price": "USD", "Real Dividend": "USD", "Real Earnings": "USD",
              "PE10": "ratio"}
@@ -132,12 +145,10 @@ def parse_commodities(url: str, blob: bytes) -> Parsed:
             continue
         d = date.fromisoformat(raw[:10]) if "-" in raw else date(int(raw[:4]), int(raw[5:7] or 1), 1)
         for k, v in r.items():
-            try:
-                out.values.append((k, _ms(d), float(v)))
-            except (TypeError, ValueError):
-                continue
+            if (x := _num(v)) is not None:
+                out.values.append((k, _ms(d), x))
     for k in {s for s, _, _ in out.values}:
-        out.series[k] = (k, "USD (nominal)", "month")
+        out.series[k] = (k, "index (2005 = 100)" if "Index" in k else "USD (nominal)", "month")
     return out
 
 
@@ -164,10 +175,10 @@ def parse_cot(url: str, blob: bytes) -> Parsed:
         d = date.fromisoformat(raw)
         name = (r.get("Market and Exchange Names") or code).strip()
         for col, key in COT_FIELDS.items():
-            v = (r.get(col) or "").strip()
-            if v:
+            v = _num((r.get(col) or "").strip())
+            if v is not None:
                 series = f"{code}:{key}"
-                out.values.append((series, _ms(d), float(v)))
+                out.values.append((series, _ms(d), v))
                 out.series.setdefault(series, (f"{name}: {key.replace('_', ' ')}", "contracts", "week"))
     return out
 
@@ -202,27 +213,31 @@ DATASETS: dict[str, Dataset] = {d.name: d for d in (
     Dataset("sp500-constituents", "S&P 500 members with GICS sector and sub-industry",
             "ODC PDDL (datasets/s-and-p-500-companies)",
             lambda t: [("https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv", False)],
-            parse_constituents, 7),
+            parse_constituents, 7, "sp500", "mirror"),
     Dataset("french-3-factors-daily", "Fama/French 3 factors, daily (from 1926)", "Kenneth R. French Data Library",
-            lambda t: [(FRENCH + "F-F_Research_Data_Factors_daily_CSV.zip", False)], parse_french, 30),
+            lambda t: [(FRENCH + "F-F_Research_Data_Factors_daily_CSV.zip", False)], parse_french, 30,
+            "french", "research"),
     Dataset("french-3-factors-monthly", "Fama/French 3 factors, monthly (from 1926)", "Kenneth R. French Data Library",
-            lambda t: [(FRENCH + "F-F_Research_Data_Factors_CSV.zip", False)], parse_french, 30),
+            lambda t: [(FRENCH + "F-F_Research_Data_Factors_CSV.zip", False)], parse_french, 30,
+            "french", "research"),
     Dataset("french-5-factors-daily", "Fama/French 5 factors (2x3), daily (from 1963)", "Kenneth R. French Data Library",
-            lambda t: [(FRENCH + "F-F_Research_Data_5_Factors_2x3_daily_CSV.zip", False)], parse_french, 30),
+            lambda t: [(FRENCH + "F-F_Research_Data_5_Factors_2x3_daily_CSV.zip", False)], parse_french, 30,
+            "french", "research"),
     Dataset("french-49-industries-daily", "49 industry portfolios, value-weighted daily returns (from 1926)",
             "Kenneth R. French Data Library",
             lambda t: [(FRENCH + "49_Industry_Portfolios_daily_CSV.zip", False)],
-            lambda url, blob: parse_french(url, blob, section="Average Value Weighted Returns"), 30),
+            lambda url, blob: parse_french(url, blob, section="Average Value Weighted Returns"), 30,
+            "french", "research"),
     Dataset("shiller-us-market-monthly", "Shiller: S&P composite, dividends, earnings, CPI, rates, CAPE (from 1871)",
             "Robert J. Shiller (shillerdata.com) via datasets/s-and-p-500, ODC PDDL",
             lambda t: [("https://raw.githubusercontent.com/datasets/s-and-p-500/main/data/data.csv", False)],
-            parse_shiller, 30),
-    Dataset("world-bank-commodities-monthly", "World Bank commodity prices (Pink Sheet), monthly (from 1960)",
-            "World Bank via datasets/commodity-prices, ODC PDDL",
-            lambda t: [("https://raw.githubusercontent.com/datasets/commodity-prices/main/data/commodity-prices.csv", False)],
-            parse_commodities, 30),
+            parse_shiller, 30, "shiller", "mirror"),
+    Dataset("imf-commodities-monthly", "IMF primary commodity prices and indexes, monthly 1980-2017 (frozen mirror)",
+            "IMF terms (personal, non-commercial use) via datasets/commodity-prices",
+            lambda t: [("https://raw.githubusercontent.com/datasets/commodity-prices/main/data/commodity-prices.csv", True)],
+            parse_commodities, 30, "imf", "mirror"),
     Dataset("cftc-cot-legacy", "CFTC Commitments of Traders, legacy futures-only, weekly (from 1986)",
-            "CFTC (public domain)", _cot_files, parse_cot, 7),
+            "CFTC (public domain)", _cot_files, parse_cot, 7, "cftc", "official"),
 )}
 
 
@@ -255,16 +270,54 @@ def fetch(store, names: list[str] | None = None, today: date | None = None, forc
             continue
         n = 0
         for url, final in due_files(store, ds, today, force):
-            resp = session.get(url, headers={"User-Agent": USER_AGENT}, timeout=120)
-            if resp.status_code == 404 and not final:
-                log(f"{name}: {url.rsplit('/', 1)[-1]} not published yet")
+            file = url.rsplit("/", 1)[-1]
+            try:
+                resp = session.get(url, headers={"User-Agent": USER_AGENT}, timeout=120)
+                if resp.status_code == 404 and not final:
+                    log(f"{name}: {file} not published yet")
+                    continue
+                resp.raise_for_status()
+                parsed = ds.parse(url, resp.content)
+            except (requests.RequestException, ValueError, KeyError, zipfile.BadZipFile) as e:
+                log(f"{name}: {file} not fetched ({e}); tried again next time")  # the others go on
                 continue
-            resp.raise_for_status()
-            parsed = ds.parse(url, resp.content)
-            rows = store.save_dataset(name, parsed)
-            store.set_dataset_file(name, url, len(resp.content), closed=final)
-            log(f"{name}: {url.rsplit('/', 1)[-1]} ({len(resp.content) / 1e6:.2f} MB): {rows:,} values"
+            if not parsed.values and not parsed.constituents:
+                log(f"{name}: {file} had nothing to read (format changed?); not marked fetched")
+                continue
+            # a dataset in one file is replaced whole (revised history, values withdrawn); one in
+            # several files (a file a year) adds each file's values
+            rows = store.save_dataset(ds.provider, name, parsed, replace=len(ds.files(today)) == 1)
+            store.set_dataset_file(name, url, len(resp.content), rows, closed=final)
+            if store.quality(name, "dataset") is None:  # a prior until something measures it
+                from .composite import PRIORS
+
+                store.set_quality(name, "dataset", PRIORS[ds.kind],
+                                  {"basis": "prior", "kind": ds.kind, "licence": ds.licence})
+            log(f"{name}: {file} ({len(resp.content) / 1e6:.2f} MB): {rows:,} values"
                 + ("; final, closed" if final else ""))
             n += 1
         done[name] = n
     return done
+
+
+def status(store, today: date | None = None) -> list[dict]:
+    """Every dataset: files fetched and closed, values, series, span, last fetch, files due, quality."""
+    today = today or datetime.now(ET).date()
+    out = []
+    for ds in DATASETS.values():
+        files = store.dataset_files(ds.name)
+        series = store.dataset_series(ds.provider, ds.name) if files else []
+        members = len(store.constituents(ds.provider, "S&P 500")) if files and ds.parse is parse_constituents else 0
+        q = store.quality(ds.name, "dataset")
+        out.append({
+            "name": ds.name, "title": ds.title, "provider": ds.provider, "kind": ds.kind, "licence": ds.licence,
+            "files": len(files), "closed": sum(f["closed"] for f in files.values()),
+            "bytes": sum(f["bytes"] or 0 for f in files.values()),
+            "values": sum(s["n"] or 0 for s in series), "series": len(series), "members": members,
+            "first": min((s["first_ts"] for s in series if s["first_ts"] is not None), default=None),
+            "last": max((s["last_ts"] for s in series if s["last_ts"] is not None), default=None),
+            "fetched": max((f["fetched_at"] for f in files.values()), default=None),
+            "due": len(due_files(store, ds, today)) if files else None,
+            "quality": q["score"] if q else None,
+        })
+    return out
