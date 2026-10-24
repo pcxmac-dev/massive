@@ -772,7 +772,7 @@
       ctx.globalAlpha = 1;
       ctx.strokeStyle = perf != null ? (STATE_COLOR[m.state] || STATE_COLOR.unknown) : (dark ? '#0b0e15' : '#fff');
       ctx.lineWidth = perf != null ? 1.6 : 1; ctx.stroke();
-      if ((m.state === 'open' && !crypto) || m.state === 'break' || m === hover || featured) labelled.push({ m, p, perf });
+      if (m.state === 'open' || m.state === 'break' || m === hover || featured) labelled.push({ m, p, perf });
     }
     drawLabels(labelled, g, dark);
     // colour legend
@@ -800,12 +800,13 @@
   }
   let lastInfo = '';
 
-  // Labels for the markets operating now (and the hovered or featured one), by one convention:
-  // markers closer than CLUSTER px on screen (a city's exchanges and FX centre, or neighbours at
-  // this zoom) share one box: the city (or cities) in bold, coloured by state, then a line per
-  // market: its code (the exchange's MIC, or FX), its important indexes joined by " · " (for an
-  // FX centre, its currency), and the day's move of the fund that tracks it. A box sits beside its
-  // markers where it fits, else further out with a leader line; boxes never overlap.
+  // Labels for the markets operating now, crypto exchanges included (and the hovered or featured
+  // one), by one convention: markers closer than CLUSTER px on screen (a city's exchanges, FX
+  // centre and crypto exchanges, or neighbours at this zoom) share one box: the city (or cities) in
+  // bold, coloured by state, then a line per market: its code (the exchange's MIC, FX, or a crypto
+  // exchange's name), its important indexes joined by " · " (an FX centre's currency, a crypto
+  // exchange's main pair), and the day's move. A box sits beside its markers where it fits, else
+  // further out with a leader line; boxes never overlap.
   const CLUSTER = 26;
   const KIND_ORDER = { stock: 0, fx: 1, crypto: 2 };
   function drawLabels(items, g, dark) {
@@ -820,10 +821,11 @@
     for (const c of clusters) {
       c.sort((a, b) => (KIND_ORDER[a.m.kind] ?? 3) - (KIND_ORDER[b.m.kind] ?? 3) || a.m.code.localeCompare(b.m.code));
       const cx = c.reduce((s, i) => s + i.p.x, 0) / c.length, cy = c.reduce((s, i) => s + i.p.y, 0) / c.length;
-      const title = [...new Set(c.map((i) => i.m.city))].join(' · ');
+      const plain = (t) => String(t || '').replace(/\s*\(.*\)\s*$/, '');  // "Dubai (main hub)" -> "Dubai"
+      const title = [...new Set(c.map((i) => plain(i.m.city)))].join(' · ');
       const state = c.some((i) => i.m.state === 'open') ? 'open' : c.some((i) => i.m.state === 'break') ? 'break' : c[0].m.state;
       const rows = c.map(({ m, perf }) => ({
-        code: m.kind === 'fx' ? 'FX' : m.code, what: m.index || m.name,
+        code: m.kind === 'fx' ? 'FX' : m.kind === 'crypto' ? plain(m.name) : m.code, what: m.index || m.name,
         move: perf != null ? `${perf >= 0 ? '+' : ''}${perf.toFixed(2)}%` : '', perf,
       }));
       ctx.font = '600 11px system-ui, sans-serif';
