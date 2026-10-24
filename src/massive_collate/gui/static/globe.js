@@ -772,7 +772,7 @@
       ctx.globalAlpha = 1;
       ctx.strokeStyle = perf != null ? (STATE_COLOR[m.state] || STATE_COLOR.unknown) : (dark ? '#0b0e15' : '#fff');
       ctx.lineWidth = perf != null ? 1.6 : 1; ctx.stroke();
-      if (m.state === 'open' || m.state === 'break' || m === hover || featured) labelled.push({ m, p, perf });
+      labelled.push({ m, p, perf });  // every exchange gets its label box; closed ones muted
     }
     drawLabels(labelled, g, dark);
     // colour legend
@@ -800,34 +800,42 @@
   }
   let lastInfo = '';
 
-  // Labels for the markets operating now, crypto exchanges included (and the hovered or featured
-  // one), by one convention: markers closer than CLUSTER px on screen (a city's exchanges, FX
-  // centre and crypto exchanges, or neighbours at this zoom) share one box: the city (or cities) in
-  // bold, coloured by state, then a line per market: its code (the exchange's MIC, FX, or a crypto
-  // exchange's name), its important indexes joined by " · " (an FX centre's currency, a crypto
-  // exchange's main pair), and the day's move. A box sits beside its markers where it fits, else
-  // further out with a leader line; boxes never overlap.
+  // A label box for every exchange, by one convention: markers closer than CLUSTER px on screen (a
+  // city's exchanges, FX centre and crypto exchanges, or neighbours at this zoom) share one box: the
+  // city (or cities) in bold, coloured by state, then a line per market: its code (the exchange's
+  // MIC, FX, or a crypto exchange's name), its important indexes joined by " · " (an FX centre's
+  // currency, a crypto exchange's main pair), and the day's move. Closed markets are muted; a box
+  // lists at most MAX_ROWS markets (open ones first), then "+N more". Boxes with something open are
+  // placed first; each sits beside its markers where it fits, else further out with a leader line,
+  // and boxes never overlap.
   const CLUSTER = 26;
+  const MAX_ROWS = 5;
   const KIND_ORDER = { stock: 0, fx: 1, crypto: 2 };
+  const STATE_ORDER = { open: 0, break: 1 };
   function drawLabels(items, g, dark) {
     const clusters = [];
     for (const it of items) {
       const c = clusters.find((k) => k.some((o) => Math.hypot(o.p.x - it.p.x, o.p.y - it.p.y) < CLUSTER));
       if (c) c.push(it); else clusters.push([it]);
     }
+    const rank = (c) => Math.min(...c.map((i) => STATE_ORDER[i.m.state] ?? 2));
+    clusters.sort((a, b) => rank(a) - rank(b) || b.length - a.length);
     const boxes = [];
     const text = dark ? '#d1d4dc' : '#131722', muted = dark ? '#9aa0ae' : '#5a606c';
-    const stateColor = (s) => (s === 'open' ? (dark ? '#9ee7dc' : '#0b6b60') : s === 'break' ? '#f0a020' : text);
+    const stateColor = (s) => (s === 'open' ? (dark ? '#9ee7dc' : '#0b6b60') : s === 'break' ? '#f0a020' : muted);
     for (const c of clusters) {
-      c.sort((a, b) => (KIND_ORDER[a.m.kind] ?? 3) - (KIND_ORDER[b.m.kind] ?? 3) || a.m.code.localeCompare(b.m.code));
+      c.sort((a, b) => (STATE_ORDER[a.m.state] ?? 2) - (STATE_ORDER[b.m.state] ?? 2)
+        || (KIND_ORDER[a.m.kind] ?? 3) - (KIND_ORDER[b.m.kind] ?? 3) || a.m.code.localeCompare(b.m.code));
       const cx = c.reduce((s, i) => s + i.p.x, 0) / c.length, cy = c.reduce((s, i) => s + i.p.y, 0) / c.length;
       const plain = (t) => String(t || '').replace(/\s*\(.*\)\s*$/, '');  // "Dubai (main hub)" -> "Dubai"
       const title = [...new Set(c.map((i) => plain(i.m.city)))].join(' · ');
       const state = c.some((i) => i.m.state === 'open') ? 'open' : c.some((i) => i.m.state === 'break') ? 'break' : c[0].m.state;
-      const rows = c.map(({ m, perf }) => ({
+      const rows = c.slice(0, MAX_ROWS).map(({ m, perf }) => ({
         code: m.kind === 'fx' ? 'FX' : m.kind === 'crypto' ? plain(m.name) : m.code, what: m.index || m.name,
         move: perf != null ? `${perf >= 0 ? '+' : ''}${perf.toFixed(2)}%` : '', perf,
+        closed: m.state !== 'open' && m.state !== 'break',
       }));
+      if (c.length > MAX_ROWS) rows.push({ code: '', what: `+${c.length - MAX_ROWS} more`, move: '', closed: true });
       ctx.font = '600 11px system-ui, sans-serif';
       let w = ctx.measureText(title).width;
       ctx.font = '10px system-ui, sans-serif';
@@ -854,18 +862,19 @@
       }
       ctx.fillStyle = dark ? 'rgba(19,23,34,0.82)' : 'rgba(238,240,244,0.92)';
       ctx.fillRect(bx, by, w, h);
-      ctx.strokeStyle = stateColor(state); ctx.globalAlpha = 0.45; ctx.lineWidth = 1;
+      ctx.strokeStyle = stateColor(state); ctx.globalAlpha = state === 'open' || state === 'break' ? 0.45 : 0.25; ctx.lineWidth = 1;
       ctx.strokeRect(bx + 0.5, by + 0.5, w - 1, h - 1); ctx.globalAlpha = 1;
       ctx.font = '600 11px system-ui, sans-serif'; ctx.fillStyle = stateColor(state);
       ctx.fillText(title, bx + 5, by + 12);
       rows.forEach((r, i) => {
         const y = by + 26 + i * 12;
         ctx.font = '600 10px system-ui, sans-serif'; ctx.fillStyle = muted; ctx.fillText(r.code, bx + 5, y);
-        ctx.font = '10px system-ui, sans-serif'; ctx.fillStyle = text;
+        ctx.font = '10px system-ui, sans-serif'; ctx.fillStyle = r.closed ? muted : text;
         ctx.fillText(r.what, bx + 5 + codeW + 6, y);
         if (r.move) {
-          ctx.fillStyle = perfColor(r.perf);
+          ctx.fillStyle = perfColor(r.perf); ctx.globalAlpha = r.closed ? 0.7 : 1;
           ctx.fillText(r.move, bx + 5 + codeW + 6 + ctx.measureText(r.what).width + 6, y);
+          ctx.globalAlpha = 1;
         }
       });
     }
