@@ -115,7 +115,8 @@ class ChartApp:
             "asset": s.asset, "aroundTheClock": s.around_the_clock, "rolls": s.rolls, "adjust": s.adjust,
             "feeds": self.engine.sources_for(ticker) if source == "*" else [source],
             "pricePrecision": s.price_precision, "volumePrecision": s.volume_precision,
-            "periods": self.engine.periods(s), "first": first.isoformat(), "last": last.isoformat(),
+            "periods": self.engine.periods(s), "allPeriods": self.engine.all_periods(s),
+            "first": first.isoformat(), "last": last.isoformat(),
             "rows": len(s.frame), "attribution": self.attribution(s.ticker, s.kind, s.asset),
         }
 

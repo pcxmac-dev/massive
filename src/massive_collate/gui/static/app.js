@@ -1218,13 +1218,20 @@ const PERIOD_LABEL = { second: 's', minute: 'm', hour: 'h', day: 'D', week: 'W',
 function renderPeriods() {
   const box = $('periods');
   box.innerHTML = '';
-  for (const p of state.meta?.periods || []) {
+  // Every interval is offered; one no source of this symbol can build is greyed out.
+  for (const p of state.meta?.allPeriods || state.meta?.periods || []) {
     const b = document.createElement('button');
     b.textContent = p.type === 'day' || p.type === 'week' || p.type === 'month' ? PERIOD_LABEL[p.type] : `${p.span}${PERIOD_LABEL[p.type]}`;
     b.title = `${p.span} ${p.type}${p.span > 1 ? 's' : ''}`;
     b.classList.toggle('active', p.type === state.period.type && p.span === state.period.span);
+    if (p.available === false) {
+      b.disabled = true;
+      b.title += ': no source of this symbol has data this fine (seconds need ticks or second bars)';
+      box.append(b);
+      continue;
+    }
     b.addEventListener('click', () => {
-      state.period = p;
+      state.period = { type: p.type, span: p.span };
       resetLod();
       prefs.set('period', p); markDirty();
       renderPeriods();

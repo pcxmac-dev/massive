@@ -492,3 +492,6 @@ button.ds-item.on { box-shadow: inset 3px 0 0 var(--accent); }
   .ds-body { flex-direction: column; }
   .ds-pick { width: auto; max-height: 200px; }
 }
+
+/* An interval no source of the symbol can build (seconds without ticks or second bars). */
+#periods button:disabled { opacity: .35; cursor: not-allowed; background: none; }

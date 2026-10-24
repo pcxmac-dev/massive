@@ -459,18 +459,24 @@ class BarEngine:
             fine_sources=[source] if fine else [], fine_spans=fine,
         )
 
+    PERIOD_CHOICES = (("second", (1, 10, 30)), ("minute", (1, 3, 5, 15, 30, 45)),
+                      ("hour", (1, 2, 4)), ("day", (1,)), ("week", (1,)), ("month", (1,)))
+
     def periods(self, series: Series) -> list[dict]:
         """Intervals that can be built exactly from the stored data (seconds where second bars
         built from ticks exist, read by window)."""
+        return [p for p in self.all_periods(series) if p.pop("available")]
+
+    def all_periods(self, series: Series) -> list[dict]:
+        """Every interval offered, each saying whether this series' data can build it (the chart
+        shows the others greyed out)."""
         base = 1 if series.fine_spans else BASE_SECONDS[series.kind]
         out = []
-        choices = (("second", (1, 5, 15, 30)), ("minute", (1, 3, 5, 15, 30, 45)),
-                   ("hour", (1, 2, 4)), ("day", (1,)), ("week", (1,)), ("month", (1,)))
-        for period, spans in choices:
+        for period, spans in self.PERIOD_CHOICES:
             for span in spans:
                 seconds = PERIOD_SECONDS[period] * span
-                if seconds >= base and (base == 0 or seconds % base == 0 or period in CALENDAR):
-                    out.append({"type": period, "span": span})
+                ok = seconds >= base and (base == 0 or seconds % base == 0 or period in CALENDAR)
+                out.append({"type": period, "span": span, "available": ok})
         return out
 
     def bars(
