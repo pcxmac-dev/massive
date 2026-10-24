@@ -24,8 +24,8 @@ Settings come from environment variables, optionally loaded from a `.env` file
 Public historical sources (closed feeds: they fill history nobody else holds, then are not asked
 again): Bitstamp (crypto minute bars from 2011) and Cboe (index daily history) need nothing;
     TIINGO_API_KEY    a free tiingo.com account key: US stock daily bars from 1962 (environment only)
-    CRYPTO_VENUE_DAYS history kept from the crypto exchange feeds (Coinbase, Bitfinex) for the composite
-                      and reference models (default: 90)
+    CRYPTO_VENUE_DAYS limit the crypto exchange feeds (Coinbase, Bitfinex) to this many days of history
+                      (default: 0, everything they hold: Coinbase from 2015, Bitfinex from 2013)
 
 Alpaca (second feed; stocks and crypto). Keys are only ever read from the environment:
     ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY   (Alpaca's own APCA_API_KEY_ID / APCA_API_SECRET_KEY
@@ -88,9 +88,9 @@ ALPACA_FEEDS = ("sip", "iex")
 PUBLIC_FEEDS: dict[str, tuple[Tier, int, int]] = {
     "bitstamp": (Tier("bitstamp-public", requests_per_minute=300, history_years=None,
                       history_start=date(2011, 8, 1)), 8000, 20000),
-    # Crypto exchange feeds for the composite / reference models (a case study of one asset on several
-    # exchanges): recent history only, CRYPTO_VENUE_DAYS (90). Coinbase allows 10 public requests a
-    # second, Bitfinex about 30 candle requests a minute.
+    # Crypto exchange feeds (also the composite / reference models' inputs): all the history they hold,
+    # unless CRYPTO_VENUE_DAYS limits it. Coinbase allows 10 public requests a second, Bitfinex about
+    # 30 candle requests a minute.
     "coinbase": (Tier("coinbase-public", requests_per_minute=300, history_years=None, history_start=date(2015, 1, 26)),
                  3000, 20000),
     "bitfinex": (Tier("bitfinex-public", requests_per_minute=20, history_years=None, history_start=date(2013, 4, 1)),
@@ -134,7 +134,7 @@ class Settings:
     tick_history_days: int = 365
     tick_min_free_gb: int = 250
     tiingo_api_key: str | None = field(default=None, repr=False)
-    crypto_venue_days: int = 90
+    crypto_venue_days: int = 0  # 0: all the history the exchange feeds hold
     # Coins recorded live from the exchanges' public streams (live.py); LIVE_CRYPTO=off for none.
     live_coins: tuple[str, ...] = ("BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LTC", "LINK")
     # MASSIVE_OFFLINE=1: nothing is fetched and no recorder starts (a test copy of the app on a
@@ -149,7 +149,7 @@ class Settings:
         base = self.origin or self
         if name in PUBLIC_FEEDS:
             tier, per_run, per_day = PUBLIC_FEEDS[name]
-            if name in ("coinbase", "bitfinex"):
+            if name in ("coinbase", "bitfinex") and base.crypto_venue_days:
                 tier = replace(tier, history_days=base.crypto_venue_days)
             return replace(base, tier=tier, max_requests_per_run=per_run, max_requests_per_day=per_day, origin=base)
         if name == "alpaca" and base.alpaca:
@@ -269,7 +269,7 @@ def load_settings(
         tick_history_days=_default(_int_setting(merged, "TICK_HISTORY_DAYS"), 365),
         tick_min_free_gb=_default(_int_setting(merged, "TICK_MIN_FREE_GB"), 250),
         tiingo_api_key=merged.get("TIINGO_API_KEY") or None,
-        crypto_venue_days=_default(_int_setting(merged, "CRYPTO_VENUE_DAYS"), 90),
+        crypto_venue_days=_default(_int_setting(merged, "CRYPTO_VENUE_DAYS"), 0),
         live_coins=_live_coins(merged.get("LIVE_CRYPTO")),
         offline=str(merged.get("MASSIVE_OFFLINE", "")).strip().lower() in ("1", "true", "yes", "on"),
     )
