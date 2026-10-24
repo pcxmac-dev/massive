@@ -186,7 +186,10 @@ def _fill_ticks(source: DataSource, store: Store, ticker: str, a: int, b: int, f
             o, n = min(times) // 1_000_000, max(times) // 1_000_000
             oldest = o if oldest is None else min(oldest, o)
             newest = n if newest is None else max(newest, n)
-            store.add_coverage(source.name, ticker, "trades", oldest, top())
+            # held from the millisecond after the oldest: more ticks of that same millisecond may come
+            # on the next page, and a run stopped here asks for the whole of it again (the store
+            # keeps one of each)
+            store.add_coverage(source.name, ticker, "trades", oldest + 1, top())
         _close_head(store, source.name, ticker, "trades", a, top(), oldest, frontier)
         span = (a, top())
     finally:  # also when a cap stops the run: build what is complete
@@ -517,10 +520,13 @@ def check_listing(source: DataSource, store: Store, item: dict, today: date, log
 
     if not inst.active:
         raw = (inst.details or {}).get("delisted_utc")
-        gone = date.fromisoformat(raw[:10]) if raw else today
+        gone = date.fromisoformat(raw[:10]) if raw else (item.get("retired_on") or today)  # not moved on each check
         if item.get("retired_on") != gone:
             store.set_retired(ticker, gone)
             log(f"{ticker}: no longer listed (since {gone}); marked retired, history still filled")
+        # checked: asked again in a week, not with every sync (it was every day, for good)
+        store.set_listing(source.name, ticker, item["listed_from"], item["figi"], today)
+        store.set_details(source.name, ticker, {**(inst.details or {}), "active": False})
         return Listing(True, item["listed_from"])
     mic = inst.primary_exchange.mic if inst.primary_exchange else None
     if item["exchange"] and mic and mic != item["exchange"]:
@@ -529,6 +535,7 @@ def check_listing(source: DataSource, store: Store, item: dict, today: date, log
 
     if item["figi"] and inst.figi and inst.figi != item["figi"]:
         n = store.delete_before(source.name, ticker)
+        store.drop_coverage(source.name, ticker)  # what was held is gone: asked for again
         store.reset_backfill(source.name, ticker)
         log(f"{ticker}: symbol now belongs to a different instrument ({inst.name}); removed {n} old rows")
     if inst.list_date:
@@ -630,6 +637,31 @@ class Refusals:
     def clear(self, ticker: str) -> None:
         if self.rows.pop(ticker, None) is not None:
             self._save()
+
+
+# Feeds whose plan limits how many different symbols a month may be asked for (Tiingo's free plan:
+# 500): kept a little inside, taken in the watchlist's order (the most traded first).
+SYMBOLS_PER_MONTH = {"tiingo": 450}
+
+
+def _monthly_symbol(store: Store, feed: str, ticker: str, now: datetime) -> bool:
+    """Whether `feed` may ask for `ticker` this month (recorded as asked when it may)."""
+    import json
+
+    cap = SYMBOLS_PER_MONTH.get(feed)
+    if cap is None:
+        return True
+    key = f"symbols:{feed}:{now.astimezone(timezone.utc):%Y-%m}"
+    try:
+        asked = json.loads(store.kv_get(key) or "[]")
+    except ValueError:
+        asked = []
+    if ticker in asked:
+        return True
+    if len(asked) >= cap:
+        return False
+    store.kv_set(key, json.dumps([*asked, ticker]))
+    return True
 
 
 PAUSE_KEY = "fetch:pause"
@@ -781,7 +813,7 @@ def sync(
             f"({store.kv_get('ticks:backfill-paused')}, TICK_MIN_FREE_GB={tick_min_free_gb})")
     rules = store.condition_rules()
     archival = getattr(source, "archival", False)  # a closed feed: fills history once per symbol
-    closed = 0
+    closed = capped = 0
     if not store.kv_get("ledger:empty-heads:v1"):  # one-off: feeds' empty history heads become 'none'
         n = store.mark_empty_heads()
         store.kv_set("ledger:empty-heads:v1", now.isoformat())
@@ -805,117 +837,129 @@ def sync(
         refusals = Refusals(store, source.name)
         while pending:
             item, urgent = _next_item(pending, store, now)
-            ticker, asset = item["ticker"], item["asset"]
-            synced = item.get("synced_at")
-            if only is not None and ticker not in only:
-                continue
-            if archival and item.get("closed_at"):  # archive complete: never asked again
-                closed += 1
-                continue
-            if archival and not source.covers(item["source_ticker"]):
-                store.set_closed(source.name, ticker, now)
-                log(f"{ticker}: {source.name} has no history for it; closed")
-                continue
-            if not source.serves(asset):  # e.g. Alpaca stocks without keys: nothing is sent
-                waiting[asset] = waiting.get(asset, 0) + 1
-                continue
-            if not urgent and refusals.paused(ticker, now):  # refused run after run: left alone a while
-                result.skipped += 1
-                continue
-            floor = floors[asset]
-            if (only is None or published_only) and synced and not _backfilling(item, floors[asset]) and not _due(
-                    asset, tier, synced, now, 0.0 if urgent or only is not None else refresh_hours):
-                # nothing new published since its last sync (a symbol still backfilling is never skipped)
-                result.skipped += 1
-                continue
-            if on_item:
-                on_item(ticker)
-            spent = source.requests_made
-            if asset == "future":
+            try:
+                ticker, asset = item["ticker"], item["asset"]
+                synced = item.get("synced_at")
+                if only is not None and ticker not in only:
+                    continue
+                if archival and item.get("closed_at"):  # archive complete: never asked again
+                    closed += 1
+                    continue
+                if not _monthly_symbol(store, source.name, ticker, now):  # Tiingo's free plan: 500 symbols a month
+                    capped += 1
+                    continue
+                if archival and not source.covers(item["source_ticker"]):
+                    store.set_closed(source.name, ticker, now)
+                    log(f"{ticker}: {source.name} has no history for it; closed")
+                    continue
+                if not source.serves(asset):  # e.g. Alpaca stocks without keys: nothing is sent
+                    waiting[asset] = waiting.get(asset, 0) + 1
+                    continue
+                if not urgent and refusals.paused(ticker, now):  # refused run after run: left alone a while
+                    result.skipped += 1
+                    continue
+                floor = floors[asset]
+                if (only is None or published_only) and synced and not _backfilling(item, floors[asset]) and not _due(
+                        asset, tier, synced, now, 0.0 if urgent or only is not None else refresh_hours):
+                    # nothing new published since its last sync (a symbol still backfilling is never skipped)
+                    result.skipped += 1
+                    continue
+                if on_item:
+                    on_item(ticker)
+                spent = source.requests_made
+                if asset == "future":
+                    try:
+                        n = sync_future(source, store, item, floor, today, log)
+                    except NotEntitled as e:
+                        log(f"{ticker}: futures refused by your plan ({e.message}); skipped"
+                            + refusals.note(ticker, now, e.message))
+                        continue
+                    refusals.clear(ticker)
+                    result.rows += n
+                    log(f"{ticker}: {n} rows ({source.requests_made - spent} requests)")
+                    store.set_synced(source.name, ticker, now)
+                    continue
+                if asset == "stock" and archival:  # an archive has no reference data: use the other feeds'
+                    listing = Listing(True, item["listed_from"] or next(
+                        (w["listed_from"] for w in store.watchlist(ticker=ticker) if w["listed_from"]), None))
+                elif asset == "stock":  # listing/identity checks only apply to listed securities
+                    listing = check_listing(source, store, item, today, log)
+                    if not listing.ok:
+                        continue
+                else:
+                    check_reference(source, store, item, today, log)
+                    listing = Listing(True)
+                item_floor = max(floor, listing.listed_from) if listing.listed_from else floor
+                item = store.watchlist(source.name, ticker)[0]
+                # a retired symbol has nothing after its last listed day: only its history is filled
+                until = min(now, datetime.combine(item["retired_on"] + timedelta(days=1), datetime.min.time(), tzinfo=ET)) \
+                    if item.get("retired_on") else now
+                resolution, backfilled_to = item["resolution"], item["backfilled_to"]
+                fetch, invert = item["source_ticker"], item["invert"]
+                if resolution == "auto":
+                    resolution = resolve_resolution(source, store, ticker, log, asset=asset, fetch=fetch)
+                    backfilled_to = None
+                    if resolution is None:
+                        log(f"{ticker}: no supported resolution on your plan; skipped")
+                        continue
+                span = dict(me=me, feeds=feeds, fetch=fetch, asset=asset, invert=invert,
+                            listed_from=listing.listed_from, log=log)
                 try:
-                    n = sync_future(source, store, item, floor, today, log)
+                    if resolution == "trades":
+                        # ticks for the recent window, then minute bars for everything before it
+                        n = 0
+                        if tick_state != "stop":
+                            n = sync_trades(source, store, ticker, item_floor, until, me, feeds, fetch=fetch, asset=asset,
+                                            listed_from=listing.listed_from, log=log, rules=rules)
+                        n += sync_bars(source, store, ticker, "minute", item_floor, until, **span)
+                    else:
+                        n = sync_bars(source, store, ticker, resolution, item_floor, until, **span)
                 except NotEntitled as e:
-                    log(f"{ticker}: futures refused by your plan ({e.message}); skipped"
+                    log(f"{ticker} {resolution}: refused by your plan ({e.message}); re-checking resolution next run"
                         + refusals.note(ticker, now, e.message))
+                    store.set_resolution(source.name, ticker, "auto")
+                    store.clear_entitlements(source.name)  # the plan may have changed: probe again
                     continue
                 refusals.clear(ticker)
                 result.rows += n
-                log(f"{ticker}: {n} rows ({source.requests_made - spent} requests)")
-                store.set_synced(source.name, ticker, now)
-                continue
-            if asset == "stock" and archival:  # an archive has no reference data: use the other feeds'
-                listing = Listing(True, item["listed_from"] or next(
-                    (w["listed_from"] for w in store.watchlist(ticker=ticker) if w["listed_from"]), None))
-            elif asset == "stock":  # listing/identity checks only apply to listed securities
-                listing = check_listing(source, store, item, today, log)
-                if not listing.ok:
-                    continue
-            else:
-                check_reference(source, store, item, today, log)
-                listing = Listing(True)
-            item_floor = max(floor, listing.listed_from) if listing.listed_from else floor
-            item = store.watchlist(source.name, ticker)[0]
-            # a retired symbol has nothing after its last listed day: only its history is filled
-            until = min(now, datetime.combine(item["retired_on"] + timedelta(days=1), datetime.min.time(), tzinfo=ET)) \
-                if item.get("retired_on") else now
-            resolution, backfilled_to = item["resolution"], item["backfilled_to"]
-            fetch, invert = item["source_ticker"], item["invert"]
-            if resolution == "auto":
-                resolution = resolve_resolution(source, store, ticker, log, asset=asset, fetch=fetch)
-                backfilled_to = None
-                if resolution is None:
-                    log(f"{ticker}: no supported resolution on your plan; skipped")
-                    continue
-            span = dict(me=me, feeds=feeds, fetch=fetch, asset=asset, invert=invert,
-                        listed_from=listing.listed_from, log=log)
-            try:
-                if resolution == "trades":
-                    # ticks for the recent window, then minute bars for everything before it
-                    n = 0
-                    if tick_state != "stop":
-                        n = sync_trades(source, store, ticker, item_floor, until, me, feeds, fetch=fetch, asset=asset,
-                                        listed_from=listing.listed_from, log=log, rules=rules)
-                    n += sync_bars(source, store, ticker, "minute", item_floor, until, **span)
-                else:
-                    n = sync_bars(source, store, ticker, resolution, item_floor, until, **span)
-            except NotEntitled as e:
-                log(f"{ticker} {resolution}: refused by your plan ({e.message}); re-checking resolution next run"
-                    + refusals.note(ticker, now, e.message))
-                store.set_resolution(source.name, ticker, "auto")
-                store.clear_entitlements(source.name)  # the plan may have changed: probe again
-                continue
-            refusals.clear(ticker)
-            result.rows += n
-            store.set_backfilled(source.name, ticker, item_floor)  # every span it should hold is in
-            if resolution != "day":
-                try:  # official daily bars (closing auction included) for day/week/month charts
-                    n_day = sync_bars(source, store, ticker, "day", item_floor, until, **span)
-                except NotEntitled:
-                    n_day = 0
-                result.rows += n_day
-                # the source's own candles above a minute (5 min, 1 h), which replace the ones built here
-                n_frames = 0
-                for key in (frame_key(t, m) for t, m in source.native_frames(asset)):
-                    try:
-                        n_frames += sync_bars(source, store, ticker, key, item_floor, until, **span)
+                store.set_backfilled(source.name, ticker, item_floor)  # every span it should hold is in
+                if resolution != "day":
+                    try:  # official daily bars (closing auction included) for day/week/month charts
+                        n_day = sync_bars(source, store, ticker, "day", item_floor, until, **span)
                     except NotEntitled:
-                        pass
-                result.rows += n_frames
-                log(f"{ticker} {resolution}: {n} rows, daily: {n_day} rows"
-                    + (f", 5 min and hourly: {n_frames} rows" if n_frames else "")
-                    + f" ({source.requests_made - spent} requests)")
-            else:
-                log(f"{ticker} {resolution}: {n} rows ({source.requests_made - spent} requests)")
-            store.set_synced(source.name, ticker, now)
-            if archival:
-                spans = [resolution] if resolution == "day" else [resolution, "day"]
-                if not any(plan(store, me, feeds, ticker, asset, ts, item_floor, now, listing.listed_from) for ts in spans):
-                    store.set_closed(source.name, ticker, now)
-                    log(f"{ticker}: {source.name} archive complete; closed (not asked again)")
-            elif asset == "stock":
-                fetch_icon(source, store, ticker, log)
+                        n_day = 0
+                    result.rows += n_day
+                    # the source's own candles above a minute (5 min, 1 h), which replace the ones built here
+                    n_frames = 0
+                    for key in (frame_key(t, m) for t, m in source.native_frames(asset)):
+                        try:
+                            n_frames += sync_bars(source, store, ticker, key, item_floor, until, **span)
+                        except NotEntitled:
+                            pass
+                    result.rows += n_frames
+                    log(f"{ticker} {resolution}: {n} rows, daily: {n_day} rows"
+                        + (f", 5 min and hourly: {n_frames} rows" if n_frames else "")
+                        + f" ({source.requests_made - spent} requests)")
+                else:
+                    log(f"{ticker} {resolution}: {n} rows ({source.requests_made - spent} requests)")
+                store.set_synced(source.name, ticker, now)
+                if archival:
+                    spans = [resolution] if resolution == "day" else [resolution, "day"]
+                    if not any(plan(store, me, feeds, ticker, asset, ts, item_floor, now, listing.listed_from) for ts in spans):
+                        store.set_closed(source.name, ticker, now)
+                        log(f"{ticker}: {source.name} archive complete; closed (not asked again)")
+                elif asset == "stock":
+                    fetch_icon(source, store, ticker, log)
+            except RateLimited as e:  # the server says slow down: the run stops (until the next one)
+                raise StopRun(f"rate limited ({e.message}); stopping until the next run") from e
+            except SourceError as e:  # this symbol's own error (404, 5xx after retries, an unexpected
+                # answer): it is skipped this run, the others go on, and one failing run after run waits a day
+                log(f"{item['ticker']}: {e}; skipped this run" + refusals.note(item["ticker"], now, str(e)))
         if closed:
             log(f"{source.name}: {closed} symbols closed (archive complete), not asked")
+        if capped:
+            log(f"{source.name}: {capped} symbols wait for next month (its plan: "
+                f"{SYMBOLS_PER_MONTH[source.name]} different symbols a month)")
         if waiting:
             log(f"{source.name}: " + ", ".join(f"{n} {a} symbols" for a, n in sorted(waiting.items()))
                 + " not collected by this feed here (see `deps`: keys or plan)")
@@ -1321,6 +1365,10 @@ def sync_market_daily(
                 try:
                     bars = _guard_call(source.market_daily, day)
                 except NotEntitled as e:
+                    if "end of day" in str(e).lower():  # not released yet (the free plan, the evening): later
+                        log(f"{day}: not out yet ({e.message})")
+                        day -= timedelta(days=1)
+                        continue
                     store.mark_grouped_day(source.name, day, "denied")
                     log(f"{day}: not covered by your plan ({e.message}); not going further back")
                     break

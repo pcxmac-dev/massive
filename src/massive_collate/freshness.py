@@ -62,7 +62,9 @@ for _venue in ("coinbase-public", "bitstamp-public", "bitfinex-public"):
     PLAN_DELAYS[_venue] = {"crypto": Delay("delay")}
 
 # Alpaca: Basic serves everything but the latest 15 minutes; crypto is never held back.
-PLAN_DELAYS["alpaca-basic"] = {"stock": Delay("delay", timedelta(minutes=15)), "crypto": Delay("delay")}
+# (16 minutes: the requests stop a minute inside the 15-minute block, sources/alpaca.RECENT_SIP_BLOCK,
+# so the ledger must not count the minute between as held.)
+PLAN_DELAYS["alpaca-basic"] = {"stock": Delay("delay", timedelta(minutes=16)), "crypto": Delay("delay")}
 PLAN_DELAYS["alpaca-plus"] = {"stock": Delay("delay"), "crypto": Delay("delay")}
 
 

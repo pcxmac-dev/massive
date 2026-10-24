@@ -33,6 +33,19 @@ class LedgerStore:
             self.conn.execute("INSERT OR REPLACE INTO coverage (source, ticker, timespan, start_ms, end_ms, origin) "
                               "VALUES (?, ?, ?, ?, ?, ?)", (*key, lo, hi, origin))
 
+    def drop_coverage(self, source: str, ticker: str, before_ms: int | None = None) -> int:
+        """Forget a feed's spans of a ticker (those starting before `before_ms`, or all), after its
+        rows there were deleted (the symbol now means another instrument): they are asked for again."""
+        with self.conn:
+            if before_ms is None:
+                return self.conn.execute("DELETE FROM coverage WHERE source=? AND ticker=?",
+                                         (source, ticker.upper())).rowcount
+            n = self.conn.execute("DELETE FROM coverage WHERE source=? AND ticker=? AND end_ms <= ?",
+                                  (source, ticker.upper(), before_ms)).rowcount
+            self.conn.execute("UPDATE coverage SET start_ms=? WHERE source=? AND ticker=? AND start_ms < ?",
+                              (before_ms, source, ticker.upper(), before_ms))
+        return n
+
     def mark_empty_heads(self, min_ms: int = 7 * 86_400_000) -> int:
         """Downloaded spans whose first stored bar comes long after the span starts (the feed's
         history begins later than it was asked for): the empty head becomes 'none' for that feed,

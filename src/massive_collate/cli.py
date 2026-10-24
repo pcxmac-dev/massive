@@ -330,6 +330,9 @@ def _sync(args, settings: Settings) -> int:
             ran += 1
         except ConfigError as e:
             errors.append(f"{name}: {e}")  # feed not configured on this machine
+        except Exception as e:  # noqa: BLE001 - recorded as this feed's run error (api_run); the next feeds go on
+            errors.append(f"{name}: {type(e).__name__}: {e}")
+            Logger(settings.db_path.parent / "logs" / "massive-collate.log")(f"sync {name}: failed ({e}); next feed")
     if ran:  # composite models and exchange quality from what the feeds hold (no requests)
         from . import composite
 

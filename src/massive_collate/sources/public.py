@@ -171,6 +171,7 @@ class CoinbaseSource(_Archive):
     assets = ("crypto",)
     archival = False
     PAGE = 300
+    EMPTY_RUN = 200  # empty windows in a row (1-minute candles: about six weeks) before the listing
     STEPS = {("minute", 1): 60, ("minute", 5): 300, ("minute", 15): 900, ("hour", 1): 3600, ("hour", 6): 21600,
              ("day", 1): 86400}
 
@@ -196,10 +197,14 @@ class CoinbaseSource(_Archive):
         while t < b_s:
             windows.append((t, min(b_s, t + self.PAGE * step)))
             t += self.PAGE * step
+        empty = 0
         for lo, hi in (reversed(windows) if descending else windows):
+            if descending and empty >= self.EMPTY_RUN:
+                return  # this long with nothing, going back: before the pair was listed (the sync records the rest as empty)
             iso = lambda s: datetime.fromtimestamp(s, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
             rows = self.client.get(f"/products/{base}-{quote}/candles",
                                    {"granularity": step, "start": iso(lo), "end": iso(hi - step)})
+            empty = 0 if rows else empty + 1
             bars = [{"t": int(r[0]) * 1000, "o": float(r[3]), "h": float(r[2]), "l": float(r[1]), "c": float(r[4]),
                      "v": float(r[5]), "vw": None, "n": None} for r in rows or [] if lo <= int(r[0]) < hi]
             bars.sort(key=lambda x: -x["t"] if descending else x["t"])
@@ -210,6 +215,15 @@ class CoinbaseSource(_Archive):
     def instrument(self, ticker: str, resolve_exchange: bool = True) -> Instrument:
         base, quote = _pair(ticker)
         return Instrument(ticker=base + quote, name=f"{base}/{quote} on Coinbase", details={"venue": "Coinbase"})
+
+
+BITFINEX_CODES = {"BCH": "BCHN"}  # Bitfinex's own names for a few coins
+
+
+def bitfinex_symbol(base: str, quote: str) -> str:
+    """Bitfinex's trading pair: tBTCUSD, but tDOGE:USD where a code is longer than three letters."""
+    base, quote = BITFINEX_CODES.get(base, base), BITFINEX_CODES.get(quote, quote)
+    return f"t{base}:{quote}" if len(base) > 3 or len(quote) > 3 else f"t{base}{quote}"
 
 
 class BitfinexSource(_Archive):
@@ -243,7 +257,7 @@ class BitfinexSource(_Archive):
         lo = a
         while lo <= hi:
             params = {"start": lo, "end": hi, "limit": limit or self.PAGE, "sort": -1 if descending else 1}
-            rows = self.client.get(f"/candles/trade:{frame}:t{base}{quote}/hist", params) or []
+            rows = self.client.get(f"/candles/trade:{frame}:{bitfinex_symbol(base, quote)}/hist", params) or []
             bars = [{"t": int(r[0]), "o": float(r[1]), "c": float(r[2]), "h": float(r[3]), "l": float(r[4]),
                      "v": float(r[5]), "vw": None, "n": None} for r in rows if a <= int(r[0]) < b]
             yield bars

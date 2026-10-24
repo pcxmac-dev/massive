@@ -59,7 +59,7 @@ def test_second_feed_downloads_only_what_nobody_holds_or_will_serve(store):
     windows = [(s, e) for _, s, e, ts, _ in other.bar_calls if ts == "minute"]
     assert len(windows) == 2
     newest, oldest = windows
-    assert newest == (datetime(2026, 10, 20, 20, 0, tzinfo=ET), datetime(2026, 10, 21, 11, 45, tzinfo=ET))
+    assert newest == (datetime(2026, 10, 20, 20, 0, tzinfo=ET), datetime(2026, 10, 21, 11, 44, tzinfo=ET))  # Alpaca Basic: 16 minutes behind
     assert oldest == (datetime(2016, 1, 1, tzinfo=ET), datetime(2024, 10, 22, tzinfo=ET))  # stops at the other's floor
     cov = store.coverage("SPCX", "minute")
     assert cov["other"][-1] == (ms(newest[0]), ms(newest[1]))  # today's session is in: held to the frontier

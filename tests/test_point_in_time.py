@@ -76,7 +76,7 @@ def _ms(*a):
 def test_publication_by_plan_rule():
     minute = np.array([_ms(2026, 10, 20, 10, 0)])
     assert freshness.published_at(minute, "minute", "stock", TIERS["free"])[0] == _ms(2026, 10, 21, 4, 0)  # overnight
-    assert freshness.published_at(minute, "minute", "stock", ALPACA_TIERS["basic"])[0] == _ms(2026, 10, 20, 10, 16)
+    assert freshness.published_at(minute, "minute", "stock", ALPACA_TIERS["basic"])[0] == _ms(2026, 10, 20, 10, 17)  # 16 minutes after the bar closes
     utc = int(datetime(2026, 10, 20, 23, 59, tzinfo=freshness.timezone.utc).timestamp() * 1000)
     assert freshness.published_at(np.array([utc]), "minute", "crypto", TIERS["free"])[0] == utc + 60_000  # next UTC midnight
     day = np.array([_ms(2026, 11, 1)])  # the day the clocks change

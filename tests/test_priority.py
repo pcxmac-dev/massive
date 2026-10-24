@@ -155,7 +155,7 @@ def test_limits_list_every_server_with_its_window_and_wait(store):
     rows = {r["source"]: r for r in limits(store, settings, now)}
     assert {"massive", "alpaca", "bitstamp", "coinbase", "bitfinex", "cboe", "tiingo"} <= set(rows)
     m = rows["massive"]
-    assert m["keptTo"] == "5 requests per minute" and m["window"]["used"] == 5 and m["window"]["freeIn"] == 10.0
+    assert m["keptTo"] == "5 requests per 62 s" and m["window"]["used"] == 5 and m["window"]["freeIn"] == 12.0
     assert m["wait"]["reason"].startswith("limit") and rows["coinbase"]["wait"] is None  # a past wait is over
     assert rows["tiingo"]["keptTo"] == "45 requests per hour" and "10 requests per second" in rows["coinbase"]["published"]
     assert m["perDay"] == 2000 and m["leftToday"] == 2000

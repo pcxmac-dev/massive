@@ -55,7 +55,11 @@ class MassiveClient:
         self.should_stop: Callable[[], str | None] | None = None
 
     def get(self, path_or_url: str, params: dict[str, Any] | None = None) -> dict:
-        return self._request(path_or_url, params).json()
+        resp = self._request(path_or_url, params)
+        try:
+            return resp.json()
+        except ValueError as e:  # an HTML error page, a cut-off body: this request's failure, not the run's
+            raise SourceError(resp.status_code, f"not JSON: {e}") from e
 
     def get_bytes(self, url: str) -> tuple[bytes, str]:
         """A file on the API host (e.g. a company icon): (content, content type). Counts as a request."""
@@ -78,10 +82,22 @@ class MassiveClient:
             if self.request_budget is not None and self.requests_made >= self.request_budget:
                 raise BudgetExhausted(f"request cap of {self.request_budget} reached")
             self.class_limiters.get(asset_class(url), self._limiter).acquire()
-            resp = self._session.get(url, params=params, headers=self._headers, timeout=self._timeout)
-            self.requests_made += 1
+            reason = self.should_stop() if self.should_stop else None  # paused during the window's wait
+            if reason:
+                raise Paused(reason)
+            self.requests_made += 1  # counted before it goes: one that times out may have reached the server
             if self.on_request:
                 self.on_request(self.requests_made)
+            try:
+                resp = self._session.get(url, params=params, headers=self._headers, timeout=self._timeout)
+            except requests.RequestException as e:  # no answer (network down, a timeout): tried again like a 5xx
+                if attempt == self._max_retries:
+                    raise SourceError(0, f"no answer: {type(e).__name__}: {e}") from e
+                delay = _retry_delay(None, attempt)
+                if self.on_retry:
+                    self.on_retry(delay, 0)
+                self._sleep(delay)
+                continue
             retryable = resp.status_code == 429 or resp.status_code >= 500
             if not retryable or attempt == self._max_retries:
                 break
@@ -107,7 +123,7 @@ class MassiveClient:
         n = 1
         while data.get("next_url"):
             if max_pages is not None and n >= max_pages:
-                raise SourceError(f"{path}: more than {max_pages} pages; stopped (the list is longer than expected)")
+                raise SourceError(0, f"{path}: more than {max_pages} pages; stopped (the list is longer than expected)")
             data = self.get(data["next_url"])
             n += 1
             yield data.get("results") or []
@@ -399,8 +415,8 @@ def _first(pages: Iterator[list[dict]]) -> Iterator[list[dict]]:
     yield next(pages)
 
 
-def _retry_delay(resp: requests.Response, attempt: int) -> float:
-    retry_after = resp.headers.get("Retry-After")
+def _retry_delay(resp: requests.Response | None, attempt: int) -> float:
+    retry_after = resp.headers.get("Retry-After") if resp is not None else None
     if retry_after:
         try:
             return float(retry_after)

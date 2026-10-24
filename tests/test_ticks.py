@@ -69,7 +69,7 @@ def test_tick_feed_takes_the_window_builds_bars_and_downloads_minutes_only_befor
     sync(src, store, ALPACA, NOW, log=_log, feeds=_feeds(tick_days=30))
     # ticks: newest first, from 30 days back to 15 minutes ago
     first = src.trade_calls[0]
-    assert first["desc"] and first["lt"] == ms(datetime(2026, 10, 21, 11, 45, tzinfo=ET)) * 1_000_000
+    assert first["desc"] and first["lt"] == ms(datetime(2026, 10, 21, 11, 44, tzinfo=ET)) * 1_000_000
     assert min(c["gte"] for c in src.trade_calls) == ms(datetime(2026, 9, 21, tzinfo=ET)) * 1_000_000
     # bars built here: 150 one-second bars, 3 minutes (09:30, 09:31, 09:32 partial-by-data)
     secs = store.load_bars(["SPCX"], "second", source="alpaca")

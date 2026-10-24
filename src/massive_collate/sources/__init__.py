@@ -18,7 +18,12 @@ def rate_window(name: str, settings: Settings) -> tuple[int | None, float]:
     server publishes (config.PUBLISHED_LIMITS) so a limiter never meets a refusal."""
     if name == "tiingo":
         return 45, 3600.0  # free plan: 50 an hour
-    return settings.for_source(name).tier.requests_per_minute, 60.0
+    if name == "coinbase":
+        return 8, 1.0  # 10 a second per address (public endpoints): a minute's window let 300 go in a burst
+    rpm = settings.for_source(name).tier.requests_per_minute
+    # A few a minute (Massive's free classes: 5): a couple of seconds' margin, so jitter between
+    # sending and arriving never puts six in the server's minute.
+    return rpm, 62.0 if rpm and rpm <= 10 else 60.0
 
 
 def _limiter(name: str, settings: Settings) -> RateLimiter:
