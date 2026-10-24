@@ -731,9 +731,9 @@
       }
     }
 
-    // exchanges: back to front, labels for open ones (and the hovered one)
+    // exchanges: back to front; labels (drawn after, on top) for the ones operating now
     const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 400);
-    const placed = [];
+    const labelled = [];
     const items = markets.world.map((m) => ({ m, p: project(m.lon, m.lat, g) })).filter((x) => x.p.visible)
       .sort((a, b) => a.p.depth - b.p.depth);
     for (const { m, p } of items) {
@@ -756,12 +756,15 @@
         ctx.globalAlpha = 1;
       }
       const featured = currentItem()?.exchange === m.code;
-      if (featured) {  // the exchange the ticker is talking about: a gold beacon
+      if (featured && m.state !== 'closed') {  // the exchange the ticker is talking about: a gold beacon
         const beat = 0.5 + 0.5 * Math.sin(Date.now() / 250);
         ctx.beginPath(); ctx.arc(p.x, p.y, 10 + 8 * beat, 0, 2 * Math.PI);
         ctx.strokeStyle = `rgba(240,185,11,${0.35 + 0.4 * (1 - beat)})`; ctx.lineWidth = 2; ctx.stroke();
         ctx.beginPath(); ctx.arc(p.x, p.y, 7, 0, 2 * Math.PI);
         ctx.fillStyle = 'rgba(240,185,11,0.35)'; ctx.fill();
+      } else if (featured) {  // closed: a steady ring, so a headline never looks like trading
+        ctx.beginPath(); ctx.arc(p.x, p.y, 10, 0, 2 * Math.PI);
+        ctx.strokeStyle = 'rgba(240,185,11,0.6)'; ctx.lineWidth = 1.5; ctx.stroke();
       }
       marker(p.x, p.y, m.kind, m === hover ? 5.5 : 4);
       ctx.globalAlpha = m.state === 'closed' && perf != null ? 0.7 : 1;
@@ -769,19 +772,9 @@
       ctx.globalAlpha = 1;
       ctx.strokeStyle = perf != null ? (STATE_COLOR[m.state] || STATE_COLOR.unknown) : (dark ? '#0b0e15' : '#fff');
       ctx.lineWidth = perf != null ? 1.6 : 1; ctx.stroke();
-      if ((m.state === 'open' && !crypto) || m.state === 'break' || m === hover || featured) {
-        const label = `${m.city} · ${m.index.split(' · ')[0]}${perf != null ? ` ${perf >= 0 ? '+' : ''}${perf.toFixed(2)}%` : ''}`;
-        ctx.font = '11px system-ui, sans-serif';
-        const w = ctx.measureText(label).width;
-        let lx = p.x + 8, ly = p.y - 6;
-        if (placed.some((b) => Math.abs(b.x - lx) < w && Math.abs(b.y - ly) < 13)) ly += 14;  // simple de-overlap
-        placed.push({ x: lx, y: ly });
-        ctx.fillStyle = dark ? 'rgba(19,23,34,0.75)' : 'rgba(238,240,244,0.88)';
-        ctx.fillRect(lx - 3, ly - 10, w + 6, 14);
-        ctx.fillStyle = m.state === 'open' ? (dark ? '#9ee7dc' : '#0b6b60') : m.state === 'break' ? '#f0a020' : (dark ? '#d1d4dc' : '#131722');
-        ctx.fillText(label, lx, ly);
-      }
+      if ((m.state === 'open' && !crypto) || m.state === 'break' || m === hover || featured) labelled.push({ m, p, perf });
     }
+    drawLabels(labelled, g, dark);
     // colour legend
     const lw = 150, lx = g.w - lw - 18, ly = g.h - 30;
     const lg = ctx.createLinearGradient(lx, 0, lx + lw, 0);
@@ -806,6 +799,75 @@
     if (infoHtml !== lastInfo) { info.innerHTML = infoHtml; lastInfo = infoHtml; }
   }
   let lastInfo = '';
+
+  // Labels for the markets operating now (and the hovered or featured one), by one convention:
+  // markers closer than CLUSTER px on screen (a city's exchanges and FX centre, or neighbours at
+  // this zoom) share one box: the city (or cities) in bold, coloured by state, then a line per
+  // market: its code (the exchange's MIC, or FX), its important indexes joined by " · " (for an
+  // FX centre, its currency), and the day's move of the fund that tracks it. A box sits beside its
+  // markers where it fits, else further out with a leader line; boxes never overlap.
+  const CLUSTER = 26;
+  const KIND_ORDER = { stock: 0, fx: 1, crypto: 2 };
+  function drawLabels(items, g, dark) {
+    const clusters = [];
+    for (const it of items) {
+      const c = clusters.find((k) => k.some((o) => Math.hypot(o.p.x - it.p.x, o.p.y - it.p.y) < CLUSTER));
+      if (c) c.push(it); else clusters.push([it]);
+    }
+    const boxes = [];
+    const text = dark ? '#d1d4dc' : '#131722', muted = dark ? '#9aa0ae' : '#5a606c';
+    const stateColor = (s) => (s === 'open' ? (dark ? '#9ee7dc' : '#0b6b60') : s === 'break' ? '#f0a020' : text);
+    for (const c of clusters) {
+      c.sort((a, b) => (KIND_ORDER[a.m.kind] ?? 3) - (KIND_ORDER[b.m.kind] ?? 3) || a.m.code.localeCompare(b.m.code));
+      const cx = c.reduce((s, i) => s + i.p.x, 0) / c.length, cy = c.reduce((s, i) => s + i.p.y, 0) / c.length;
+      const title = [...new Set(c.map((i) => i.m.city))].join(' · ');
+      const state = c.some((i) => i.m.state === 'open') ? 'open' : c.some((i) => i.m.state === 'break') ? 'break' : c[0].m.state;
+      const rows = c.map(({ m, perf }) => ({
+        code: m.kind === 'fx' ? 'FX' : m.code, what: m.index || m.name,
+        move: perf != null ? `${perf >= 0 ? '+' : ''}${perf.toFixed(2)}%` : '', perf,
+      }));
+      ctx.font = '600 11px system-ui, sans-serif';
+      let w = ctx.measureText(title).width;
+      ctx.font = '10px system-ui, sans-serif';
+      const codeW = Math.max(...rows.map((r) => ctx.measureText(r.code).width));
+      for (const r of rows) w = Math.max(w, codeW + 6 + ctx.measureText(r.what).width + (r.move ? 6 + ctx.measureText(r.move).width : 0));
+      w += 10;
+      const h = 16 + rows.length * 12 + 2;
+      const fits = (x, y) => x >= 2 && y >= 2 && x + w <= g.w - 2 && y + h <= g.h - 2
+        && !boxes.some((b) => x < b.x + b.w + 3 && x + w + 3 > b.x && y < b.y + b.h + 3 && y + h + 3 > b.y);
+      const near = [[cx + 10, cy - h / 2], [cx - 10 - w, cy - h / 2], [cx - w / 2, cy - 12 - h], [cx - w / 2, cy + 12]];
+      const far = [];
+      for (let d = 1; d <= 6; d++) {
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, -1], [0, 1], [1, -1], [1, 1], [-1, -1], [-1, 1]]) {
+          far.push([cx + dx * (10 + d * 22) - (dx < 0 ? w : dx === 0 ? w / 2 : 0), cy + dy * (8 + d * 16) - (dy < 0 ? h : dy === 0 ? h / 2 : 0)]);
+        }
+      }
+      const spot = [...near, ...far].find(([x, y]) => fits(x, y)) || near[0];
+      const [bx, by] = spot;
+      boxes.push({ x: bx, y: by, w, h });
+      if (!near.includes(spot)) {  // a leader line from the markers to the box
+        const tx = Math.max(bx, Math.min(cx, bx + w)), ty = Math.max(by, Math.min(cy, by + h));
+        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(tx, ty);
+        ctx.strokeStyle = dark ? 'rgba(160,170,200,0.45)' : 'rgba(40,50,80,0.4)'; ctx.lineWidth = 1; ctx.stroke();
+      }
+      ctx.fillStyle = dark ? 'rgba(19,23,34,0.82)' : 'rgba(238,240,244,0.92)';
+      ctx.fillRect(bx, by, w, h);
+      ctx.strokeStyle = stateColor(state); ctx.globalAlpha = 0.45; ctx.lineWidth = 1;
+      ctx.strokeRect(bx + 0.5, by + 0.5, w - 1, h - 1); ctx.globalAlpha = 1;
+      ctx.font = '600 11px system-ui, sans-serif'; ctx.fillStyle = stateColor(state);
+      ctx.fillText(title, bx + 5, by + 12);
+      rows.forEach((r, i) => {
+        const y = by + 26 + i * 12;
+        ctx.font = '600 10px system-ui, sans-serif'; ctx.fillStyle = muted; ctx.fillText(r.code, bx + 5, y);
+        ctx.font = '10px system-ui, sans-serif'; ctx.fillStyle = text;
+        ctx.fillText(r.what, bx + 5 + codeW + 6, y);
+        if (r.move) {
+          ctx.fillStyle = perfColor(r.perf);
+          ctx.fillText(r.move, bx + 5 + codeW + 6 + ctx.measureText(r.what).width + 6, y);
+        }
+      });
+    }
+  }
 
   // -- list ----------------------------------------------------------------------------
   function untilText(iso) {
