@@ -56,7 +56,7 @@
     }
   }
 
-  const RAIL_ICON = 40;  // px; the buttons (style.css #rail) leave room around it
+  const RAIL_ICON = 32;  // px; the buttons (style.css #rail) leave room around it
 
   function renderRailIcons(activity) {
     $('railStock').innerHTML = state.ticker ? symbolIcon(symbolInfo(state.ticker), RAIL_ICON + 4) : icon('analysis', RAIL_ICON);

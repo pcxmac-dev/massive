@@ -234,11 +234,11 @@ dialog::backdrop { background: rgba(0, 0, 0, .5); }
 
 #rail { display: flex; flex-direction: column; gap: 2px; padding: 6px 4px; border-left: 1px solid var(--border);
   background: var(--panel); flex: none; }
-#rail button { position: relative; width: 58px; height: 58px; padding: 0; display: grid; place-items: center;
-  color: var(--muted); border-radius: 8px; }
+#rail button { position: relative; width: 46px; height: 46px; padding: 0; display: grid; place-items: center;
+  color: var(--muted); border-radius: 7px; }
 #rail button:hover { color: var(--text); }
 #rail button.active { background: var(--hover); color: var(--accent); }
-#rail button.active::before { content: ""; position: absolute; left: -4px; top: 12px; bottom: 12px; width: 3px;
+#rail button.active::before { content: ""; position: absolute; left: -4px; top: 10px; bottom: 10px; width: 2px;
   border-radius: 1px; background: var(--accent); }
 #rail hr { width: 70%; border: 0; border-top: 1px solid var(--border); margin: 4px auto; }
 #rail button.busy { color: var(--accent); }
@@ -247,8 +247,8 @@ dialog::backdrop { background: rgba(0, 0, 0, .5); }
 #railLive.recording { color: var(--down); opacity: 1; }
 .rail-badge { position: absolute; right: 2px; bottom: 2px; color: var(--accent); background: var(--panel);
   border-radius: 50%; display: grid; place-items: center; }
-.rail-count { position: absolute; right: 2px; top: 2px; min-width: 22px; height: 22px; padding: 0 5px; border-radius: 11px;
-  font-size: 13px; line-height: 22px; color: #fff; background: var(--accent); }
+.rail-count { position: absolute; right: 2px; top: 2px; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 9px;
+  font-size: 11px; line-height: 18px; color: #fff; background: var(--accent); }
 .pane[hidden] { display: none; }
 .small { font-size: 11px; }
 button.primary { background: var(--accent); color: #fff; margin: 8px 0 4px; display: inline-flex; align-items: center; gap: 6px; }

@@ -9,7 +9,7 @@
 (() => {
   'use strict';
 
-  const SIZE = 44;           // css px (the rail's icons are 40)
+  const SIZE = 35;           // css px (the rail's icons are 32)
   const FRAMES = 24;         // one per hour of UTC
   const MARKETS_MS = 300_000;
   const SKIP = new Set(['fx', 'crypto']);  // not markets for this icon (yet)
