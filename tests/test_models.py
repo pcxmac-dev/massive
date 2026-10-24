@@ -150,3 +150,35 @@ def test_causal_model_restarts_at_gaps_and_scales_like_the_centred_one():
     out = apply_model(b, Model("d1", per="hour", causal=True), 60)["close"]
     assert len(out) == 40 - 2 * 3  # the first 3 bars of each segment have too few samples
     assert np.allclose(out, 6.0)  # 0.1 per minute = 6 per hour, no overnight spike
+
+
+def test_the_fourier_model_keeps_the_slow_cycles_and_removes_the_fast_ones():
+    import numpy as np
+    import pandas as pd
+
+    from massive_collate.calc.derivatives import Model, apply_model, fourier_lowpass
+
+    t = np.arange(600, dtype=float)
+    slow = 5 * np.sin(2 * np.pi * t / 200)  # a 200-bar cycle
+    fast = 1 * np.sin(2 * np.pi * t / 8)  # an 8-bar wiggle
+    y = 100 + 0.01 * t + slow + fast
+    kept = fourier_lowpass(y, 41)
+    inner = slice(50, 550)  # away from the ends
+    assert np.max(np.abs(kept[inner] - (100 + 0.01 * t + slow)[inner])) < 0.35  # the wiggle is gone
+    assert np.max(np.abs(fourier_lowpass(y, 4)[inner] - y[inner])) < 0.35  # a 4-bar cut keeps the 8-bar wiggle
+
+    idx = pd.date_range("2026-10-20 09:30", periods=600, freq="1min", tz="America/New_York")
+    bars = pd.DataFrame({"open": y, "high": y, "low": y, "close": y, "volume": 1.0, "turnover": y, "trades": 1}, index=idx)
+    out = apply_model(bars, Model(kind="fourier", window=41, reset_gaps=False), 60)
+    assert len(out) == 600 and abs(out["close"].iloc[300] - kept[300]) < 1e-9
+    log = apply_model(bars, Model(kind="fourier", basis="log", window=41, reset_gaps=False), 60)
+    assert abs(log["close"].iloc[300] - kept[300]) < 0.2  # in price on a log basis too
+    assert Model(kind="fourier").unit_label() == "price"
+    short = apply_model(bars.iloc[:30], Model(kind="fourier", window=41), 60)
+    assert short.empty  # no whole 41-bar cycle in 30 bars
+    try:
+        Model(kind="fourier", causal=True).validate()
+    except ValueError as e:
+        assert "causal" in str(e)
+    else:
+        raise AssertionError("a Fourier fit has no causal form")

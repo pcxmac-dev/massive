@@ -1,4 +1,5 @@
-"""Mathematical models of a price series: 1st and 2nd derivatives and the integral.
+"""Mathematical models of a price series: 1st and 2nd derivatives, the integral, and a Fourier
+low-pass (the price with its short cycles removed).
 
 Market data is discrete, noisy and has gaps, so:
 
@@ -27,6 +28,12 @@ Market data is discrete, noisy and has gaps, so:
   price levels.
 - The integral is the trapezoid area of (basis - first value of the series) over time,
   accumulated across segments; gaps contribute nothing (the market was closed).
+- Fourier: within each segment, the linear trend is taken out, the rest mirrored at both ends
+  (a transform takes a series as one turn of a loop: mirrored, its ends need not meet), every
+  cycle shorter than the window (in bars) removed, and the trend put back: the price's slower
+  swings, in price (on a log basis, fitted to log price and turned back into price). It uses
+  bars on both sides of each one, so it has no causal form. A segment shorter than the window
+  holds no whole cycle to keep and has no values.
 """
 from __future__ import annotations
 
@@ -37,16 +44,16 @@ from functools import lru_cache
 import numpy as np
 import pandas as pd
 
-MODELS = ("price", "d1", "d2", "integral")
+MODELS = ("price", "d1", "d2", "integral", "fourier")
 UNITS_SECONDS = {"bar": None, "minute": 60, "hour": 3600, "day": 86400}
 
 
 @dataclass(frozen=True)
 class Model:
-    kind: str = "price"  # price | d1 | d2 | integral
+    kind: str = "price"  # price | d1 | d2 | integral | fourier
     basis: str = "price"  # price | log
     per: str = "hour"  # bar | minute | hour | day: time unit of slopes and areas
-    window: int = 9  # Savitzky-Golay window (bars, odd)
+    window: int = 9  # Savitzky-Golay window (bars, odd); Fourier: the shortest cycle kept (bars)
     order: int = 3  # Savitzky-Golay polynomial order
     reset_gaps: bool = True  # treat gaps as breaks
     causal: bool = False  # trailing window only (no look-ahead): for backtests and signals
@@ -63,6 +70,8 @@ class Model:
         need = 2 if self.kind == "d2" else 1
         if not need <= self.order < self.window:
             raise ValueError(f"order must be at least {need} and less than the window")
+        if self.kind == "fourier" and self.causal:
+            raise ValueError("the Fourier model uses bars on both sides: it has no causal form")
         return self
 
     @property
@@ -72,6 +81,8 @@ class Model:
     def unit_label(self) -> str:
         base = "%" if self.basis == "log" else "price"
         per = self.per
+        if self.kind == "fourier":
+            return "price"  # turned back into price on either basis
         return {"d1": f"{base}/{per}", "d2": f"{base}/{per}²", "integral": f"{base}·{per}"}.get(self.kind, base)
 
 
@@ -151,6 +162,23 @@ def savgol_derivative_causal(y: np.ndarray, window: int, order: int, deriv: int)
     return out
 
 
+def fourier_lowpass(y: np.ndarray, period: float) -> np.ndarray:
+    """y with every cycle shorter than `period` samples removed: the linear trend out, the rest
+    mirrored at both ends, the short cycles zeroed in its Fourier transform, transformed back,
+    the trend back in (see the module notes)."""
+    n = len(y)
+    if n < 4:
+        return y.astype(float).copy()
+    x = np.arange(n, dtype=float)
+    slope, intercept = np.polyfit(x, y, 1)
+    trend = slope * x + intercept
+    rest = y - trend
+    loop = np.concatenate([rest[::-1], rest, rest[::-1]])
+    spectrum = np.fft.rfft(loop)
+    spectrum[np.fft.rfftfreq(len(loop)) > 1.0 / period] = 0  # cycles per sample above the cut
+    return np.fft.irfft(spectrum, len(loop))[n:2 * n] + trend
+
+
 def segments(index: pd.DatetimeIndex, step_seconds: float, reset_gaps: bool) -> np.ndarray:
     """Segment number of each bar: a new segment starts after a gap much longer than the step."""
     if len(index) == 0 or not reset_gaps:
@@ -181,6 +209,14 @@ def apply_model(bars: pd.DataFrame, model: Model, step_seconds: float) -> pd.Dat
             if not model.causal and m.sum() < model.window:
                 continue  # shorter than the window: no honest slope here (see the module notes)
             value[m] = derivative(y[m], model.window, model.order, deriv) * steps_per_unit ** deriv
+    elif model.kind == "fourier":
+        for s in np.unique(seg):
+            m = seg == s
+            if m.sum() < model.window:
+                continue  # no whole cycle of the window's length in it (see the module notes)
+            value[m] = fourier_lowpass(y[m], model.window)
+        if model.basis == "log":
+            value = np.exp(value / 100)  # back into price
     else:  # integral: trapezoid area of (y - y0) in (basis x time unit), gaps contribute nothing
         base = y - y[0]
         dt = 1.0 / steps_per_unit  # time units per bar

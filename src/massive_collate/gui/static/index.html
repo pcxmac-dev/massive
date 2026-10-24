@@ -37,11 +37,12 @@
       </optgroup>
     </select>
     <span id="typeParams" class="params"></span>
-    <select id="modelSelect" title="Model: the price, its derivatives, or its integral">
+    <select id="modelSelect" title="Model: the price, its derivatives, its integral, or its slower Fourier cycles">
       <option value="price">Price</option>
       <option value="d1">1st derivative (slope)</option>
       <option value="d2">2nd derivative (acceleration)</option>
       <option value="integral">Integral (area)</option>
+      <option value="fourier">Fourier (slow cycles)</option>
     </select>
     <span id="modelParams" class="params" hidden>
       <select id="modelBasis" title="Differentiate the price itself, or log price (percent terms)">

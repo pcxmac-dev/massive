@@ -525,7 +525,7 @@ function typeQuery() {
   return { type: state.chartType, box: p.box || undefined, reversal: p.reversal || undefined, lines: p.lines || undefined };
 }
 
-// -- models: price, 1st / 2nd derivative, integral (computed by the server) ------------
+// -- models: price, 1st / 2nd derivative, integral, Fourier low-pass (computed by the server) ----
 const MODEL_DEFAULTS = { kind: 'price', basis: 'price', per: 'hour', detail: 80, gaps: true };
 state.model = { ...MODEL_DEFAULTS, ...prefs.get('model', {}) };
 
@@ -576,7 +576,9 @@ function renderModelControls() {
   $('modelDetail').disabled = m.kind === 'integral';
   const note = $('modelWindow');
   const hidden = m.kind === 'd1' || m.kind === 'd2' ? state.modelHidden || 0 : 0;
-  note.textContent = m.kind === 'integral' ? '' : `${windowForDetail(m.detail)} bars ≈ ${windowSpan()}`
+  note.textContent = m.kind === 'integral' ? ''
+    : m.kind === 'fourier' ? `cycles of ${windowForDetail(m.detail)}+ bars (≈ ${windowSpan()}) kept`
+      : `${windowForDetail(m.detail)} bars ≈ ${windowSpan()}`
     + (hidden ? ` · ${compact(hidden)} bars not drawn` : '');
   note.classList.toggle('warn', hidden > 0);
   note.title = hidden ? 'Stretches of data shorter than the smoothing window are not drawn: fitted to a whole short '
@@ -1605,9 +1607,82 @@ $('ethBtn').addEventListener('click', () => {
   chart.resetData();
 });
 
+// -- Fourier cycles: the strongest cycles of the bars in view, refitted as you zoom and scroll ----
+// The closes on screen, their linear trend taken out, decomposed into whole cycles across the view
+// (a discrete Fourier transform); the FOURIER_CYCLES strongest, with the trend back in, are drawn over
+// the price, and the legend gives each one's length in bars and time. A fit to what is in view, not a
+// forecast: zoom in or out and it is fitted again.
+const FOURIER_CYCLES = 3;
+const FOURIER_MAX_HARMONIC = 400;  // a cycle of at least view / 400 bars: plenty for any screen
+let fourierFit = { key: '', from: 0, to: 0, values: [], periods: [] };
+
+function fitFourier(data, from, to, k = FOURIER_CYCLES) {
+  const key = `${from}:${to}:${data[to - 1]?.timestamp}:${data[to - 1]?.close}:${k}`;
+  if (fourierFit.key === key) return fourierFit;
+  const y = [];
+  for (let i = from; i < to; i++) y.push(data[i].close);
+  const n = y.length;
+  if (n < 8) return (fourierFit = { key, from, to, values: [], periods: [] });
+  const mx = (n - 1) / 2;
+  const my = y.reduce((a, v) => a + v, 0) / n;
+  let sxy = 0, sxx = 0;
+  y.forEach((v, t) => { sxy += (t - mx) * (v - my); sxx += (t - mx) ** 2; });
+  const slope = sxx ? sxy / sxx : 0;
+  const trend = (t) => my + slope * (t - mx);
+  const rest = y.map((v, t) => v - trend(t));
+  const cycles = [];
+  for (let h = 1; h <= Math.min(Math.floor(n / 2), FOURIER_MAX_HARMONIC); h++) {
+    let a = 0, b = 0;
+    const w = 2 * Math.PI * h / n;
+    for (let t = 0; t < n; t++) { a += rest[t] * Math.cos(w * t); b += rest[t] * Math.sin(w * t); }
+    const scale = h === n / 2 ? 1 / n : 2 / n;
+    cycles.push({ h, a: a * scale, b: b * scale, power: a * a + b * b });
+  }
+  const top = cycles.sort((p, q) => q.power - p.power).slice(0, k);
+  const values = y.map((_, t) => trend(t) + top.reduce((s, c) => s + c.a * Math.cos(2 * Math.PI * c.h * t / n)
+    + c.b * Math.sin(2 * Math.PI * c.h * t / n), 0));
+  return (fourierFit = { key, from, to, values, periods: top.map((c) => n / c.h) });
+}
+
+kc.registerIndicator({
+  name: 'FOURIER',
+  shortName: 'Fourier',
+  series: 'price',
+  figures: [],
+  calc: (list) => list.map(() => ({})),
+  createTooltipDataSource: ({ chart: c }) => {
+    const { from, to } = c.getVisibleRange();
+    const fit = fitFourier(c.getDataList(), Math.max(0, from), to);
+    const p = state.period || { type: 'minute', span: 1 };
+    const barMs = ({ second: 1, minute: 60, hour: 3600, day: 86400, week: 604800, month: 2629800, year: 31557600 }[p.type] || 60)
+      * p.span * 1000 * lodFor();
+    const text = fit.periods.length
+      ? `${fit.periods.length} strongest cycles in view: ${fit.periods.map((b) => `${b.toFixed(b < 10 ? 1 : 0)} bars (${fmtDuration(b * barMs)})`).join(' · ')}`
+      : 'too few bars in view';
+    return { name: 'Fourier', calcParamsText: '', features: [], legends: [{ title: '', value: { text, color: '#ab47bc' } }] };
+  },
+  draw: ({ ctx, chart: c, xAxis, yAxis }) => {
+    const data = c.getDataList();
+    const { from, to } = c.getVisibleRange();
+    const fit = fitFourier(data, Math.max(0, from), to);
+    if (!fit.values.length) return true;
+    ctx.save();
+    ctx.strokeStyle = '#ab47bc'; ctx.lineWidth = 2; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    fit.values.forEach((v, t) => {
+      const x = xAxis.convertToPixel(fit.from + t), y = yAxis.convertToPixel(v);
+      if (t) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+    });
+    ctx.stroke();
+    ctx.restore();
+    return true;
+  },
+});
+
 // -- indicators ----------------------------------------------------------------
 const MAIN_INDICATORS = [['MA', 'Moving average'], ['EMA', 'Exponential MA'], ['SMA', 'Smoothed MA'],
-  ['BOLL', 'Bollinger bands'], ['SAR', 'Parabolic SAR'], ['AVP', 'Average price (VWAP-like)'], ['BBI', 'Bull and bear index']];
+  ['BOLL', 'Bollinger bands'], ['SAR', 'Parabolic SAR'], ['AVP', 'Average price (VWAP-like)'], ['BBI', 'Bull and bear index'],
+  ['FOURIER', 'Fourier cycles (fitted to the bars in view)']];
 const SUB_INDICATORS = [['VOL', 'Volume'], ['MACD', 'MACD'], ['RSI', 'RSI'], ['KDJ', 'KDJ'], ['OBV', 'On-balance volume'],
   ['CCI', 'CCI'], ['WR', 'Williams %R'], ['DMI', 'DMI'], ['TRIX', 'TRIX'], ['MTM', 'Momentum'], ['ROC', 'Rate of change']];
 const isMain = (name) => MAIN_INDICATORS.some(([n]) => n === name);
