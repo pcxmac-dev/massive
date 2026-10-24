@@ -12,6 +12,7 @@ from .. import collector
 from ..collector import ET, history_floor
 from .. import freshness
 from ..config import Settings, Tier
+from ..live import RECORDER_KEY, STATUS_KEY
 from ..storage import Store
 
 LOG_TAIL_BYTES = 64 * 1024
@@ -115,7 +116,8 @@ DETAIL_ROWS = 300  # rows the Fetcher shows, each with what it still needs; the 
 
 
 def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, current: str | None = None,
-                detail: int | None = None, focus: frozenset = frozenset()) -> list[dict]:
+                detail: int | None = None, focus: frozenset = frozenset(),
+                order: dict[str, int] | None = None) -> list[dict]:
     """The Fetcher's rows for one feed. With several feeds, what a row still needs is the spans
     this feed should download (coverage.plan: nobody holds them and no better-ranked feed serves
     them), not everything it lacks itself. That plan costs a few queries a symbol: with `detail`,
@@ -154,7 +156,7 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
         rows.append(row)
         items.append((item, floor))
     chosen = set(range(len(rows))) if detail is None else \
-        {i for i, r in enumerate(rows) if r["ticker"] in focus} | set(ranked(rows)[:detail])
+        {i for i, r in enumerate(rows) if r["ticker"] in focus} | set(ranked(rows, order)[:detail])
     for i in sorted(chosen):
         row, (item, floor) = rows[i], items[i]
         row["planned"] = True
@@ -172,9 +174,10 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
     return rows
 
 
-def ranked(rows: list[dict]) -> list[int]:
-    """Row indexes, most worth seeing first: by state (STATE_RANK), then the initializer's order."""
-    order = getattr(ranked, "order", {})
+def ranked(rows: list[dict], order: dict[str, int] | None = None) -> list[int]:
+    """Row indexes, most worth seeing first: by state (STATE_RANK), then the initializer's order
+    (initializer.load_order: {ticker: rank})."""
+    order = order or {}
     return sorted(range(len(rows)), key=lambda i: (STATE_RANK.get(rows[i]["state"], 9),
                                                    order.get(rows[i]["ticker"], len(order)), rows[i]["ticker"]))
 
@@ -198,9 +201,6 @@ def _directory(store: Store, source: str, settings: Settings, used_today: int) -
     return {**s, "remaining": left, "requestsLeft": left * 2,
             "days": round(left * 2 / per_day, 1) if per_day else None,
             "updated": store.kv_get(f"directory:{source}")}
-
-
-RECORDER_KEY = "live-recorder"  # a live recorder process heartbeats here (kv table) while recording
 
 
 def live_feeds(store: Store, settings: Settings, source: str, now: datetime) -> dict:
@@ -237,12 +237,9 @@ LIVE_FRESH_SECONDS = 300  # a pair whose last trade is older than this is not sh
 def _streams(store: Store, now: datetime) -> tuple[dict, list[str]]:
     """The live recorder's streams (live.py): per exchange whether it is connected and, per pair,
     trades recorded, the last price and when; and the tickers trading live right now."""
-    import json
-
-    raw = store.kv_get("live:status")
-    if not raw:
+    streams = store.kv_json(STATUS_KEY, {}).get("streams", {})
+    if not isinstance(streams, dict):
         return {}, []
-    streams = json.loads(raw).get("streams", {})
     now_ms = now.timestamp() * 1000
     live = sorted({t for s in streams.values() if s.get("connected")
                    for t, p in s.get("pairs", {}).items() if p.get("last") and now_ms - p["last"] < LIVE_FRESH_SECONDS * 1000})
@@ -296,8 +293,6 @@ def limits(store: Store, settings: Settings, now: datetime) -> list[dict]:
     """Every server's limits beside what this machine keeps to and has used: the request window
     (and how full it is now, from the window runs share), the caps per run and per day, today's
     requests, and a wait in progress (a full window or a server's Retry-After) with its reason."""
-    import json
-
     from ..config import PUBLISHED_LIMITS
     from ..ratelimit import describe, load_times, wait_key, window_state
     from ..sources import BUILDERS, rate_window
@@ -309,10 +304,7 @@ def limits(store: Store, settings: Settings, now: datetime) -> list[dict]:
         calls, period = rate_window(name, settings)
         published = PUBLISHED_LIMITS.get(name) or (
             f"{feed.tier.name} plan: {describe(feed.tier.requests_per_minute, 60.0)}")
-        try:
-            wait = json.loads(store.kv_get(wait_key(name)) or "null")
-        except ValueError:
-            wait = None
+        wait = store.kv_json(wait_key(name))
         used = store.requests_today(name)
         rows.append({
             "source": name, "plan": feed.tier.name, "published": published, "keptTo": describe(calls, period),
@@ -394,15 +386,10 @@ def _pause(store: Store, now: datetime) -> dict | None:
 
 def derive_progress(store: Store, now: datetime) -> dict | None:
     """What derive.py is building now (frames from finer bars, for the status bar), or None."""
-    import json
-
     from ..derive import PROGRESS_KEY
 
-    try:
-        p = json.loads(store.kv_get(PROGRESS_KEY) or "null")
-    except ValueError:
-        return None
-    if not isinstance(p, dict) or now.timestamp() * 1000 - p.get("at", 0) > DERIVE_FRESH_MS:
+    p = store.kv_json(PROGRESS_KEY, {})
+    if not p or now.timestamp() * 1000 - p.get("at", 0) > DERIVE_FRESH_MS:
         return None
     return p
 
@@ -428,10 +415,10 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
         if r["status"] == "running" and not owner:
             r["status"] = "abandoned"  # the process died; the next run marks it so in the database
 
-    ranked.order = load_order(store)
+    order = load_order(store)
     focus_set = frozenset({focus.upper()}) if focus else frozenset()
-    every = symbol_rows(store, settings, source, now, current, detail=DETAIL_ROWS, focus=focus_set)
-    symbols = [every[i] for i in ranked(every) if every[i].get("planned")]
+    every = symbol_rows(store, settings, source, now, current, detail=DETAIL_ROWS, focus=focus_set, order=order)
+    symbols = [every[i] for i in ranked(every, order) if every[i].get("planned")]
     counts: dict[str, int] = {}
     for s in every:
         counts[s["state"]] = counts.get(s["state"], 0) + 1

@@ -10,6 +10,10 @@ from zoneinfo import ZoneInfo
 
 _ET = ZoneInfo("America/New_York")
 
+# How long a connection waits for another process's write before failing with "database is
+# locked": the hourly sync, the live recorder and the chart app write the same files.
+BUSY_TIMEOUT_S = 30.0
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")

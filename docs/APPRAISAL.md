@@ -6,6 +6,19 @@ the unbounded series cache in `BarEngine`, the Fetcher's state order disagreeing
 server, and the missing SQLite busy-timeout and sync settings were all confirmed. ★ marks the
 five to do first in each part. Paths are relative to `src/massive_collate/`.
 
+**Done since (2026-10-24, evening):** 1.★5's first step (the series cache is bounded); 1.8's
+`proc.py`; 1.9's busy wait (30 s, `storage/common.py` `BUSY_TIMEOUT_S`; Python's sqlite3 already
+waited 5 s, so this lengthens it rather than adding one); 2.★1 (`Store.kv_json`, and
+`kv_update` under `BEGIN IMMEDIATE` for the priority requests, the open charts and the monthly
+symbol places; `RECORDER_KEY`, `STATUS_KEY` and `WATCHLISTS_KEY` defined once, in `live.py`);
+2.★3's `clear_denied` duplicate and the lock files (all through `proc.py`); 2.★4's state order
+(the page's now matches the server's, with a test); 2.6's `start_scan` docstring, unused `tier =`
+and `ranked.order` (now a parameter).
+**Not done, on purpose:** `synchronous=NORMAL`. Bars and the coverage ledger are in different
+files, so after a power cut NORMAL could keep the ledger's "held" while losing the bars it
+describes: a hole that would never be fetched again. FULL stays until the ledger moves into the
+feed files or a start-up check reconciles them.
+
 ## 1. Modularity and scale
 
 **★1. A series catalog table instead of `stored_series()` scans** (medium). The list of stored

@@ -12,7 +12,8 @@
   const { dataIcon, symbolIcon, DATA_LABEL } = window.MassiveIcons;
   const POLL_FAST_MS = 1500;   // while a run is going or the Fetcher / Live view is open
   const POLL_SLOW_MS = 10000;
-  const STATE_ORDER = { fetching: 0, new: 1, backfilling: 2, queued: 3, current: 4, retired: 5, closed: 6, blocked: 7 };
+  // As the server ranks them (gui/activity.py STATE_RANK): a blocked symbol needs attention before current ones.
+  const STATE_ORDER = { fetching: 0, new: 1, backfilling: 2, queued: 3, blocked: 4, current: 5, retired: 6, closed: 7 };
   const el = (id) => document.getElementById(id);
   const esc = window.MassiveIcons.esc;
   const safeUrl = window.MassiveIcons.safeUrl;

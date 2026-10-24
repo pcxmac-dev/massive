@@ -53,25 +53,21 @@ def _build_alpaca(settings: Settings, request_budget: int | None) -> DataSource:
 
 
 def _build_bitstamp(settings: Settings, request_budget: int | None) -> DataSource:
-    tier = settings.for_source("bitstamp").tier
     return BitstampSource(PublicClient("https://www.bitstamp.net/api/v2", rate_limiter=_limiter("bitstamp", settings),
                                        request_budget=request_budget))
 
 
 def _build_coinbase(settings: Settings, request_budget: int | None) -> DataSource:
-    tier = settings.for_source("coinbase").tier
     return CoinbaseSource(PublicClient("https://api.exchange.coinbase.com", rate_limiter=_limiter("coinbase", settings),
                                        request_budget=request_budget))
 
 
 def _build_bitfinex(settings: Settings, request_budget: int | None) -> DataSource:
-    tier = settings.for_source("bitfinex").tier
     return BitfinexSource(PublicClient("https://api-pub.bitfinex.com/v2", rate_limiter=_limiter("bitfinex", settings),
                                        request_budget=request_budget))
 
 
 def _build_cboe(settings: Settings, request_budget: int | None) -> DataSource:
-    tier = settings.for_source("cboe").tier
     return CboeSource(PublicClient("https://cdn-api.cboe.com/api/global/us_indices/daily_prices",
                                    rate_limiter=_limiter("cboe", settings), request_budget=request_budget))
 

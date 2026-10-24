@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import datetime, timezone
+from typing import Any
 
 from .common import _now, _now_precise
 
@@ -30,6 +32,30 @@ class AppStateStore:
         with self.conn:
             self.conn.execute("INSERT OR REPLACE INTO kv VALUES (?, ?)", (key, value))
         self._wrote()
+
+    def kv_json(self, key: str, default: Any = None) -> Any:
+        """A kv value stored as JSON; `default` when it is missing, empty, unreadable or of
+        another type than `default` (a list where a dict is kept ...). A None default takes any."""
+        raw = self.kv_get(key)
+        if not raw:
+            return default
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            return default
+        return value if default is None or isinstance(value, type(default)) else default
+
+    def kv_update(self, key: str, fn: Callable[[Any], Any], default: Any = None) -> Any:
+        """Read, change and write a JSON kv value in one write transaction (BEGIN IMMEDIATE): a
+        writer in another process waits, so neither loses the other's change. `fn` gets the
+        value (as kv_json reads it) and returns the new one; returns that."""
+        with self.conn:
+            if not self.conn.in_transaction:
+                self.conn.execute("BEGIN IMMEDIATE")
+            value = fn(self.kv_json(key, default))
+            self.conn.execute("INSERT OR REPLACE INTO kv VALUES (?, ?)", (key, json.dumps(value)))
+        self._wrote()
+        return value
 
     # -- chart layouts (saved markups) --------------------------------------
 

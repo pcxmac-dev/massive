@@ -27,19 +27,11 @@ BULK_RESOLUTION = {"massive": "minute", "alpaca": "minute"}
 
 
 def load_order(store) -> dict[str, int]:
-    try:
-        order = json.loads(store.kv_get(ORDER_KEY) or "{}")
-    except ValueError:
-        return {}
-    return order if isinstance(order, dict) else {}
+    return store.kv_json(ORDER_KEY, {})
 
 
 def load_bulk(store) -> list[str]:
-    try:
-        bulk = json.loads(store.kv_get(BULK_KEY) or "[]")
-    except ValueError:
-        return []
-    return bulk if isinstance(bulk, list) else []
+    return store.kv_json(BULK_KEY, [])
 
 
 def initialize(store, feeds: list[str], exchanges=EXCHANGES, by: str = "value", source: str = "massive",

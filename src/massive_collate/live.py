@@ -211,16 +211,10 @@ def stock_keys(settings) -> tuple[str, str] | None:
 def wanted_stocks(store, now_ms: int) -> tuple[str, ...]:
     """The stock symbols to stream, at most MAX_STOCKS: those open on a chart (most recently
     noted first), then the rail's watchlists in their order. Only symbols collected as stocks."""
-    def kv(key, empty):
-        try:
-            value = json.loads(store.kv_get(key) or "null")
-        except ValueError:
-            return empty
-        return value if isinstance(value, type(empty)) else empty
-    opened = sorted(((at, t) for t, at in kv(OPEN_KEY, {}).items()
+    opened = sorted(((at, t) for t, at in store.kv_json(OPEN_KEY, {}).items()
                      if isinstance(at, (int, float)) and now_ms - at <= OPEN_FRESH_MS), reverse=True)
     out = [t for _, t in opened]
-    for lst in kv(WATCHLISTS_KEY, []):
+    for lst in store.kv_json(WATCHLISTS_KEY, []):
         out += (lst.get("tickers") or []) if isinstance(lst, dict) else []
     out = [t.upper() for t in out if isinstance(t, str) and 0 < len(t) <= 32]
     stocks = (t for t in dict.fromkeys(out) if any(w["asset"] == "stock" for w in store.watchlist(ticker=t)))

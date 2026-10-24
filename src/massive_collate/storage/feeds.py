@@ -24,7 +24,7 @@ from typing import Iterable, Sequence
 
 import pandas as pd
 
-from .common import _date_ms, _distinct, _feed_name, _now
+from .common import BUSY_TIMEOUT_S, _date_ms, _distinct, _feed_name, _now
 
 
 # A feed's own files, in the `feeds` folder beside the main file: <feed>.db holds its bars (the
@@ -210,7 +210,8 @@ class _Feed:
         self.name = name
         self.path = folder / f"{name}.db" if folder else None
         self.ticks_path = folder / f"{name}-ticks.db" if folder else None
-        self.conn = sqlite3.connect(str(self.path) if self.path else ":memory:", check_same_thread=check_same_thread)
+        self.conn = sqlite3.connect(str(self.path) if self.path else ":memory:", check_same_thread=check_same_thread,
+                                    timeout=BUSY_TIMEOUT_S)
         self.conn.execute("PRAGMA journal_mode=WAL")
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(bars)")}
         if cols and "stored_at" not in cols:
@@ -644,16 +645,13 @@ class FeedStore:
             (source, day.isoformat(), status, count, _now()),
         )
 
-    def clear_denied_days(self, source: str) -> int:
-        """Forget the market days a plan refused (asked again after a plan change). Returns days."""
-        with self.conn:
-            return self.conn.execute("DELETE FROM grouped_days WHERE source=? AND status='denied'", (source,)).rowcount
-
     def grouped_days(self, source: str) -> dict[date, str]:
         cur = self.conn.execute("SELECT day, status FROM grouped_days WHERE source=?", (source,))
         return {date.fromisoformat(d): s for d, s in cur}
 
     def clear_denied(self, source: str) -> int:
+        """Forget the market days a plan refused (asked again after a plan change, or by
+        `admin reset-denied`). Returns days."""
         with self.conn:
             return self.conn.execute(
                 "DELETE FROM grouped_days WHERE source=? AND status='denied'", (source,)

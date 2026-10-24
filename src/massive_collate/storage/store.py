@@ -10,6 +10,7 @@ from pathlib import Path
 from .admin import AdminStore
 from .appstate import AppStateStore
 from .audits import AuditStore
+from .common import BUSY_TIMEOUT_S
 from .datasets import DatasetStore
 from .directory import DirectoryStore
 from .feeds import FeedStore, OldLayout, _Feed, old_layout
@@ -32,7 +33,7 @@ class Store(ProvenanceStore, AdminStore, FeedStore, DatasetStore, DirectoryStore
         self.datasets_dir = Path(datasets_dir) if datasets_dir else (None if memory else self.path.with_name("datasets"))
         self._dataset_conns: dict[str, sqlite3.Connection] = {}
         self._check_same_thread = check_same_thread
-        self.conn = sqlite3.connect(str(path), check_same_thread=check_same_thread)
+        self.conn = sqlite3.connect(str(path), check_same_thread=check_same_thread, timeout=BUSY_TIMEOUT_S)
         old = old_layout(self.conn, None if memory else self.path)
         if old:
             self.conn.close()

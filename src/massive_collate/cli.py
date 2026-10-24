@@ -210,7 +210,7 @@ def _note_tier(store: Store, settings: Settings, log) -> None:
         return
     if seen:
         store.clear_entitlements("massive")
-        days = store.clear_denied_days("massive")
+        days = store.clear_denied("massive")
         n = reresolve(store, "massive")
         log(f"massive plan changed ({seen} -> {key}): entitlements, {days} refused days "
             f"and {n} symbols' resolutions asked again")

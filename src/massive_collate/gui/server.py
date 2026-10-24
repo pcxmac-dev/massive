@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from .. import live
 from ..config import Settings, load_settings
 from ..storage import LayoutLimit, Store
 from . import activity, astro
@@ -368,7 +369,7 @@ class ChartApp:
         )
 
     # -- watchlists (the rail's lists of symbols) --------------------------------
-    WATCHLISTS_KEY = "ui:watchlists"  # live.WATCHLISTS_KEY: the live recorder streams their stocks
+    WATCHLISTS_KEY = live.WATCHLISTS_KEY  # the live recorder streams their stocks
     MAX_LISTS, MAX_LIST_TICKERS = 50, 1000
 
     def watchlists(self) -> dict:
@@ -444,23 +445,20 @@ class ChartApp:
         symbols not noted for live.OPEN_FRESH_MS drop out."""
         import time as _time
 
-        from .. import live
-
         ticker = ticker.strip().upper()
         now_ms = now_ms or int(_time.time() * 1000)
         last = self._open_noted.get(ticker)
         if not 0 < len(ticker) <= 32 or (last is not None and now_ms - last < self.OPEN_NOTE_SECONDS * 1000):
             return
         self._open_noted[ticker] = now_ms
+
+        def add(opened: dict) -> dict:  # other chart apps note theirs in the same key
+            kept = {t: at for t, at in opened.items()
+                    if isinstance(at, (int, float)) and now_ms - at <= live.OPEN_FRESH_MS}
+            return {**kept, ticker: now_ms}
+
         with self._lock:
-            try:
-                opened = json.loads(self.store.kv_get(live.OPEN_KEY) or "{}")
-            except ValueError:
-                opened = {}
-            opened = {t: at for t, at in (opened.items() if isinstance(opened, dict) else ())
-                      if isinstance(at, (int, float)) and now_ms - at <= live.OPEN_FRESH_MS}
-            opened[ticker] = now_ms
-            self.store.kv_set(live.OPEN_KEY, json.dumps(opened))
+            self.store.kv_update(live.OPEN_KEY, add, {})
 
     def activity(self, q: dict[str, str]) -> dict:
         if q.get("open"):
@@ -533,11 +531,11 @@ class ChartApp:
             return self.store.icon(ticker)
 
     def start_scan(self, ticker: str | None = None) -> dict:
-        if self.settings.offline:
-            raise RuntimeError("offline (MASSIVE_OFFLINE): this copy of the app fetches nothing")
         """Run `scan --probe --fetch` (for one ticker, or every watched symbol) in its own
         process: it takes the run lock and the plan caps like a scheduled sync, and shows up in
         the activity view and the status bar while it runs."""
+        if self.settings.offline:
+            raise RuntimeError("offline (MASSIVE_OFFLINE): this copy of the app fetches nothing")
         if activity.lock_owner(self.store.path):
             raise RuntimeError("a run is already in progress")
         args = [sys.executable, "-m", "massive_collate", "scan", "--probe", "--fetch", "--all-sources"]

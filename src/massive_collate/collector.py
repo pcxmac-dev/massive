@@ -608,14 +608,8 @@ class Refusals:
     LIMIT, PAUSE = 3, timedelta(hours=24)
 
     def __init__(self, store: Store, feed: str):
-        import json
-
         self.store, self.key = store, f"refusals:{feed}"
-        try:
-            raw = json.loads(store.kv_get(self.key) or "{}")
-        except ValueError:
-            raw = {}
-        self.rows: dict = raw if isinstance(raw, dict) else {}
+        self.rows: dict = store.kv_json(self.key, {})
 
     def _save(self) -> None:
         import json
@@ -646,23 +640,21 @@ SYMBOLS_PER_MONTH = {"tiingo": 450}
 
 
 def _monthly_symbol(store: Store, feed: str, ticker: str, now: datetime) -> bool:
-    """Whether `feed` may ask for `ticker` this month (recorded as asked when it may)."""
-    import json
-
+    """Whether `feed` may ask for `ticker` this month (recorded as asked when it may; one
+    transaction, so two processes cannot both take the last place)."""
     cap = SYMBOLS_PER_MONTH.get(feed)
     if cap is None:
         return True
     key = f"symbols:{feed}:{now.astimezone(timezone.utc):%Y-%m}"
-    try:
-        asked = json.loads(store.kv_get(key) or "[]")
-    except ValueError:
-        asked = []
-    if ticker in asked:
-        return True
-    if len(asked) >= cap:
-        return False
-    store.kv_set(key, json.dumps([*asked, ticker]))
-    return True
+    allowed = False
+
+    def take(asked: list) -> list:
+        nonlocal allowed
+        allowed = ticker in asked or len(asked) < cap
+        return asked if ticker in asked or not allowed else [*asked, ticker]
+
+    store.kv_update(key, take, [])
+    return allowed
 
 
 PAUSE_KEY = "fetch:pause"
@@ -673,16 +665,12 @@ def pause_state(store: Store, now: datetime | None = None) -> dict | None:
     """Background fetching paused by the user (the chart's button), if it is: {at, until}. The
     hourly sync does not start, a running one stops before its next request; fetches for the
     symbol open in the chart (`sync --tickers`) and the live recorder go on."""
-    import json
-
-    try:
-        p = json.loads(store.kv_get(PAUSE_KEY) or "null")
-    except ValueError:
-        return None
+    p = store.kv_json(PAUSE_KEY, {})
     now = now or datetime.now(timezone.utc)
-    if not isinstance(p, dict) or datetime.fromisoformat(p["until"]) <= now:
+    try:
+        return p if datetime.fromisoformat(p["until"]) > now else None
+    except (KeyError, TypeError, ValueError):
         return None
-    return p
 
 
 def set_pause(store: Store, paused: bool, now: datetime | None = None, minutes: float | None = None) -> dict | None:
@@ -720,34 +708,36 @@ PRIORITY_HOURS = 6  # a request older than this has been dealt with (or given up
 
 
 def _priority_raw(store: Store) -> dict:
-    import json
+    return store.kv_json(PRIORITY_KEY, {})
 
+
+def _recent(v, now: datetime) -> bool:
     try:
-        raw = json.loads(store.kv_get(PRIORITY_KEY) or "{}")
-    except ValueError:
-        return {}
-    return raw if isinstance(raw, dict) else {}
+        return now - datetime.fromisoformat(v["at"]) < timedelta(hours=PRIORITY_HOURS)
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def request_priority(store: Store, ticker: str, now: datetime | None = None) -> None:
     """Ask every feed holding `ticker` to update it before anything else (the chart opened it)."""
-    import json
-
     now = now or datetime.now(timezone.utc)
-    asked = {t: v for t, v in _priority_raw(store).items()
-             if now - datetime.fromisoformat(v["at"]) < timedelta(hours=PRIORITY_HOURS)}
-    asked[ticker.upper()] = {"at": now.isoformat(timespec="seconds"), "runs": 0}
-    store.kv_set(PRIORITY_KEY, json.dumps(asked))
+
+    def add(asked: dict) -> dict:
+        kept = {t: v for t, v in asked.items() if _recent(v, now)}
+        return {**kept, ticker.upper(): {"at": now.isoformat(timespec="seconds"), "runs": 0}}
+
+    store.kv_update(PRIORITY_KEY, add, {})
 
 
 def priority_started(store: Store, ticker: str) -> None:
     """A run for that symbol alone was started for the request."""
-    import json
+    def count(asked: dict) -> dict:
+        v = asked.get(ticker.upper())
+        if isinstance(v, dict):
+            v["runs"] = v.get("runs", 0) + 1
+        return asked
 
-    asked = _priority_raw(store)
-    if ticker.upper() in asked:
-        asked[ticker.upper()]["runs"] = asked[ticker.upper()].get("runs", 0) + 1
-        store.kv_set(PRIORITY_KEY, json.dumps(asked))
+    store.kv_update(PRIORITY_KEY, count, {})
 
 
 def priority_requests(store: Store, now: datetime | None = None) -> dict[str, dict]:

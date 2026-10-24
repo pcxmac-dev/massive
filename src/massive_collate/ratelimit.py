@@ -99,7 +99,7 @@ def wait_key(source: str) -> str:
 
 def load_times(store, source: str) -> list[float]:
     try:
-        return [float(t) for t in json.loads(store.kv_get(ledger_key(source)) or "[]")]
+        return [float(t) for t in store.kv_json(ledger_key(source), [])]
     except (ValueError, TypeError):
         return []
 

@@ -190,7 +190,7 @@ def refresh(store, feeds: dict, now: datetime, log=print, rebuild_days: int = 2)
             # Rebuild the last few days, and from wherever an exchange's data now reaches further
             # back than at the last build (a new exchange, a backfill); everything the first time.
             key = f"composite:edges:{ticker}:{timespan}"
-            before = json.loads(store.kv_get(key) or "{}")
+            before = store.kv_json(key, {})
             have = store.bar_edges("composite", ticker, timespan)
             lo = have[1] - rebuild_days * DAY_MS if have else first
             for f, (a, _) in edges.items():
