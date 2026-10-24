@@ -2,6 +2,39 @@
 
 Working notes so work can resume in a fresh session. Newest first.
 
+## State (2026-10-24, evening)
+
+- **Plans and caps**: Massive **Advanced** for stocks (`python -m massive_collate plan` probes it:
+  trades, quotes, seconds, history from 2003-09-10); the other Massive classes stay on the free
+  plan (`MASSIVE_TIER_INDICES/_CURRENCIES/_CRYPTO/_FUTURES`, each with its own history, delay and
+  5 req/min rate). Saved user env vars (read from the registry by running processes):
+  `MASSIVE_TIER=advanced`, `MASSIVE_MAX_REQUESTS_PER_RUN=10000`, `MASSIVE_MAX_REQUESTS_PER_DAY=200000`
+  (the user approved these caps). Alpaca paper keys set (free Basic: SIP from 2016, 15 min behind).
+- **Watchlist**: `initialize` put every NYSE and Nasdaq listing (7,894; preferreds left out: the
+  directory loses their ticker case) on massive, alpaca and tiingo at minute resolution, ranked
+  by traded value (`watchlist:order`); backfills go most traded first. 7,913 symbols in all.
+- **Which feed downloads a span** (`coverage.rank`): availability, precision, freshness (real time
+  over delayed over end of day), quality, priority. A plan change re-resolves each symbol's
+  resolution (bulk symbols stay at minutes). Charts open on every feed merged, the reference
+  exchange first (Coinbase for crypto), other feeds filling where it has nothing.
+- **Sanity checks for repeated failures**: the page shares in-flight requests and pauses failing
+  endpoints (a 60/s retry loop sent 1.8 M requests); live streams back off up to 5 min; a symbol
+  refused 3 runs in a row waits a day (`refusals:<feed>`); empty history walked by a capped run is
+  recorded (Coinbase windows); symbols still backfilling are never skipped; one live recorder per
+  machine (`MASSIVE_LIVE_LOCK`). Stray recorders from old test runs (~35, old code) still need
+  stopping by the user (Claude is not allowed to stop processes).
+- **Live**: Alpaca IEX stream for the open stock and the rail's watchlists (≤30, own `iex` feed,
+  ranked below whole-market feeds); the Live icon pulses red while data arrives (blue/white selected).
+- **Derived data**: every interval stored, only upward (30 s; 5/30 m, 1/2/4 h, 1 D; W/M/Y); a feed's
+  own bars at the chart's interval are prime; the status bar shows builds; Fourier model and
+  indicator; the Analysis highlight greys out everything outside it.
+- **Fetcher**: every source's status (ok/fetching/limited/down/off), "Unable to fetch data
+  currently", pause/resume fetching, 300 most relevant rows of 7,913 with counts.
+- **Scale**: /api/symbols 0.6 s and the activity poll 0.5 s with 7,913 symbols on the real database.
+- **Next**: results of five bug sweeps and a modularity/style appraisal; then per-symbol data from
+  several feeds and derived data everywhere. A private web portal (Tailscale + token) awaits the
+  user's go-ahead.
+
 ## State (2026-10-24)
 
 - **Live charts**: the live recorder (`python -m massive_collate live`, started by `sync`) streams
