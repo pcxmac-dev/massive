@@ -21,8 +21,9 @@ Working notes so work can resume in a fresh session. Newest first.
 - **Analysis view**: virtual level 2 (volume by price, derived prices starred); box plots chart
   type; models fixed (short stretches, edges).
 - **Rail**: Live icon heartbeat (or ROYGBIV pulse) while the open symbol streams; Markets icon
-  is the Earth (`vendor/world/blue-marble.jpg`, `black-marble.jpg`, NASA, public domain): the
-  day side while an exchange trades, the night side when none does (forex and crypto aside).
+  is the Markets view's wireframe globe in miniature (1:50m coastlines and borders): the day
+  side while an exchange trades, turned to the night side when none does (forex and crypto
+  aside). The NASA images in `vendor/world` are kept but unused.
 - **Testing**: `massive-charts-test` (sessions folder `.claude/launch.json`) serves an empty
   scratch database on port 8766; the old scratch copy predates the per-feed split.
 
