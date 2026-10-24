@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 from ..storage import Store
-from .models import Model, apply_model
+from ..calc.derivatives import Model, apply_model
 
 
 def model_precision(values) -> int:

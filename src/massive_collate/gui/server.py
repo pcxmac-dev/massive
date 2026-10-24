@@ -17,7 +17,7 @@ from ..config import Settings, load_settings
 from ..storage import LayoutLimit, Store
 from . import activity, astro
 from .bars import BarEngine, Style, resample
-from .models import Model
+from ..calc.derivatives import Model
 from .stats import details_subset, key_stats
 
 STATIC = Path(__file__).parent / "static"

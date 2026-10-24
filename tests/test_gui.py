@@ -304,7 +304,7 @@ def test_info_for_futures_reports_contract(tmp_path):
 
 def test_models_through_the_engine_and_api(tmp_path):
     from massive_collate.gui.bars import Style
-    from massive_collate.gui.models import Model
+    from massive_collate.calc.derivatives import Model
 
     s = _store_with_bars(tmp_path)  # opens rise 0.001 per minute, close constant 10.25
     eng = BarEngine(s)

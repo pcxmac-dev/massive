@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from massive_collate.gui.models import Model, apply_model, savgol_derivative, segments
+from massive_collate.calc.derivatives import Model, apply_model, savgol_derivative, segments
 
 ET = "America/New_York"
 
