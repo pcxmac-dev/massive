@@ -44,6 +44,7 @@ class Store(ProvenanceStore, AdminStore, FeedStore, DatasetStore, DirectoryStore
         self._migrate()
         self._feeds: dict[str, _Feed] = {}
         self._feeds_lock = threading.Lock()
+        self._missing: dict[str, float] = {}  # feed -> when it was found to have no files (monotonic s)
         self._feeds_seen = None
         # Data-version caches: SQLite's data_version changes when another connection (the
         # collector) commits, per file; _writes counts this store's own market-data writes.

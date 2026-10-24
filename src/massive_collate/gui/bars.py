@@ -392,11 +392,15 @@ class BarEngine:
             have |= {w["source"] for w in rows if w["asset"] == "future"}  # continuous futures are stored under their contracts
         reference = REFERENCE.get(next((w["asset"] for w in rows), "stock"))
         fine = {s for s, k in stored if k in ("trades", "second")}
+        return self.rank_sources(have, fine, reference, self.quality or (lambda s: 1.0))
+
+    def rank_sources(self, have: set, fine: set, reference: str | None, quality) -> list[str]:
+        """`have` best first, as sources_for ranks them (for callers that hold the series and the
+        watchlist already: the symbol list ranks thousands at once)."""
         order = {s: i for i, s in enumerate(self.priority)}
-        have -= set(MODEL_SOURCES)
-        quality = self.quality or (lambda s: 1.0)
-        return sorted(have, key=lambda s: (s in PARTIAL_FEEDS, s not in fine, s != reference, -quality(s),
-                                           order.get(s, len(order)), s))
+        return sorted(set(have) - set(MODEL_SOURCES),
+                      key=lambda s: (s in PARTIAL_FEEDS, s not in fine, s != reference, -quality(s),
+                                     order.get(s, len(order)), s))
 
     def _fingerprint(self, source: str, ticker: str) -> tuple:
         item = self._watch_item(source, ticker)

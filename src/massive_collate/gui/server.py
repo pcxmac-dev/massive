@@ -54,13 +54,13 @@ class ChartApp:
 
         return max((quality_of(self.store, feed, a) for a in ("stock", "crypto", "index", "fx", "future")), default=1.0)
 
-    def models(self, ticker: str, asset: str, sources: list[str]) -> dict | None:
+    def models(self, ticker: str, asset: str, sources: list[str], feeds: dict | None = None) -> dict | None:
         """The models of an asset traded on several exchanges: the gold-standard reference (one
         exchange), the composite across exchanges, the consolidated tape, and each exchange's quality."""
         from ..composite import exchange_feeds, quality_of, reference_feed
         from ..sources import feed_profiles
 
-        feeds = feed_profiles(self.settings)
+        feeds = feeds if feeds is not None else feed_profiles(self.settings)
         exch = {f: v for f, v in exchange_feeds(feeds, asset).items() if f in sources}
         if len(exch) < 2:
             return None
@@ -73,7 +73,14 @@ class ChartApp:
                 "consolidated": consolidated, "exchanges": exchanges}
 
     def symbols(self) -> list[dict]:
-        """One entry per ticker, with every feed that has data for it."""
+        """One entry per ticker, with every feed that has data for it. One pass over the watchlist
+        and the stored series (indexed by ticker): thousands of symbols, no scan of them per symbol;
+        each symbol's state without the per-symbol download plan (the Fetcher shows that)."""
+        from collections import defaultdict
+
+        from ..composite import REFERENCE
+        from ..sources import feed_profiles
+
         with self._lock:
             watch = self.store.watchlist()
             stored = self.store.stored_series()
@@ -84,7 +91,7 @@ class ChartApp:
             members = self.store.constituents("sp500", "S&P 500")
             now = datetime.now(timezone.utc).astimezone(activity.ET)
             states = {(r["ticker"]): r for src in {w["source"] for w in watch}
-                      for r in activity.symbol_rows(self.store, self.settings, src, now)}
+                      for r in activity.symbol_rows(self.store, self.settings, src, now, detail=0)}
         names = {r.mic: r.name for r in exchanges.itertuples() if r.mic}
         # Futures contracts are stored only as parts of a continuous series (NQ1!): not symbols of their own.
         with self._lock:
@@ -92,22 +99,37 @@ class ChartApp:
                      for c in self.store.contracts(w["source"], w["source_ticker"])}
         watched = {w["ticker"] for w in watch}
         tickers = sorted(({t for _, t, _ in stored} - (parts - watched)) | watched)
+        by_ticker: dict[str, list] = defaultdict(list)
+        for w in watch:
+            by_ticker[w["ticker"]].append(w)
+        kinds: dict[str, dict[str, list]] = defaultdict(dict)  # ticker -> {feed: [kinds]}
+        for s, t, k in stored:
+            kinds[t].setdefault(s, []).append(k)
+        qualities: dict[str, float] = {}
+
+        def quality(feed: str) -> float:  # once per feed, not per symbol
+            if feed not in qualities:
+                with self._lock:
+                    qualities[feed] = self._feed_quality(feed)
+            return qualities[feed]
+        feed_set = feed_profiles(self.settings)
         out = []
         for ticker in tickers:
-            ws = [w for w in watch if w["ticker"] == ticker]
+            ws = by_ticker.get(ticker, [])
             w = next((x for x in ws if x.get("name")), ws[0] if ws else {})
             mic = next((x["exchange"] for x in ws if x.get("exchange")), None)
-            feeds = [
-                {"source": s, "data": sorted(k for s2, t2, k in stored if s2 == s and t2 == ticker)}
-                for s in self.engine.sources_for(ticker)
-            ]
+            held = kinds.get(ticker, {})
+            have = set(held) | {x["source"] for x in ws if x["asset"] == "future"}
+            fine = {s for s, ks in held.items() if any(k in ("trades", "second") for k in ks)}
+            order = self.engine.rank_sources(have, fine, REFERENCE.get(w.get("asset") or "stock"), quality)
+            feeds = [{"source": s, "data": sorted(held.get(s, []))} for s in order]
             out.append({
                 "ticker": ticker, "name": w.get("name"), "kind": w.get("kind") or w.get("asset") or "stock",
                 "asset": w.get("asset") or "stock",
                 "exchange": mic, "exchangeName": names.get(mic, mic) if mic else None,
                 "listed": str(w["listed_from"]) if w.get("listed_from") else None,
                 "feeds": feeds,
-                "models": self.models(ticker, w.get("asset") or "stock", [f["source"] for f in feeds]),
+                "models": self.models(ticker, w.get("asset") or "stock", [f["source"] for f in feeds], feed_set),
                 "icon": ticker in icons,
                 "market": _market(snapshot, ticker, w),
                 **_sector(ticker, profiles.get(ticker), w.get("asset") or "stock", (snapshot.get(ticker) or {}).get("close"),
@@ -432,7 +454,7 @@ class ChartApp:
             self.note_open(q["open"])
         with self._lock:
             out = activity.activity(self.store, self.settings, self.store.path, q.get("source", "massive"),
-                                    log_lines=min(int(q.get("lines", 200)), 1000))
+                                    log_lines=min(int(q.get("lines", 200)), 1000), focus=q.get("open"))
         out["feeds"] = self.feeds()
         return out
 

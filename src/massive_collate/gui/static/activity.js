@@ -307,15 +307,17 @@
       <div class="tile"><h5>Plan</h5><div class="big">${esc(plan.tier)}</div>
         <small>history from ${esc(plan.historyFloor)}</small></div>`;
 
-    const counts = { all: data.symbols.length };
-    for (const s of data.symbols) counts[s.state] = (counts[s.state] || 0) + 1;
+    // Every symbol is counted (symbolCounts); the table holds the rows most worth seeing (the server
+    // picks them: being fetched, new data, backfills ... most traded first, the open symbol always).
+    const counts = { all: data.symbolTotal ?? data.symbols.length, ...(data.symbolCounts || {}) };
+    if (!data.symbolCounts) for (const s of data.symbols) counts[s.state] = (counts[s.state] || 0) + 1;
     el('actFilters').innerHTML = ['all', 'fetching', 'new', 'backfilling', 'queued', 'current', 'retired', 'closed', 'blocked']
       .filter((k) => k === 'all' || counts[k])
       .map((k) => `<button data-filter="${k}" class="${k === filter ? 'active' : ''}">${k === 'all' ? 'All' : DATA_LABEL[k]} <span class="chip">${counts[k] || 0}</span></button>`)
       .join('');
     const rows = data.symbols
       .filter((s) => filter === 'all' || s.state === filter)
-      .sort((a, b) => STATE_ORDER[a.state] - STATE_ORDER[b.state] || a.ticker.localeCompare(b.ticker));
+      .sort((a, b) => STATE_ORDER[a.state] - STATE_ORDER[b.state]);  // stable: the server's order within a state
     el('actSymbols').innerHTML = rows.length ? rows.map((s) => `
       <tr data-ticker="${esc(s.ticker)}" class="${s.first ? 'has-data' : ''}" title="${s.first ? 'Open in the chart' : 'No data stored yet'}">
         <td><span class="sym-cell">${symbolIcon(s, 20)}<span><b>${esc(s.exchange ? `${s.ticker}::${s.exchange}` : s.ticker)}</b>
@@ -326,7 +328,9 @@
         <td>${esc(s.resolution)}</td>
         <td class="num">${s.requestsLeft ? `≈${num(s.requestsLeft)}` : '–'}</td>
         <td>${s.syncedAt ? ago(s.syncedAt) : '–'}<div class="sub">${s.nextDue ? `new data ${when(s.nextDue)}` : ''}</div></td>
-      </tr>`).join('') : '<tr><td colspan="6" class="empty">No symbols in this state.</td></tr>';
+      </tr>`).join('') + (counts.all > data.symbols.length ? `<tr><td colspan="6" class="empty">Showing the ${num(data.symbols.length)}
+        most relevant of ${num(counts.all)} symbols: being fetched, new data and backfills first, the most traded first.</td></tr>` : '')
+      : '<tr><td colspan="6" class="empty">No symbols in this state among the rows shown.</td></tr>';
     el('actRuns').innerHTML = data.runs.slice(0, 12).map((r) => `
       <tr><td>${when(new Date(r.started_at).toISOString())}</td><td>${esc(r.command)}</td>
         <td><span class="state run-${esc(r.status)}">${esc(r.status)}</span></td>

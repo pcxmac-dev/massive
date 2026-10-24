@@ -16,6 +16,7 @@ Publication delays (observed on Massive, Oct 2026; adjust PLAN_DELAYS if the pla
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -157,6 +158,7 @@ def _eod_ready(session: date) -> datetime:
     return datetime.combine(session + timedelta(days=1), time(0), ET) + EOD_READY_AFTER_MIDNIGHT
 
 
+@lru_cache(maxsize=512)  # the same for every symbol of an asset class at one moment
 def expected(asset: str, tier: Tier, now: datetime) -> Expectation:
     now = now.astimezone(ET)
     delay = plan_delay(tier, asset)

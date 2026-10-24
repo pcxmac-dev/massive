@@ -15,6 +15,10 @@
   let query = '';
   let sort = prefs.get('watchSort', { key: 'symbol', dir: 1 });
   let collapsed = new Set(prefs.get('watchCollapsed', []));
+  // A group shows its first GROUP_ROWS rows until "Show all": thousands of stocks took half a second
+  // to draw, again with every activity poll. A filter still searches every symbol.
+  const GROUP_ROWS = 200;
+  const expanded = new Set();
 
   const shown = () => document.body.dataset.pane === 'watchlist';
 
@@ -95,8 +99,11 @@
           .map((sym) => ({ sym, q: quote(sym) })).sort(compare);
         if (!entries.length) return '';
         const closed = collapsed.has(key) && !q;
+        const shownRows = expanded.has(key) ? entries : entries.slice(0, GROUP_ROWS);
+        const more = entries.length - shownRows.length;
         return `<tbody><tr class="w-group" data-group="${key}"><td colspan="4">${closed ? '▸' : '▾'} ${label} <span class="p-muted">${entries.length}</span></td></tr></tbody>
-          <tbody${closed ? ' hidden' : ''}>${entries.map((e) => row(e, false)).join('')}</tbody>`;
+          <tbody${closed ? ' hidden' : ''}>${shownRows.map((e) => row(e, false)).join('')}${more
+            ? `<tr class="w-more" data-more="${key}"><td colspan="4">Show all ${entries.length.toLocaleString()} (${more.toLocaleString()} more)</td></tr>` : ''}</tbody>`;
       }).join('');
     } else {
       const entries = mine.tickers.map((t) => bySym.get(t)).filter((s) => s && match(s)).map((sym) => ({ sym, q: quote(sym) }));
@@ -179,6 +186,8 @@
       mine.tickers = mine.tickers.filter((t) => t !== remove.dataset.remove);
       return save();
     }
+    const moreRow = e.target.closest('tr[data-more]');
+    if (moreRow) { expanded.add(moreRow.dataset.more); render(); return; }
     const item = e.target.closest('tr[data-ticker]');
     if (item) window.dispatchEvent(new CustomEvent('massive:open-symbol', { detail: item.dataset.ticker }));
   });

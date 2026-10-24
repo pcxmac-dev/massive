@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -130,6 +131,8 @@ ON CONFLICT (ticker, timespan, multiplier, ts) DO UPDATE SET
 """
 
 BAR_COLUMNS = ["open", "high", "low", "close", "volume", "vwap", "transactions"]
+
+MISSING_RECHECK_S = 5.0  # a feed found without files is looked for again after this long
 
 # Only a bar whose values changed is rewritten (and so revised); the same values leave it as stored.
 _UPSERT_BAR = """
@@ -285,9 +288,17 @@ class FeedStore:
             if create:
                 raise ValueError(f"not a feed name: {name!r}")
             return None
-        if not create and (self.feeds_dir is None or not any(
-                (self.feeds_dir / f).exists() for f in (f"{name}.db", f"{name}-ticks.db"))):
-            return None
+        if not create:
+            # A feed without files is looked for again only after a few seconds: asked about for every
+            # symbol (thousands per page), checking the disk each time cost seconds.
+            seen = self._missing.get(name)
+            if seen is not None and time.monotonic() - seen < MISSING_RECHECK_S:
+                return None
+            if self.feeds_dir is None or not any(
+                    (self.feeds_dir / f).exists() for f in (f"{name}.db", f"{name}-ticks.db")):
+                self._missing[name] = time.monotonic()
+                return None
+        self._missing.pop(name, None)
         with self._feeds_lock:
             feed = self._feeds.get(name)
             if feed is None:

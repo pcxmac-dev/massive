@@ -139,3 +139,25 @@ def test_every_source_has_a_state_and_the_status_bar_knows_when_none_can_fetch(t
     assert can_fetch(list(rows.values()))
     assert not can_fetch([{"state": "down"}, {"state": "limited"}, {"state": "off"}])
     assert not can_fetch([{"state": "off"}])
+
+
+def test_the_fetcher_shows_the_rows_most_worth_seeing_and_counts_the_rest(tmp_path):
+    import json
+    from datetime import datetime, timezone
+
+    from massive_collate.config import load_settings
+    from massive_collate.gui.activity import activity
+    from massive_collate.storage import Store
+
+    settings = load_settings(env={"MASSIVE_API_KEY": "k"}, env_file=None)
+    with Store(tmp_path / "m.db") as store:
+        tickers = [f"T{i:04d}" for i in range(400)]
+        store.watch("massive", tickers, "minute")
+        store.kv_set("watchlist:order", json.dumps({"T0399": 0, "T0398": 1}))  # the most traded first
+        out = activity(store, settings, tmp_path / "m.db", "massive", datetime(2026, 10, 24, 18, tzinfo=timezone.utc),
+                       focus="t0350")
+    shown = [s["ticker"] for s in out["symbols"]]
+    assert out["symbolTotal"] == 400 and sum(out["symbolCounts"].values()) == 400
+    assert len(shown) == 301 and "T0350" in shown  # 300 by relevance, and the open symbol beyond them
+    assert shown[:2] == ["T0399", "T0398"]  # within a state, the initializer's order
+    assert out["backfill"]["total"] == 400  # tiles count every symbol

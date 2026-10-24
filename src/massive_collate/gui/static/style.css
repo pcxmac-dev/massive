@@ -383,6 +383,7 @@ main > .view[hidden] { display: none; }
 .net-status .bad { color: var(--down); }
 #netText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }
 #netText .net-derived { color: var(--muted); font-style: italic; }
+.w-more td { color: var(--accent); cursor: pointer; text-align: center; font-size: 12px; padding: 6px; }
 .net-pause { font-size: 11px; padding: 1px 8px; border: 1px solid var(--border); border-radius: 4px; background: none;
   color: var(--muted); cursor: pointer; white-space: nowrap; }
 .net-pause:hover { color: var(--text); }

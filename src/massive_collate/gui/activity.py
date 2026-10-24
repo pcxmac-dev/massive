@@ -113,10 +113,19 @@ def symbol_status(item: dict, edges: tuple | None, floor: date, today: date, now
     }
 
 
-def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, current: str | None = None) -> list[dict]:
+# The Fetcher's table: the rows most worth seeing first (what is being fetched, then new data,
+# backfills, the queue ...), the initializer's order (most traded) within each state.
+STATE_RANK = {"fetching": 0, "new": 1, "backfilling": 2, "queued": 3, "blocked": 4, "current": 5, "retired": 6, "closed": 7}
+DETAIL_ROWS = 300  # rows the Fetcher shows, each with what it still needs; the rest are counted
+
+
+def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, current: str | None = None,
+                detail: int | None = None, focus: frozenset = frozenset()) -> list[dict]:
     """The Fetcher's rows for one feed. With several feeds, what a row still needs is the spans
     this feed should download (coverage.plan: nobody holds them and no better-ranked feed serves
-    them), not everything it lacks itself."""
+    them), not everything it lacks itself. That plan costs a few queries a symbol: with `detail`,
+    only the first `detail` rows by relevance (`ranked`), and the `focus` tickers, get it (each
+    marked `planned`); the others keep the estimate from what the feed holds itself."""
     from ..coverage import plan
     from ..sources import feed_profiles
 
@@ -124,7 +133,7 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
     profiles = feed_profiles(settings)
     settings = settings.for_source(source)
     me = profiles.get(source)
-    rows = []
+    rows, items = [], []
     for item in store.watchlist(source):
         floor = history_floor(settings.tier, today, item["asset"])
         if item["asset"] == "future":
@@ -142,22 +151,36 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
         elif item.get("retired_on"):
             row.update(state="retired" if row["state"] in ("new", "current") else row["state"],
                        note=f"no longer listed since {item['retired_on']}: history only, no new data expected")
-        elif me is not None and item["asset"] != "future" and item["resolution"] != "trades":
-            if item["asset"] not in me.assets:
-                row.update(state="blocked", requestsLeft=0,
-                           note="keys not set" if source == "alpaca" else f"{source} has no {item['asset']} data here")
-            elif len(profiles) > 1:
-                item_floor = max(floor, item["listed_from"]) if item.get("listed_from") else floor
-                gaps = plan(store, me, profiles, item["ticker"], item["asset"], "minute", item_floor, now,
-                            item.get("listed_from"))
-                missing_days = sum(b - a for a, b in gaps) / 86_400_000
-                per_day = MINUTES_PER_DAY.get(item["asset"], 960) * (1 if item["asset"] == "crypto" else 5 / 7)
-                row["requestsLeft"] = math.ceil(missing_days * per_day / (10_000 if source == "alpaca" else BARS_PER_REQUEST))
-                row["gapDays"] = round(missing_days, 1)
-                if row["state"] in ("queued", "backfilling") and missing_days < 1:
-                    row.update(state="current", progress=1.0)  # other feeds hold the rest
+        elif me is not None and item["asset"] != "future" and item["resolution"] != "trades" \
+                and item["asset"] not in me.assets:
+            row.update(state="blocked", requestsLeft=0,
+                       note="keys not set" if source == "alpaca" else f"{source} has no {item['asset']} data here")
         rows.append(row)
+        items.append((item, floor))
+    chosen = set(range(len(rows))) if detail is None else \
+        {i for i, r in enumerate(rows) if r["ticker"] in focus} | set(ranked(rows)[:detail])
+    for i in sorted(chosen):
+        row, (item, floor) = rows[i], items[i]
+        row["planned"] = True
+        if (me is None or len(profiles) < 2 or item["asset"] == "future" or item["resolution"] == "trades"
+                or row["state"] in ("closed", "retired", "blocked")):
+            continue
+        item_floor = max(floor, item["listed_from"]) if item.get("listed_from") else floor
+        gaps = plan(store, me, profiles, item["ticker"], item["asset"], "minute", item_floor, now, item.get("listed_from"))
+        missing_days = sum(b - a for a, b in gaps) / 86_400_000
+        per_day = MINUTES_PER_DAY.get(item["asset"], 960) * (1 if item["asset"] == "crypto" else 5 / 7)
+        row["requestsLeft"] = math.ceil(missing_days * per_day / (10_000 if source == "alpaca" else BARS_PER_REQUEST))
+        row["gapDays"] = round(missing_days, 1)
+        if row["state"] in ("queued", "backfilling") and missing_days < 1:
+            row.update(state="current", progress=1.0)  # other feeds hold the rest
     return rows
+
+
+def ranked(rows: list[dict]) -> list[int]:
+    """Row indexes, most worth seeing first: by state (STATE_RANK), then the initializer's order."""
+    order = getattr(ranked, "order", {})
+    return sorted(range(len(rows)), key=lambda i: (STATE_RANK.get(rows[i]["state"], 9),
+                                                   order.get(rows[i]["ticker"], len(order)), rows[i]["ticker"]))
 
 
 def _ticks(store: Store, settings: Settings) -> dict:
@@ -389,7 +412,11 @@ def derive_progress(store: Store, now: datetime) -> dict | None:
 
 
 def activity(store: Store, settings: Settings, db_path: Path, source: str = "massive",
-             now: datetime | None = None, log_lines: int = 200) -> dict:
+             now: datetime | None = None, log_lines: int = 200, focus: str | None = None) -> dict:
+    """The Fetcher view and the status bar: runs, the feed's symbols (the DETAIL_ROWS most worth
+    seeing, with `focus` (the open symbol) always among them; every symbol counted by state),
+    limits, each source's state, live feeds, the log."""
+    from ..initializer import load_order
     now = (now or datetime.now(timezone.utc)).astimezone(ET)
     today = now.date()
     settings = settings.for_source(source)  # the feed's own plan, rate and caps
@@ -405,10 +432,16 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
         if r["status"] == "running" and not owner:
             r["status"] = "abandoned"  # the process died; the next run marks it so in the database
 
-    symbols = symbol_rows(store, settings, source, now, current)
+    ranked.order = load_order(store)
+    focus_set = frozenset({focus.upper()}) if focus else frozenset()
+    every = symbol_rows(store, settings, source, now, current, detail=DETAIL_ROWS, focus=focus_set)
+    symbols = [every[i] for i in ranked(every) if every[i].get("planned")]
+    counts: dict[str, int] = {}
+    for s in every:
+        counts[s["state"]] = counts.get(s["state"], 0) + 1
 
     used = store.requests_today(source)
-    left = sum(s["requestsLeft"] for s in symbols)
+    left = sum(s["requestsLeft"] for s in every)
     per_day = settings.max_requests_per_day
     limit_rows = limits(store, settings.origin or settings, now)
     sources_health = health(store, settings.origin or settings, now, limit_rows, live)
@@ -423,13 +456,15 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
         "running": live is not None,
         "live": live,
         "scanning": bool(live and live["command"].startswith("scan")),
-        "newData": sum(x["state"] == "new" for x in symbols),
+        "newData": counts.get("new", 0),
         "backfill": {
-            "done": sum(s["progress"] >= 1 for s in symbols), "total": len(symbols), "requestsLeft": left,
+            "done": sum(s["progress"] >= 1 for s in every), "total": len(every), "requestsLeft": left,
             "runs": math.ceil(left / settings.max_requests_per_run) if settings.max_requests_per_run else None,
             "days": round(left / per_day, 1) if per_day else None,
         },
         "symbols": symbols,
+        "symbolCounts": counts,
+        "symbolTotal": len(every),
         "directory": _directory(store, source, settings, used),
         "ticks": _ticks(store, settings),
         "liveFeeds": live_feeds(store, settings, source, now),
