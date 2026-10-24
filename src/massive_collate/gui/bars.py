@@ -6,6 +6,7 @@ intervals are left out (as TradingView does).
 """
 from __future__ import annotations
 
+import json
 import math
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -20,6 +21,16 @@ import pandas as pd
 
 from ..storage import Store
 from ..calc.derivatives import Model, apply_model
+
+
+def _money(step: float | None) -> str:
+    """'$0.10', '$1', '$2.50', '$0.005' (a price segment)."""
+    if not step:
+        return "exact"
+    if step >= 1 and step == int(step):
+        return f"${int(step):,}"
+    decimals = len(f"{step:.8f}".rstrip("0").split(".")[1])
+    return f"${step:,.{max(2, decimals)}f}"
 
 
 def model_precision(values) -> int:
@@ -147,6 +158,7 @@ def _aggregate(groups) -> pd.DataFrame:
 
 def resample(
     frame: pd.DataFrame, period: str, span: int = 1, session: str = "regular", align_hours_to_open: bool = True,
+    utc_days: bool = False,
 ) -> pd.DataFrame:
     """Aggregate a fine frame into bars. `session` is "regular" (09:30-16:00 ET) or "extended"."""
     if frame.empty:
@@ -155,12 +167,28 @@ def resample(
         frame = regular_session(frame)
         if frame.empty:
             return frame.copy()
+    return _aggregate(frame.groupby(bin_keys(frame.index, period, span, align_hours_to_open, utc_days)))
+
+
+def bin_keys(index: pd.DatetimeIndex, period: str, span: int = 1, align_hours_to_open: bool = True,
+             utc_days: bool = False) -> pd.DatetimeIndex:
+    """The start of the bar each timestamp falls in (what `resample` groups by)."""
     if period in INTRADAY:
         # US equities: hour bars line up with the 09:30 open, like TradingView. Around-the-clock
         # markets (fx, futures) use clock hours.
         offset = 570 * 60 if period == "hour" and align_hours_to_open else 0
-        return _aggregate(frame.groupby(wall_clock_bins(frame.index, period, span, offset)))
-    return _aggregate(frame.groupby(calendar_key(frame.index, period)))
+        return wall_clock_bins(index, period, span, offset)
+    return calendar_key(index, period, utc=utc_days)
+
+
+def bar_end(start: pd.Timestamp, period: str, span: int) -> pd.Timestamp:
+    """Where a bar starting at `start` ends (exclusive), in New York wall-clock time."""
+    if period in INTRADAY:
+        return start + pd.Timedelta(seconds=span * _UNIT_SECONDS[period])
+    local = start.tz_convert(ET).tz_localize(None)
+    step = {"day": pd.DateOffset(days=1), "week": pd.DateOffset(days=7), "month": pd.DateOffset(months=1),
+            "year": pd.DateOffset(years=1)}[period]
+    return (local + step).tz_localize(ET, nonexistent="shift_forward", ambiguous=True)
 
 
 _UNIT_SECONDS = {"second": 1, "minute": 60, "hour": 3600}
@@ -185,9 +213,12 @@ def wall_clock_bins(index: pd.DatetimeIndex, period: str, span: int, offset_seco
     return bins.tz_localize(ET, ambiguous=is_dst, nonexistent="shift_forward")
 
 
-def calendar_key(index: pd.DatetimeIndex, period: str) -> pd.DatetimeIndex:
-    """Start of the day/week (Monday)/month/year each timestamp falls in, in US/Eastern."""
-    local = index.tz_convert(ET).tz_localize(None).normalize()
+def calendar_key(index: pd.DatetimeIndex, period: str, utc: bool = False) -> pd.DatetimeIndex:
+    """Start of the day/week (Monday)/month/year each timestamp falls in, in US/Eastern; with
+    `utc`, of the UTC day/week/month (crypto and forex days are UTC days, as their feeds stamp
+    them), still given in US/Eastern."""
+    zone = "UTC" if utc else ET
+    local = index.tz_convert(zone).tz_localize(None).normalize()
     if period == "day":
         key = local
     elif period == "week":
@@ -198,7 +229,7 @@ def calendar_key(index: pd.DatetimeIndex, period: str) -> pd.DatetimeIndex:
         key = local.to_period("Y").start_time
     else:
         raise ValueError(f"not a calendar period: {period}")
-    return pd.DatetimeIndex(key).tz_localize(ET)
+    return pd.DatetimeIndex(key).tz_localize(zone).tz_convert(ET)
 
 
 def epoch_ms(index: pd.DatetimeIndex) -> np.ndarray:
@@ -230,9 +261,14 @@ def lod_aggregate(bars: pd.DataFrame, k: int) -> pd.DataFrame:
     return out
 
 
-EXTRA_COLUMNS = ("yang_start", "yang", "switch", "up", "env_high", "env_low", "dev_sd", "venues_n")
+EXTRA_COLUMNS = ("yang_start", "yang", "switch", "up", "env_high", "env_low", "dev_sd", "venues_n", "q1", "med", "q3")
 # Derived models stored as bars: not feeds of their own in the merged view.
 MODEL_SOURCES = ("composite",)
+
+
+def utc_days(s) -> bool:
+    """Crypto and forex days are UTC days (their feeds stamp daily bars 00:00 UTC)."""
+    return s.asset in ("crypto", "fx")
 BAR_KINDS = ("second", "minute", "hour", "day")  # series of bars (not ticks) that can take tail updates
 
 
@@ -263,6 +299,8 @@ class Style:
 
 TIME_TYPES = ("candles", "hollow", "bars", "volume_candles", "line", "line_markers", "step", "area",
               "hlc_area", "baseline", "columns", "high_low")
+# Box plots: time bars with each bar's quartiles of traded price (calc/profile.py).
+BOX = "box"
 
 
 MERGED = "*"  # pseudo-source: every feed for a ticker combined
@@ -384,7 +422,7 @@ class BarEngine:
             elif base in INTRADAY:
                 frames.append(resample(p.frame, base, 1, session="extended"))
             else:
-                frames.append(_aggregate(p.frame.groupby(calendar_key(p.frame.index, "day"))))
+                frames.append(_aggregate(p.frame.groupby(calendar_key(p.frame.index, "day", utc=utc_days(p)))))
         # Official daily bars come from whichever feed holds each day (one feed per span), so they
         # are combined day by day like the intraday bars, best-ranked feed first.
         dailies = [p.daily for p in parts if p.daily is not None and not p.daily.empty]
@@ -600,6 +638,13 @@ class BarEngine:
                                             "lookAhead": not model.causal}}
         if style.type == "range" and s.kind != "trades":
             page["approximate"] = "range bars built from bars, not ticks: intra-bar order of high and low is assumed"
+        if style.type == BOX:
+            page["approximate"] = (
+                "* derived: each box is the volume-weighted quartiles (25 %, median, 75 %) of the average prices of "
+                f"the {used['from']} inside the bar, not of trades; whiskers are the bar's high and low"
+                if used["from"] and used["from"] != "trades" else
+                "box: quartiles of the trades' prices inside each bar; whiskers high and low" if used["from"] else
+                "no data finer than this interval: boxes need a finer interval's bars inside each bar")
         return page
 
     def calendar(self):
@@ -642,6 +687,8 @@ class BarEngine:
 
         if style.type in TIME_TYPES:
             return self._resampled(s, period, span, session), {"type": style.type}
+        if style.type == BOX:
+            return self._boxed(s, period, span, session)
         if style.type not in ct.TRANSFORMS:
             raise ValueError(f"unknown chart type {style.type!r}")
         base = self._resampled(s, period, span, session)
@@ -683,6 +730,113 @@ class BarEngine:
             if len(self._bars) > self._cache_size:
                 self._bars.popitem(last=False)
         return out, used
+
+    def _built_days(self, s: Series, session: str) -> pd.DataFrame:
+        """Daily bars built from the series' finer data, keyed like the official ones."""
+        frame = regular_session(s.frame) if session == "regular" else s.frame
+        if frame.empty:
+            return frame.copy()
+        return _aggregate(frame.groupby(calendar_key(frame.index, "day", utc=utc_days(s))))
+
+    def _boxed(self, s: Series, period: str, span: int, session: str) -> tuple[pd.DataFrame, dict]:
+        """Time bars with q1/med/q3: the volume-weighted quartiles of the price traded inside each
+        bar. From ticks (a series of trades) they are exact; from finer bars they are of each
+        bar's average price (derived). A bar with nothing finer inside it has none (a series of
+        minute bars at a 1-minute interval)."""
+        from ..calc.profile import weighted_quartiles
+
+        bars = self._resampled(s, period, span, session)
+        finer = BASE_SECONDS[s.kind] < PERIOD_SECONDS[period] * span and not self._windowed(s, period)
+        unit = "trades" if s.kind == "trades" else f"{s.kind} bars"
+        used = {"type": BOX, "from": unit if finer else None}
+        key = ("box", s.source, s.ticker, s.adjust, period, span, session, self._series[(s.source, s.ticker, s.adjust)][0])
+        with self._lock:
+            if key in self._bars:
+                self._bars.move_to_end(key)
+                return self._bars[key], used
+        out = bars.copy()
+        out["q1"] = out["med"] = out["q3"] = np.nan
+        if finer and not bars.empty:
+            sub = regular_session(s.frame) if session == "regular" else s.frame
+            group = bars.index.get_indexer(bin_keys(sub.index, period, span, s.asset in ("stock", "index"), utc_days(s)))
+            vol = sub["volume"].to_numpy(dtype=float)
+            price = np.where(vol > 0, sub["turnover"].to_numpy(dtype=float) / np.where(vol > 0, vol, 1),
+                             sub["close"].to_numpy(dtype=float))
+            q = weighted_quartiles(group, price, vol, len(bars))
+            out["q1"], out["med"], out["q3"] = q[:, 0], q[:, 1], q[:, 2]
+        with self._lock:
+            self._bars[key] = out
+            if len(self._bars) > self._cache_size:
+                self._bars.popitem(last=False)
+        return out, used
+
+    # -- the virtual level 2: traded volume by price in one bar --------------------------------
+    PROFILE_TICK_MS = 86_400_000  # windows up to a day read ticks; longer ones use bars
+    PROFILE_MAX_ROWS = 2000
+
+    def profile(self, source: str, ticker: str, period: str, span: int = 1, session: str = "regular",
+                at_ms: int | None = None, step: float | None = None, adjust: str = "none") -> dict:
+        """Volume and trades by price in the chart's bar at `at_ms` (the newest without), with the
+        bar's and its day's range and the last price. Not an order book: what traded, not what
+        was resting. Exact prices from ticks where the feed has them; summed into price segments
+        or spread from bars otherwise, which is derived and says so (calc/profile.py)."""
+        from ..calc.profile import from_bars, from_trades, nice_step
+
+        s = self.series(source, ticker, adjust)
+        if s is None:
+            raise LookupError(f"no data stored for {source}:{ticker}")
+        session = s.session_for(session)
+        bars = self._resampled(s, period, span, session)
+        if bars.empty:
+            return {"ticker": s.ticker, "rows": []}
+        ts = epoch_ms(bars.index)
+        i = len(ts) - 1 if at_ms is None else max(0, int(np.searchsorted(ts, int(at_ms), side="right")) - 1)
+        start = bars.index[i]
+        end = bar_end(start, period, span)
+        lo, hi = int(ts[i]), int(end.value // 1_000_000)
+        bar = bars.iloc[i]
+        # The day the bar is in (as the daily bars count days), from its daily bar.
+        d0 = calendar_key(pd.DatetimeIndex([start]), "day", utc=utc_days(s))[0]
+        days = self._resampled(s, "day", 1, session)
+        hit = days[days.index == d0]
+        day = None if hit.empty else {"from": int(epoch_ms(pd.DatetimeIndex([d0]))[0]),
+                                      **{k: float(hit[k].iloc[0]) for k in ("open", "high", "low", "close", "volume")}}
+        span_px = float(bar["high"] - bar["low"])
+        if step is not None and step > 0 and span_px / step > self.PROFILE_MAX_ROWS:
+            step = nice_step(span_px, self.PROFILE_MAX_ROWS)  # a segment too fine for this range
+        rows, basis, derived = None, None, None
+        if hi - lo <= self.PROFILE_TICK_MS and s.asset != "future":  # adjusted futures prices are not the contract's
+            for feed in (self.sources_for(s.ticker) if source == MERGED else [source]):
+                with self._lock:
+                    t = self.store.trades_between(feed, s.ticker, lo * 1_000_000, hi * 1_000_000)
+                if len(t):
+                    rows, summed = from_trades(t["price"].to_numpy(), t["size"].to_numpy(), step)
+                    basis = f"{len(t):,} trade{'' if len(t) == 1 else 's'} on {feed}"
+                    used_step = step or (nice_step(float(t["price"].max() - t["price"].min())) if summed else None)
+                    derived = f"summed into {_money(used_step)} price segments" if summed else None
+                    step = used_step
+                    break
+        if rows is None:
+            if self._windowed(s, period) or (s.fine_spans and hi - lo <= self.PROFILE_TICK_MS
+                                             and BASE_SECONDS[s.kind] >= PERIOD_SECONDS[period] * span):
+                sub, unit = self._fine_bars(s, 1, session, lo, hi), "1-second bars"
+            else:
+                sub = s.frame[(s.frame.index >= start) & (s.frame.index < end)]
+                unit = "trades" if s.kind == "trades" else f"1-{s.kind} bars"
+            rows, step = from_bars(sub["low"].to_numpy(), sub["high"].to_numpy(), sub["volume"].to_numpy(),
+                                   sub["trades"].to_numpy(), step)
+            basis = f"{len(sub):,} {unit}"
+            derived = (f"estimated from {unit}: each one's volume and trades spread evenly across its range, "
+                       f"in {_money(step)} price segments")
+        return {
+            "ticker": s.ticker, "period": period, "span": span,
+            "bar": {"from": lo, "to": hi, **{k: float(bar[k]) for k in ("open", "high", "low", "close", "volume")},
+                    "trades": float(bar["trades"])},
+            "day": day, "last": float(bars["close"].iloc[-1]), "newest": i == len(ts) - 1,
+            "rows": json.loads(rows.to_json(orient="records")) if len(rows) else [],
+            "step": step, "basis": basis, "derived": derived,
+            "note": "Traded volume by price, not an order book: what changed hands, not what was resting.",
+        }
 
     def _modelled(self, s: Series, bars: pd.DataFrame, period: str, span: int, session: str, model: Model) -> pd.DataFrame:
         key = ("model", s.source, s.ticker, s.adjust, period, span, session, model,
@@ -793,14 +947,19 @@ class BarEngine:
                 self._bars.move_to_end(key)
                 return self._bars[key]
         if period in CALENDAR and s.daily is not None and not s.daily.empty:
-            # Official daily bars (closing auction included); weeks/months group those.
+            # Official daily bars (closing auction included); weeks/months group those. Days after the
+            # last official one (today's, growing as the session goes; days the feed has not published)
+            # are built from the finer data, on the same day boundaries.
             daily = s.daily.copy()
-            daily.index = calendar_key(daily.index, "day")
+            daily.index = calendar_key(daily.index, "day", utc=utc_days(s))
+            built = self._built_days(s, session)
+            daily = pd.concat([daily, built[built.index > daily.index.max()]])
             if s.asset in ("stock", "index"):  # no session on weekends/holidays: stray feed rows
                 daily = daily[[_regular_close(d.date()) is not None for d in daily.index]]
-            bars = daily if period == "day" else _aggregate(daily.groupby(calendar_key(daily.index, period)))
+            bars = daily if period == "day" else _aggregate(daily.groupby(calendar_key(daily.index, period, utc=utc_days(s))))
         else:
-            bars = resample(s.frame, period, span, session, align_hours_to_open=s.asset in ("stock", "index"))
+            bars = resample(s.frame, period, span, session, align_hours_to_open=s.asset in ("stock", "index"),
+                            utc_days=utc_days(s))
         with self._lock:
             self._bars[key] = bars
             if len(self._bars) > self._cache_size:

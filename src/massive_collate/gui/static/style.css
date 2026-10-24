@@ -553,3 +553,17 @@ body.light .now-line { --now-line: #a4aab2; }
 /* Limits table: the feed fetching now is marked. */
 .act-table.limits tr.live td:first-child { box-shadow: inset 2px 0 0 var(--accent, #2962ff); }
 .act-table.limits .warn { color: var(--warn, #d9a441); }
+/* Virtual level 2 (Analysis view): volume by price; the row holding the last price is marked. */
+#pLevel2 h3 { display: flex; align-items: center; gap: 8px; }
+#pLevel2 h3 select { margin-left: auto; font-size: 11px; }
+#pLevel2 sup { color: var(--warn, #d9a441); }
+.l2-wrap { position: relative; max-height: 340px; overflow: auto; margin-top: 6px; }
+table.l2 { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12px; }
+table.l2 th { position: sticky; top: 0; background: var(--panel); text-align: left; font-weight: 500; color: var(--muted); }
+table.l2 td, table.l2 th { padding: 1px 6px; }
+table.l2 .num { text-align: right; }
+table.l2 td.l2-vol { position: relative; width: 50%; }
+table.l2 .l2-bar { position: absolute; left: 0; top: 2px; bottom: 2px; background: var(--s1, #2962ff); opacity: .28; border-radius: 0 2px 2px 0; }
+table.l2 .l2-vol span:last-child { position: relative; }
+table.l2 tr.at td { background: color-mix(in srgb, var(--accent, #2962ff) 18%, transparent); font-weight: 600; }
+.l2-note { margin-top: 4px; }

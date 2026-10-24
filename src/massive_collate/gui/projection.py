@@ -17,7 +17,7 @@ import pandas as pd
 
 from ..sessions import ET, MarketCalendar
 from .bars import (CALENDAR, COLUMNS, LOD_TYPES, PERIOD_SECONDS, REGULAR_OPEN, TIME_TYPES, Series, _aggregate,
-                   _regular_close, calendar_key, regular_session, wall_clock_bins)
+                   _regular_close, calendar_key, regular_session, utc_days, wall_clock_bins)
 
 PROJECTABLE = set(TIME_TYPES) | {"heikin_ashi"}  # price-based types (Renko...) have no time axis to project
 MAX_YEARS = 400  # far enough for any zoom; each request is bounded by `count` anyway
@@ -62,8 +62,8 @@ def future_bar_starts_reference(cal: MarketCalendar, s: Series, product: str | N
     if period in CALENDAR and s.daily is not None and not s.daily.empty:
         # As the engine does: official daily bars keyed by calendar day, weeks/months grouped from them.
         daily = _daily_frame(future_daily_stamps(cal, s, product, last.to_pydatetime() - timedelta(days=40), until))
-        daily.index = calendar_key(daily.index, "day")
-        bars = daily if period == "day" else _aggregate(daily.groupby(calendar_key(daily.index, period)))
+        daily.index = calendar_key(daily.index, "day", utc=utc_days(s))
+        bars = daily if period == "day" else _aggregate(daily.groupby(calendar_key(daily.index, period, utc=utc_days(s))))
         idx = bars.index
     else:
         # Bar starts straight from the open minutes with the engine's own binning (what
@@ -75,7 +75,7 @@ def future_bar_starts_reference(cal: MarketCalendar, s: Series, product: str | N
         if session == "regular" and s.asset in ("stock", "index"):
             minutes = regular_session(_daily_frame(minutes)).index  # the engine's own filter
         if period in CALENDAR:  # no official daily bars: calendar groups of the intraday frame
-            idx = calendar_key(minutes, period).unique()
+            idx = calendar_key(minutes, period, utc=utc_days(s)).unique()
         else:
             offset = 570 * 60 if period == "hour" and s.asset in ("stock", "index") else 0
             idx = wall_clock_bins(minutes, period, span, offset).unique()

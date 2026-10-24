@@ -167,7 +167,7 @@
           · <span class="p-muted">Min</span> ${priceText(s.lo?.low)} <span class="p-muted">${s.lo ? e(t(s.lo.timestamp)) : ''}</span></div>
         <div><span class="p-muted">${s.live ? 'Last' : e(t(b.timestamp))}</span>
           O ${priceText(b.open)} H ${priceText(b.high)} L ${priceText(b.low)} C ${priceText(b.close)} ${chg}
-          · <span class="p-muted">Rng</span> ${priceText(s.range)} · <span class="p-muted">Vol</span> ${big(b.volume)}${s.vwap && isPrice() ? ` · <span class="p-muted">VWAP</span> ${priceText(s.vwap)}` : ''}${s.feeds.length ? ` · <span class="p-muted">Src</span> ${e(s.feeds.join('+'))}` : ''}</div>`;
+          ${b.q1 != null ? `· <span class="p-muted" title="${e(state.approximate || '')}">Q1*</span> ${priceText(b.q1)} <span class="p-muted">Med*</span> ${priceText(b.med)} <span class="p-muted">Q3*</span> ${priceText(b.q3)} ` : ''}· <span class="p-muted">Rng</span> ${priceText(s.range)} · <span class="p-muted">Vol</span> ${big(b.volume)}${s.vwap && isPrice() ? ` · <span class="p-muted">VWAP</span> ${priceText(s.vwap)}` : ''}${s.feeds.length ? ` · <span class="p-muted">Src</span> ${e(s.feeds.join('+'))}` : ''}</div>`;
     } else {
       box.hidden = true;
     }

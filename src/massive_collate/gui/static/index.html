@@ -25,6 +25,7 @@
         <option value="baseline">Baseline</option>
         <option value="columns">Columns</option>
         <option value="high_low">High-low</option>
+        <option value="box" title="Each bar's quartiles of traded price (derived from finer bars)">Box plots*</option>
         <option value="heikin_ashi">Heikin Ashi</option>
       </optgroup>
       <optgroup label="Price based">
@@ -100,6 +101,7 @@
           <section id="pData"></section>
         </div>
         <div class="pane" id="paneAnalysis" data-pane="analysis" hidden>
+          <section id="pLevel2"></section>
           <section id="pHighlight"></section>
           <section id="pCursor"></section>
         </div>
@@ -213,5 +215,6 @@
   <script src="globe.js"></script>
   <script src="news.js"></script>
   <script src="datasets.js"></script>
+  <script src="level2.js"></script>
 </body>
 </html>

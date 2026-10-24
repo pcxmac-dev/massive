@@ -151,6 +151,15 @@ class ChartApp:
             limit=limit, style=style, adjust=_adjust(q.get("adjust")), lod=int(q.get("lod", 1)), model=_model(q),
         )
 
+    def profile(self, q: dict[str, str]) -> dict:
+        """The virtual level 2 for the chart's bar at `at` (the newest without)."""
+        step = float(q["step"]) if q.get("step") not in (None, "", "auto") else None
+        if step is not None and not 0 < step < 1e9:
+            raise ValueError("step must be a positive price")
+        return self.engine.profile(
+            q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)), q.get("session", "regular"),
+            at_ms=int(q["at"]) if q.get("at") else None, step=step, adjust=_adjust(q.get("adjust")))
+
     STREAM_SECONDS = 300  # one stream's life; the page opens the next from where it got to
     STREAM_CHECK = 0.5  # seconds between looks at the stored data
     STREAM_KEEPALIVE = 15
@@ -192,7 +201,8 @@ class ChartApp:
             watch = next((w for w in self.store.watchlist() if w["ticker"] == s.ticker and w["source"] in feeds), {})
             details = next((d for d in (self.store.details(f, s.ticker) for f in feeds) if d), None)
             exchanges = self.store.exchanges()
-        daily = s.daily if s.daily is not None and not s.daily.empty else resample(s.frame, "day", 1, "extended")
+        daily = s.daily if s.daily is not None and not s.daily.empty else resample(
+            s.frame, "day", 1, "extended", utc_days=s.asset in ("crypto", "fx"))
         mic = watch.get("exchange") or (details or {}).get("primary_exchange")
         names = {r.mic: r.name for r in exchanges.itertuples() if r.mic}
         out = {
@@ -648,6 +658,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.bars(q))
                 if url.path == "/api/stream":
                     return self._stream(q)
+                if url.path == "/api/profile":
+                    return self._json(app.profile(q))
                 if url.path == "/api/info":
                     return self._json(app.info(q["source"], q["ticker"], q.get("adjust")))
                 if url.path == "/api/deps":

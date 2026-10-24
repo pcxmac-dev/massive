@@ -472,12 +472,15 @@ chart.subscribeAction('onZoom', () => checkLod());
 const NATIVE = { candles: 'candle_solid', bars: 'ohlc', area: 'area', heikin_ashi: 'candle_solid',
                  renko: 'candle_solid', line_break: 'candle_solid', range: 'candle_solid' };
 const TRANSFORMED = new Set(['heikin_ashi', 'renko', 'line_break', 'kagi', 'point_figure', 'range']);
+// Types the server builds (transformed, or time bars with fields of their own: box plots' quartiles):
+// asked for by name, and reloaded when chosen or left.
+const SERVER_TYPES = new Set([...TRANSFORMED, 'box']);
 const PRICE_BASED = new Set(['renko', 'line_break', 'kagi', 'point_figure', 'range']);
 const LINE = '#2962ff';
 const CLEAR = 'rgba(0,0,0,0)';
 
 function typeQuery() {
-  if (!TRANSFORMED.has(state.chartType)) return {};
+  if (!SERVER_TYPES.has(state.chartType)) return {};
   const p = state.typeParams[state.chartType] || {};
   return { type: state.chartType, box: p.box || undefined, reversal: p.reversal || undefined, lines: p.lines || undefined };
 }
@@ -495,7 +498,7 @@ state.workspace = WORKSPACES.includes(prefs.get('workspace')) ? prefs.get('works
 state.workspaces = prefs.get('workspaces', {});
 // Chart types that only make sense for prices (bricks, Heikin Ashi, Kagi, P&F).
 const PRICE_ONLY_TYPES = new Set([...TRANSFORMED]);
-const CANDLE_LIKE = new Set(['candles', 'bars', 'hollow', 'volume_candles']);
+const CANDLE_LIKE = new Set(['candles', 'bars', 'hollow', 'volume_candles', 'box']);
 
 // Detail slider: 100 = a 5-bar Savitzky-Golay window (full resolution), 0 = 401 bars (very smooth).
 function windowForDetail(detail) {
@@ -869,6 +872,27 @@ kc.registerIndicator({
         ctx.fillRect(x - half, top, half * 2, bounding.height - top);
       }
       ctx.globalAlpha = 1;
+    } else if (type === 'box') {
+      // Whiskers high to low, the box from the 25th to the 75th percentile of the price traded in
+      // the bar, a bar across at the median; open and close ticks left and right. Up or down by close.
+      const cap = Math.max(1, half * 0.5);
+      for (let i = lo; i < hi; i++) {
+        const d = data[i], x = px(xAxis, i) + 0.5;
+        const color = d.close >= d.open ? UP : DOWN;
+        ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, y(d.high)); ctx.lineTo(x, y(d.low));
+        ctx.moveTo(x - cap, y(d.high)); ctx.lineTo(x + cap, y(d.high));
+        ctx.moveTo(x - cap, y(d.low)); ctx.lineTo(x + cap, y(d.low));
+        ctx.moveTo(x - half, y(d.open)); ctx.lineTo(x, y(d.open));
+        ctx.moveTo(x, y(d.close)); ctx.lineTo(x + half, y(d.close));
+        ctx.stroke();
+        if (d.q1 == null) continue;  // nothing finer inside this bar
+        const top = y(d.q3), bottom = y(d.q1);
+        ctx.globalAlpha = 0.3; ctx.fillRect(x - half, top, half * 2, Math.max(1, bottom - top)); ctx.globalAlpha = 1;
+        ctx.strokeRect(x - half, top, half * 2, Math.max(1, bottom - top));
+        ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x - half, y(d.med)); ctx.lineTo(x + half, y(d.med)); ctx.stroke();
+      }
     } else if (type === 'high_low') {
       ctx.fillStyle = LINE;
       for (let i = lo; i < hi; i++) {
@@ -953,24 +977,24 @@ function renderTypeParams() {
   if (t === 'kagi') input('reversal', 'Reversal', used.reversal != null ? `ATR ${used.reversal}` : 'ATR(14)', 'any');
   if (t === 'point_figure') input('reversal', 'Reversal boxes', '3', '1');
   if (t === 'line_break') input('lines', 'Lines', '3', '1');
-  if (state.approximate && t === 'range') {
+  if (state.approximate && (t === 'range' || t === 'box')) {
     const s = document.createElement('span');
-    s.className = 'approx'; s.textContent = 'approx.'; s.title = state.approximate;
+    s.className = 'approx'; s.textContent = t === 'box' ? 'derived*' : 'approx.'; s.title = state.approximate;
     box.append(s);
   }
 }
 
 $('typeSelect').value = state.chartType;
 $('typeSelect').addEventListener('change', (e) => {
-  const wasTransformed = TRANSFORMED.has(state.chartType);
+  const wasServerBuilt = SERVER_TYPES.has(state.chartType);
   state.chartType = e.target.value;
   prefs.set('chartType', state.chartType); markDirty();
   state.styleUsed = null;
   applyChartType();
   renderTypeParams();
   // Between two time-based types the same bars (and detail level) are reused; anything
-  // involving a transformed type reloads, and the detail level is chosen again after loading.
-  if (wasTransformed || TRANSFORMED.has(state.chartType)) {
+  // involving a type the server builds reloads, and the detail level is chosen again after loading.
+  if (wasServerBuilt || SERVER_TYPES.has(state.chartType)) {
     resetLod();
     chart.resetData();
   }

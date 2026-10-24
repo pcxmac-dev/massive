@@ -36,7 +36,8 @@ SERIES = {a: _series(a, START, END) for a in ("stock", "index", "fx", "future")}
 def test_projection_matches_a_perfect_feed_exactly(asset, period, span, session):
     s = SERIES[asset]
     session = s.session_for(session)
-    bars = resample(s.frame, period, span, session, align_hours_to_open=asset in ("stock", "index"))
+    bars = resample(s.frame, period, span, session, align_hours_to_open=asset in ("stock", "index"),
+                    utc_days=asset == "fx")  # as the engine bins: forex days are UTC days
     for cut in CUTS:
         T = pd.Timestamp(cut, tz=ET)
         past, future = bars[bars.index <= T], bars[bars.index > T]
