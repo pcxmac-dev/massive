@@ -432,6 +432,40 @@ class ChartApp:
         self._scan = proc  # keep a reference so it is reaped
         return {"started": True, "pid": proc.pid}
 
+    PRIORITY_COOLDOWN = 300  # seconds: a symbol opened again sooner is not asked for again
+
+    def priority(self, ticker: str) -> dict:
+        """The chart opened `ticker`: every feed holding it updates it before anything else.
+        With no run going, a run for that symbol alone starts now (`sync --tickers`: gaps and
+        new data on every feed, only what each plan has published); with one going, the request
+        waits in the database and the running sync takes the symbol next on each feed it still
+        has to visit. Within every feed's limits either way: one fetching process at a time (the
+        run lock), and limiters that share their window across runs."""
+        from .. import collector
+
+        ticker = ticker.upper()
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            feeds = sorted({w["source"] for w in self.store.watchlist() if w["ticker"] == ticker})
+            if not feeds:
+                raise LookupError(f"{ticker} is not on the watchlist")
+            asked = collector.priority_requests(self.store, now).get(ticker)
+            if asked is None or (now - asked["at"]).total_seconds() > self.PRIORITY_COOLDOWN:
+                collector.request_priority(self.store, ticker, now)
+                asked = {"at": now, "runs": 0}
+        out = {"ticker": ticker, "feeds": feeds, "asked": asked["at"].isoformat()}
+        if activity.lock_owner(self.store.path):
+            return {**out, "state": "queued"}  # the running sync takes it next
+        if asked["runs"]:
+            return {**out, "state": "recent"}  # a run for it already went
+        args = [sys.executable, "-m", "massive_collate", "sync", "--tickers", ticker]
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        self._scan = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                      stdin=subprocess.DEVNULL, creationflags=flags)
+        with self._lock:
+            collector.priority_started(self.store, ticker)
+        return {**out, "state": "started", "pid": self._scan.pid}
+
     def exchanges(self) -> list[dict]:
         with self._lock:
             df = self.store.exchanges()
@@ -556,6 +590,11 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     if not ticker:
                         return self._json({"error": "ticker is required"}, HTTPStatus.BAD_REQUEST)
                     return self._json(app.watch(ticker), HTTPStatus.CREATED)
+                if method == "POST" and parts == ["", "api", "priority"]:
+                    ticker = parse_qs(urlparse(self.path).query).get("ticker", [None])[-1]
+                    if not ticker:
+                        return self._json({"error": "ticker is required"}, HTTPStatus.BAD_REQUEST)
+                    return self._json(app.priority(ticker), HTTPStatus.ACCEPTED)
                 if method == "POST" and parts in (["", "api", "scan"], ["", "api", "fetch"]):
                     ticker = parse_qs(urlparse(self.path).query).get("ticker", [None])[-1] if parts[2] == "fetch" else None
                     if parts[2] == "fetch" and not ticker:

@@ -1,0 +1,161 @@
+"""The symbol open in the chart goes first on every feed, and every server's limits hold across
+runs (each run is a new process with a new limiter) and are shown with any wait."""
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from massive_collate import cli, collector
+from massive_collate.collector import ET, sync
+from massive_collate.config import TIERS, load_settings
+from massive_collate.gui import server
+from massive_collate.gui.activity import limits
+from massive_collate.gui.server import ChartApp
+from massive_collate.ratelimit import KvLedger, RateLimiter, describe, window_state
+from massive_collate.sources.massive import MassiveClient
+from massive_collate.storage import Store
+
+from .conftest import FakeResponse, FakeSession, FakeSource
+
+NOW = datetime(2026, 10, 21, 12, 0, tzinfo=ET)
+FREE = TIERS["free"]
+
+
+def _trades() -> list[dict]:
+    day = NOW.date() - timedelta(days=1)
+    ns = int(datetime(day.year, day.month, day.day, 10, 0, tzinfo=ET).timestamp()) * 10**9
+    return [{"sip_timestamp": ns + s * 10**9, "sequence_number": s, "price": 10.0 + s, "size": 100, "exchange": 4}
+            for s in range(3)]
+
+
+class FakeClock:
+    def __init__(self, now: float = 1000.0):
+        self.now, self.sleeps = now, []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+# -- the symbol open in the chart goes first --------------------------------------------------
+
+def test_a_requested_symbol_goes_first_even_when_asked_mid_run(store):
+    src = FakeSource(trades=_trades())
+    store.watch("fake", ["AAA", "BBB", "CCC", "DDD"], "trades")
+    order = []
+
+    def on_item(ticker):
+        order.append(ticker)
+        if ticker == "AAA":  # opened in the chart while the run is going
+            collector.request_priority(store, "DDD", NOW)
+
+    collector.request_priority(store, "CCC", NOW - timedelta(minutes=1))
+    sync(src, store, FREE, NOW, log=lambda m: None, on_item=on_item)
+    assert order == ["CCC", "AAA", "DDD", "BBB"]
+
+
+def test_a_requested_symbol_skips_the_refresh_interval_but_not_its_plans_publication(store):
+    src = FakeSource(trades=_trades())
+    store.watch("fake", ["AAA"], "trades")
+    sync(src, store, FREE, NOW, log=lambda m: None)
+    later = NOW + timedelta(days=1)  # the next session is published
+    assert sync(src, store, FREE, later, log=lambda m: None, refresh_hours=48).skipped == 1
+    collector.request_priority(store, "AAA", later)
+    assert sync(src, store, FREE, later, log=lambda m: None, refresh_hours=48).skipped == 0
+    again = later + timedelta(minutes=1)  # nothing published since: asked or not, nothing to ask for
+    collector.request_priority(store, "AAA", again)
+    assert sync(src, store, FREE, again, log=lambda m: None, refresh_hours=48).skipped == 1
+
+
+def test_requests_expire_and_count_the_runs_started_for_them(store):
+    collector.request_priority(store, "aaa", NOW)
+    collector.priority_started(store, "AAA")
+    assert collector.priority_requests(store, NOW)["AAA"] == {"at": NOW, "runs": 1}
+    assert collector.priority_requests(store, NOW + timedelta(hours=collector.PRIORITY_HOURS + 1)) == {}
+
+
+def test_opening_a_symbol_starts_a_run_for_it_or_queues_it_behind_the_running_one(tmp_path, monkeypatch):
+    store = Store(tmp_path / "m.db", check_same_thread=False)
+    for feed in ("massive", "alpaca"):
+        store.watch(feed, ["SPCX"], "minute", exchange="XNAS")
+    started = []
+
+    class Proc:
+        pid = 4242
+
+    monkeypatch.setattr(server.subprocess, "Popen", lambda args, **kw: started.append(args) or Proc())
+    monkeypatch.setattr(server.activity, "lock_owner", lambda path: None)
+    app = ChartApp(store)
+    first = app.priority("spcx")
+    assert first["state"] == "started" and first["feeds"] == ["alpaca", "massive"]
+    assert started[0][-3:] == ["sync", "--tickers", "SPCX"]
+    assert app.priority("SPCX")["state"] == "recent" and len(started) == 1  # opened again within minutes
+    monkeypatch.setattr(server.activity, "lock_owner", lambda path: 99)  # a sync is running
+    monkeypatch.setattr(app, "PRIORITY_COOLDOWN", 0)
+    assert app.priority("SPCX")["state"] == "queued" and len(started) == 1  # it takes the symbol next
+    monkeypatch.setattr(server.activity, "lock_owner", lambda path: None)
+    monkeypatch.setattr(app, "PRIORITY_COOLDOWN", 300)
+    assert app.priority("SPCX")["state"] == "started" and len(started) == 2  # the run ended: its turn now
+    with pytest.raises(LookupError):
+        app.priority("NOPE")
+    store.close()
+
+
+def test_sync_takes_tickers():
+    args = cli.build_parser().parse_args(["sync", "--tickers", "spcx", "aapl"])
+    assert args.tickers == ["spcx", "aapl"] and args.all_sources
+
+
+# -- limits held across runs, and shown -------------------------------------------------------
+
+def test_a_new_run_continues_the_window_the_last_one_left(store):
+    clock = FakeClock()
+    first = RateLimiter(5, 60.0, clock=clock, sleep=clock.sleep)
+    first.share(KvLedger(store, "massive"))
+    for _ in range(5):  # all in the same millisecond: still five calls
+        first.acquire()
+    assert clock.sleeps == [] and len(json.loads(store.kv_get("ratelimit:massive"))) == 5
+    second = RateLimiter(5, 60.0, clock=clock, sleep=clock.sleep)  # the next run: a new process
+    waits = []
+    second.on_wait = waits.append
+    second.share(KvLedger(store, "massive"))
+    second.acquire()
+    assert waits == [60.0] and clock.sleeps == [60.0]  # it waited out the window the first one filled
+
+
+def test_window_state_and_descriptions():
+    assert window_state([0, 10, 20, 30, 40], 5, 60.0, now=50) == {"used": 5, "allowed": 5, "periodSeconds": 60.0,
+                                                                   "freeIn": 10.0}
+    assert window_state([0, 10], 5, 60.0, now=50)["freeIn"] == 0 and window_state([0], 5, 60.0, now=70)["used"] == 0
+    assert describe(5, 60.0) == "5 requests per minute" and describe(45, 3600.0) == "45 requests per hour"
+    assert describe(None, 60.0) == "no limit"
+
+
+def test_a_servers_retry_wait_is_reported():
+    session = FakeSession([FakeResponse(429, {}, headers={"Retry-After": "120"}), FakeResponse(200, {"ok": 1})])
+    slept, told = [], []
+    client = MassiveClient("KEY", session=session, sleep=slept.append)
+    client.on_retry = lambda s, status: told.append((s, status))
+    assert client.get("/x") == {"ok": 1}
+    assert told == [(120.0, 429)] and slept == [120.0]
+
+
+def test_limits_list_every_server_with_its_window_and_wait(store):
+    settings = load_settings(env={}, env_file=None)
+    now = datetime(2026, 10, 24, 12, tzinfo=timezone.utc)
+    t = now.timestamp()
+    store.kv_set("ratelimit:massive", json.dumps([t - 50, t - 40, t - 30, t - 20, t - 10]))
+    store.kv_set("fetch:wait:massive", json.dumps({"until": t + 10, "seconds": 10, "reason": "limit: 5 requests per minute"}))
+    store.kv_set("fetch:wait:coinbase", json.dumps({"until": t - 5, "seconds": 1, "reason": "over"}))
+    rows = {r["source"]: r for r in limits(store, settings, now)}
+    assert {"massive", "alpaca", "bitstamp", "coinbase", "bitfinex", "cboe", "tiingo"} <= set(rows)
+    m = rows["massive"]
+    assert m["keptTo"] == "5 requests per minute" and m["window"]["used"] == 5 and m["window"]["freeIn"] == 10.0
+    assert m["wait"]["reason"].startswith("limit") and rows["coinbase"]["wait"] is None  # a past wait is over
+    assert rows["tiingo"]["keptTo"] == "45 requests per hour" and "10 requests per second" in rows["coinbase"]["published"]
+    assert m["perDay"] == 2000 and m["leftToday"] == 2000

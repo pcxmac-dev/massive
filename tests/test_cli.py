@@ -49,13 +49,21 @@ def test_daily_cap_reached_sends_nothing(env, monkeypatch, capsys):
 
 
 def test_overlapping_runs_are_refused(env):
+    import os
+
     db = env / "data" / "m.db"
+    lock = db.with_suffix(".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(str(os.getppid()))  # another live process holds it
+    with pytest.raises(SystemExit):
+        with cli.run_lock(db):
+            pass
+    lock.unlink()
     with cli.run_lock(db):
-        with pytest.raises(SystemExit):
-            with cli.run_lock(db):
-                pass
-    with cli.run_lock(db):  # released afterwards
-        pass
+        with cli.run_lock(db):  # this process again (a whole sync holds it across its feeds)
+            assert lock.exists()
+        assert lock.exists()  # the inner one leaves it to the outer
+    assert not lock.exists()  # released afterwards
 
 
 def test_lock_left_by_a_dead_process_is_taken_over(env):

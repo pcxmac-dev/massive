@@ -47,6 +47,8 @@ class MassiveClient:
         # Called with the running total after every request, so usage is recorded even if
         # the run is interrupted (the daily cap counts it).
         self.on_request: Callable[[int], None] | None = None
+        # Called with (seconds, HTTP status) before waiting to retry a refused or failed request.
+        self.on_retry: Callable[[float, int], None] | None = None
 
     def get(self, path_or_url: str, params: dict[str, Any] | None = None) -> dict:
         return self._request(path_or_url, params).json()
@@ -76,7 +78,10 @@ class MassiveClient:
             retryable = resp.status_code == 429 or resp.status_code >= 500
             if not retryable or attempt == self._max_retries:
                 break
-            self._sleep(_retry_delay(resp, attempt))
+            delay = _retry_delay(resp, attempt)
+            if self.on_retry:
+                self.on_retry(delay, resp.status_code)
+            self._sleep(delay)
 
         if resp.status_code >= 400:
             message = _error_message(resp)

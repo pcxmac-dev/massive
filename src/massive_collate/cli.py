@@ -78,22 +78,30 @@ def _lock_is_stale(lock: Path) -> bool:
     return time.time() - lock.stat().st_mtime > LOCK_STALE_SECONDS
 
 
+_HELD: set[str] = set()  # run locks this process holds
+
+
 @contextmanager
 def run_lock(db_path: Path) -> Iterator[None]:
     """Only one downloading run at a time, so two runs can never double the request rate."""
     lock = db_path.with_suffix(".lock")
     lock.parent.mkdir(parents=True, exist_ok=True)
+    if str(lock) in _HELD:  # this process holds it already (a whole sync holds it across its feeds)
+        yield
+        return
     if lock.exists() and _lock_is_stale(lock):
         lock.unlink(missing_ok=True)
     try:
         fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         raise SystemExit(f"another run is in progress (lock file {lock}); exiting") from None
+    _HELD.add(str(lock))
     try:
         os.write(fd, str(os.getpid()).encode())
         os.close(fd)
         yield
     finally:
+        _HELD.discard(str(lock))
         lock.unlink(missing_ok=True)
 
 
@@ -124,6 +132,7 @@ def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource
         client = getattr(source, "client", None)
         if client is not None:  # record usage as it happens, not only at the end
             client.on_request = lambda n: store.set_run_requests(run_id, n)
+            _share_limits(client, store, args.source, log)
         log(f"{command}: source={args.source} tier={settings.tier.name} "
             f"rate={settings.tier.requests_per_minute or 'unlimited'}/min cap={budget} requests")
         status, message = "ok", ""
@@ -141,6 +150,28 @@ def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource
         finally:
             store.finish_run(run_id, source.requests_made, getattr(args, "_rows", 0), status, message)
             log(f"{command}: {source.requests_made} requests used")
+
+
+def _share_limits(client, store: Store, name: str, log) -> None:
+    """The feed's request window continues from earlier runs (they share it through the
+    database), and every wait, for the window or for a server's Retry-After, is recorded for the
+    app to show with the limit behind it."""
+    import json
+    import time
+
+    from .ratelimit import KvLedger, wait_key
+
+    limiter = client._limiter
+
+    def waiting(seconds: float, reason: str) -> None:
+        store.kv_set(wait_key(name), json.dumps(
+            {"until": round(time.time() + seconds, 1), "seconds": round(seconds, 1), "reason": reason}))
+        if seconds >= 5:
+            log(f"{name}: waiting {seconds:.0f} s ({reason})")
+
+    limiter.share(KvLedger(store, name))
+    limiter.on_wait = lambda s: waiting(s, f"limit: {limiter.describe()}")
+    client.on_retry = lambda s, status: waiting(s, f"server answered {status}; trying again")
 
 
 # -- commands ------------------------------------------------------------------
@@ -170,7 +201,15 @@ def cmd_watch(args, settings: Settings) -> int:
 
 
 def cmd_sync(args, settings: Settings) -> int:
-    """Sync every configured feed (or just --source), each within its own limits."""
+    """Sync every configured feed (or just --source), each within its own limits, holding the
+    run lock for the whole run (released between feeds, another run could take it and this one
+    would stop). With --tickers, those symbols only, on every feed (the chart opened them)."""
+    with run_lock(settings.db_path):
+        return _sync(args, settings)
+
+
+def _sync(args, settings: Settings) -> int:
+    tickers = {t.upper() for t in getattr(args, "tickers", None) or []} or None
     names = list(BUILDERS) if args.all_sources else [args.source]
     with Store(settings.db_path) as store:
         separated = store.kv_get("built-bars:separated:v1")
@@ -197,7 +236,7 @@ def cmd_sync(args, settings: Settings) -> int:
                 feed = settings.for_source(name)
                 reserve_left = feed.max_requests_per_day - collector.DAILY_RESERVE - store.requests_today(name)
                 result = collector.sync(source, store, feed.tier, log=log, refresh_hours=settings.refresh_hours,
-                                        feeds=feed_profiles(settings),
+                                        feeds=feed_profiles(settings), only=tickers, published_only=True,
                                         audits=(settings.audits_per_run, settings.audits_random_per_run),
                                         tick_min_free_gb=settings.tick_min_free_gb,
                                         on_item=lambda t: store.set_run_current(args._run_id, t),
@@ -216,7 +255,7 @@ def cmd_sync(args, settings: Settings) -> int:
         logger = Logger(settings.db_path.parent / "logs" / "massive-collate.log")
         with Store(settings.db_path) as store:
             composite.refresh(store, feed_profiles(settings), collector.now_et(), log=logger)
-            if args.all_sources:  # research datasets fetched before, when due (never starts one)
+            if args.all_sources and not tickers:  # research datasets fetched before, when due (never starts one)
                 from . import datasets
 
                 datasets.fetch(store, log=logger, only_started=True)
@@ -720,6 +759,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("sync", help="scheduled run: update and backfill the watchlist on every feed")
     s.add_argument("--only", dest="all_sources", action="store_false",
                    help="sync only the feed given by --source instead of all configured feeds")
+    s.add_argument("--tickers", nargs="+", metavar="TICKER",
+                   help="only these watched symbols, on every feed holding them, before anything else")
     s.set_defaults(func=cmd_sync, all_sources=True)
 
     s = sub.add_parser("scan", help="check which symbols should have new data (free); --probe asks the source")

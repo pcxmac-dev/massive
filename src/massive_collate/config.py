@@ -100,6 +100,17 @@ PUBLIC_FEEDS: dict[str, tuple[Tier, int, int]] = {
 }
 ALPACA_CRYPTO_LOCS = ("us-1", "eu-1", "us")
 
+# What each server publishes, shown beside the window the app keeps (sources.rate_window).
+# Massive's depends on the plan: see TIERS.
+PUBLISHED_LIMITS: dict[str, str] = {
+    "alpaca": "Basic (free): 200 requests per minute; Algo Trader Plus: 10,000",
+    "bitstamp": "8,000 requests per 10 minutes",
+    "coinbase": "10 requests per second per IP (public endpoints)",
+    "bitfinex": "about 30 candle requests per minute",
+    "cboe": "none published (a public file server)",
+    "tiingo": "free plan: 50 requests per hour, 1,000 per day",
+}
+
 
 class ConfigError(Exception):
     pass

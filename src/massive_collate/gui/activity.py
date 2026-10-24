@@ -8,6 +8,7 @@ import math
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from .. import collector
 from ..collector import ET, history_floor
 from .. import freshness
 from ..config import Settings, Tier
@@ -272,6 +273,38 @@ def exchange_checks(store: Store, source: str, now: datetime) -> list[dict]:
     return checks
 
 
+def limits(store: Store, settings: Settings, now: datetime) -> list[dict]:
+    """Every server's limits beside what this machine keeps to and has used: the request window
+    (and how full it is now, from the window runs share), the caps per run and per day, today's
+    requests, and a wait in progress (a full window or a server's Retry-After) with its reason."""
+    import json
+
+    from ..config import PUBLISHED_LIMITS
+    from ..ratelimit import describe, load_times, wait_key, window_state
+    from ..sources import BUILDERS, rate_window
+
+    t = now.timestamp()
+    rows = []
+    for name in BUILDERS:
+        feed = settings.for_source(name)
+        calls, period = rate_window(name, settings)
+        published = PUBLISHED_LIMITS.get(name) or (
+            f"{feed.tier.name} plan: {describe(feed.tier.requests_per_minute, 60.0)}")
+        try:
+            wait = json.loads(store.kv_get(wait_key(name)) or "null")
+        except ValueError:
+            wait = None
+        used = store.requests_today(name)
+        rows.append({
+            "source": name, "plan": feed.tier.name, "published": published, "keptTo": describe(calls, period),
+            "window": window_state(load_times(store, name), calls, period, t),
+            "perRun": feed.max_requests_per_run, "perDay": feed.max_requests_per_day,
+            "today": used, "leftToday": max(0, feed.max_requests_per_day - used),
+            "wait": wait if wait and wait.get("until", 0) > t else None,
+        })
+    return rows
+
+
 def activity(store: Store, settings: Settings, db_path: Path, source: str = "massive",
              now: datetime | None = None, log_lines: int = 200) -> dict:
     now = (now or datetime.now(timezone.utc)).astimezone(ET)
@@ -315,6 +348,9 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
         "directory": _directory(store, source, settings, used),
         "ticks": _ticks(store, settings),
         "liveFeeds": live_feeds(store, settings, source, now),
+        "limits": limits(store, settings, now),
+        "priority": {t: {"at": v["at"].isoformat(), "runs": v["runs"]}
+                     for t, v in collector.priority_requests(store, now).items()},
         "runs": runs,
         "log": log_tail(log_path(db_path), log_lines),
     }

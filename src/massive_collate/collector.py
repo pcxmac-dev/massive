@@ -588,11 +588,74 @@ def _due(asset: str, tier: Tier, synced: datetime, now: datetime, refresh_hours:
     return freshness.expected(asset, tier, now).latest != freshness.expected(asset, tier, synced).latest
 
 
+# -- the symbol open in the chart goes first ------------------------------------------------
+PRIORITY_KEY = "fetch:priority"
+PRIORITY_HOURS = 6  # a request older than this has been dealt with (or given up on)
+
+
+def _priority_raw(store: Store) -> dict:
+    import json
+
+    try:
+        raw = json.loads(store.kv_get(PRIORITY_KEY) or "{}")
+    except ValueError:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def request_priority(store: Store, ticker: str, now: datetime | None = None) -> None:
+    """Ask every feed holding `ticker` to update it before anything else (the chart opened it)."""
+    import json
+
+    now = now or datetime.now(timezone.utc)
+    asked = {t: v for t, v in _priority_raw(store).items()
+             if now - datetime.fromisoformat(v["at"]) < timedelta(hours=PRIORITY_HOURS)}
+    asked[ticker.upper()] = {"at": now.isoformat(timespec="seconds"), "runs": 0}
+    store.kv_set(PRIORITY_KEY, json.dumps(asked))
+
+
+def priority_started(store: Store, ticker: str) -> None:
+    """A run for that symbol alone was started for the request."""
+    import json
+
+    asked = _priority_raw(store)
+    if ticker.upper() in asked:
+        asked[ticker.upper()]["runs"] = asked[ticker.upper()].get("runs", 0) + 1
+        store.kv_set(PRIORITY_KEY, json.dumps(asked))
+
+
+def priority_requests(store: Store, now: datetime | None = None) -> dict[str, dict]:
+    """Recent requests: ticker -> {at (datetime), runs (dedicated runs started for it)}."""
+    now = now or datetime.now(timezone.utc)
+    out = {}
+    for t, v in _priority_raw(store).items():
+        try:
+            at = datetime.fromisoformat(v["at"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if now - at < timedelta(hours=PRIORITY_HOURS):
+            out[t] = {"at": at, "runs": int(v.get("runs", 0))}
+    return out
+
+
+def _next_item(pending: list[dict], store: Store, now: datetime) -> tuple[dict, bool]:
+    """The next symbol to work on, and whether it was asked for: a symbol opened in the chart
+    since this feed last synced it goes first, wherever it is in the line. Read before every
+    symbol, so a request made while the run is going is taken at the next one."""
+    asked = priority_requests(store, now)
+    if asked:
+        for i, w in enumerate(pending):
+            at = asked.get(w["ticker"], {}).get("at")
+            if at and (w.get("synced_at") is None or w["synced_at"] < at):
+                return pending.pop(i), True
+    return pending.pop(0), False
+
+
 def sync(
     source: DataSource, store: Store, tier: Tier, now: datetime | None = None, log: Log = print,
     refresh_hours: float = 0.0, on_item: Callable[[str], None] | None = None, only: set[str] | None = None,
     directory_allowance: int = 0, feeds: dict[str, FeedProfile] | None = None, audits: tuple[int, int] = (0, 0),
-    tick_min_free_gb: int = 250,
+    tick_min_free_gb: int = 250, published_only: bool = False,
 ) -> SyncResult:
     """One scheduled run over the watchlist for a source.
 
@@ -601,7 +664,10 @@ def sync(
     spend requests) and, if set, `refresh_hours` have passed. Symbols still backfilling are
     never skipped. `on_item` is told which symbol is
     being worked on (for the activity view). `only` limits the run to those symbols and
-    fetches them whatever the refresh interval (used by `scan --fetch`).
+    fetches them whatever the refresh interval (used by `scan --fetch`); with `published_only`
+    (`sync --tickers`) a symbol whose plan has published nothing since its last sync is still
+    left alone. A symbol the chart opened (`request_priority`) is taken first, and its refresh
+    interval does not apply (its plan's publication does).
 
     `feeds` describes every configured feed, so this one downloads only spans no better-ranked
     feed can serve (see coverage.py); `audits` = (queued, random) audits this run may do for
@@ -628,14 +694,16 @@ def sync(
         if n:
             log(f"ledger: {n} spans where a feed's history starts later marked as theirs to leave")
     try:
-        if not archival:
+        if not archival and only is None:  # a run for chosen symbols spends nothing on the rest
             sync_exchanges(source, store, log)
             refresh_calendars(source, store, today, log)
             fetch_news(source, store, now, log)
             from .gui.world import PROXIES
             fetch_market_moves(source, store, now, PROXIES, log)
         # Keep complete symbols current first; backfills take what budget is left.
-        for item in sorted(store.watchlist(source.name), key=lambda w: (_backfilling(w, floor), w["ticker"])):
+        pending = sorted(store.watchlist(source.name), key=lambda w: (_backfilling(w, floor), w["ticker"]))
+        while pending:
+            item, urgent = _next_item(pending, store, now)
             ticker, asset = item["ticker"], item["asset"]
             synced = item.get("synced_at")
             if only is not None and ticker not in only:
@@ -650,7 +718,8 @@ def sync(
             if not source.serves(asset):  # e.g. Alpaca stocks without keys: nothing is sent
                 waiting[asset] = waiting.get(asset, 0) + 1
                 continue
-            if only is None and synced and not _due(asset, tier, synced, now, refresh_hours):
+            if (only is None or published_only) and synced and not _due(
+                    asset, tier, synced, now, 0.0 if urgent or only is not None else refresh_hours):
                 result.skipped += 1
                 continue
             if on_item:

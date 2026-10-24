@@ -2,9 +2,10 @@
 // data: sessions before the current one, with the Scan button), the Live view (current-session
 // feeds and whether they are being recorded), the rail icons and the status bar.
 //
-// Opening a symbol checks it at once: if its plan should have published a session it does not
-// have yet, that symbol alone is fetched in the background, and the status bar at the bottom
-// shows the check and the download (like a browser's), then the chart picks up the new bars.
+// Opening a symbol asks every feed holding it to update it first: with no run going, a run for
+// that symbol alone starts (gaps and new data on each feed, within each feed's limits); with one
+// going, the running sync takes it next. The status bar at the bottom shows where that stands
+// (like a browser's), then the chart picks up the new bars.
 (() => {
   'use strict';
 
@@ -12,7 +13,6 @@
   const POLL_FAST_MS = 1500;   // while a run is going or the Fetcher / Live view is open
   const POLL_SLOW_MS = 10000;
   const STATE_ORDER = { fetching: 0, new: 1, backfilling: 2, queued: 3, current: 4, retired: 5, closed: 6, blocked: 7 };
-  const UPDATE_REQUESTS = 4;  // a one-symbol update: newest-bar check, new bars, daily bars, listing
   const el = (id) => document.getElementById(id);
   const esc = window.MassiveIcons.esc;
   const num = (n) => (n == null ? '–' : Number(n).toLocaleString());
@@ -103,27 +103,32 @@
   async function checkSymbol(ticker) {
     if (!ticker) return;
     if (!data) await poll();
-    const s = data?.symbols?.find((x) => x.ticker === ticker);
-    if (!s) { job = null; renderStatusBar(); return; }
-    if (s.state === 'new') {
-      job = { ticker, phase: 'checking', since: Date.now() };
-      renderStatusBar();
-      await startFetch(ticker);
-    } else if (s.state === 'current') {
-      job = { ticker, phase: 'current', nextDue: s.nextDue, last: s.last, since: Date.now() };
-    } else {
-      job = { ticker, phase: s.state, progress: s.progress, since: Date.now() };  // backfilling / queued / fetching
-    }
+    job = { ticker, phase: 'checking', since: Date.now() };
+    renderStatusBar();
+    await askFirst(ticker);
     renderStatusBar();
   }
 
-  async function startFetch(ticker) {
+  // Where the symbol stands on the Fetcher's feed (when nothing is being fetched for it).
+  function standing(ticker) {
+    const s = data?.symbols?.find((x) => x.ticker === ticker);
+    if (!s) return null;
+    if (s.state === 'current') return { ticker, phase: 'current', nextDue: s.nextDue, last: s.last, since: Date.now() };
+    return { ticker, phase: s.state, progress: s.progress, since: Date.now() };  // backfilling / queued / ...
+  }
+
+  async function askFirst(ticker) {
     try {
-      const res = await fetch(`/api/fetch?ticker=${encodeURIComponent(ticker)}`, { method: 'POST', headers: { 'X-Massive-Charts': '1' } });
-      if (res.status === 409) { job = { ticker, phase: 'waiting', since: Date.now() }; return; }  // fetcher busy: retry after its run
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
-      job = { ticker, phase: 'downloading', since: Date.now(), runId: null };
-      setTimeout(poll, 400);
+      const res = await fetch(`/api/priority?ticker=${encodeURIComponent(ticker)}`, { method: 'POST', headers: { 'X-Massive-Charts': '1' } });
+      const body = await res.json().catch(() => ({}));
+      if (res.status === 404) { job = null; return; }  // not on the watchlist: nothing to fetch
+      if (!res.ok) throw new Error(body.error || res.statusText);
+      const feeds = body.feeds || [];
+      if (body.state === 'started') {
+        job = { ticker, phase: 'downloading', feeds, since: Date.now() };
+        setTimeout(poll, 400);
+      } else if (body.state === 'queued') job = { ticker, phase: 'waiting', feeds, since: Date.now() };
+      else job = standing(ticker);  // a run for it went in the last few minutes
     } catch (e) {
       job = { ticker, phase: 'error', message: String(e.message || e), since: Date.now() };
     }
@@ -131,17 +136,19 @@
 
   function advanceJob() {
     if (!job || !data) return;
-    if (job.phase === 'downloading' && data.running && data.live.command.startsWith('scan') && !job.runId) job.runId = data.live.id;
-    if (job.phase === 'waiting' && !data.running) startFetch(job.ticker);
+    if (job.phase === 'waiting' && !data.running) askFirst(job.ticker).then(renderStatusBar);  // the run ended: its turn
   }
 
   function finishJob() {
     if (!job || job.phase !== 'downloading') return;
-    const run = data.runs.find((r) => r.id === job.runId) || data.runs.find((r) => String(r.command).startsWith('scan'));
-    const s = data.symbols.find((x) => x.ticker === job.ticker);
-    job = run && run.status === 'ok'
-      ? { ticker: job.ticker, phase: 'done', rows: run.rows, requests: run.requests, last: s?.last, since: Date.now() }
-      : { ticker: job.ticker, phase: 'error', message: run ? `${run.status}: ${run.message || ''}` : 'run ended', since: Date.now() };
+    // The symbol's run went over every feed holding it: one run record per feed.
+    const runs = data.runs.filter((r) => String(r.command).startsWith('sync') && Date.parse(r.started_at) >= job.since - 5000);
+    const bad = runs.find((r) => r.status !== 'ok');
+    job = !runs.length || bad
+      ? { ticker: job.ticker, phase: 'error', message: bad ? `${bad.source}: ${bad.status} ${bad.message || ''}` : 'run ended', since: Date.now() }
+      : { ticker: job.ticker, phase: 'done', rows: runs.reduce((n, r) => n + (r.rows || 0), 0),
+          requests: runs.reduce((n, r) => n + (r.requests || 0), 0), feedCount: runs.length, since: Date.now() };
+    if (job.phase === 'done' && job.rows) window.dispatchEvent(new CustomEvent('massive:symbol-updated', { detail: job.ticker }));
   }
 
   function renderStatusBar() {
@@ -151,12 +158,17 @@
     if (job && job.ticker === state.ticker) {
       const t = esc(job.ticker);
       if (job.phase === 'checking') { msg = `${t}: checking…`; busy = true; }
-      else if (job.phase === 'waiting') { msg = `${t}: new data · fetcher busy`; busy = true; }
-      else if (job.phase === 'downloading') {
-        const req = running ? data.live.requests : 0;
-        msg = running ? `${t}: downloading ${num(req)}/~${UPDATE_REQUESTS}` : `${t}: starting…`;
-        progress = running ? Math.min(0.95, req / UPDATE_REQUESTS) : 0.05;
-      } else if (job.phase === 'done') { msg = `${t}: +${num(job.rows)} rows${job.last ? ` · to ${short(job.last)}` : ''}`; cls = 'ok'; }
+      else if (job.phase === 'waiting') {
+        msg = `${t}: next in line · ${data?.live?.source ? `${esc(data.live.source)} is fetching` : 'the fetcher is busy'}${waitNote()}`;
+        busy = true;
+      } else if (job.phase === 'downloading') {
+        msg = running ? `${t}: updating on ${esc(data.live.source)}${job.feeds.length > 1 ? ` (${job.feeds.length} feeds)` : ''} · ${num(data.live.requests)} req${waitNote()}`
+          : `${t}: starting…`;
+        busy = true;
+      } else if (job.phase === 'done') {
+        msg = `${t}: +${num(job.rows)} rows from ${job.feedCount} feed${job.feedCount === 1 ? '' : 's'}`;
+        cls = 'ok';
+      }
       else if (job.phase === 'current') { msg = `${t} ✓ to ${short(job.last)} · next ${short(job.nextDue)}`; }
       else if (job.phase === 'backfilling') { msg = `${t}: backfill ${Math.round((job.progress || 0) * 100)}%`; progress = job.progress || 0; }
       else if (job.phase === 'queued') { msg = `${t}: queued`; }
@@ -173,7 +185,34 @@
     bar.firstElementChild.style.width = progress == null ? '' : `${Math.round(progress * 100)}%`;
   }
 
+  // A wait in progress on the running feed: its limit (or the server's Retry-After) and how long.
+  function waitNote() {
+    const src = data?.live?.source;
+    const w = (data?.limits || []).find((l) => l.source === src)?.wait;
+    if (!w) return '';
+    const left = Math.max(0, Math.round(w.until - Date.now() / 1000));
+    return left ? ` · waiting ${left} s (${esc(w.reason)})` : '';
+  }
+
   window.addEventListener('massive:symbol', (e) => checkSymbol(e.detail));
+
+  // Every server's limits beside what this machine keeps to and has used.
+  function limitsHtml(rows) {
+    const t = Date.now() / 1000;
+    return rows.map((l) => {
+      const w = l.window;
+      const full = w.allowed && w.used >= w.allowed;
+      const wait = l.wait ? Math.max(0, Math.round(l.wait.until - t)) : 0;
+      const next = wait ? `<span class="warn">in ${wait} s</span> <div class="sub">${esc(l.wait.reason)}</div>`
+        : full ? `<span class="warn">in ${Math.ceil(w.freeIn)} s</span> <div class="sub">window full</div>` : 'now';
+      const live = data.running && data.live.source === l.source;
+      return `<tr class="${live ? 'live' : ''}"><td><b>${esc(l.source)}</b><div class="sub">${esc(l.plan)}</div></td>
+        <td>${esc(l.published)}</td><td>${esc(l.keptTo)}</td>
+        <td>${w.allowed ? `${meter(w.used / w.allowed, full ? 'warn' : '')}<div class="sub">${num(w.used)} of ${num(w.allowed)} in the last ${w.periodSeconds >= 3600 ? 'hour' : 'minute'}</div>` : '<span class="sub">no limit</span>'}</td>
+        <td>${next}</td>
+        <td class="num">${num(l.today)} <span class="sub">/ ${num(l.perDay)}</span></td><td class="num">${num(l.perRun)}</td></tr>`;
+    }).join('');
+  }
 
   // -- Fetcher view --------------------------------------------------------------------
   function logHtml(lines) {
@@ -193,6 +232,7 @@
     el('actFeeds').innerHTML = (data.feeds || []).map((f) => `<button type="button" data-feed="${esc(f.name)}"
         class="${f.name === feed ? 'active' : ''}" title="${esc(f.plan)}${f.archive ? ' · public archive: fills history once per symbol, then closed' : ''}${f.keys === false ? ' · key not set' : ''}${f.configured ? '' : ' · not configured here'}">${esc(f.name)}${f.closed ? ' <span class="chip">closed</span>' : f.keys === false ? ` <span class="chip">${f.name === 'alpaca' ? 'crypto' : 'no key'}</span>` : ''}</button>`).join('');
     loadAudits();
+    el('actLimits').innerHTML = limitsHtml(data.limits || []);
     el('scanBtn').disabled = !!data.running;
     el('scanNote').innerHTML = scanNote ? esc(scanNote) : '';
     const mine = data.running && data.live.source === data.source;  // a run of another feed is not this feed's

@@ -93,6 +93,9 @@
     if (typeof state.pollNow === 'function') state.pollNow();
     loadInfo();
   });
+  window.addEventListener('massive:symbol-updated', (e) => {
+    if (e.detail === state.ticker) chart.resetData();  // filled gaps are anywhere, not only after the newest bar
+  });
   window.addEventListener('keydown', (e) => {  // Escape returns to the chart from the other views
     if (e.key === 'Escape' && document.body.dataset.view !== 'chart' && !document.querySelector('dialog[open]')) showPane('stock', { toggle: false });
   });
