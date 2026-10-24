@@ -5,6 +5,7 @@
      Analysis  the chart, with the highlight's measurements and the bar under the cursor beside it
      Markets   the world's exchanges on a globe turned to where it is noon now (globe.js)
      News      every announcement the globe's ticker shows (news.js)
+     Datasets  research series drawn on one time axis: factors, CAPE, COT positioning (datasets.js)
      Fetcher   historical data (sessions before the current one); coloured while a run is active
      Live      current-session feeds; a red "recording" dot while live data is being recorded
 
@@ -13,7 +14,7 @@
    cursor). */
 (() => {
   const { symbolIcon, icon } = window.MassiveIcons;
-  const VIEWS = { stock: 'chart', analysis: 'chart', markets: 'markets', news: 'news', fetcher: 'fetcher', live: 'live' };
+  const VIEWS = { stock: 'chart', analysis: 'chart', markets: 'markets', news: 'news', datasets: 'datasets', fetcher: 'fetcher', live: 'live' };
 
   // -- rail --------------------------------------------------------------------------------
   function showPane(name, { toggle = true } = {}) {
@@ -57,6 +58,7 @@
     $('railAnalysis').innerHTML = icon('analysis', 20);
     $('railMarkets').innerHTML = icon('globe', 20);
     $('railNews').innerHTML = icon('news', 20);
+    $('railDatasets').innerHTML = icon('dataset', 20);
     const running = !!activity?.running;
     const fresh = activity?.newData || 0;
     $('railFetcher').innerHTML = `${icon('database', 20)}${running ? `<span class="rail-badge spin">${icon('sync', 11)}</span>` : ''}`

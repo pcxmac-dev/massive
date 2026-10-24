@@ -160,6 +160,6 @@ library 0.85, a mirror of someone else's data 0.80.
 | Directory details refresh | details re-checked every 90 days with spare budget only | — | ⚠️ |
 | Shiller fundamentals after 2023 | the mirror stops dividends, earnings, CPI and CAPE in 2023 | Shiller's own `ie_data.xls` (shillerdata.com; needs an .xls reader) | ⚠️ mirror lags |
 | Current commodity prices | the IMF mirror ends in 2017 | World Bank Pink Sheet (`CMO-Historical-Data-Monthly.xlsx`) or the IMF's own PCPS | ❌ |
-| Dataset series in charts | datasets are listed and queryable (`datasets show`), not yet drawn | a dataset viewer in the chart app | ❌ |
+| Dataset series beside prices | the Datasets view draws dataset series on their own; they cannot yet be overlaid on a symbol's price chart | an overlay indicator fed from a dataset series | ❌ |
 | Exchange holidays beyond what exchange_calendars records | China/Singapore/India: to year end until the package updates | the exchanges' own announcements | ⚠️ `deps` warns |
 | Corporate actions (splits, ticker changes) for watched stocks | prices are split-adjusted by Massive (`adjusted=true`); ticker reuse is caught by the weekly FIGI check | `/v3/reference/splits`, `/v3/reference/dividends` | ⚠️ adjustments not stored separately |

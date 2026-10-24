@@ -330,6 +330,30 @@ class ChartApp:
             r["fetched"] = r["fetched"].isoformat() if r["fetched"] else None
         return {"datasets": rows}
 
+    def dataset_series(self, name: str) -> dict:
+        """A dataset's series (or, for the COT report, its markets) for the viewer's picker."""
+        from .. import datasets
+
+        if name not in datasets.DATASETS:
+            raise LookupError(f"no dataset {name}")
+        ds = datasets.DATASETS[name]
+        with self._lock:
+            if name == "cftc-cot-legacy":
+                return {"name": name, "markets": datasets.cot_markets(self.store)}
+            return {"name": name, "series": datasets.series_list(self.store, name),
+                    "members": len(self.store.constituents(ds.provider, "S&P 500"))}
+
+    def dataset_values(self, name: str, series: str) -> dict:
+        from .. import datasets
+
+        if name not in datasets.DATASETS:
+            raise LookupError(f"no dataset {name}")
+        wanted = [s for s in series.split(",") if s]
+        if not wanted:
+            raise ValueError("no series given")
+        with self._lock:
+            return {"name": name, "series": datasets.values(self.store, name, wanted)}
+
     def audit_summary(self, ticker: str | None = None, limit: int = 40) -> dict:
         with self._lock:
             rows = self.store.audits(limit, ticker)
@@ -566,6 +590,10 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.audit_summary(q.get("ticker")))
                 if url.path == "/api/datasets":
                     return self._json(app.datasets())
+                if url.path == "/api/dataset/series":
+                    return self._json(app.dataset_series(q["name"]))
+                if url.path == "/api/dataset/values":
+                    return self._json(app.dataset_values(q["name"], q["series"]))
             except (KeyError, ValueError) as e:
                 return self._json({"error": f"bad request: {e}"}, HTTPStatus.BAD_REQUEST)
             except LookupError as e:

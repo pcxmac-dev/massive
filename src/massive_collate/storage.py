@@ -1316,6 +1316,15 @@ class Store:
         cols = [c[0] for c in cur.description]
         return [dict(zip(cols, r)) for r in cur]
 
+    def dataset_last_values(self, provider: str, name: str) -> dict[str, float]:
+        """{series: its newest value} for every series of a dataset (one index seek each)."""
+        conn = self._dataset_db(provider)
+        if conn is None:
+            return {}
+        return dict(conn.execute(
+            "SELECT o.series, o.value FROM series s JOIN observations o ON o.dataset=s.dataset AND o.series=s.series "
+            "AND o.ts=s.last_ts WHERE s.dataset=?", (name,)))
+
     def dataset_values(self, provider: str, name: str, series: str, lo_ms: int | None = None,
                        hi_ms: int | None = None) -> pd.DataFrame:
         """ts (ms) and value of one series, oldest first."""

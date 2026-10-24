@@ -218,3 +218,24 @@ def test_chart_app_lists_datasets_and_maps_members_by_gics(tmp_path):
     jpm = next(x for x in app.symbols() if x["ticker"] == "JPM")
     assert (jpm["sector"], jpm["sectorBasis"]) == ("Financial", "GICS (S&P 500 list)")
     s.close()
+
+
+def test_viewer_endpoints(tmp_path):
+    from massive_collate.gui.server import ChartApp
+
+    s = Store(tmp_path / "m.db", check_same_thread=False)
+    fetch(s, ["cftc-cot-legacy", "french-3-factors-daily"], today=TODAY, session=_Session(_web), log=lambda *_: None)
+    app = ChartApp(s)
+    markets = app.dataset_series("cftc-cot-legacy")["markets"]
+    assert [(m["code"], m["name"], m["openInterest"]) for m in markets] == [
+        ("001602", "WHEAT-SRW - CHICAGO BOARD OF TRADE", 400000.0)]  # the name without the field
+    assert [x["series"] for x in app.dataset_series("french-3-factors-daily")["series"]] == ["HML", "Mkt-RF", "RF", "SMB"]
+    got = app.dataset_values("french-3-factors-daily", "Mkt-RF,SMB")["series"]
+    assert got["SMB"]["v"] == [-0.25, -0.33, 0.12] and got["SMB"]["unit"] == "%" and len(got["SMB"]["t"]) == 3
+    cot = app.dataset_values("cftc-cot-legacy", "001602:noncommercial_long")["series"]["001602:noncommercial_long"]
+    assert cot["v"] == [100000.0] * 10 and cot["freq"] == "week"
+    with pytest.raises(KeyError):
+        app.dataset_values("french-3-factors-daily", "Nope")
+    with pytest.raises(LookupError):
+        app.dataset_series("no-such-dataset")
+    s.close()

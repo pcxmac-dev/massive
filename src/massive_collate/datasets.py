@@ -300,6 +300,51 @@ def fetch(store, names: list[str] | None = None, today: date | None = None, forc
     return done
 
 
+# -- reading, for the chart app's dataset viewer ---------------------------------------------
+
+MAX_SERIES = 8  # series drawn at once (the categorical palette's eight slots)
+
+
+def series_list(store, name: str) -> list[dict]:
+    """A dataset's series with their span; for the COT report its markets instead (see cot_markets)."""
+    ds = DATASETS[name]
+    return [{"series": r["series"], "title": r["title"], "unit": r["unit"], "freq": r["freq"],
+             "first": r["first_ts"], "last": r["last_ts"], "n": r["n"]}
+            for r in store.dataset_series(ds.provider, name) if r["n"]]
+
+
+def cot_markets(store) -> list[dict]:
+    """Markets of the COT report: code, name, span and latest open interest; those still reported
+    first, largest open interest first."""
+    ds = DATASETS["cftc-cot-legacy"]
+    last = store.dataset_last_values(ds.provider, ds.name)
+    markets: dict[str, dict] = {}
+    for r in store.dataset_series(ds.provider, ds.name):
+        code, _, field = r["series"].partition(":")
+        m = markets.setdefault(code, {"code": code, "name": code, "first": None, "last": None, "openInterest": None})
+        if field == "open_interest":
+            m["name"] = (r["title"] or code).rsplit(": ", 1)[0]
+            m["first"], m["last"] = r["first_ts"], r["last_ts"]
+            m["openInterest"] = last.get(r["series"])
+    newest = max((m["last"] or 0 for m in markets.values()), default=0)
+    current = newest - 21 * 86_400_000  # reported within three weeks of the newest report
+    return sorted(markets.values(), key=lambda m: (-(m["last"] or 0 >= current), -(m["openInterest"] or 0), m["name"]))
+
+
+def values(store, name: str, series: list[str]) -> dict[str, dict]:
+    """{series: {title, unit, freq, t: [ms...], v: [values...]}} for up to MAX_SERIES series."""
+    ds = DATASETS[name]
+    meta = {r["series"]: r for r in store.dataset_series(ds.provider, name)}
+    out = {}
+    for s in series[:MAX_SERIES]:
+        if s not in meta:
+            raise KeyError(f"no series {s!r} in {name}")
+        df = store.dataset_values(ds.provider, name, s)
+        out[s] = {"title": meta[s]["title"], "unit": meta[s]["unit"], "freq": meta[s]["freq"],
+                  "t": [int(t) for t in df["ts"]], "v": [float(v) for v in df["value"]]}
+    return out
+
+
 def status(store, today: date | None = None) -> list[dict]:
     """Every dataset: files fetched and closed, values, series, span, last fetch, files due, quality."""
     today = today or datetime.now(ET).date()

@@ -403,3 +403,64 @@ body:not(.light) #viewMarkets { background: #0a0c11; }
 
 /* GPU button: on = setting on; partial = this chart type is still drawn on the CPU */
 #gpuBtn.on.partial { color: var(--muted); box-shadow: inset 0 -2px 0 var(--accent); }
+
+/* Dataset viewer (datasets.js). Series colours: the validated categorical palette in its fixed
+   order, dark steps on the dark theme and light steps on the light one (checked against the page
+   colour of each theme); text never wears a series colour. */
+:root { --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767; }
+body.light { --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948; }
+.ds-view { flex-direction: column; padding: 12px 18px; min-height: 0; overflow: hidden; }
+.ds-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0 10px; flex: none; }
+.ds-bar #dsName { max-width: 420px; }
+.ds-bar .group { display: inline-flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+.ds-bar .group button { border-radius: 0; padding: 4px 10px; }
+.ds-body { flex: 1; min-height: 0; display: flex; gap: 14px; }
+.ds-pick { width: 260px; flex: none; display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+.ds-pick input[type="search"] { border: 1px solid var(--border); background: var(--panel); cursor: text; }
+.ds-list { flex: 1; overflow-y: auto; border: 1px solid var(--border); border-radius: 4px; }
+.ds-item { display: flex; align-items: center; gap: 6px; width: 100%; padding: 5px 8px; border: 0; border-bottom: 1px solid var(--border);
+  border-radius: 0; text-align: left; cursor: pointer; }
+.ds-item:hover, .ds-item.on { background: var(--hover); }
+.ds-item input { margin: 0; }
+.ds-item .ds-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ds-item small { color: var(--muted); font-size: 11px; white-space: nowrap; }
+button.ds-item { flex-direction: column; align-items: stretch; gap: 1px; }
+button.ds-item.on { box-shadow: inset 3px 0 0 var(--accent); }
+.ds-main { position: relative; flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; transition: opacity .15s; }
+.ds-main.loading { opacity: .55; }
+.ds-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; min-height: 18px; margin-bottom: 4px; flex: none; }
+.ds-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.ds-charts { flex: 1; min-height: 260px; outline: none; }
+.ds-charts:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ds-chart { display: block; overflow: visible; }
+.ds-chart text { font-size: 11px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+.ds-grid line { stroke: var(--border); stroke-width: 1; shape-rendering: crispEdges; }
+.ds-grid line.zero, .ds-grid line.tick { stroke: var(--muted); }
+.ds-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.ds-key { stroke-width: 2; stroke-linecap: round; }
+.ds-line.dash, .ds-key.dash { stroke-dasharray: 5 3; }
+.ds-chart text.ds-end { fill: var(--text); font-weight: 600; }
+.ds-chart text.ds-end tspan.muted { fill: var(--muted); font-weight: 400; }
+.ds-hover .cross { stroke: var(--muted); stroke-width: 1; }
+.ds-dot { stroke: var(--bg); stroke-width: 2; }
+.ds-line.s1, .ds-key.s1 { stroke: var(--s1); } .ds-dot.s1 { fill: var(--s1); }
+.ds-line.s2, .ds-key.s2 { stroke: var(--s2); } .ds-dot.s2 { fill: var(--s2); }
+.ds-line.s3, .ds-key.s3 { stroke: var(--s3); } .ds-dot.s3 { fill: var(--s3); }
+.ds-line.s4, .ds-key.s4 { stroke: var(--s4); } .ds-dot.s4 { fill: var(--s4); }
+.ds-line.s5, .ds-key.s5 { stroke: var(--s5); } .ds-dot.s5 { fill: var(--s5); }
+.ds-line.s6, .ds-key.s6 { stroke: var(--s6); } .ds-dot.s6 { fill: var(--s6); }
+.ds-line.s7, .ds-key.s7 { stroke: var(--s7); } .ds-dot.s7 { fill: var(--s7); }
+.ds-line.s8, .ds-key.s8 { stroke: var(--s8); } .ds-dot.s8 { fill: var(--s8); }
+.ds-tip { position: absolute; z-index: 5; pointer-events: none; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 9px; font-size: 12px; box-shadow: 0 4px 14px rgba(0, 0, 0, .3); max-width: 360px; }
+.ds-tip-date { color: var(--muted); font-size: 11px; margin-bottom: 3px; }
+.ds-tip-row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.ds-tip-row b { font-variant-numeric: tabular-nums; min-width: 64px; text-align: right; }
+.ds-tip-row span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.ds-note { margin-top: 6px; flex: none; }
+.ds-table { max-height: 240px; overflow: auto; margin-top: 8px; flex: none; }
+.ds-empty { padding: 40px; text-align: center; }
+@media (max-width: 760px) {
+  .ds-body { flex-direction: column; }
+  .ds-pick { width: auto; max-height: 200px; }
+}
