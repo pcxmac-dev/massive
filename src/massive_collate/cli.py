@@ -329,7 +329,7 @@ def cmd_audit(args, settings: Settings) -> int:
         now = collector.now_et()
         if not args.ticker:
             for _ in range(args.random):
-                pick = audit.random_span(store, source, me, now, random.Random())
+                pick = audit.random_span(store, source, me, now, random.Random(), feeds=feeds)
                 if pick:
                     audit.audit_span(source, store, *pick, "manual", log)
                 else:

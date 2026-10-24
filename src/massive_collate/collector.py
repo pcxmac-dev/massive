@@ -330,8 +330,11 @@ def _queue_audit(store: Store, me: FeedProfile, feeds: dict[str, FeedProfile], t
     """After new data: ask another feed watching the ticker to audit the newest session."""
     if newest is None:
         return
-    if not any(f.name != me.name and asset in f.assets for f in feeds.values()):
-        return
+    from .coverage import same_market
+
+    if not any(f.name != me.name and asset in f.assets and same_market(feeds, f.name, me.name, asset)
+               for f in feeds.values()):
+        return  # no copy of this market to audit against
     t = datetime.fromtimestamp(newest / 1000, ET)
     sessions = [x for x in freshness.CALENDAR.sessions(asset, t.date() - timedelta(days=1), t.date() + timedelta(days=1))
                 if x.open <= t < x.close]

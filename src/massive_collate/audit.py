@@ -208,6 +208,10 @@ def run_audits(source, store, me: FeedProfile, feeds: dict[str, FeedProfile], no
             continue
         if w is None or not source.serves(w["asset"]):
             continue
+        from .coverage import same_market
+
+        if not same_market(feeds, q["owner"], me.name, w["asset"]):
+            continue  # another market: the composite compares it, an audit would not
         lo, hi = _window(me, w["asset"], q["timespan"], now)
         if not (lo <= q["start_ms"] and q["end_ms"] <= hi):
             continue  # not on this feed's plan yet (e.g. end of day): a later run
@@ -215,16 +219,20 @@ def run_audits(source, store, me: FeedProfile, feeds: dict[str, FeedProfile], no
         store.dequeue_audit(q["ticker"], q["timespan"], q["start_ms"], q["owner"])
         done += 1
     for _ in range(random_count):
-        pick = random_span(store, source, me, now, rng, mine)
+        pick = random_span(store, source, me, now, rng, mine, feeds)
         if pick:
             audit_span(source, store, *pick, "random", log)
             done += 1
     return done
 
 
-def random_span(store, source, me: FeedProfile, now: datetime, rng: random.Random, mine: dict | None = None):
-    """A random session of another feed's stored minute bars that this feed could serve:
+def random_span(store, source, me: FeedProfile, now: datetime, rng: random.Random, mine: dict | None = None,
+                feeds: dict | None = None):
+    """A random session of another feed's stored minute bars that this feed could serve, of the same
+    market (another exchange's data is compared by the composite, not audited as a copy):
     (ticker, timespan, start, end, owner), or None."""
+    from .coverage import same_market
+
     mine = mine or {w["ticker"]: w for w in store.watchlist(source.name)}
     candidates = []
     for ticker, w in mine.items():
@@ -232,7 +240,7 @@ def random_span(store, source, me: FeedProfile, now: datetime, rng: random.Rando
             continue
         lo, hi = _window(me, w["asset"], "minute", now)
         for owner, spans in store.coverage(ticker, "minute").items():
-            if owner == me.name:
+            if owner == me.name or owner == "composite" or (feeds and not same_market(feeds, owner, me.name, w["asset"])):
                 continue
             for a, b in spans:
                 a, b = max(a, lo), min(b, hi)

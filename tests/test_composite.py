@@ -89,3 +89,48 @@ def test_chart_engine_serves_the_composite_with_its_band(store):
     assert bar["env_high"] == pytest.approx(84030.2) and bar["env_low"] == pytest.approx(83999.8)
     assert bar["venues_n"] == 2 and bar["dev_sd"] > 0
     assert "composite" not in engine.sources_for("BTCUSD")  # a model, not a feed to merge
+
+
+def test_single_exchange_minutes_have_no_composite(store):
+    for feed in ("coinbase", "alpaca"):
+        store.watch_spec(feed, resolve("BTCUSD"))
+    mk = lambda start, n: [{"t": T0 + i * 60_000, "o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0, "v": 1.0} for i in range(start, n)]  # noqa: E731
+    store.upsert_bars("coinbase", "BTCUSD", "minute", 1, mk(0, 10))
+    store.upsert_bars("alpaca", "BTCUSD", "minute", 1, mk(5, 10))  # Kraken only from minute 5
+    composite.refresh(store, _feeds(), datetime.fromtimestamp((T0 + 3_600_000) / 1000, timezone.utc), log=lambda m: None)
+    assert list(store.composite_stats("BTCUSD", "minute")["venues"]) == [2] * 5
+    store.save_composite("BTCUSD", "minute", composite.combine({"coinbase": _bars([5.0])}, {"coinbase": 1}))
+    assert store.drop_single_exchange_composites() == 1
+
+
+def test_audits_pair_only_feeds_of_the_same_market(store):
+    import random
+
+    from massive_collate.audit import random_span
+
+    feeds = _feeds()
+    store.watch_spec("coinbase", resolve("BTCUSD"))
+    store.watch_spec("alpaca", resolve("BTCUSD"))
+    store.add_coverage("alpaca", "BTCUSD", "minute", T0 - 10 * 86_400_000, T0)
+    from massive_collate.sources.public import CoinbaseSource, PublicClient
+
+    src = CoinbaseSource(PublicClient("https://x.test"))
+    now = datetime.fromtimestamp(T0 / 1000, timezone.utc)
+    assert random_span(store, src, feeds["coinbase"], now, random.Random(1), feeds=feeds) is None  # Kraken is another market
+
+
+def test_two_exchanges_cannot_outvote_each_other_and_backfills_are_rebuilt(store):
+    two = composite.combine({"coinbase": _bars([100.0]), "kraken": _bars([100.5])}, {"coinbase": 1, "kraken": 1})
+    assert two["outliers"].iloc[0] == ""  # 50 bps apart, but which one is off? needs a third
+    for feed in ("coinbase", "alpaca", "bitfinex"):
+        store.watch_spec(feed, resolve("BTCUSD"))
+    mk = lambda days, n=3: [{"t": T0 - days * 86_400_000 + i * 60_000, "o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0, "v": 1.0}  # noqa: E731
+                            for i in range(n)]
+    store.upsert_bars("coinbase", "BTCUSD", "minute", 1, mk(0) + mk(40))
+    store.upsert_bars("alpaca", "BTCUSD", "minute", 1, mk(0) + mk(40))
+    now = datetime.fromtimestamp((T0 + 3_600_000) / 1000, timezone.utc)
+    composite.refresh(store, _feeds(), now, log=lambda m: None)
+    assert set(store.composite_stats("BTCUSD", "minute")["venues"]) == {2}
+    store.upsert_bars("bitfinex", "BTCUSD", "minute", 1, mk(0) + mk(40))  # a new exchange, 40 days back
+    composite.refresh(store, _feeds(), now, log=lambda m: None)
+    assert set(store.composite_stats("BTCUSD", "minute")["venues"]) == {3}  # old days rebuilt too

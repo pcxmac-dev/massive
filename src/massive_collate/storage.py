@@ -968,6 +968,16 @@ class Store:
         self._wrote()
         return len(rows)
 
+    def drop_single_exchange_composites(self) -> int:
+        """Composite bars built from one exchange only (they are copies of it): removed."""
+        with self.conn:
+            rows = self.conn.execute("SELECT ticker, timespan, ts FROM composite_stats WHERE venues < 2").fetchall()
+            self.conn.executemany("DELETE FROM bars WHERE source='composite' AND ticker=? AND timespan=? AND multiplier=1 "
+                                  "AND ts=?", rows)
+            self.conn.execute("DELETE FROM composite_stats WHERE venues < 2")
+        self._wrote()
+        return len(rows)
+
     def composite_stats(self, ticker: str, timespan: str, lo_ms: int | None = None, hi_ms: int | None = None) -> pd.DataFrame:
         sql = ("SELECT ts, venues, sd_bps, range_bps, env_h, env_l, members, outliers FROM composite_stats "
                "WHERE ticker=? AND timespan=?")

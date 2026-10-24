@@ -109,7 +109,9 @@ def combine(bars: dict[str, pd.DataFrame], weights: dict[str, float]) -> pd.Data
         others = centre + mean_o
         dist = (all_["c"].to_numpy() - others) / others * 1e4
         sd_o = np.sqrt(np.clip(var_o, 0, None)) / others * 1e4
-    flag = np.abs(dist) > np.maximum(OUTLIER_BPS, 3 * np.nan_to_num(sd_o))
+    # an outlier needs a majority to stand out from: at least two other exchanges in the bar
+    rest_n = g["venue"].count().reindex(all_.index).to_numpy() - 1
+    flag = (np.abs(dist) > np.maximum(OUTLIER_BPS, 3 * np.nan_to_num(sd_o))) & (rest_n >= 2)
     all_["outlier"] = flag & np.isfinite(dist)
     out["outliers"] = all_[all_["outlier"]].groupby(level=0)["venue"].agg(lambda s: ",".join(sorted(s)))
     out["outliers"] = out["outliers"].fillna("")
@@ -175,20 +177,33 @@ def refresh(store, feeds: dict, now: datetime, log=print, rebuild_days: int = 2)
             continue
         weights = {v: quality_of(store, f, asset) for f, v in feed_of.items()}
         built = 0
+        if not store.kv_get("composite:single-dropped:v1"):  # one-off: bars built from one exchange only
+            store.drop_single_exchange_composites()
+            store.kv_set("composite:single-dropped:v1", now.isoformat())
         for timespan in ("minute", "day"):
-            edges = [e for e in (store.bar_edges(f, ticker, timespan) for f in feed_of) if e]
-            if not edges:
+            edges = {f: e for f in feed_of if (e := store.bar_edges(f, ticker, timespan))}
+            if len(edges) < 2:
                 continue
-            first, last = min(e[0] for e in edges), max(e[1] for e in edges)
+            first, last = min(e[0] for e in edges.values()), max(e[1] for e in edges.values())
+            # Rebuild the last few days, and from wherever an exchange's data now reaches further
+            # back than at the last build (a new exchange, a backfill); everything the first time.
+            key = f"composite:edges:{ticker}:{timespan}"
+            before = json.loads(store.kv_get(key) or "{}")
             have = store.bar_edges("composite", ticker, timespan)
-            lo = max(first, have[1] - rebuild_days * DAY_MS) if have else first
-            lo = lo // DAY_MS * DAY_MS
+            lo = have[1] - rebuild_days * DAY_MS if have else first
+            for f, (a, _) in edges.items():
+                if f not in before or a < before[f][0]:
+                    lo = min(lo, a)
+            lo = max(first, lo) // DAY_MS * DAY_MS
             while lo <= last:
                 hi = lo + (30 if timespan == "day" else 1) * DAY_MS
                 comp = combine(_venue_bars(store, feed_of, ticker, timespan, lo, hi), weights)
                 if not comp.empty:
+                    comp = comp[comp["venues"] >= 2]  # one exchange alone is that exchange, not a composite
+                if not comp.empty:
                     built += store.save_composite(ticker, timespan, comp)
                 lo = hi
+            store.kv_set(key, json.dumps({f: list(e) for f, e in edges.items()}))
         key = f"quality:{ticker}"
         last_q = store.kv_get(key)
         if built or not last_q or (now - datetime.fromisoformat(last_q)).total_seconds() > 86_400:

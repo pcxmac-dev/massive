@@ -835,11 +835,13 @@ function renderFeeds(info) {
   const add = (value, label) => { const o = document.createElement('option'); o.value = value; o.textContent = label; sel.append(o); };
   if (m) {  // an asset on several exchanges: its models first
     const q = Object.fromEntries((m.exchanges || []).map((x) => [x.feed, x.quality]));
-    if (m.reference) add(m.reference, `Reference: ${m.reference} (gold standard)`);
+    const ex = Object.fromEntries((m.exchanges || []).map((x) => [x.feed, x.exchange]));
+    const name = (feed) => (ex[feed] && ex[feed] !== feed ? `${ex[feed]} (via ${feed})` : feed);
+    if (m.reference) add(m.reference, `Reference: ${name(m.reference)} (gold standard)`);
     if (m.composite) add('composite', `Composite: ${m.exchanges.length} exchanges, with deviation`);
     if (m.consolidated) add(m.consolidated, `Consolidated: ${m.consolidated}`);
     feeds.filter((f) => f.source !== m.reference && f.source !== m.consolidated)
-      .forEach((f) => add(f.source, `Exchange: ${f.source}${q[f.source] != null ? ` (quality ${q[f.source].toFixed(2)})` : ''}`));
+      .forEach((f) => add(f.source, `Exchange: ${name(f.source)}${q[f.source] != null ? `, quality ${q[f.source].toFixed(2)}` : ''}`));
     add(MERGED, 'All feeds, merged');
   } else {
     add(MERGED, feeds.length > 1 ? `All feeds (${feeds.map((f) => f.source).join(' > ')})` : `Feed: ${feeds[0]?.source || '-'}`);
