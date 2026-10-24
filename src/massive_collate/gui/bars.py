@@ -377,19 +377,26 @@ class BarEngine:
 
     def sources_for(self, ticker: str) -> list[str]:
         """Feeds holding a ticker, best first: a feed with ticks (finer data) for it ranks first,
-        then the configured priority. A feed of one exchange's share of a market (IEX's trades)
-        comes after every feed of the whole market, so a merged chart shows it only where none
-        of them has bars (the current session, until a sync downloads it)."""
+        then the asset class's reference exchange (Coinbase for crypto), then quality and the
+        configured priority. A merged chart takes each bar from the first feed that has it, so it
+        shows the reference where it has data and every other feed's history where it has none.
+        A feed of one exchange's share of a market (IEX's trades) comes after every feed of the
+        whole market, so a merged chart shows it only where none of them has bars (the current
+        session, until a sync downloads it)."""
+        from ..composite import REFERENCE
+
         with self._lock:
             stored = [(s, k) for s, t, k in self.store.stored_series() if t == ticker.upper()]
             have = {s for s, _ in stored}
-            have |= {w["source"] for w in self.store.watchlist(ticker=ticker)
-                     if w["asset"] == "future"}  # continuous futures are stored under their contracts
+            rows = self.store.watchlist(ticker=ticker)
+            have |= {w["source"] for w in rows if w["asset"] == "future"}  # continuous futures are stored under their contracts
+        reference = REFERENCE.get(next((w["asset"] for w in rows), "stock"))
         fine = {s for s, k in stored if k in ("trades", "second")}
         order = {s: i for i, s in enumerate(self.priority)}
         have -= set(MODEL_SOURCES)
         quality = self.quality or (lambda s: 1.0)
-        return sorted(have, key=lambda s: (s in PARTIAL_FEEDS, s not in fine, -quality(s), order.get(s, len(order)), s))
+        return sorted(have, key=lambda s: (s in PARTIAL_FEEDS, s not in fine, s != reference, -quality(s),
+                                           order.get(s, len(order)), s))
 
     def _fingerprint(self, source: str, ticker: str) -> tuple:
         item = self._watch_item(source, ticker)

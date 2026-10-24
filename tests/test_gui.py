@@ -406,3 +406,20 @@ def test_exchanges_without_a_mic_never_break_the_markets_endpoint(tmp_path):
     assert stocks["exchanges"] == [{"name": "New York Stock Exchange", "mic": "XNYS"}]
     json.dumps(out, allow_nan=False)
     assert finite({"a": [1.0, float("nan"), {"b": float("inf")}], "c": "x"}) == {"a": [1.0, None, {"b": None}], "c": "x"}
+
+
+def test_a_merged_crypto_chart_takes_the_reference_exchange_first_and_others_where_it_has_nothing(tmp_path):
+    from massive_collate.gui.bars import BarEngine
+    from massive_collate.storage import Store
+
+    with Store(tmp_path / "m.db") as store:
+        t0 = 1_760_000_000_000
+        store.upsert_bars("coinbase", "BTCUSD", "minute", 1, [{"t": t0 + 60_000, "o": 2, "h": 2, "l": 2, "c": 2, "v": 1}])
+        store.upsert_bars("bitstamp", "BTCUSD", "minute", 1, [{"t": t0 + i * 60_000, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}
+                                                              for i in range(2)])
+        for feed in ("coinbase", "bitstamp"):
+            store.watch(feed, ["BTCUSD"], "minute", asset="crypto")
+        eng = BarEngine(store)
+        assert eng.sources_for("BTCUSD") == ["coinbase", "bitstamp"]  # alphabetically bitstamp would lead
+        closes = [b["close"] for b in eng.bars("*", "BTCUSD", "minute", 1, "extended")["bars"]]
+        assert closes == [1.0, 2.0]  # Bitstamp's older minute, then Coinbase's where it has one

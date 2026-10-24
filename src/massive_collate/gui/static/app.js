@@ -1134,10 +1134,10 @@ function symbolInfo(ticker) {
   return state.symbols.find((s) => s.ticker === ticker) || { ticker, feeds: [] };
 }
 
-// An asset on several exchanges opens on its reference (gold-standard exchange) unless a feed or
-// model is asked for.
+// A symbol opens on every feed merged (each bar from the best feed that has it: the reference
+// exchange first, every other fetcher's history where it has none) unless a feed is asked for.
 async function selectSymbol(ticker, source = null) {
-  source = source ?? symbolInfo(ticker).models?.reference ?? MERGED;
+  source = source ?? MERGED;
   resetLod();
   const meta = await api('/api/meta', { source, ticker, adjust: state.adjust });
   $('ethBtn').hidden = meta.aroundTheClock;  // fx and futures trade around the clock
@@ -2047,6 +2047,8 @@ async function applyLayout(l) {
     const sym = d.symbol && state.symbols.some((s) => s.ticker === d.symbol.ticker) ? d.symbol
       : state.ticker ? { ticker: state.ticker, source: state.source }
       : state.symbols.length ? { ticker: state.symbols[0].ticker, source: MERGED } : null;
+    // A layout saved on a reference exchange only because that was once the default opens merged.
+    if (sym && sym.source === symbolInfo(sym.ticker).models?.reference) sym.source = MERGED;
     if (sym) await selectSymbol(sym.ticker, sym.source);
   } finally {
     state.applyingLayout = false;
