@@ -5,6 +5,8 @@
   'use strict';
 
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  // A link from a feed (a headline's URL) only if it is a web address: never javascript: or data:.
+  const safeUrl = (u) => (/^https?:\/\//i.test(String(u ?? '').trim()) ? String(u).trim() : '');
 
   // Stable colour per ticker for lettered badges.
   const BADGE = ['#2962ff', '#00897b', '#7b1fa2', '#ef6c00', '#c2185b', '#455a64', '#5d4037', '#1565c0', '#2e7d32', '#ad1457'];
@@ -86,5 +88,5 @@
     img.replaceWith(document.createTextNode(box.dataset.letter || '?'));
   }, true);
 
-  window.MassiveIcons = { symbolIcon, dataIcon, icon, DATA_LABEL, esc };
+  window.MassiveIcons = { symbolIcon, dataIcon, icon, DATA_LABEL, esc, safeUrl };
 })();

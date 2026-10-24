@@ -23,6 +23,7 @@
   const list = document.getElementById('marketsList');
   const info = document.getElementById('globeInfo');
   const esc = window.MassiveIcons.esc;
+  const safeUrl = window.MassiveIcons.safeUrl;
   const rad = Math.PI / 180;
 
   let markets = null, fetchedAt = 0;
@@ -101,13 +102,27 @@
     return `GMT${min > 0 ? '+' : '−'}${h}${m ? `:${String(m).padStart(2, '0')}` : ''}`;
   }
 
+  // A loader the render loop may call every frame: one request at a time, and after a failure
+  // none again for RETRY_MS. `fn` resolves true when it loaded.
+  const RETRY_MS = 60_000;
+  function loader(fn) {
+    let busy = false, next = 0;
+    return () => {
+      if (busy || Date.now() < next) return;
+      busy = true;
+      fn().then((ok) => { if (!ok) next = Date.now() + RETRY_MS; }, () => { next = Date.now() + RETRY_MS; })
+        .finally(() => { busy = false; });
+    };
+  }
+
   let topo50 = null;
-  async function loadTopo50() {
+  const loadTopo50 = loader(async () => {
     try {
       const res = await fetch('vendor/world/countries-50m.json');
       if (res.ok) { topo50 = decodeTopo(await res.json()); if (glr) glr.setLines('o50', topo50); }
-    } catch { /* keep the 110m outlines */ }
-  }
+      return res.ok;
+    } catch { return false; }  // keep the 110m outlines
+  });
 
   // Finest coastlines and borders: GSHHG high resolution (~200 m) in 10-degree tiles
   // (tools/build_coastlines.py), loaded for the region on screen past HIRES_ZOOM and kept on the
@@ -115,12 +130,15 @@
   const HIRES_ZOOM = 12, MAX_TILES = 120;
   let hires = null;  // { tile, margin, names: Set }
   const tiles = new Map();  // name -> 'loading' | 'ready' (insertion order = use order)
-  async function loadHiresIndex() {
+  const tileFailed = new Map();  // name -> when it failed: not asked for again before RETRY_MS
+  let tilesLoading = 0;  // on their way, from every frame (at most 4)
+  const loadHiresIndex = loader(async () => {
     try {
       const res = await fetch('vendor/world/coast-h/index.json');
       if (res.ok) { const d = await res.json(); hires = { tile: d.tile, margin: d.margin, names: new Set(Object.keys(d.tiles)) }; }
-    } catch { /* stay at 1:10m */ }
-  }
+      return res.ok;
+    } catch { return false; }  // stay at 1:10m
+  });
 
   function decodeTile(buf, name) {
     const [lat0, lon0] = name.split('_').map(Number);
@@ -165,15 +183,16 @@
     if (!glr || zoom <= HIRES_ZOOM) return null;
     if (!hires) { loadHiresIndex(); return null; }
     const want = visibleTiles(g);
-    let loading = 0;
+    const failed = (name) => { tiles.delete(name); tileFailed.set(name, Date.now()); };
     for (const name of want) {
       const state = tiles.get(name);
       if (state) { tiles.delete(name); tiles.set(name, state); continue; }  // mark as recently used
-      if (loading >= 4) continue;
+      if (tilesLoading >= 4 || Date.now() - (tileFailed.get(name) ?? -Infinity) < RETRY_MS) continue;
       tiles.set(name, 'loading');
-      loading++;
+      tilesLoading++;
       fetch(`vendor/world/coast-h/${name}.bin`).then((r) => (r.ok ? r.arrayBuffer() : null)).then((buf) => {
-        if (!buf) { tiles.delete(name); return; }
+        if (!buf) { failed(name); return; }
+        tileFailed.delete(name);
         glr.setLines(`hires:${name}`, decodeTile(buf, name));
         tiles.set(name, 'ready');
         while (tiles.size > MAX_TILES) {  // evict the least recently used
@@ -181,7 +200,7 @@
           tiles.delete(old);
           glr.deleteLines(`hires:${old}`);
         }
-      }).catch(() => tiles.delete(name));
+      }).catch(() => failed(name)).finally(() => { tilesLoading--; });
     }
     const ready = want.filter((n) => tiles.get(n) === 'ready');
     // until every visible tile is in, draw the 1:10m outlines underneath as well
@@ -968,7 +987,7 @@
     const ex = markets?.world.find((m) => m.code === it.exchange);
     const text = esc(it.text) + (it.tickers?.length ? ` <span class="p-muted">${esc(it.tickers.join(' '))}</span>` : '');
     ticker.innerHTML = `<span class="src" title="Source">${esc(it.source)}</span>`
-      + (it.url ? `<a class="txt" href="${esc(it.url)}" target="_blank" rel="noopener noreferrer">${text}</a>` : `<span class="txt">${text}</span>`)
+      + (safeUrl(it.url) ? `<a class="txt" href="${esc(safeUrl(it.url))}" target="_blank" rel="noopener noreferrer">${text}</a>` : `<span class="txt">${text}</span>`)
       + `<span class="when">${ex ? esc(ex.city) + ' · ' : ''}${it.kind === 'news' ? ago(it.time) : 'now'}</span>`
       + `<span class="count">${(news.i % news.items.length) + 1}/${news.items.length}</span>`;
     ticker.classList.toggle('slide', slide);

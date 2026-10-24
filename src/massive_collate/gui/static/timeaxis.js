@@ -67,8 +67,9 @@
     redrawQueued = true;
     requestAnimationFrame(() => {
       redrawQueued = false;
-      // Rebuild the axis ticks and overlays with the new times (cheap: no data change).
-      chart.setOffsetRightDistance(store.getOffsetRightDistance ? store.getOffsetRightDistance() : chart.getOffsetRightDistance());
+      // Rebuild the axis ticks and overlays with the new times (cheap: no data change). Only a
+      // layout: setting the right offset again would scroll back to the newest bar (the library
+      // reads a chart scrolled into history as offset 0).
       chart.resize();
     });
   }
@@ -131,7 +132,9 @@
   chart.subscribeAction('onVisibleRangeChange', prefetch);
 
   // -- sessions -----------------------------------------------------------------------
-  const sess = { key: null, from: 0, to: 0, list: [], pending: null };
+  const sess = { key: null, from: 0, to: 0, list: [], pending: null, failed: null };
+  const CALENDAR_DAYS = 3600;  // the most the server answers in one request (3700) less a margin
+  const CALENDAR_RETRY_MS = 30_000;  // a window that failed is not asked for again before this
 
   function loadSessions() {
     if (!state.ticker || ['day', 'week', 'month'].includes(state.period.type)) return;
@@ -142,14 +145,22 @@
     const b = store.dataIndexToTimestamp(Math.max(from + 1, to));
     if (!Number.isFinite(a) || !Number.isFinite(b)) return;
     const key = `${state.source}|${state.ticker}`;
-    if (sess.key === key && a >= sess.from && b <= sess.to) return;
+    // The visible range with a screen's width either side, at most CALENDAR_DAYS: on a wider
+    // range, the newest part of it.
+    const span = Math.max(b - a, 864e5), most = CALENDAR_DAYS * 864e5;
+    let qFrom = a - span, qTo = b + span;
+    if (qTo - qFrom > most) { qTo = Math.min(qTo, Math.max(b, a + most)); qFrom = qTo - most; }
+    if (sess.key === key && Math.max(a, qFrom) >= sess.from && Math.min(b, qTo) <= sess.to) return;
     if (sess.pending) return;
-    const span = Math.max(b - a, 864e5);
-    const qFrom = a - span, qTo = Math.min(b + span, a + 3650 * 864e5);
+    const want = `${key}|${Math.round(qFrom / 864e5)}|${Math.round(qTo / 864e5)}`;
+    if (sess.failed?.want === want && Date.now() - sess.failed.at < CALENDAR_RETRY_MS) return;
     sess.pending = api('/api/calendar', { source: state.source, ticker: state.ticker, from: Math.round(qFrom), to: Math.round(qTo) })
-      .then((res) => { sess.key = key; sess.from = qFrom; sess.to = qTo; sess.list = res.sessions; sess.asset = res.asset; })
-      .catch(() => {})
-      .finally(() => { sess.pending = null; redraw(); });
+      .then((res) => {
+        sess.key = key; sess.from = qFrom; sess.to = qTo; sess.list = res.sessions; sess.asset = res.asset; sess.failed = null;
+        redraw();
+      })
+      .catch(() => { sess.failed = { want, at: Date.now() }; })  // no redraw: it would only ask again
+      .finally(() => { sess.pending = null; });
   }
   state.sessions = sess;
 

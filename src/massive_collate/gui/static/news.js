@@ -6,6 +6,7 @@
 (() => {
   const box = document.getElementById('viewNews');
   const esc = window.MassiveIcons.esc;
+  const safeUrl = window.MassiveIcons.safeUrl;
   let items = [], fetchedAt = 0, filter = 'all', query = '';
 
   async function load(force = false) {
@@ -43,7 +44,7 @@
         <div class="news-row ${esc(it.kind)}">
           <span class="src">${esc(it.source)}</span>
           <div class="news-main">
-            ${it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener noreferrer">${esc(it.text)}</a>` : `<span>${esc(it.text)}</span>`}
+            ${safeUrl(it.url) ? `<a href="${esc(safeUrl(it.url))}" target="_blank" rel="noopener noreferrer">${esc(it.text)}</a>` : `<span>${esc(it.text)}</span>`}
             <div class="p-muted small">${it.kind === 'news' ? `${fmt(it.time)} ET · ${ago(it.time)}` : 'now'}
               · <a href="#" data-exchange="${esc(it.exchange)}" title="Show on the globe">${esc(it.exchange)}</a>
               ${(it.tickers || []).map((t) => watched.has(t)

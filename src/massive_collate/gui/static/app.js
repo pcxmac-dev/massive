@@ -52,9 +52,10 @@ const API_PAUSE_MS = [2_000, 300_000];
 
 function apiFailed(path, message) {
   const f = apiFailing.get(path) || { count: 0 };
+  f.message = message;
+  if (f.until && Date.now() < f.until) return;  // requests sent before the pause began: the same outage
   f.count += 1;
   f.until = Date.now() + Math.min(API_PAUSE_MS[1], API_PAUSE_MS[0] * 2 ** (f.count - 1));
-  f.message = message;
   apiFailing.set(path, f);
 }
 
@@ -112,9 +113,16 @@ function change(from, to, precision) {
   return `${signed(to - from, precision)} (${signed(pct, 2)}%)`;
 }
 
+// The zone a period's labels are read in: New York, except crypto and forex days, weeks and
+// months, which are UTC days (stamped 00:00 UTC, the previous evening in New York).
+function labelZone(period) {
+  const daily = ['day', 'week', 'month'].includes(period?.type);
+  return daily && ['crypto', 'fx'].includes(state.meta?.asset) ? 'UTC' : TZ;
+}
+
 function fmtTime(ts) {
   const p = chart.getPeriod() || { type: 'minute' };
-  const opts = { timeZone: TZ, month: 'short', day: '2-digit', hourCycle: 'h23' };
+  const opts = { timeZone: labelZone(p), month: 'short', day: '2-digit', hourCycle: 'h23' };
   if (p.type === 'second' || p.type === 'minute' || p.type === 'hour') Object.assign(opts, { hour: '2-digit', minute: '2-digit' });
   if (p.type === 'second') opts.second = '2-digit';
   if (p.type === 'month' || p.type === 'week') opts.year = 'numeric';
@@ -127,7 +135,9 @@ function compact(v) {
 
 function statsKey(pa, pb) {
   const p = chart.getPeriod() || {};
-  return `${p.type}:${p.span}|${state.session}|${JSON.stringify(modelQuery())}|${pa.timestamp}|${pb.timestamp}`;
+  const sym = chart.getSymbol() || {};
+  return `${sym.source}:${sym.ticker}|${state.adjust}|${p.type}:${p.span}|${state.session}|${JSON.stringify(modelQuery())}`
+    + `|${pa.timestamp}|${pb.timestamp}`;
 }
 
 function requestRangeStats(overlay, key, pa, pb) {
@@ -262,6 +272,8 @@ chart.setDataLoader({
     try {
       const res = await api('/api/bars', params);
       if (token !== state.loadToken) return; // a newer symbol/interval was chosen meanwhile
+      const zone = labelZone(period);  // the time axis and crosshair read the bars' own days
+      if (chart.getTimezone() !== zone) chart.setTimezone(zone);
       callback(res.bars, { forward: res.more, backward: false });
       showError(null);
       if (type === 'init') {
@@ -276,16 +288,18 @@ chart.setDataLoader({
         requestAnimationFrame(drawModelGuides);
         renderTypeParams();
         requestAnimationFrame(drawRolls);
+        const keep = state.lodSwitch && !state.lodSwitch.atLatest;  // the same window, back in time
         if (state.lodSwitch) finishLodSwitch();
         else requestAnimationFrame(checkLod);  // new symbol/interval/type at a far zoom: pick the right detail
         // After the first render: overlays created in the same tick as the data skew the price scale.
         requestAnimationFrame(() => requestAnimationFrame(restoreDrawings));
-        requestAnimationFrame(applyNowPosition);
+        if (!keep) requestAnimationFrame(applyNowPosition);
         updateStatus(res.bars.length);
       }
     } catch (err) {
       showError(err);
       callback([], { forward: false, backward: false });
+      if (type === 'init') retryLoad(token);
     }
   },
   subscribeBar: ({ symbol, period, callback }) => {
@@ -354,7 +368,29 @@ chart.setDataLoader({
   unsubscribeBar: () => { clearInterval(state.poll); closeStream(); },
 });
 
-window.addEventListener('resize', () => { chart.resize(); applyNowPosition(); placeHighlightMask(); });
+// A chart whose first page failed because the app was busy, restarting or out of reach (not a
+// refusal) loads again when the pause on /api/bars is over, instead of staying empty until
+// something else is picked.
+function retryLoad(token) {
+  const f = apiFailing.get('/api/bars');
+  if (!f) return;  // refused (an unknown symbol ...): asking again would get the same answer
+  setTimeout(() => {
+    if (token === state.loadToken && !chart.getDataList().length) chart.resetData();
+  }, Math.max(1_000, f.until - Date.now() + 50));
+}
+
+// Whether the newest bar is on screen (the chart then follows it): only then may a resize put it
+// back where the "now" handle was left; a chart scrolled into history stays where it is.
+function atNewest() {
+  const n = chart.getDataList().length;
+  return !n || chart.getVisibleRange().to >= n;
+}
+
+window.addEventListener('resize', () => {
+  chart.resize();
+  if (atNewest()) applyNowPosition(); else placeNowHandle();
+  placeHighlightMask();
+});
 
 function closeStream() {
   state.stream?.close();
@@ -382,7 +418,9 @@ function plotWidth() {
 function applyNowPosition() {
   const w = plotWidth();
   if (!w) return;
-  chart.setOffsetRightDistance(state.nowAt == null ? DEFAULT_RIGHT_OFFSET : Math.max(8, w * (1 - state.nowAt)));
+  const at = isLive() ? state.nowAt : null;  // not moving: no room kept for time that is not coming
+  state.nowApplied = isLive();
+  chart.setOffsetRightDistance(at == null ? DEFAULT_RIGHT_OFFSET : Math.max(8, w * (1 - at)));
   placeNowHandle();
 }
 
@@ -442,7 +480,10 @@ nowHandle.addEventListener('dblclick', () => {
   chart.scrollToRealTime(200);
 });
 chart.subscribeAction('onVisibleRangeChange', () => requestAnimationFrame(() => { placeNowHandle(); placeHighlightMask(); }));
-window.addEventListener('massive:activity', () => requestAnimationFrame(placeNowHandle));  // live or not, again
+window.addEventListener('massive:activity', () => requestAnimationFrame(() => {  // live or not, again
+  if (state.nowAt != null && state.nowApplied !== isLive() && atNewest()) applyNowPosition();
+  else placeNowHandle();
+}));
 
 // -- level of detail -------------------------------------------------------------------
 // Zoomed out past half a pixel per bar, the chart is fed exact aggregates of k consecutive
@@ -629,6 +670,8 @@ async function reloadWithModelPrecision() {
       const p = chart.getPeriod();
       const res = await api('/api/bars', { source: sym.source, ticker: sym.ticker, period: p.type, span: p.span,
                                            session: state.session, limit: 1, adjust: state.adjust, ...modelQuery() });
+      const now = chart.getSymbol();
+      if (now?.ticker !== sym.ticker || now?.source !== sym.source) return;  // another symbol meanwhile: its own load
       want = res.model?.precision ?? want;
       state.modelUnit = res.model?.unit ?? null;
       state.modelHidden = res.model?.hidden ?? 0;
@@ -860,7 +903,7 @@ kc.registerIndicator({
   draw: ({ ctx, chart: c, xAxis, yAxis }) => {
     const data = c.getDataList();
     const { from, to } = c.getVisibleRange();
-    if (!data.length || to <= from || state.model.kind !== 'price') return true;
+    if (!data.length || to <= from || state.model.kind !== 'price') { renderDerivedChip(0, 0); return true; }
     let some = 0, interp = 0;
     for (let i = from; i < to; i++) {
       if (data[i]?.interp) interp++;
@@ -907,6 +950,9 @@ function renderDerivedChip(some, total, interp = 0) {
     $('periods').append(chip);
   }
   const label = periodLabel(state.period);
+  const shown = `${some}|${total}|${interp}|${label}|${state.derivedFrom}`;  // drawn every frame: write on change
+  if (chip.dataset.shown === shown) return;
+  chip.dataset.shown = shown;
   chip.hidden = !some;
   chip.textContent = interp ? 'interpolated*' : some === total ? 'derived*' : '◦ derived*';
   if (interp) {
@@ -1139,8 +1185,10 @@ function symbolInfo(ticker) {
 // exchange first, every other fetcher's history where it has none) unless a feed is asked for.
 async function selectSymbol(ticker, source = null) {
   source = source ?? MERGED;
-  resetLod();
+  const pick = state.selectToken = (state.selectToken || 0) + 1;
   const meta = await api('/api/meta', { source, ticker, adjust: state.adjust });
+  if (pick !== state.selectToken) return;  // another symbol was picked while this one was asked for
+  resetLod();
   $('ethBtn').hidden = meta.aroundTheClock;  // fx and futures trade around the clock
   $('adjustSelect').hidden = meta.asset !== 'future';
   saveDrawings();
@@ -2344,9 +2392,14 @@ function kv(rows) {
 
 async function loadInfo() {
   if (!state.ticker) return;
+  const ask = { source: state.source, ticker: state.ticker, adjust: state.adjust };
+  const current = () => state.source === ask.source && state.ticker === ask.ticker && state.adjust === ask.adjust;
   try {
-    state.info = await api('/api/info', { source: state.source, ticker: state.ticker, adjust: state.adjust });
+    const info = await api('/api/info', ask);
+    if (!current()) return;  // the symbol changed meanwhile: its own load fills the panel
+    state.info = info;
   } catch (err) {
+    if (!current()) return;
     state.info = null;
     showError(err);
   }

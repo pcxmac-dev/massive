@@ -33,7 +33,10 @@ def finite(data):
     if isinstance(data, (list, tuple)):
         return [finite(v) for v in data]
     return data
+
+
 MAX_LIMIT = 20000
+CALENDAR_MAX_DAYS = 3700  # the widest /api/calendar range (timeaxis.js asks for at most CALENDAR_DAYS)
 MAX_BODY = 5 * 1024 * 1024
 WRITE_HEADER = "X-Massive-Charts"
 
@@ -345,7 +348,7 @@ class ChartApp:
         product = item["source_ticker"] if item and item["asset"] == "future" else None
         start = datetime.fromtimestamp(int(q["from"]) / 1000, timezone.utc)
         end = datetime.fromtimestamp(int(q["to"]) / 1000, timezone.utc)
-        if end - start > timedelta(days=3700):
+        if end - start > timedelta(days=CALENDAR_MAX_DAYS):
             raise ValueError("calendar range is limited to 10 years")
         return {"asset": asset, "sessions": symbol_sessions(self.engine.calendar(), asset, product, start, end)}
 

@@ -15,6 +15,7 @@
   const STATE_ORDER = { fetching: 0, new: 1, backfilling: 2, queued: 3, current: 4, retired: 5, closed: 6, blocked: 7 };
   const el = (id) => document.getElementById(id);
   const esc = window.MassiveIcons.esc;
+  const safeUrl = window.MassiveIcons.safeUrl;
   const num = (n) => (n == null ? '–' : Number(n).toLocaleString());
 
   let data = null;
@@ -124,26 +125,35 @@
     return { ticker, phase: s.state, progress: s.progress, since: Date.now() };  // backfilling / queued / ...
   }
 
-  async function askFirst(ticker) {
+  const ASK_EVERY_MS = 10_000;
+  const asked = { ticker: null, at: 0, busy: null };  // the last priority request, and the one on its way
+  async function askFirst(ticker, again = false) {
+    if (asked.busy === ticker || again && asked.ticker === ticker && Date.now() - asked.at < ASK_EVERY_MS) return;
+    Object.assign(asked, { ticker, at: Date.now(), busy: ticker });
+    let next = null;
     try {
       const res = await fetch(`/api/priority?ticker=${encodeURIComponent(ticker)}`, { method: 'POST', headers: { 'X-Massive-Charts': '1' } });
       const body = await res.json().catch(() => ({}));
-      if (res.status === 404) { job = null; return; }  // not on the watchlist: nothing to fetch
-      if (!res.ok) throw new Error(body.error || res.statusText);
-      const feeds = body.feeds || [];
-      if (body.state === 'started') {
-        job = { ticker, phase: 'downloading', feeds, since: Date.now() };
-        setTimeout(poll, 400);
-      } else if (body.state === 'queued') job = { ticker, phase: 'waiting', feeds, since: Date.now() };
-      else job = standing(ticker);  // a run for it went in the last few minutes
+      if (res.status !== 404) {  // 404: not on the watchlist, nothing to fetch
+        if (!res.ok) throw new Error(body.error || res.statusText);
+        const feeds = body.feeds || [];
+        if (body.state === 'started') {
+          next = { ticker, phase: 'downloading', feeds, since: Date.now() };
+          setTimeout(poll, 400);
+        } else if (body.state === 'queued') next = { ticker, phase: 'waiting', feeds, since: Date.now() };
+        else next = standing(ticker);  // a run for it went in the last few minutes
+      }
     } catch (e) {
-      job = { ticker, phase: 'error', message: String(e.message || e), since: Date.now() };
+      next = { ticker, phase: 'error', message: String(e.message || e), since: Date.now() };
+    } finally {
+      if (asked.busy === ticker) asked.busy = null;
     }
+    if (!job || job.ticker === ticker) job = next;  // a symbol opened meanwhile keeps its own
   }
 
   function advanceJob() {
     if (!job || !data) return;
-    if (job.phase === 'waiting' && !data.running) askFirst(job.ticker).then(renderStatusBar);  // the run ended: its turn
+    if (job.phase === 'waiting' && !data.running) askFirst(job.ticker, true).then(renderStatusBar);  // the run ended: its turn
   }
 
   function finishJob() {
@@ -160,7 +170,7 @@
 
   function renderStatusBar() {
     const text = el('netText'), bar = el('netBar');
-    let msg = '', progress = null, busy = false, cls = '';
+    let msg = '', progress = null, busy = false, cls = '', title = '';
     const running = data?.running;
     if (job && job.ticker === state.ticker) {
       const t = esc(job.ticker);
@@ -180,7 +190,7 @@
       else if (job.phase === 'backfilling') { msg = `${t}: backfill ${Math.round((job.progress || 0) * 100)}%`; progress = job.progress || 0; }
       else if (job.phase === 'queued') { msg = `${t}: queued`; }
       else if (job.phase === 'fetching') { msg = `${t}: fetching`; busy = true; }
-      else if (job.phase === 'error') { msg = `${t}: fetch failed`; cls = 'bad'; text.title = job.message; }
+      else if (job.phase === 'error') { msg = `${t}: fetch failed`; cls = 'bad'; title = job.message; }
     } else if (running) {
       msg = `Fetcher${data.live.current ? `: ${esc(data.live.current)}` : ''} · ${num(data.live.requests)} req`;
       busy = true;
@@ -197,15 +207,16 @@
     if (data && data.canFetch === false && !busy) {
       msg = 'Unable to fetch data currently';
       cls = 'bad';
-      text.title = (data.health || []).filter((h) => h.state !== 'off').map((h) => `${h.source}: ${h.state} — ${h.why}`).join('\n')
+      title = (data.health || []).filter((h) => h.state !== 'off').map((h) => `${h.source}: ${h.state} — ${h.why}`).join('\n')
         || 'No source is set up here';
     } else if (!data && pollFailed) {
       msg = 'Unable to reach the chart app';
       cls = 'bad';
-    } else text.title = '';
+    }
+    text.title = title;
     // Frames built from finer bars (derive.py): what, from what, for which series, how far along.
     const d = data?.derive;
-    if (d && (!msg || !busy)) {
+    if (d && cls !== 'bad' && (!msg || !busy)) {
       msg = `Building ${esc(d.to.join(', '))} from ${esc(d.from)} bars <span class="net-derived">*derived</span> · `
         + `${esc(d.source)}:${esc(d.ticker)} (${num(d.n)} of ${num(d.of)})`;
       progress = d.of ? d.n / d.of : null;
@@ -524,7 +535,7 @@
     return liveNews.items.slice(0, 15).map((it) => `
       <div class="news-row ${esc(it.kind)}">
         <span class="src">${esc(it.source)}</span>
-        <div class="news-main">${it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener noreferrer">${esc(it.text)}</a>` : `<span>${esc(it.text)}</span>`}
+        <div class="news-main">${safeUrl(it.url) ? `<a href="${esc(safeUrl(it.url))}" target="_blank" rel="noopener noreferrer">${esc(it.text)}</a>` : `<span>${esc(it.text)}</span>`}
           <div class="p-muted small">${it.kind === 'news' ? ago(it.time) : 'now'} · ${esc(it.exchange)}${(it.tickers || []).length ? ` · ${esc(it.tickers.join(' '))}` : ''}</div></div>
       </div>`).join('');
   }

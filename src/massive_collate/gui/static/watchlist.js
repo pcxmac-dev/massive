@@ -79,6 +79,7 @@
     </tr>`;
   }
 
+  let shownHead = null;  // the panel's head (list, sort, filter) as last drawn
   function render() {
     if (!shown()) return;
     const box = $('pWatch');
@@ -87,7 +88,7 @@
     const q = query.trim().toUpperCase();
     const match = (s) => !q || s.ticker.includes(q) || (s.name || '').toUpperCase().includes(q) || (s.exchange || '').includes(q);
     const mine = lists.find((l) => l.name === current);
-    const head = (key, label, cls = '') => `<th class="${cls}" data-sort="${key}">${label}${sort.key === key ? (sort.dir > 0 ? ' ▲' : ' ▼') : ''}</th>`;
+    const th = (key, label, cls = '') => `<th class="${cls}" data-sort="${key}">${label}${sort.key === key ? (sort.dir > 0 ? ' ▲' : ' ▼') : ''}</th>`;
     const options = [`<option value="${COLLECTED}">Collected (${symbols.length})</option>`,
       ...lists.map((l) => `<option value="${esc(l.name)}">${esc(l.name)} (${l.tickers.length})</option>`),
       '<option value="__new__">New list…</option>'].join('');
@@ -111,15 +112,21 @@
       body = entries.length ? `<tbody>${entries.map((e) => row(e, true)).join('')}</tbody>`
         : `<tbody><tr><td colspan="4" class="p-muted w-empty">${mine.tickers.length ? 'Nothing matches.' : 'Empty: open a symbol and press + to add it.'}</td></tr></tbody>`;
     }
-    box.innerHTML = `
-      <h3 class="w-head">Watchlist
+    const head = `<h3 class="w-head">Watchlist
         <select id="watchList" aria-label="Watchlist">${options}</select>
         ${mine ? `<button type="button" id="watchAdd" title="Add ${esc(state.ticker || 'the open symbol')} to this list"${state.ticker && !mine.tickers.includes(state.ticker) ? '' : ' disabled'}>+</button>
           <button type="button" id="watchDelete" title="Delete this list">🗑</button>` : ''}</h3>
       <input id="watchFilter" type="search" placeholder="Filter symbols" value="${esc(query)}" autocomplete="off">
       <div class="table-wrap w-wrap"><table class="w-table">
-        <thead><tr>${head('symbol', 'Symbol')}${head('last', 'Last', 'num')}${head('pct', 'Chg%', 'num')}<th></th></tr></thead>
-        ${body}</table></div>`;
+        <thead><tr>${th('symbol', 'Symbol')}${th('last', 'Last', 'num')}${th('pct', 'Chg%', 'num')}<th></th></tr></thead>`;
+    const table = box.querySelector('.w-table');
+    if (table && shownHead === head) {  // the same list, sort and filter: new rows only
+      table.querySelectorAll('tbody').forEach((t) => t.remove());
+      table.insertAdjacentHTML('beforeend', body);
+      return;
+    }
+    shownHead = head;
+    box.innerHTML = `${head}${body}</table></div>`;
     $('watchList').value = mine ? mine.name : COLLECTED;
   }
 

@@ -13,7 +13,8 @@
   const still = window.matchMedia?.('(prefers-reduced-motion: reduce)');
   let outlines = null;  // every arc of the topology (coastlines and borders): [[lon, lat], ...]
   let failed = false;
-  const cache = new Map();  // `${lon}:${declination}:${dpr}` -> canvas
+  const cache = new Map();  // `${lon}:${declination}:${dpr}:${selected}` -> canvas (insertion order = age)
+  const CACHE_MAX = 32;
 
   // TopoJSON (world-atlas) arcs in degrees, as the Markets view draws them.
   function arcs(topo) {
@@ -115,6 +116,7 @@
     g.beginPath(); g.arc(cx, cy, r, 0, 2 * Math.PI);
     g.strokeStyle = `${line}0.55)`; g.lineWidth = 0.9 * dpr; g.stroke();
     cache.set(key, c);
+    while (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);  // the oldest
     return c;
   }
 
