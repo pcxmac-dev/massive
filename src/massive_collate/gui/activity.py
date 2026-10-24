@@ -138,6 +138,9 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
                             10_000 if source == "alpaca" else None)
         if item.get("closed_at"):
             row.update(state="closed", requestsLeft=0, progress=1.0, note="archive complete: not asked again")
+        elif item.get("retired_on"):
+            row.update(state="retired" if row["state"] in ("new", "current") else row["state"],
+                       note=f"no longer listed since {item['retired_on']}: history only, no new data expected")
         elif me is not None and item["asset"] != "future" and item["resolution"] != "trades":
             if item["asset"] not in me.assets:
                 row.update(state="blocked", requestsLeft=0,

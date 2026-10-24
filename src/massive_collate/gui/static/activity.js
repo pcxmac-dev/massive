@@ -11,7 +11,7 @@
   const { dataIcon, symbolIcon, DATA_LABEL } = window.MassiveIcons;
   const POLL_FAST_MS = 1500;   // while a run is going or the Fetcher / Live view is open
   const POLL_SLOW_MS = 10000;
-  const STATE_ORDER = { fetching: 0, new: 1, backfilling: 2, queued: 3, current: 4, closed: 5, blocked: 6 };
+  const STATE_ORDER = { fetching: 0, new: 1, backfilling: 2, queued: 3, current: 4, retired: 5, closed: 6, blocked: 7 };
   const UPDATE_REQUESTS = 4;  // a one-symbol update: newest-bar check, new bars, daily bars, listing
   const el = (id) => document.getElementById(id);
   const esc = window.MassiveIcons.esc;
@@ -218,7 +218,7 @@
 
     const counts = { all: data.symbols.length };
     for (const s of data.symbols) counts[s.state] = (counts[s.state] || 0) + 1;
-    el('actFilters').innerHTML = ['all', 'fetching', 'new', 'backfilling', 'queued', 'current', 'closed', 'blocked']
+    el('actFilters').innerHTML = ['all', 'fetching', 'new', 'backfilling', 'queued', 'current', 'retired', 'closed', 'blocked']
       .filter((k) => k === 'all' || counts[k])
       .map((k) => `<button data-filter="${k}" class="${k === filter ? 'active' : ''}">${k === 'all' ? 'All' : DATA_LABEL[k]} <span class="chip">${counts[k] || 0}</span></button>`)
       .join('');

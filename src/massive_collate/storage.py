@@ -266,6 +266,18 @@ CREATE TABLE IF NOT EXISTS directory (
     PRIMARY KEY (source, ticker)
 );
 
+-- Changes to the listings, as each refresh finds them: listed (new), retired (gone from the active
+-- listings), relisted (back again), reassigned (the symbol now names another instrument: new FIGI).
+CREATE TABLE IF NOT EXISTS listing_events (
+    source   TEXT NOT NULL,
+    ticker   TEXT NOT NULL,
+    kind     TEXT NOT NULL,                     -- stock | future
+    day      TEXT NOT NULL,
+    event    TEXT NOT NULL,                     -- listed | retired | relisted | reassigned
+    detail   TEXT,                              -- name, venue, old and new FIGI
+    PRIMARY KEY (source, ticker, day, event)
+);
+
 -- The whole market's latest daily bar (close, volume, VWAP) per ticker, from the market-wide
 -- daily file: ranks the directory and fills placeholder tiles. Only the newest days are kept.
 CREATE TABLE IF NOT EXISTS market_snapshot (
@@ -389,6 +401,11 @@ MIGRATIONS = [
     ("futures_contracts", "checked", "TEXT"),
     # When a symbol last finished syncing completely (for the per-symbol refresh interval).
     ("watchlist", "synced_at", "TEXT"),
+    # Directory listings: first seen, and the day a listing left the active list (kept, not deleted).
+    ("directory", "first_seen", "TEXT"),
+    ("directory", "retired_on", "TEXT"),
+    # A watched symbol no longer listed: its history is still filled, no new data is expected.
+    ("watchlist", "retired_on", "TEXT"),
 ]
 
 BAR_COLUMNS = ["open", "high", "low", "close", "volume", "vwap", "transactions"]
@@ -922,7 +939,7 @@ class Store:
             self.conn.execute(
                 "UPDATE watchlist SET listed_from=?, figi=?, checked_at=?, name=COALESCE(?, name), "
                 "kind=COALESCE(?, kind), exchange=COALESCE(exchange, ?) WHERE source=? AND ticker=?",
-                (listed_from.isoformat() if listed_from else None, figi, checked.isoformat(), name, kind,
+                (listed_from.isoformat() if listed_from else None, figi, checked.isoformat() if checked else None, name, kind,
                  exchange, source, ticker.upper()),
             )
 
@@ -951,7 +968,7 @@ class Store:
     def watchlist(self, source: str | None = None) -> list[dict]:
         sql = (
             "SELECT source, ticker, resolution, backfilled_to, exchange, listed_from, figi, checked_at, "
-            "name, kind, asset, source_ticker, invert, rank, synced_at, closed_at FROM watchlist"
+            "name, kind, asset, source_ticker, invert, rank, synced_at, closed_at, retired_on FROM watchlist"
         )
         params: list = []
         if source:
@@ -966,8 +983,8 @@ class Store:
              "listed_from": d(lf), "figi": f, "checked_at": d(c), "name": n, "kind": k,
              "asset": a or "stock", "source_ticker": st or t, "invert": bool(inv), "rank": rk or 1,
              "synced_at": datetime.fromisoformat(sy) if sy else None,
-             "closed_at": datetime.fromisoformat(cl) if cl else None}
-            for s, t, r, b, e, lf, f, c, n, k, a, st, inv, rk, sy, cl
+             "closed_at": datetime.fromisoformat(cl) if cl else None, "retired_on": d(ret)}
+            for s, t, r, b, e, lf, f, c, n, k, a, st, inv, rk, sy, cl, ret
             in self.conn.execute(sql + " ORDER BY source, ticker", params)
         ]
 
@@ -1014,6 +1031,12 @@ class Store:
             args.append(ticker.upper())
         with self.conn:
             return self.conn.execute(sql, args).rowcount
+
+    def set_retired(self, ticker: str, day: date | None) -> int:
+        """Mark a watched symbol retired (no longer listed) on every feed, or clear the mark (None)."""
+        with self.conn:
+            return self.conn.execute("UPDATE watchlist SET retired_on=? WHERE ticker=? AND asset IN ('stock', 'future')",
+                                     (day.isoformat() if day else None, ticker.upper())).rowcount
 
     def reset_backfill(self, source: str, ticker: str) -> None:
         self.set_backfilled(source, ticker, None)
@@ -1608,19 +1631,69 @@ class Store:
 
     # -- directory ------------------------------------------------------------
 
-    def save_directory(self, source: str, rows: Iterable[dict], seen: date) -> int:
-        data = [(source, r["ticker"].upper(), r.get("kind", "stock"), r.get("name"), r.get("exchange"),
-                 r.get("type"), r.get("figi"), seen.isoformat()) for r in rows if r.get("ticker")]
-        with self.conn:
-            self.conn.executemany("INSERT OR REPLACE INTO directory VALUES (?, ?, ?, ?, ?, ?, ?, ?)", data)
-        self._wrote()
-        return len(data)
+    # A refresh that would retire more than this share of a kind's active listings is taken for a
+    # bad answer (a venue missing from the reply), not a wave of delistings: nothing is retired.
+    MAX_RETIRED_SHARE = 0.05
 
-    def prune_directory(self, source: str, kind: str, before: date) -> int:
-        """Drop listings not seen in the latest listing (delisted, or symbol reused)."""
+    def update_directory(self, source: str, kind: str, rows: Iterable[dict], today: date) -> dict[str, list]:
+        """The complete active listing of one kind (stock | future): listings are added or updated,
+        those missing are marked retired (kept, with the day), and every change is logged in
+        listing_events. Returns {listed, retired, relisted, reassigned, suspect}: tickers, with
+        `suspect` true when retiring was skipped because too much would have gone at once."""
+        day = today.isoformat()
+        rows = {r["ticker"].upper(): r for r in rows if r.get("ticker")}
+        before = {t: (figi, retired, name) for t, figi, retired, name in self.conn.execute(
+            "SELECT ticker, figi, retired_on, name FROM directory WHERE source=? AND kind=?", (source, kind))}
+        venues = {v for (v,) in self.conn.execute("SELECT DISTINCT exchange FROM directory WHERE source=? AND kind=?",
+                                                  (source, kind))}
+        active = {t for t, (_, retired, _) in before.items() if not retired}
+        out = {"listed": [], "retired": [], "relisted": [], "reassigned": [], "suspect": False}
+        events, start = [], set()  # start: a venue's first listing here, a starting point, not new listings
+        for t, r in rows.items():
+            if t not in before:
+                if r.get("exchange") not in venues:
+                    start.add(t)
+                    continue
+                out["listed"].append(t)
+                events.append((t, "listed", f"{r.get('name') or ''} ({r.get('exchange') or ''})"))
+                continue
+            figi, retired, name = before[t]
+            if retired:
+                out["relisted"].append(t)
+                events.append((t, "relisted", f"{r.get('name') or ''}, retired {retired}"))
+            if figi and r.get("figi") and r["figi"] != figi:
+                out["reassigned"].append(t)
+                events.append((t, "reassigned", f"{name or ''} {figi} -> {r.get('name') or ''} {r['figi']}"))
+        gone = sorted(active - set(rows))
+        if active and len(gone) > self.MAX_RETIRED_SHARE * len(active):
+            out["suspect"], gone = True, []
+        out["retired"] = gone
+        events += [(t, "retired", before[t][2] or "") for t in gone]
         with self.conn:
-            return self.conn.execute("DELETE FROM directory WHERE source=? AND kind=? AND seen<?",
-                                     (source, kind, before.isoformat())).rowcount
+            self.conn.executemany(
+                "INSERT INTO directory (source, ticker, kind, name, exchange, type, figi, seen, first_seen, retired_on) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL) ON CONFLICT (source, ticker) DO UPDATE SET kind=excluded.kind, "
+                "name=excluded.name, exchange=excluded.exchange, type=excluded.type, figi=COALESCE(excluded.figi, figi), "
+                "seen=excluded.seen, retired_on=NULL",
+                [(source, t, kind, r.get("name"), r.get("exchange"), r.get("type"), r.get("figi"), day,
+                  None if t in start else day) for t, r in rows.items()])
+            self.conn.executemany("UPDATE directory SET retired_on=? WHERE source=? AND ticker=?",
+                                  [(day, source, t) for t in gone])
+            self.conn.executemany("INSERT OR REPLACE INTO listing_events VALUES (?, ?, ?, ?, ?, ?)",
+                                  [(source, t, kind, day, e, d) for t, e, d in events])
+        self._wrote()
+        return out
+
+    def listing_events(self, source: str | None = None, since: date | None = None, limit: int = 200) -> list[dict]:
+        sql, args = "SELECT source, ticker, kind, day, event, detail FROM listing_events WHERE 1=1", []
+        if source:
+            sql += " AND source=?"
+            args.append(source)
+        if since:
+            sql += " AND day >= ?"
+            args.append(since.isoformat())
+        cols = ["source", "ticker", "kind", "day", "event", "detail"]
+        return [dict(zip(cols, r)) for r in self.conn.execute(sql + " ORDER BY day DESC, ticker LIMIT ?", [*args, limit])]
 
     def directory(self, source: str = "massive", kind: str | None = None) -> list[dict]:
         sql = """SELECT d.ticker, d.kind, d.name, d.exchange, d.type, s.close, s.volume, s.vwap,
@@ -1629,7 +1702,7 @@ class Store:
                  LEFT JOIN market_snapshot s ON s.source=d.source AND s.ticker=d.ticker
                       AND s.day=(SELECT MAX(day) FROM market_snapshot WHERE source=d.source)
                  LEFT JOIN icons i ON i.source=d.source AND i.ticker=d.ticker
-                 WHERE d.source=?""" + (" AND d.kind=?" if kind else "") + " ORDER BY d.ticker"
+                 WHERE d.source=? AND d.retired_on IS NULL""" + (" AND d.kind=?" if kind else "") + " ORDER BY d.ticker"
         cols = ["ticker", "kind", "name", "exchange", "type", "close", "volume", "vwap", "icon"]
         return [dict(zip(cols, r)) for r in self.conn.execute(sql, [source] + ([kind] if kind else []))]
 
@@ -1669,21 +1742,26 @@ class Store:
                   LEFT JOIN icons i ON i.source=d.source AND i.ticker=d.ticker
                   LEFT JOIN market_snapshot s ON s.source=d.source AND s.ticker=d.ticker
                        AND s.day=(SELECT MAX(day) FROM market_snapshot WHERE source=d.source)
-                  WHERE d.source=? AND d.kind='stock' AND d.type IN ({marks}) AND i.ticker IS NULL
+                  WHERE d.source=? AND d.kind='stock' AND d.type IN ({marks}) AND i.ticker IS NULL AND d.retired_on IS NULL
                   ORDER BY COALESCE(s.close * s.volume, 0) DESC, d.ticker LIMIT ?"""
         return [r[0] for r in self.conn.execute(sql, [source, *types, limit])]
 
     def directory_stats(self, source: str, types: tuple[str, ...]) -> dict:
         marks = ",".join("?" * len(types))
         q = self.conn.execute
-        listed = q("SELECT kind, COUNT(*) FROM directory WHERE source=? GROUP BY kind", (source,)).fetchall()
-        companies = q(f"SELECT COUNT(*) FROM directory WHERE source=? AND kind='stock' AND type IN ({marks})",
-                      (source, *types)).fetchone()[0]
+        listed = q("SELECT kind, COUNT(*) FROM directory WHERE source=? AND retired_on IS NULL GROUP BY kind",
+                   (source,)).fetchall()
+        venues = q("SELECT exchange, COUNT(*) FROM directory WHERE source=? AND retired_on IS NULL AND kind='stock' "
+                   "GROUP BY exchange", (source,)).fetchall()
+        retired = q("SELECT COUNT(*) FROM directory WHERE source=? AND retired_on IS NOT NULL", (source,)).fetchone()[0]
+        companies = q(f"SELECT COUNT(*) FROM directory WHERE source=? AND kind='stock' AND type IN ({marks}) "
+                      "AND retired_on IS NULL", (source, *types)).fetchone()[0]
         decided = q(f"""SELECT COUNT(*), SUM(i.data IS NOT NULL) FROM directory d JOIN icons i
                         ON i.source=d.source AND i.ticker=d.ticker
-                        WHERE d.source=? AND d.kind='stock' AND d.type IN ({marks})""", (source, *types)).fetchone()
-        return {"listed": dict(listed), "companies": companies, "iconsChecked": decided[0] or 0,
-                "icons": int(decided[1] or 0)}
+                        WHERE d.source=? AND d.kind='stock' AND d.type IN ({marks}) AND d.retired_on IS NULL""",
+                    (source, *types)).fetchone()
+        return {"listed": dict(listed), "venues": dict(venues), "retired": retired, "companies": companies,
+                "iconsChecked": decided[0] or 0, "icons": int(decided[1] or 0)}
 
     def save_market_snapshot(self, source: str, day: date, bars: list[dict]) -> int:
         rows = [(source, day.isoformat(), b["T"].upper(), b.get("c"), b.get("v"), b.get("vw")) for b in bars if b.get("T")]

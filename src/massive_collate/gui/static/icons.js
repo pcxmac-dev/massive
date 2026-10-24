@@ -59,6 +59,7 @@
     fetching: 'Fetching now', backfilling: 'Backfilling history', queued: 'Queued for download',
     new: 'New data should be available', current: 'Up to date', blocked: 'Not collected by this feed',
     closed: 'Closed: archive complete',
+    retired: 'Retired: no longer listed, history only',
   };
 
   // `d`: { state, progress } from /api/activity or /api/symbols.

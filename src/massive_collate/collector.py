@@ -487,8 +487,12 @@ def check_listing(source: DataSource, store: Store, item: dict, today: date, log
         return Listing(True, item["listed_from"])
 
     if not inst.active:
-        log(f"{ticker}: not an active listing; skipped")
-        return Listing(False)
+        raw = (inst.details or {}).get("delisted_utc")
+        gone = date.fromisoformat(raw[:10]) if raw else today
+        if item.get("retired_on") != gone:
+            store.set_retired(ticker, gone)
+            log(f"{ticker}: no longer listed (since {gone}); marked retired, history still filled")
+        return Listing(True, item["listed_from"])
     mic = inst.primary_exchange.mic if inst.primary_exchange else None
     if item["exchange"] and mic and mic != item["exchange"]:
         log(f"{ticker}: listed on {mic}, not {item['exchange']} as watched; skipped")
@@ -661,6 +665,9 @@ def sync(
                 listing = Listing(True)
             item_floor = max(floor, listing.listed_from) if listing.listed_from else floor
             item = next(w for w in store.watchlist(source.name) if w["ticker"] == ticker)
+            # a retired symbol has nothing after its last listed day: only its history is filled
+            until = min(now, datetime.combine(item["retired_on"] + timedelta(days=1), datetime.min.time(), tzinfo=ET)) \
+                if item.get("retired_on") else now
             resolution, backfilled_to = item["resolution"], item["backfilled_to"]
             fetch, invert = item["source_ticker"], item["invert"]
             if resolution == "auto":
@@ -676,11 +683,11 @@ def sync(
                     # ticks for the recent window, then minute bars for everything before it
                     n = 0
                     if tick_state != "stop":
-                        n = sync_trades(source, store, ticker, item_floor, now, me, feeds, fetch=fetch, asset=asset,
+                        n = sync_trades(source, store, ticker, item_floor, until, me, feeds, fetch=fetch, asset=asset,
                                         listed_from=listing.listed_from, log=log, rules=rules)
-                    n += sync_bars(source, store, ticker, "minute", item_floor, now, **span)
+                    n += sync_bars(source, store, ticker, "minute", item_floor, until, **span)
                 else:
-                    n = sync_bars(source, store, ticker, resolution, item_floor, now, **span)
+                    n = sync_bars(source, store, ticker, resolution, item_floor, until, **span)
             except NotEntitled as e:
                 log(f"{ticker} {resolution}: refused by your plan ({e.message}); re-checking resolution next run")
                 store.set_resolution(source.name, ticker, "auto")
@@ -690,7 +697,7 @@ def sync(
             store.set_backfilled(source.name, ticker, item_floor)  # every span it should hold is in
             if resolution != "day":
                 try:  # official daily bars (closing auction included) for day/week/month charts
-                    n_day = sync_bars(source, store, ticker, "day", item_floor, now, **span)
+                    n_day = sync_bars(source, store, ticker, "day", item_floor, until, **span)
                 except NotEntitled:
                     n_day = 0
                 result.rows += n_day
@@ -841,42 +848,75 @@ def refresh_calendars(source: DataSource, store: Store, today: date, log: Log = 
     return source.requests_made - before
 
 
-DIRECTORY_EXCHANGES = ("XNAS", "XNYS")
-DIRECTORY_REFRESH_DAYS = 7
+# Nasdaq, NYSE, NYSE American and NYSE Arca (where most ETFs list); CME Group's products come from
+# the futures product list.
+DIRECTORY_EXCHANGES = ("XNAS", "XNYS", "XASE", "ARCX")
+DIRECTORY_REFRESH_DAYS = 1  # daily: new listings, retirements and reused symbols are found within a day
 COMPANY_TYPES = ("CS", "ADRC", "OS", "GDR", "NYRS")  # operating companies (not funds, warrants, units...)
 DAILY_RESERVE = 400  # requests of the daily cap kept back for the watchlist's own updates
 DETAILS_REFRESH_DAYS = 90  # directory companies' details (and logo links) are re-checked this often
 
 
 def refresh_directory(source: DataSource, store: Store, today: date, log: Log = print) -> int:
-    """Weekly: every active Nasdaq and NYSE listing and the futures products, as placeholders."""
+    """Daily: every active listing on the directory's exchanges and the futures products, as
+    placeholders. Listings that appear are logged as new, those that leave as retired (kept, with
+    the day), a symbol back as relisted, a symbol that now names another instrument as reassigned;
+    a watched symbol that retires is marked so (its history is still filled, no new data is
+    expected) and the mark is cleared if it comes back."""
     key = f"directory:{source.name}"
     last = store.kv_get(key)
     if last and (today - date.fromisoformat(last)).days < DIRECTORY_REFRESH_DAYS:
         return 0
     before = source.requests_made
+    done = True
     try:
         rows = []
         for mic in DIRECTORY_EXCHANGES:
             rows += _guard_call(source.listings, mic)
-        n = store.save_directory(source.name, rows, today)
-        gone = store.prune_directory(source.name, "stock", today)
-        log(f"directory: {n} listings on {', '.join(DIRECTORY_EXCHANGES)}" + (f", {gone} no longer listed" if gone else ""))
+        _apply_listing(store, source.name, "stock", rows, today, log)
     except NotImplementedError:
         pass
     except (NotEntitled, SourceError) as e:
         log(f"directory: listings not available ({e})")
+        done = False
     try:
-        fut = _guard_call(source.futures_products)
-        n = store.save_directory(source.name, fut, today)
-        store.prune_directory(source.name, "future", today)
-        log(f"directory: {n} futures products")
+        _apply_listing(store, source.name, "future", _guard_call(source.futures_products, today), today, log)
     except NotImplementedError:
         pass
     except (NotEntitled, SourceError) as e:
         log(f"directory: futures products not available ({e})")
-    store.kv_set(key, today.isoformat())
+        done = False
+    if done:  # a step that failed is tried again on the next run, not a day later
+        store.kv_set(key, today.isoformat())
     return source.requests_made - before
+
+
+def _apply_listing(store: Store, source: str, kind: str, rows: list[dict], today: date, log: Log) -> None:
+    if not rows:
+        log(f"directory: no {kind} listings returned; nothing changed")
+        return
+    ch = store.update_directory(source, kind, rows, today)
+    what = "listings on " + ", ".join(DIRECTORY_EXCHANGES) if kind == "stock" else "futures products"
+    parts = [f"{len(ch[k])} {k}" for k in ("listed", "retired", "relisted", "reassigned") if ch[k]]
+    log(f"directory: {len(rows)} {what}" + (f"; {', '.join(parts)}" if parts else "; no changes"))
+    if ch["suspect"]:
+        log(f"directory: too many {kind} listings missing at once; none retired (checked again next run)")
+    watched = {w["ticker"] for w in store.watchlist() if w["asset"] == ("stock" if kind == "stock" else "future")}
+    for t in ch["retired"]:
+        if kind == "stock" and t in watched:
+            store.set_retired(t, today)
+            log(f"{t}: no longer listed; marked retired (its history is kept and still filled, no new data expected)")
+    for t in ch["relisted"]:
+        if kind == "stock" and t in watched:
+            store.set_retired(t, None)
+            log(f"{t}: listed again; retired mark cleared")
+    for t in ch["reassigned"]:
+        if kind == "stock" and t in watched:
+            log(f"{t}: the symbol now names another instrument; its listing is re-checked on the next update")
+            for w in store.watchlist():
+                if w["ticker"] == t:
+                    store.set_listing(w["source"], t, w["listed_from"], w["figi"], None, w["name"], w["kind"],
+                                      w["exchange"])  # checked_at cleared: check_listing asks again
 
 
 def fill_directory_icons(source: DataSource, store: Store, allowance: int, today: date, log: Log = print) -> int:

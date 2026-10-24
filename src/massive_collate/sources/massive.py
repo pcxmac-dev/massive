@@ -87,12 +87,17 @@ class MassiveClient:
             raise SourceError(resp.status_code, message)
         return resp
 
-    def pages(self, path: str, params: dict[str, Any] | None = None) -> Iterator[list[dict]]:
-        """Yield each page of results, following next_url links."""
+    def pages(self, path: str, params: dict[str, Any] | None = None, max_pages: int | None = None) -> Iterator[list[dict]]:
+        """Yield each page of results, following next_url links. With `max_pages`, a list longer than
+        expected stops with an error instead of spending the run's requests on it."""
         data = self.get(path, params)
         yield data.get("results") or []
+        n = 1
         while data.get("next_url"):
+            if max_pages is not None and n >= max_pages:
+                raise SourceError(f"{path}: more than {max_pages} pages; stopped (the list is longer than expected)")
             data = self.get(data["next_url"])
+            n += 1
             yield data.get("results") or []
 
 
@@ -255,21 +260,31 @@ class MassiveSource(DataSource):
         params = {"market": "stocks", "exchange": exchange.upper(), "active": "true", "limit": 1000, "order": "asc",
                   "sort": "ticker"}
         out = []
-        for page in self.client.pages("/v3/reference/tickers", params):
+        for page in self.client.pages("/v3/reference/tickers", params, max_pages=20):  # ~6 pages for Nasdaq
             out += [{"ticker": r["ticker"], "name": r.get("name"), "exchange": r.get("primary_exchange") or exchange,
                      "type": r.get("type"), "figi": r.get("composite_figi"), "kind": "stock"} for r in page if r.get("ticker")]
         return out
 
-    def futures_products(self) -> list[dict]:
-        out = []
-        for page in self.client.pages("/futures/v1/products", {"limit": 1000}):
-            for r in page:
-                code = r.get("product_code") or r.get("ticker")
-                if code:
-                    out.append({"ticker": code, "name": r.get("name") or r.get("product_name"),
-                                "exchange": r.get("trading_venue"), "type": r.get("sector") or r.get("asset_class"),
-                                "kind": "future"})
-        return out
+    def futures_products(self, day: date | None = None) -> list[dict]:
+        """The futures products as of one day (single contracts, not spreads), in one request. The
+        endpoint keeps a dated record of every product for every day since 2017: asked without a
+        date it pages through all of them. A day without a record (weekend, holiday, not yet
+        published) steps back a day, at most a week."""
+        day = day or datetime.now(timezone.utc).date()
+        for back in range(8):
+            d = day - timedelta(days=back)
+            params = {"date": d.isoformat(), "type": "single", "limit": 50000}
+            rows = [r for page in self.client.pages("/futures/v1/products", params, max_pages=3) for r in page]
+            if not rows:
+                continue
+            out = {}
+            for r in rows:
+                code = r.get("product_code")
+                if code and code not in out:
+                    out[code] = {"ticker": code, "name": r.get("name"), "exchange": r.get("trading_venue"),
+                                 "type": r.get("sector") or r.get("asset_class"), "figi": None, "kind": "future"}
+            return list(out.values())
+        return []
 
     def icon(self, url: str) -> tuple[bytes, str]:
         return self.client.get_bytes(url)

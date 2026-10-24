@@ -89,8 +89,9 @@ class DataSource(ABC):
         """Every active listing on an exchange (MIC): dicts with ticker, name, exchange, type, figi."""
         raise NotImplementedError(f"{self.name} has no listings directory")
 
-    def futures_products(self) -> list[dict]:
-        """Futures products: dicts with ticker (product code), name, exchange (venue), type (sector)."""
+    def futures_products(self, day=None) -> list[dict]:
+        """Futures products as of `day` (default today): dicts with ticker (product code), name,
+        exchange (venue), type (sector)."""
         raise NotImplementedError(f"{self.name} has no futures products")
 
     def icon(self, url: str) -> tuple[bytes, str]:
