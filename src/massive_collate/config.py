@@ -37,6 +37,8 @@ Alpaca (second feed; stocks and crypto). Keys are only ever read from the enviro
     ALPACA_CRYPTO_LOC us-1 (Kraken, default) | eu-1 (Kraken EU) | us (Alpaca's own venue)
     ALPACA_PAPER      1 (default): keys are paper-trading keys; 0: live keys (decides the host
                       asked for reference data; market data is the same either way)
+    LIVE_STOCKS       on (default) | off: with keys, the live recorder streams IEX's trades for the
+                      symbols open on a chart and on the watchlists (at most 30; live.py)
     ALPACA_MAX_REQUESTS_PER_RUN / ALPACA_MAX_REQUESTS_PER_DAY   hard caps (default: 3000 / 30000)
 """
 from __future__ import annotations
@@ -138,6 +140,8 @@ class Settings:
     crypto_venue_days: int = 0  # 0: all the history the exchange feeds hold
     # Coins recorded live from the exchanges' public streams (live.py); LIVE_CRYPTO=off for none.
     live_coins: tuple[str, ...] = ("BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LTC", "LINK")
+    # Stocks streamed live from Alpaca's IEX feed (with its keys; live.py); LIVE_STOCKS=off for none.
+    live_stocks: bool = True
     # MASSIVE_OFFLINE=1: nothing is fetched and no recorder starts (a test copy of the app on a
     # scratch database must never spend the real plan's requests: its own ledger would not know them).
     offline: bool = False
@@ -301,6 +305,7 @@ def load_settings(
         tiingo_api_key=merged.get("TIINGO_API_KEY") or None,
         crypto_venue_days=_default(_int_setting(merged, "CRYPTO_VENUE_DAYS"), 0),
         live_coins=_live_coins(merged.get("LIVE_CRYPTO")),
+        live_stocks=str(merged.get("LIVE_STOCKS", "on")).strip().lower() not in ("off", "0", "false", "no", "none"),
         offline=str(merged.get("MASSIVE_OFFLINE", "")).strip().lower() in ("1", "true", "yes", "on"),
     )
 

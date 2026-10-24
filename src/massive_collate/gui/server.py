@@ -34,6 +34,7 @@ class ChartApp:
         self.settings = settings or load_settings(env={}, env_file=None)
         self.engine = BarEngine(store, priority=priority, quality=self._feed_quality)
         self._lock = self.engine.lock
+        self._open_noted: dict[str, int] = {}  # ticker -> ms it was last noted open (note_open)
 
     def _feed_quality(self, feed: str) -> float:
         """A feed's best quality over asset classes (display priority between feeds)."""
@@ -320,7 +321,7 @@ class ChartApp:
         )
 
     # -- watchlists (the rail's lists of symbols) --------------------------------
-    WATCHLISTS_KEY = "ui:watchlists"
+    WATCHLISTS_KEY = "ui:watchlists"  # live.WATCHLISTS_KEY: the live recorder streams their stocks
     MAX_LISTS, MAX_LIST_TICKERS = 50, 1000
 
     def watchlists(self) -> dict:
@@ -388,7 +389,35 @@ class ChartApp:
                 raise LookupError(f"no layout {layout_id}")
         return {"deleted": layout_id}
 
+    OPEN_NOTE_SECONDS = 30
+
+    def note_open(self, ticker: str, now_ms: int | None = None) -> None:
+        """A chart page has `ticker` open (its activity poll says so): the live recorder streams it
+        if it is a stock (live.wanted_stocks). Noted at most every OPEN_NOTE_SECONDS per symbol;
+        symbols not noted for live.OPEN_FRESH_MS drop out."""
+        import time as _time
+
+        from .. import live
+
+        ticker = ticker.strip().upper()
+        now_ms = now_ms or int(_time.time() * 1000)
+        last = self._open_noted.get(ticker)
+        if not 0 < len(ticker) <= 32 or (last is not None and now_ms - last < self.OPEN_NOTE_SECONDS * 1000):
+            return
+        self._open_noted[ticker] = now_ms
+        with self._lock:
+            try:
+                opened = json.loads(self.store.kv_get(live.OPEN_KEY) or "{}")
+            except ValueError:
+                opened = {}
+            opened = {t: at for t, at in (opened.items() if isinstance(opened, dict) else ())
+                      if isinstance(at, (int, float)) and now_ms - at <= live.OPEN_FRESH_MS}
+            opened[ticker] = now_ms
+            self.store.kv_set(live.OPEN_KEY, json.dumps(opened))
+
     def activity(self, q: dict[str, str]) -> dict:
+        if q.get("open"):
+            self.note_open(q["open"])
         with self._lock:
             out = activity.activity(self.store, self.settings, self.store.path, q.get("source", "massive"),
                                     log_lines=min(int(q.get("lines", 200)), 1000))

@@ -336,6 +336,21 @@ class FeedStore:
         self._wrote()
         return len(rows)
 
+    def withdraw_trades(self, source: str, ticker: str, seqs: Iterable[int], since_ns: int) -> list[int]:
+        """Remove trades the exchange withdrew (canceled, or replaced by a correction), by sequence
+        number, from `since_ns` on. Returns the times (ns) of those removed."""
+        conn = self._ticks(source)
+        if conn is None:
+            return []
+        ticker, gone = ticker.upper(), []
+        with conn:
+            for seq in set(seqs):
+                where = ("WHERE ticker=? AND ts_ns>=? AND seq=?", (ticker, since_ns, int(seq)))
+                gone += [ts for (ts,) in conn.execute("SELECT ts_ns FROM ticks.trades " + where[0], where[1])]
+                conn.execute("DELETE FROM ticks.trades " + where[0], where[1])
+        self._wrote()
+        return gone
+
     def trade_range(self, source: str, ticker: str) -> tuple[int, int] | None:
         """(oldest ns, newest ns) stored for a ticker's trades, or None."""
         conn = self._ticks(source)
@@ -412,6 +427,19 @@ class FeedStore:
                 [(*r, *r[:4]) for r in rows])
         self._wrote()
         return conn.total_changes - before
+
+    def drop_built_between(self, source: str, ticker: str, timespans: Sequence[str], lo_ms: int, hi_ms: int) -> int:
+        """Remove a series' built bars in [lo, hi) ms, before they are built again from ticks some of
+        which were withdrawn (a bar left without trades must not stay). Returns bars removed."""
+        conn = self._bars(source)
+        if conn is None:
+            return 0
+        marks = ",".join("?" * len(timespans))
+        with conn:
+            n = conn.execute(f"DELETE FROM built_bars WHERE ticker=? AND timespan IN ({marks}) AND multiplier=1 "
+                             "AND ts>=? AND ts<?", (ticker.upper(), *timespans, lo_ms, hi_ms)).rowcount
+        self._wrote()
+        return n
 
     def drop_superseded_built(self, source: str) -> int:
         """Built bars the feed has since sent its own for (from before bars_replace_built): kept

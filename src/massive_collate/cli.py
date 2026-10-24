@@ -218,9 +218,10 @@ def _sync(args, settings: Settings) -> int:
     names = list(BUILDERS) if args.all_sources else [args.source]
     with Store(settings.db_path) as store:
         separated = store.kv_get("built-bars:separated:v1")
-    if args.all_sources and settings.live_coins and not settings.offline:  # keep the live crypto recorder running
-        from . import live
+    from . import live
 
+    if args.all_sources and (settings.live_coins or live.stock_keys(settings)) and not settings.offline:
+        # keep the live recorder running (crypto, and stocks with Alpaca keys)
         if live.start_detached(settings.db_path):
             Logger(settings.db_path.parent / "logs" / "massive-collate.log")("live: recorder started")
     if not separated:  # one-off: bars built from ticks before they were kept apart from the feeds' own
@@ -318,8 +319,8 @@ def cmd_datasets(args, settings: Settings) -> int:
 
 
 def cmd_live(args, settings: Settings) -> int:
-    """Live crypto from the exchanges' public streams: run the recorder here, start it in the
-    background, or show what it is recording."""
+    """Live trades (crypto from the exchanges' public streams, stocks from Alpaca's IEX stream with
+    its keys): run the recorder here, start it in the background, or show what it is recording."""
     import json
 
     from . import live
@@ -332,8 +333,9 @@ def cmd_live(args, settings: Settings) -> int:
             pairs = ", ".join(f"{t} {p['trades']:,}" for t, p in sorted(st.get("pairs", {}).items()))
             print(f"  {source:9} {'connected' if st.get('connected') else 'down: ' + str(st.get('error'))}  {pairs}")
         return 0
-    if not settings.live_coins or settings.offline:
-        print("live recording is off (LIVE_CRYPTO=off or MASSIVE_OFFLINE)")
+    if not (settings.live_coins or live.stock_keys(settings)) or settings.offline:
+        print("live recording is off (LIVE_CRYPTO=off and no stocks: no Alpaca keys or LIVE_STOCKS=off; "
+              "or MASSIVE_OFFLINE)")
         return 0
     if args.action == "start":
         print("recorder started in the background" if live.start_detached(settings.db_path)
@@ -344,7 +346,7 @@ def cmd_live(args, settings: Settings) -> int:
         return 0
     lock = live.lock_path(settings.db_path)
     lock.write_text(str(os.getpid()))
-    recorder = live.Recorder(settings.db_path, coins=settings.live_coins,
+    recorder = live.Recorder(settings.db_path, coins=settings.live_coins, stock_keys=live.stock_keys(settings),
                              log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
     try:
         recorder.run()
@@ -863,7 +865,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--tickers", nargs="+", metavar="TICKER", help="only these symbols")
     s.set_defaults(func=cmd_derive)
 
-    s = sub.add_parser("live", help="live crypto from the exchanges' public streams: run, start (background) or status")
+    s = sub.add_parser("live", help="live trades (crypto: the exchanges' public streams; stocks: Alpaca's IEX stream): "
+                                     "run, start (background) or status")
     s.add_argument("action", nargs="?", choices=["run", "start", "status"], default="run")
     s.set_defaults(func=cmd_live)
 

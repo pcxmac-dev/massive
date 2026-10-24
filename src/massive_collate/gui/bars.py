@@ -19,6 +19,7 @@ from threading import RLock
 import numpy as np
 import pandas as pd
 
+from ..live import PARTIAL_FEEDS
 from ..storage import Store
 from ..calc.derivatives import Model, apply_model
 
@@ -376,7 +377,9 @@ class BarEngine:
 
     def sources_for(self, ticker: str) -> list[str]:
         """Feeds holding a ticker, best first: a feed with ticks (finer data) for it ranks first,
-        then the configured priority."""
+        then the configured priority. A feed of one exchange's share of a market (IEX's trades)
+        comes after every feed of the whole market, so a merged chart shows it only where none
+        of them has bars (the current session, until a sync downloads it)."""
         with self._lock:
             stored = [(s, k) for s, t, k in self.store.stored_series() if t == ticker.upper()]
             have = {s for s, _ in stored}
@@ -386,7 +389,7 @@ class BarEngine:
         order = {s: i for i, s in enumerate(self.priority)}
         have -= set(MODEL_SOURCES)
         quality = self.quality or (lambda s: 1.0)
-        return sorted(have, key=lambda s: (s not in fine, -quality(s), order.get(s, len(order)), s))
+        return sorted(have, key=lambda s: (s in PARTIAL_FEEDS, s not in fine, -quality(s), order.get(s, len(order)), s))
 
     def _fingerprint(self, source: str, ticker: str) -> tuple:
         item = self._watch_item(source, ticker)

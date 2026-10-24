@@ -1,6 +1,7 @@
 """A small WebSocket client (RFC 6455) on the standard library, for the exchanges' public streams.
 
-Text frames in and out, fragmented messages reassembled, pings answered, close honoured. Client
+Text frames in and out, fragmented messages reassembled, pings answered (and sent, with the
+server's pongs counted), close honoured. Client
 frames are masked as the protocol requires. No compression extensions are offered, so servers send
 plain frames.
 """
@@ -35,6 +36,8 @@ def encode_frame(opcode: int, payload: bytes, mask: bytes | None = None) -> byte
 
 
 class WebSocket:
+    pongs = 0  # pongs received (answers to `ping`)
+
     def __init__(self, url: str, timeout: float = 30.0, user_agent: str = "massive-collate/1"):
         u = urlparse(url)
         if u.scheme not in ("ws", "wss"):
@@ -77,6 +80,10 @@ class WebSocket:
     def send(self, text: str) -> None:
         self.sock.sendall(encode_frame(OP_TEXT, text.encode()))
 
+    def ping(self, payload: bytes = b"") -> None:
+        """A ping: the server answers with a pong (counted in `pongs`) if the connection is alive."""
+        self.sock.sendall(encode_frame(OP_PING, payload))
+
     def _frame(self) -> tuple[bool, int, bytes]:
         b0, b1 = self._read(2)
         fin, opcode = bool(b0 & 0x80), b0 & 0x0F
@@ -100,6 +107,7 @@ class WebSocket:
                 self.sock.sendall(encode_frame(OP_PONG, payload))
                 continue
             if opcode == OP_PONG:
+                self.pongs += 1
                 continue
             if opcode == OP_CLOSE:
                 try:

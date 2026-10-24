@@ -25,6 +25,7 @@ def no_recorders(monkeypatch):
     """Tests never start the live recorder: `sync` would start a real detached process (with real
     exchange connections) pointed at the test's temporary folder."""
     monkeypatch.setenv("LIVE_CRYPTO", "off")
+    monkeypatch.setenv("LIVE_STOCKS", "off")
     monkeypatch.setattr(live, "start_detached", lambda db_path: False)
 
 

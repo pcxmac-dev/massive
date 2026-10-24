@@ -1,11 +1,18 @@
-"""Live crypto: trades from exchanges' public WebSocket streams (no key), recorded as ticks in each
-exchange's own tick file, with one-second and minute bars built from them every few seconds (kept
-apart from the exchange's own bars in built_bars, under a derivation record) so charts update live.
+"""Live trades from real-time streams, recorded as ticks in each feed's own tick file, with
+one-second and minute bars built from them every few seconds (kept apart from the feed's own bars
+in built_bars, under a derivation record) so charts update live.
 
-Exchanges: Coinbase (the reference exchange) and Bitstamp; well-known coins only (LIVE_COINS). A
-thread per exchange keeps one connection and reconnects with backoff. While it is connected, its
-span is entered in the coverage ledger for every coin it streams: a connected span without trades
-had none. The heartbeat (kv `live-recorder`) and each stream's state per pair (kv `live:status`)
+Crypto: Coinbase (the reference exchange) and Bitstamp's public streams (no key), well-known coins
+only (LIVE_COINS). Stocks: Alpaca's free real-time stream of IEX's trades (with Alpaca keys) for
+the symbols open on a chart and on the rail's watchlists, at most MAX_STOCKS (Alpaca Basic's limit
+on its one stream connection per account). IEX is one exchange, a few per cent of US volume, so
+its trades go in a feed of their own ("iex", one of PARTIAL_FEEDS) that a chart of all feeds shows
+only where no feed of the whole market (SIP) has bars yet: the current session, until a sync
+downloads it.
+
+A thread per stream keeps one connection and reconnects with backoff. While it is connected, its
+span is entered in the coverage ledger for every symbol it streams: a connected span without trades
+had none. The heartbeat (kv `live-recorder`) and each stream's state per symbol (kv `live:status`)
 feed the Live view and the rail icon. One recorder runs at a time (a lock file beside the data).
 """
 from __future__ import annotations
@@ -23,14 +30,36 @@ from pathlib import Path
 LIVE_COINS = ("BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LTC", "LINK")
 RECORDER_KEY = "live-recorder"
 STATUS_KEY = "live:status"
+OPEN_KEY = "live:open"  # {ticker: ms}: the symbols chart pages have open (gui/server.py notes them)
+WATCHLISTS_KEY = "ui:watchlists"  # the rail's lists of symbols (gui/server.py)
+IEX_FEED = "iex"
+PARTIAL_FEEDS = frozenset({IEX_FEED})  # one exchange's share of a market other feeds hold whole
+MAX_STOCKS = 30  # Alpaca Basic: symbols on its one real-time connection
+OPEN_FRESH_MS = 180_000  # a symbol is streamed this long after a page last said it has it open
+WANT_SECONDS = 5.0  # how often the stock symbols to stream are looked up
 FLUSH_SECONDS = 2.0
-DERIVE_SECONDS = 60.0  # the time frames above a minute are rebuilt this often for the coins streamed
+DERIVE_SECONDS = 60.0  # the time frames above a minute are rebuilt this often for the symbols streamed
+RULES_SECONDS = 3600.0  # trade condition rules (stocks) are reread this often
 RECV_TIMEOUT = 20.0
 DAY_MS = 86_400_000
+PING = "ping"  # keepalive by WebSocket ping frames rather than a message
 
 
 class Reconnect(ConnectionError):
     """The exchange asked for a new connection."""
+
+
+class Refused(ConnectionError):
+    """The server ended the session (keys, plan, or another connection on the account): tried
+    again after `wait` seconds at the earliest."""
+
+    def __init__(self, message: str, wait: float):
+        super().__init__(message)
+        self.wait = wait
+
+
+class Notice(Exception):
+    """The server turned down a request but kept the connection (shown, not retried)."""
 
 
 def _ns(iso: str) -> int:
@@ -92,22 +121,123 @@ class BitstampStream:
 
 STREAMS = {"coinbase": CoinbaseStream, "bitstamp": BitstampStream}
 
+# Alpaca stream errors that end the session, and the seconds to wait before connecting again:
+# 401 not authenticated, 402 auth failed, 404 auth timeout, 406 connection limit exceeded (another
+# connection on the account), 407 slow client, 409 insufficient subscription, 500 internal error.
+ALPACA_REFUSALS = {401: 60, 402: 600, 404: 60, 406: 120, 407: 60, 409: 3600, 500: 60}
+
+
+@dataclass
+class AlpacaIexStream:
+    """Alpaca's free real-time stock stream (v2/iex): every trade on IEX, with cancels and
+    corrections (the trades they withdraw are marked `withdrawn`). The keys go in the auth
+    message only, never in a log. Its symbols change while it is connected (`change`), once the
+    server has accepted the keys; `confirmed` holds those the server says it streams."""
+    key_id: str = field(default="", repr=False)
+    secret_key: str = field(default="", repr=False)
+    source: str = IEX_FEED
+    url: str = "wss://stream.data.alpaca.markets/v2/iex"
+    keepalive: str | None = PING
+    dynamic: bool = True  # symbols from the charts and watchlists (wanted_stocks), not LIVE_COINS
+    tape_rules: bool = True  # bars by the consolidated tape's rules per trade condition (ticks.py)
+    method: str = ("IEX's trades from Alpaca's real-time stream: one exchange, a few per cent of US volume; "
+                   "bars rebuilt as trades arrive (a forming bar changes until it closes), by the consolidated "
+                   "tape's rules per trade condition; a feed of the whole market (SIP) ranks above them")
+    authed: bool = False
+    confirmed: frozenset = frozenset()
+
+    def subscribe(self, symbols) -> list[str]:
+        """The first messages on a new connection: the keys (symbols follow once accepted)."""
+        self.authed, self.confirmed = False, frozenset()
+        return [json.dumps({"action": "auth", "key": self.key_id, "secret": self.secret_key})]
+
+    def change(self, add, drop) -> list[str]:
+        out = []
+        if drop:
+            out.append(json.dumps({"action": "unsubscribe", "trades": sorted(drop)}))
+        if add:
+            out.append(json.dumps({"action": "subscribe", "trades": sorted(add)}))
+        return out
+
+    def parse(self, msg) -> list[tuple[str, dict]]:
+        from .sources.alpaca import normalize_trade
+
+        out = []
+        for m in msg if isinstance(msg, list) else [msg]:
+            kind = m.get("T")
+            if kind == "t":
+                t = normalize_trade(m)
+                if t:
+                    out.append((m["S"], t))
+            elif kind == "x":  # a trade withdrawn: canceled, or an error
+                out.append((m["S"], {**normalize_trade(m), "withdrawn": True}))
+            elif kind == "c":  # a correction: the original trade withdrawn, the corrected one in its place
+                base = {"x": m["x"], "t": m["t"], "z": m.get("z")}
+                was = normalize_trade({**base, "i": m["oi"], "p": m["op"], "s": m["os"], "c": m.get("oc")})
+                out.append((m["S"], {**was, "withdrawn": True}))
+                out.append((m["S"], normalize_trade({**base, "i": m["ci"], "p": m["cp"], "s": m["cs"], "c": m.get("cc")})))
+            elif kind == "subscription":
+                self.confirmed = frozenset(m.get("trades") or [])
+            elif kind == "success" and m.get("msg") == "authenticated":
+                self.authed = True
+            elif kind == "error":
+                code = int(m.get("code") or 0)
+                text = f"alpaca {code}: {m.get('msg')}"
+                if code in ALPACA_REFUSALS:
+                    raise Refused(text, ALPACA_REFUSALS[code])
+                raise Notice(text)
+        return out
+
+
+def stock_keys(settings) -> tuple[str, str] | None:
+    """Alpaca's keys for the IEX stream: None without keys, with LIVE_STOCKS=off, or offline."""
+    a = settings.alpaca
+    if settings.offline or not settings.live_stocks or not (a and a.has_keys):
+        return None
+    return a.key_id, a.secret_key
+
+
+def wanted_stocks(store, now_ms: int) -> tuple[str, ...]:
+    """The stock symbols to stream, at most MAX_STOCKS: those open on a chart (most recently
+    noted first), then the rail's watchlists in their order. Only symbols collected as stocks."""
+    stocks = {w["ticker"] for w in store.watchlist() if w["asset"] == "stock"}
+
+    def kv(key, empty):
+        try:
+            value = json.loads(store.kv_get(key) or "null")
+        except ValueError:
+            return empty
+        return value if isinstance(value, type(empty)) else empty
+    opened = sorted(((at, t) for t, at in kv(OPEN_KEY, {}).items()
+                     if isinstance(at, (int, float)) and now_ms - at <= OPEN_FRESH_MS), reverse=True)
+    out = [t for _, t in opened]
+    for lst in kv(WATCHLISTS_KEY, []):
+        out += (lst.get("tickers") or []) if isinstance(lst, dict) else []
+    out = [t.upper() for t in out if isinstance(t, str)]
+    return tuple(dict.fromkeys(t for t in out if t in stocks))[:MAX_STOCKS]
+
 
 @dataclass
 class Recorder:
     db_path: Path
     coins: tuple[str, ...] = LIVE_COINS
     sources: tuple[str, ...] = ("coinbase", "bitstamp")
+    stock_keys: tuple[str, str] | None = field(default=None, repr=False)  # Alpaca's: the IEX stream
     log: object = print
     connect: object = None  # WebSocket factory (tests pass a fake)
     stop: threading.Event = field(default_factory=threading.Event)
 
     def __post_init__(self):
-        self.streams = [STREAMS[s]() for s in self.sources]
+        self.streams = [STREAMS[s]() for s in self.sources] if self.coins else []
+        if self.stock_keys:
+            self.streams.append(AlpacaIexStream(*self.stock_keys))
         self._lock = threading.Lock()
         self._buffer: dict[tuple[str, str], list[dict]] = defaultdict(list)
         self._since: dict[str, int] = {}  # source -> connected since (ms)
         self._status: dict[str, dict] = {s.source: {"connected": False, "pairs": {}} for s in self.streams}
+        self._wanted: tuple[str, ...] = ()  # stock symbols to stream (wanted_stocks)
+        self._subs: dict[str, dict[str, int]] = {s.source: {} for s in self.streams}  # symbol -> asked for since (ms)
+        self._rules: tuple[float, dict] = (0.0, {})
         self._derivations: dict[tuple[str, str, int], int] = {}
         self._built: dict[int, int] = defaultdict(int)
         if self.connect is None:
@@ -116,31 +246,67 @@ class Recorder:
             self.connect = lambda url: WebSocket(url, timeout=RECV_TIMEOUT)
 
     # -- streams ---------------------------------------------------------------------------
+    def _follow(self, stream, ws) -> bool:
+        """Bring a stream's symbols in line with those wanted (once the server took the keys).
+        False when none are wanted any more."""
+        with self._lock:
+            want, have = set(self._wanted), self._subs[stream.source]
+            add, drop = want - set(have), set(have) - want
+        if not want:
+            return False
+        if stream.authed and (add or drop):
+            for m in stream.change(add, drop):
+                ws.send(m)
+            now = int(time.time() * 1000)
+            with self._lock:
+                for t in drop:
+                    have.pop(t, None)
+                have.update(dict.fromkeys(add, now))
+        return True
+
     def _run_stream(self, stream) -> None:
         backoff = 1.0
+        dynamic = getattr(stream, "dynamic", False)
         while not self.stop.is_set():
+            if dynamic and not self._wanted:  # nothing to stream: no connection
+                self.stop.wait(WANT_SECONDS)
+                continue
             ws = None
             try:
                 ws = self.connect(stream.url)
-                for m in stream.subscribe(self.coins):
+                for m in stream.subscribe(() if dynamic else self.coins):
                     ws.send(m)
                 with self._lock:
                     self._since[stream.source] = int(time.time() * 1000)
                     self._status[stream.source].update(connected=True, since=datetime.now(timezone.utc).isoformat(),
                                                        error=None)
-                self.log(f"live: {stream.source} connected ({len(self.coins)} coins)")
-                backoff, misses = 1.0, 0
+                self.log(f"live: {stream.source} connected ({'stocks' if dynamic else f'{len(self.coins)} coins'})")
+                backoff, misses, pongs = 1.0, 0, 0
                 while not self.stop.is_set():
+                    if dynamic and not self._follow(stream, ws):
+                        with self._lock:  # none wanted any more: the connection is closed
+                            self._since.pop(stream.source, None)
+                            self._subs[stream.source] = {}
+                            self._status[stream.source].update(connected=False, error=None)
+                        break
                     try:
                         raw = ws.recv()
                     except socket.timeout:
+                        if getattr(ws, "pongs", 0) != pongs:  # the server answered the last ping
+                            pongs, misses = ws.pongs, 0
                         misses += 1
                         if not stream.keepalive or misses > 2:
                             raise ConnectionError("no messages")
-                        ws.send(stream.keepalive)
+                        ws.ping() if stream.keepalive == PING else ws.send(stream.keepalive)
                         continue
                     misses = 0
-                    trades = stream.parse(json.loads(raw))
+                    try:
+                        trades = stream.parse(json.loads(raw))
+                    except Notice as e:
+                        self.log(f"live: {stream.source}: {e}")
+                        with self._lock:
+                            self._status[stream.source]["error"] = str(e)[:200]
+                        continue
                     if trades:
                         with self._lock:
                             for ticker, t in trades:
@@ -148,10 +314,12 @@ class Recorder:
             except (OSError, ConnectionError, ValueError, KeyError) as e:
                 with self._lock:
                     self._since.pop(stream.source, None)
+                    self._subs[stream.source] = {}
                     self._status[stream.source].update(connected=False, error=str(e)[:200])
                 if not self.stop.is_set():
-                    self.log(f"live: {stream.source} disconnected ({e}); again in {backoff:.0f} s")
-                    self.stop.wait(backoff)
+                    wait = max(backoff, getattr(e, "wait", 0))
+                    self.log(f"live: {stream.source} disconnected ({e}); again in {wait:.0f} s")
+                    self.stop.wait(wait)
                     backoff = min(60.0, backoff * 2)
             finally:
                 if ws is not None:
@@ -160,55 +328,92 @@ class Recorder:
                     except OSError:
                         pass
 
+    def set_wanted(self, tickers: tuple[str, ...]) -> None:
+        with self._lock:
+            self._wanted = tuple(tickers)[:MAX_STOCKS]
+
     # -- storing ---------------------------------------------------------------------------
-    def _derivation(self, store, source: str, ticker: str, day: int, url: str) -> int:
+    def _derivation(self, store, stream, ticker: str, day: int, rules: dict) -> int:
         from . import provenance
 
-        key = (source, ticker, day)
+        key = (stream.source, ticker, day)
         if key not in self._derivations:
-            self._derivations[key] = provenance.record(store, "bars-from-ticks", f"{source}:{ticker}", {
-                "steps": ["second", "minute"], "live": True, "flush_seconds": FLUSH_SECONDS,
-                "method": "trades from the exchange's public stream; bars rebuilt as trades arrive "
-                          "(a forming bar changes until it closes)"},
-                {"stream": url, "ticks": f"{source}:{ticker}"}, (day * DAY_MS, (day + 1) * DAY_MS))
+            settings = {"steps": ["second", "minute"], "live": True, "flush_seconds": FLUSH_SECONDS,
+                        "method": getattr(stream, "method", "trades from the exchange's public stream; bars rebuilt "
+                                          "as trades arrive (a forming bar changes until it closes)")}
+            if getattr(stream, "tape_rules", False):
+                settings |= {"rules": provenance.digest(sorted(rules.items())), "rule_count": len(rules)}
+            self._derivations[key] = provenance.record(store, "bars-from-ticks", f"{stream.source}:{ticker}", settings,
+                                                       {"stream": stream.url, "ticks": f"{stream.source}:{ticker}"},
+                                                       (day * DAY_MS, (day + 1) * DAY_MS))
         return self._derivations[key]
 
+    def _tape_rules(self, store) -> dict:
+        """The trade condition rules (ticks.py) stocks' bars are built by, reread hourly."""
+        at, rules = self._rules
+        if not at or time.monotonic() - at > RULES_SECONDS:
+            self._rules = (time.monotonic(), store.condition_rules())
+        return self._rules[1]
+
+    def _streamed(self, stream, since_ms: int, subs: dict[str, int]) -> dict[str, int]:
+        """{symbol: streamed since (ms)} of a connected stream."""
+        if getattr(stream, "dynamic", False):
+            return {t: max(since_ms, at) for t, at in subs.items() if t in stream.confirmed}
+        return {f"{c}USD": since_ms for c in self.coins}
+
     def flush(self, store, now_ms: int | None = None) -> int:
-        """Store the trades received since the last flush, enter the connected spans in the ledger,
-        rebuild the affected bars, and beat the heartbeat. Returns trades stored."""
+        """Store the trades received since the last flush (and remove those withdrawn), enter the
+        connected spans in the ledger, rebuild the affected bars, and beat the heartbeat. Returns
+        trades stored."""
         from .ticks import build_bars
 
         now_ms = now_ms or int(time.time() * 1000)
         with self._lock:
             batch, self._buffer = self._buffer, defaultdict(list)
             since = dict(self._since)
+            subs = {k: dict(v) for k, v in self._subs.items()}
         stored = 0
-        urls = {s.source: s.url for s in self.streams}
+        streams = {s.source: s for s in self.streams}
         for (source, ticker), trades in batch.items():
-            stored += store.upsert_trades(source, ticker, trades)
+            kept = [t for t in trades if not t.get("withdrawn")]
+            if kept:
+                stored += store.upsert_trades(source, ticker, kept)
         for source, start in since.items():
-            for coin in self.coins:
-                store.add_coverage(source, f"{coin}USD", "trades", start, now_ms)
+            for ticker, t0 in self._streamed(streams[source], start, subs.get(source, {})).items():
+                store.add_coverage(source, ticker, "trades", t0, now_ms)
         for (source, ticker), trades in batch.items():
-            lo = min(t["sip_timestamp"] for t in trades) // 1_000_000 // 60_000 * 60_000  # the minute it starts in
+            stream = streams[source]
+            lo_ns = min(t["sip_timestamp"] for t in trades)
+            gone = [t["sequence_number"] for t in trades if t.get("withdrawn")]
+            if gone:
+                lo_ns = min([lo_ns, *store.withdraw_trades(source, ticker, gone, lo_ns - DAY_MS * 1_000_000)])
+            lo = lo_ns // 1_000_000 // 60_000 * 60_000  # the minute it starts in
+            if gone:  # a bar whose only trades were withdrawn must go
+                store.drop_built_between(source, ticker, ("second", "minute"), lo, now_ms)
             ticks = store.trades_between(source, ticker, lo * 1_000_000, now_ms * 1_000_000)
-            day = now_ms // DAY_MS
-            did = self._derivation(store, source, ticker, day, urls[source])
+            rules = self._tape_rules(store) if getattr(stream, "tape_rules", False) else {}
+            did = self._derivation(store, stream, ticker, now_ms // DAY_MS, rules)
             for step, timespan in ((1_000_000_000, "second"), (60_000_000_000, "minute")):
-                bars, _ = build_bars(ticks, step, {})
+                bars, _ = build_bars(ticks, step, rules)
                 self._built[did] += store.upsert_built_bars(source, ticker, timespan, 1, bars, did)
                 store.add_coverage(source, ticker, timespan, lo, now_ms, origin="ticks")
             store.set_derivation_rows(did, self._built[did])
-            last = trades[-1]
+            last = next((t for t in reversed(trades) if not t.get("withdrawn")), None)
             with self._lock:
                 pair = self._status[source]["pairs"].setdefault(ticker, {"trades": 0})
-                pair["trades"] += len(trades)
-                pair["last"] = last["sip_timestamp"] // 1_000_000
-                pair["price"] = last["price"]
+                pair["trades"] += len(trades) - 2 * len(gone)
+                if last:
+                    pair["last"] = last["sip_timestamp"] // 1_000_000
+                    pair["price"] = last["price"]
         with self._lock:
+            for s in self.streams:
+                if getattr(s, "dynamic", False):
+                    self._status[s.source]["symbols"] = sorted(set(subs.get(s.source, {})) & s.confirmed)
             status = json.loads(json.dumps(self._status))
+            wanted = list(self._wanted)
         store.kv_set(RECORDER_KEY, datetime.now(timezone.utc).isoformat(timespec="seconds"))
-        store.kv_set(STATUS_KEY, json.dumps({"at": now_ms, "coins": list(self.coins), "streams": status}))
+        store.kv_set(STATUS_KEY, json.dumps({"at": now_ms, "coins": list(self.coins), "stocks": wanted,
+                                             "streams": status}))
         return stored
 
     def run(self) -> None:
@@ -218,15 +423,21 @@ class Recorder:
                    for s in self.streams]
         for t in threads:
             t.start()
+        stocks = any(getattr(s, "dynamic", False) for s in self.streams)
         with Store(self.db_path) as store:
-            total, last_log, last_derive = 0, time.time(), time.time()
-            while not self.stop.wait(FLUSH_SECONDS):
+            total, last_log, last_derive, last_want = 0, time.time(), time.time(), 0.0
+            while True:
+                if stocks and time.time() - last_want > WANT_SECONDS:
+                    self.set_wanted(wanted_stocks(store, int(time.time() * 1000)))
+                    last_want = time.time()
+                if self.stop.wait(FLUSH_SECONDS):
+                    break
                 total += self.flush(store)
                 if time.time() - last_derive > DERIVE_SECONDS:
                     from . import derive
 
                     derive.run(store, sources={s.source for s in self.streams},
-                               tickers={f"{c}USD" for c in self.coins}, log=lambda *_: None)
+                               tickers={f"{c}USD" for c in self.coins} | set(self._wanted), log=lambda *_: None)
                     last_derive = time.time()
                 if time.time() - last_log > 600:
                     self.log(f"live: {total:,} trades recorded in the last 10 min")

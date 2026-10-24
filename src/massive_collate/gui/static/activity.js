@@ -25,6 +25,7 @@
   let scanNote = '';
   // The status bar's job: { ticker, phase: 'checking' | 'waiting' | 'downloading' | 'done' | 'current' | 'error', ... }
   let job = null;
+  let openTicker = null;  // the symbol open on the chart (sent with each poll for the live recorder)
 
   function dur(s) {
     if (s == null) return '–';
@@ -61,7 +62,9 @@
   async function poll() {
     clearTimeout(timer);
     try {
-      const res = await fetch(`/api/activity?lines=300&source=${encodeURIComponent(feed)}`);
+      // `open`: the chart's symbol, so the live recorder streams it (stocks, from IEX).
+      const open = openTicker ? `&open=${encodeURIComponent(openTicker)}` : '';
+      const res = await fetch(`/api/activity?lines=300&source=${encodeURIComponent(feed)}${open}`);
       if (!res.ok) throw new Error(String(res.status));
       data = await res.json();
       window.dispatchEvent(new CustomEvent('massive:activity', { detail: data }));
@@ -194,7 +197,7 @@
     return left ? ` · waiting ${left} s (${esc(w.reason)})` : '';
   }
 
-  window.addEventListener('massive:symbol', (e) => checkSymbol(e.detail));
+  window.addEventListener('massive:symbol', (e) => { openTicker = e.detail; checkSymbol(e.detail); });
 
   // Every server's limits beside what this machine keeps to and has used.
   function limitsHtml(rows) {
@@ -429,8 +432,9 @@
     loadLiveNews();
   }
 
-  // The live recorder's exchange streams (python -m massive_collate live): connection, and per
-  // coin the trades recorded, the last price and how long ago it traded.
+  // The live recorder's streams (python -m massive_collate live): connection, and per symbol the
+  // trades recorded, the last price and how long ago it traded. The stock stream (IEX) follows the
+  // open chart and the watchlists.
   function liveStreamsHtml(live) {
     const streams = Object.entries(live.streams || {});
     if (!streams.length) {
@@ -440,16 +444,18 @@
     const rows = streams.flatMap(([src, s]) => {
       const pairs = Object.entries(s.pairs || {}).sort(([a], [b]) => a.localeCompare(b));
       const head = `<tr><td><b>${esc(src)}</b></td><td colspan="4">${s.connected
-        ? `<span class="rec on"></span> connected${s.since ? ` · since ${when(s.since)}` : ''}`
+        ? `<span class="rec on"></span> connected${s.since ? ` · since ${when(s.since)}` : ''}${s.symbols
+          ? ` · ${s.symbols.length} of 30 symbols` : ''}`
         : `<span class="state run-error">down</span> <span class="sub">${esc(s.error || '')}</span>`}</td></tr>`;
       return [head, ...pairs.map(([t, p]) => `
         <tr class="has-data" data-ticker="${esc(t)}"><td></td><td><b>${esc(t)}</b>${live.liveTickers?.includes(t) ? ' <span class="state fresh">live</span>' : ''}</td>
           <td class="num">${p.price == null ? '–' : esc(String(p.price))}</td><td class="num">${num(p.trades)}</td>
           <td>${p.last ? ago(new Date(p.last).toISOString()) : '–'}</td></tr>`)];
     });
-    return `<h4>Live streams <span class="p-muted small">public exchange feeds, no key · each exchange's trades in its own tick file</span></h4>
+    return `<h4>Live streams <span class="p-muted small">crypto: public exchange feeds, no key · stocks: IEX's trades
+      through Alpaca (your keys; one exchange, a small share of volume) · each feed's trades in its own tick file</span></h4>
       <div class="table-wrap"><table class="act-table">
-        <thead><tr><th>Exchange</th><th>Coin</th><th class="num">Last price</th><th class="num">Trades recorded</th><th>Last trade</th></tr></thead>
+        <thead><tr><th>Feed</th><th>Symbol</th><th class="num">Last price</th><th class="num">Trades recorded</th><th>Last trade</th></tr></thead>
         <tbody>${rows.join('')}</tbody></table></div>`;
   }
 

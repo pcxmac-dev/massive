@@ -139,7 +139,7 @@ derivation record). Keys are read from user environment variables only. Plan pri
 | Class – source | History here | Live stream | Key | Kept in | Quality |
 |---|---|---|---|---|---|
 | stock – massive | minute and daily, 2 years; published end of day (free plan, 5 req/min) | none on the free plan; 15-min delayed from Stocks Starter (~$29/mo), real-time SIP on Advanced (~$199/mo) | `MASSIVE_API_KEY` set | feeds/massive.db | 0.90 prior (consolidated) |
-| stock – alpaca | SIP minute and daily from 2016, latest 15 min held back | IEX real time, 30 symbols, 1 connection (free Basic); SIP real time on Algo Trader Plus (paid) | `ALPACA_API_KEY_ID` + `ALPACA_API_SECRET_KEY` **not set** | feeds/alpaca.db | 0.90 prior |
+| stock – alpaca | SIP minute and daily from 2016, latest 15 min held back | IEX real time, 30 symbols, 1 connection (free Basic); SIP real time on Algo Trader Plus (paid) | `ALPACA_API_KEY_ID` + `ALPACA_API_SECRET_KEY` set (paper keys) | feeds/alpaca.db; IEX live in feeds/iex.db | 0.90 prior |
 | stock – tiingo | daily from 1962 (split-adjusted); IEX intraday | IEX stream (free-tier access unconfirmed) | `TIINGO_API_KEY` **not set** | feeds/tiingo.db | 0.90 prior |
 | index – massive | end of day (free plan) | paid Indices plans | set | feeds/massive.db | 0.90 prior |
 | index – cboe | daily CSV archive (VIX family), closed feed | none | none | feeds/cboe.db | 1.00 prior (official) |
@@ -162,9 +162,11 @@ derivation record). Keys are read from user environment variables only. Plan pri
 - **Crypto: Coinbase's public WebSocket** (no key; the reference exchange), with Kraken's and
   Bitstamp's public WebSockets for a live composite. Not Bitfinex (its premium). Well-known coins
   only: BTC, ETH, SOL, XRP, ADA, DOGE, LTC, LINK (listed on all three).
-- **Stocks: Alpaca's IEX stream**, once the free Alpaca keys are set: real-time prices for up to 30
-  symbols. IEX is one exchange (a few % of volume): prices are sound, volumes partial. Consolidated
-  real time (SIP) needs a paid plan (Alpaca Algo Trader Plus, Massive Stocks Advanced).
+- **Stocks: Alpaca's IEX stream** (wired, with the free Alpaca keys): real-time trades for up to 30
+  symbols, those open on a chart first, then the rail's watchlists. IEX is one exchange (a few % of
+  volume): prices are sound, volumes partial, so its trades are a feed of their own (`iex`) that a
+  merged chart shows only where no whole-market feed has bars yet. Consolidated real time (SIP)
+  needs a paid plan (Alpaca Algo Trader Plus, Massive Stocks Advanced).
 - **Indices:** no free live index; their ETFs (SPY, QQQ, DIA, IWM) on Alpaca's IEX stream as proxies.
 - **Currencies:** Tiingo's forex stream if its free tier allows (key needed; to be confirmed), else
   a paid Massive Currencies plan.
@@ -224,7 +226,7 @@ the cost; requests are estimates.
 | 7 | Massive Basic for options (contracts, per-contract end-of-day bars), indices (non-flagship), currencies (grouped daily), futures (from 2017) | Massive | per class, own 5/min | SPX, DJI, RUT and VIX are not on Indices Basic |
 | 8 | Kraken directly (trades from 2013 at ~1 req/s; WS trades and OHLC) | Kraken public | trades backfill very large | Kraken data now comes via Alpaca (`us-1`) |
 | 9 | L3 order flow and funding | Bitstamp `live_orders` (public), `order_data` (30 days); Bitstamp/Bitfinex funding and derivatives status | low | |
-| 10 | Alpaca with free keys: SIP bars older than 15 min (10,000 per request at 200/min), IEX live (30 symbols), corporate actions, Benzinga news, screener, options chains with Greeks (from Feb 2024) | Alpaca | — | waiting for `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` |
+| 10 | Alpaca with free keys: SIP bars older than 15 min (10,000 per request at 200/min), IEX live (30 symbols), corporate actions, Benzinga news, screener, options chains with Greeks (from Feb 2024) | Alpaca | — | keys set; IEX live wired (live.py); the rest not yet |
 | 11 | Cboe put/call ratios (CSVs 2006-2019, archive 1995-2003; daily pages after), CFE volume and open interest; check SKEW/VIX3M on the same URL pattern | Cboe public files | a few files, 1 page a day | |
 | 12 | Tiingo with a free key: adjusted end of day (500 symbols/month, 1,000 requests/day), Dow 30 fundamentals, IEX reference-price and crypto WebSockets | Tiingo | — | waiting for `TIINGO_API_KEY` |
 
@@ -235,9 +237,9 @@ the cost; requests are estimates.
 | Real index levels for non-US markets | colours use US-listed proxy funds (USD, US hours), not the local index | Massive indices plan, or an index data vendor | ❌ |
 | ~20 exchanges without a proxy fund (Prague, Budapest, Baltics, Dhaka...) | they stay uncoloured | local index data | ❌ |
 | Ticks before the one-year window | seconds charts and tick analysis stop a year back | raise `TICK_HISTORY_DAYS` (≈390 GB and ~550k requests per extra year for the current watchlist) | ⚠️ by choice |
-| Alpaca stock keys | without them Alpaca collects crypto only; with them it serves stock history from 2016 and the current session (15 min delayed) | a free Alpaca account's API keys, as user environment variables | ❌ waiting for keys |
+| Alpaca stock keys | without them Alpaca collects crypto only; with them it serves stock history from 2016 and the current session (15 min delayed) | a free Alpaca account's API keys, as user environment variables | ✅ set |
 | Audit referee | with two feeds an audit says how far they differ, not which is right (their scores move together) | a third feed, or official closing prints | ⚠️ |
-| Live recorder (websocket) | the Live view's "recording" is grey; current-session data arrives only with fetcher runs | Massive websockets (paid plans) | ❌ |
+| Live recorder (websocket) | stocks stream from IEX only (30 symbols, one exchange's volume); the whole market's current session arrives with fetcher runs | Massive or Alpaca SIP websockets (paid plans) | ⚠️ IEX |
 | Icons for futures products and indices | lettered badges only | none from Massive; would need a curated set | ❌ |
 | Directory details refresh | details re-checked every 90 days with spare budget only | — | ⚠️ |
 | Shiller fundamentals after 2023 | the mirror stops dividends, earnings, CPI and CAPE in 2023 | Shiller's own `ie_data.xls` (shillerdata.com; needs an .xls reader) | ⚠️ mirror lags |
