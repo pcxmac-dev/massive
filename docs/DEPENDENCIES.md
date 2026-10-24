@@ -98,18 +98,32 @@ comparison, never the bars. Audits run after new data (queued for the other feed
 
 ### Research datasets (`datasets.py`)
 
-Free public files, downloaded whole (`datasets fetch`), each provider in its own file
-(`datasets/<provider>.db`). A file that will not change again is closed and never fetched again;
-the others refresh on their own cadence in the hourly sync, but only once fetched by hand the first
-time. Each dataset carries a quality prior by provenance: official 1.00, the researcher's own
-library 0.85, a mirror of someone else's data 0.80.
+Free public files, each provider in its own file (`datasets/<provider>.db`), point in time: every
+version of every value is kept with when its source published it, when it was stored here and the
+file version it came from; `datasets show NAME SERIES --as-of DATE` reads what was public then.
+
+- **GitHub-hosted datasets are git submodules** of this repository (`data/github/<owner>/<repo>`,
+  pinned commits; `git submodule update --init` after cloning). Their whole commit history is
+  imported, each commit a published version at its commit time; a fetch reads new commits and checks
+  the submodule out at the newest (commit the new pin to record it).
+- **Downloaded files** are kept locally, every distinct version, named by checksum
+  (`<data>/sources/datasets/<provider>/<file>.<sha256[:12]>.<ext>`); a version is dated by the
+  file's Last-Modified time. A file that will not change again is closed and never fetched again.
+- A file's first import is history published on a schedule, dated by the source's rule (never later
+  than the file): COT as of Tuesday, released Friday 15:30 ET; French data for month M around the
+  15th of M+2; Shiller early the next month; IMF around the 5th of the next month; S&P 500 members
+  from their "date added".
+
+Refresh: in the hourly sync on each dataset's cadence, but only once fetched by hand the first time.
+Each dataset carries a quality prior by provenance: official 1.00, the researcher's own library 0.85,
+a mirror of someone else's data 0.80.
 
 | Dataset | Source | Span (Oct 2026) | Refresh | Notes |
 |---|---|---|---|---|
-| S&P 500 constituents | datasets/s-and-p-500-companies (GitHub mirror of the Wikipedia list, ODC PDDL) | 503 current members | weekly | GICS sector of members drives the market map's sectors |
+| S&P 500 constituents | submodule datasets/s-and-p-500-companies (mirror of the Wikipedia list, ODC PDDL) | 503 current members; 200 versions, 870 joins and 367 departures recorded | weekly | GICS sector of members drives the market map's sectors; membership readable as of a date |
 | Fama/French 3 factors (daily, monthly), 5 factors (daily), 49 industries (daily, value-weighted) | Kenneth R. French Data Library (Tuck) | 1926-07 (5 factors 1963-07) to 2026-08 | monthly; revised history replaces the old | percent returns; -99.99 = missing |
-| Shiller US market (S&P composite, dividends, earnings, CPI, long rate, CAPE) | datasets/s-and-p-500 (mirror of shillerdata.com) | price 1871-01 to 2026-09; the other series stop in 2023 (mirror lags) | monthly | the mirror writes 0 for missing; read as missing |
-| IMF primary commodity prices (53 commodities, 10 indexes, 2005 = 100) | datasets/commodity-prices (mirror of IMF data, frozen) | 1980-02 to 2017-06 | closed | IMF terms: personal, non-commercial use |
+| Shiller US market (S&P composite, dividends, earnings, CPI, long rate, CAPE) | submodule datasets/s-and-p-500 (mirror of shillerdata.com) | price 1871-01 to 2026-09; the other series stop in 2023 (mirror lags); 38 versions, the mirror not updated 2018-2024 | monthly | the mirror writes 0 for missing (read as missing); its first versions date months as decimal years; real series are restated every month (revisions) |
+| IMF primary commodity prices (53 commodities, 10 indexes, 2005 = 100) | submodule datasets/commodity-prices (mirror of IMF data, frozen) | 1980-02 to 2017-06; 4 versions | none (frozen) | IMF terms: personal, non-commercial use |
 | CFTC Commitments of Traders, legacy futures-only | cftc.gov (public domain) | 1986-01 to the latest Tuesday | weekly; past years closed | values are as of Tuesday, published Friday 15:30 ET |
 
 ## 2. Calendars and time

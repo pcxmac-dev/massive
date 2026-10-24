@@ -243,8 +243,9 @@ CREATE TABLE IF NOT EXISTS audit_queue (
     PRIMARY KEY (ticker, timespan, start_ms, owner)
 );
 
--- Files of the research datasets (datasets.py): when each was fetched, and whether it is closed
--- (final: never fetched again). Their values are in datasets/<provider>.db.
+-- File versions of the research datasets (datasets.py): when each was fetched, whether it is closed
+-- (final: never fetched again), its checksum, the time its source published it, where the copy is
+-- kept, and what it is (a git commit, or the sha256 of a download). Values: datasets/<provider>.db.
 CREATE TABLE IF NOT EXISTS dataset_files (
     dataset    TEXT    NOT NULL,
     url        TEXT    NOT NULL,
@@ -300,4 +301,9 @@ MIGRATIONS = [
     ("directory", "retired_on", "TEXT"),
     # A watched symbol no longer listed: its history is still filled, no new data is expected.
     ("watchlist", "retired_on", "TEXT"),
+    # Dataset file versions: checksum, publication time, origin (commit or sha256), local copy.
+    ("dataset_files", "sha256", "TEXT"),
+    ("dataset_files", "version_at", "TEXT"),
+    ("dataset_files", "origin", "TEXT"),
+    ("dataset_files", "local_path", "TEXT"),
 ]

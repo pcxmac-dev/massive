@@ -241,7 +241,8 @@ def cmd_datasets(args, settings: Settings) -> int:
                 for t, m in sorted(store.constituents(ds.provider, "S&P 500").items()):
                     print(f"{t:6} {m['sector'] or '':22} {m['industry'] or '':40} {m['name']}")
                 return 0
-            df = store.dataset_values(ds.provider, ds.name, args.names[1])
+            as_of = int(datetime.combine(args.as_of, datetime.min.time(), ET).timestamp() * 1000) if args.as_of else None
+            df = store.dataset_values(ds.provider, ds.name, args.names[1], as_of=as_of)
             for ts, v in df.tail(args.tail).itertuples(index=False):
                 print(f"{_day(ts)}  {v:g}")
             return 0
@@ -249,7 +250,9 @@ def cmd_datasets(args, settings: Settings) -> int:
             if not d["files"]:
                 state = "not fetched (datasets fetch " + d["name"] + ")"
             else:
-                state = (f"{d['files']} files ({d['closed']} closed), {d['bytes'] / 1e6:.1f} MB, "
+                kept = (f"{d['files']} versions from {d['source']}" if d["source"].startswith("git")
+                        else f"{d['files']} files ({d['closed']} closed), {d['bytes'] / 1e6:.1f} MB")
+                state = (f"{kept}, "
                          + (f"{d['members']} members" if d["members"] else
                             f"{d['series']:,} series, {d['values']:,} values {_day(d['first'])} -> {_day(d['last'])}")
                          + f", fetched {d['fetched']:%Y-%m-%d}, quality {d['quality']:.2f}"
@@ -712,6 +715,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("names", nargs="*", help="fetch: datasets (default all); show: a dataset and one of its series")
     s.add_argument("--force", action="store_true", help="fetch: also files fetched recently (closed files never)")
     s.add_argument("--tail", type=int, default=12, help="show: how many of the newest values")
+    s.add_argument("--as-of", type=_date, help="show: the values as public on that date (YYYY-MM-DD)")
     s.set_defaults(func=cmd_datasets)
 
     s = sub.add_parser("status", help="what is stored, limits, and recent runs")

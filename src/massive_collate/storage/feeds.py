@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS ticks.trades (
 ) WITHOUT ROWID;
 """
 
+# Composite model of an asset traded on several exchanges (the bars of the 'composite' feed): the
+# deviation across exchanges per bar (see composite.py). Kept in the composite's own file.
 COMPOSITE = "composite"
 
 COMPOSITE_SCHEMA = """

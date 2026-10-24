@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import zipfile
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 import requests
@@ -13,6 +14,12 @@ from massive_collate.datasets import DATASETS, due_files, fetch, parse_cot, pars
 from massive_collate.storage import Store
 
 TODAY = date(2026, 10, 23)
+
+
+@pytest.fixture(autouse=True)
+def no_submodules(tmp_path, monkeypatch):
+    """Tests never touch the repository's own dataset submodules."""
+    monkeypatch.setattr(datasets, "REPOS", tmp_path / "no-repos")
 
 FRENCH_DAILY = """This file was created by CMPT_ME_BEME_RETS_DAILY using the 202608 CRSP database.
 The Tbill return is the simple daily rate.
@@ -179,7 +186,7 @@ def test_due_files_force_skips_closed(store):
     fetch(store, ["cftc-cot-legacy"], today=TODAY, session=_Session(_web), log=lambda *_: None)
     assert due_files(store, ds, TODAY, force=True) == [(datasets.CFTC + "deacot2026.zip", False)]
     with pytest.raises(ValueError):
-        store.save_dataset("../x", "x", datasets.Parsed())
+        store.save_dataset_version("../x", "x", datasets.Parsed(), 0, "test")
 
 
 def test_commodities_skip_missing_cells():
@@ -189,7 +196,7 @@ def test_commodities_skip_missing_cells():
     assert parsed.series["Gold"][1] == "USD (nominal)" and parsed.series["All Commodity Price Index"][1] == "index (2005 = 100)"
 
 
-def test_shiller_zeros_are_missing_and_a_one_file_dataset_is_replaced(store):
+def test_shiller_zeros_are_missing_and_what_a_new_version_drops_is_withdrawn(store):
     first = (b"Date,SP500,Earnings,PE10\n1871-01-01,4.44,0.4,0\n2026-08-01,7711.32,0,0\n")
     second = (b"Date,SP500,Earnings,PE10\n1871-01-01,4.44,0.4,0\n2026-08-01,7711.32,0,0\n2026-09-01,7669.41,0,0\n")
     files = iter([first, second])
@@ -197,11 +204,12 @@ def test_shiller_zeros_are_missing_and_a_one_file_dataset_is_replaced(store):
     fetch(store, ["shiller-us-market-monthly"], today=TODAY, session=session, log=lambda *_: None)
     series = {r["series"]: r["n"] for r in store.dataset_series("shiller", "shiller-us-market-monthly")}
     assert series == {"SP500": 2, "Earnings": 1}  # PE10 had only zeros: no values, no series
-    store.save_dataset("shiller", "shiller-us-market-monthly", datasets.Parsed(values=[("Old", 0, 1.0)],
-                                                                               series={"Old": ("Old", "", "month")}))
+    store.save_dataset_version("shiller", "shiller-us-market-monthly",
+                               datasets.Parsed(values=[("Old", 0, 1.0)], series={"Old": ("Old", "", "month")}), 1, "t")
     fetch(store, ["shiller-us-market-monthly"], today=TODAY, session=session, log=lambda *_: None, force=True)
-    series = {r["series"]: r["n"] for r in store.dataset_series("shiller", "shiller-us-market-monthly")}
-    assert series == {"SP500": 3, "Earnings": 1}  # replaced whole: the withdrawn series is gone
+    series = {r["series"]: r["n"] for r in store.dataset_series("shiller", "shiller-us-market-monthly") if r["n"]}
+    assert series == {"SP500": 3, "Earnings": 1}  # the series the new version dropped is withdrawn
+    assert store.dataset_values("shiller", "shiller-us-market-monthly", "Old", as_of=10)["value"].tolist() == [1.0]
 
 
 def test_chart_app_lists_datasets_and_maps_members_by_gics(tmp_path):
@@ -239,3 +247,138 @@ def test_viewer_endpoints(tmp_path):
     with pytest.raises(LookupError):
         app.dataset_series("no-such-dataset")
     s.close()
+
+
+
+# -- point in time ------------------------------------------------------------------------------
+
+def _version(store, values, version_ms, origin, **kw):
+    parsed = datasets.Parsed(values=values, series={"X": ("X", "%", "day")})
+    return store.save_dataset_version("p", "d", parsed, version_ms, origin, **kw)
+
+
+def test_revisions_and_withdrawals_are_versions_read_as_of_a_time(store):
+    assert _version(store, [("X", 100, 1.0), ("X", 200, 2.0)], 1_000, "v1")["new"] == 2
+    counts = _version(store, [("X", 100, 1.5), ("X", 300, 3.0)], 2_000, "v2", withdraw=True)
+    assert (counts["revised"], counts["new"], counts["withdrawn"]) == (1, 1, 1)
+    latest = store.dataset_values("p", "d", "X")
+    assert latest.values.tolist() == [[100, 1.5], [300, 3.0]]  # 200 withdrawn, 100 revised
+    then = store.dataset_values("p", "d", "X", as_of=1_500)
+    assert then.values.tolist() == [[100, 1.0], [200, 2.0]]  # what was public before the revision
+    assert store.dataset_values("p", "d", "X", as_of=500).empty  # nothing was public yet
+    assert [v["value"] for v in store.dataset_versions("p", "d", "X", 100)] == [1.0, 1.5]
+    assert _version(store, [("X", 100, 1.5), ("X", 300, 3.0)], 3_000, "v3", withdraw=True)["unchanged"] == 2
+    assert {r["series"]: r["n"] for r in store.dataset_series("p", "d")} == {"X": 2}
+
+
+def test_a_first_import_is_dated_by_the_publication_rule_never_after_the_file(store):
+    _version(store, [("X", 100, 1.0), ("X", 9_000, 2.0)], 5_000, "v1", first_rule=lambda ts: ts + 1_000)
+    assert [v["available_at"] for v in store.dataset_versions("p", "d", "X", 100)] == [1_100]  # by the rule
+    assert [v["available_at"] for v in store.dataset_versions("p", "d", "X", 9_000)] == [5_000]  # capped at the file
+    assert store.dataset_values("p", "d", "X", as_of=2_000)["ts"].tolist() == [100]
+
+
+def test_publication_rules():
+    tue = datasets._at(date(2026, 10, 20))  # COT as of Tuesday 20 Oct
+    assert datetime.fromtimestamp(datasets._cot_published(tue) / 1000, datasets.ET) == datetime(
+        2026, 10, 23, 15, 30, tzinfo=datasets.ET)  # Friday 15:30 ET
+    aug = datasets._at(date(2026, 8, 17))
+    assert datasets._day_of(datasets._months_after(2, 15)(aug)) == date(2026, 10, 15)  # French: mid-month after next
+    dec = datasets._at(date(2026, 12, 1))
+    assert datasets._day_of(datasets._months_after(1, 2)(dec)) == date(2027, 1, 2)  # across the year
+
+
+def test_index_members_join_and_leave_point_in_time(store):
+    def members(*tickers):
+        return datasets.Parsed(constituents=[{"index": "S&P 500", "ticker": t, "name": t, "sector": "Technology",
+                                              "added": "2020-03-02" if t == "AAA" else None} for t in tickers])
+
+    store.save_dataset_version("sp500", "sp", members("AAA", "BBB"), datasets._at(date(2026, 1, 5)), "c1")
+    counts = store.save_dataset_version("sp500", "sp", members("AAA", "CCC"), datasets._at(date(2026, 6, 1)), "c2")
+    assert (counts["joined"], counts["left"]) == (1, 1)
+    assert set(store.constituents("sp500", "S&P 500")) == {"AAA", "CCC"}
+    assert set(store.constituents("sp500", "S&P 500", as_of=datasets._at(date(2026, 3, 1)))) == {"AAA", "BBB"}
+    assert set(store.constituents("sp500", "S&P 500", as_of=datasets._at(date(2021, 1, 1)))) == {"AAA"}  # date added
+
+
+def test_downloads_are_kept_with_their_checksum_and_dated_by_last_modified(tmp_path):
+    class Resp(_Resp):
+        headers = {"Last-Modified": "Thu, 15 Oct 2026 14:00:00 GMT"}
+
+    with Store(tmp_path / "m.db") as store:
+        session = _Session(lambda url: Resp(200, _zip("F.CSV", FRENCH_DAILY)))
+        fetch(store, ["french-3-factors-daily"], today=TODAY, session=session, log=lambda *_: None)
+        f = next(iter(store.dataset_files("french-3-factors-daily").values()))
+        assert f["version_at"] == datetime(2026, 10, 15, 14, tzinfo=timezone.utc) and len(f["sha256"]) == 64
+        assert Path(f["local_path"]).exists() and Path(f["local_path"]).parent == tmp_path / "sources" / "datasets" / "french"
+        lines = []
+        fetch(store, ["french-3-factors-daily"], today=TODAY, session=session, log=lines.append, force=True)
+        assert any("unchanged" in l for l in lines)  # the same bytes: no new version
+
+
+def _git_repo(root, commits):
+    """A repository with one file committed in versions: [(iso date, text)]."""
+    import os
+    import subprocess
+
+    root.mkdir(parents=True)
+    run = lambda *a, env=None: subprocess.run(["git", "-C", str(root), *a], check=True, capture_output=True,
+                                              env={**os.environ, **(env or {})})
+    run("init", "-q", "-b", "main")
+    run("config", "user.email", "t@example.invalid")
+    run("config", "user.name", "t")
+    (root / "data").mkdir()
+    for when, text in commits:
+        (root / "data" / "data.csv").write_text(text)
+        run("add", "data/data.csv")
+        run("commit", "-q", "-m", when, env={"GIT_COMMITTER_DATE": when, "GIT_AUTHOR_DATE": when})
+
+
+def test_a_github_dataset_is_imported_commit_by_commit(tmp_path, monkeypatch):
+    repos = tmp_path / "repos"
+    _git_repo(repos / "datasets" / "s-and-p-500", [
+        ("2024-02-01T04:00:00+00:00", "Date,SP500,PE10\n1990-01-01,339.97,17.05\n2024-01-01,4815.6,31.1\n"),
+        ("2024-03-01T04:00:00+00:00", "Date,SP500,PE10\n1990-01-01,339.97,17.05\n2024-01-01,4815.6,31.1\n2024-02-01,5011.9,32.2\n"),
+        ("2024-04-01T04:00:00+00:00", "Date,SP500,PE10\n1990-01-01,339.97,17.05\n2024-01-01,4815.6,31.3\n2024-02-01,5011.9,32.2\n"),
+    ])
+    monkeypatch.setattr(datasets, "REPOS", repos)
+    ms = lambda iso: int(datetime.fromisoformat(iso).timestamp() * 1000)
+    with Store(tmp_path / "m.db") as store:
+        done = fetch(store, ["shiller-us-market-monthly"], today=TODAY, log=lambda *_: None)
+        assert done == {"shiller-us-market-monthly": 3}
+        name, jan24 = "shiller-us-market-monthly", datasets._at(date(2024, 1, 1))
+        versions = store.dataset_versions("shiller", name, "PE10", jan24)
+        assert [(v["value"], v["available_at"]) for v in versions] == [
+            (31.1, datasets._at(date(2024, 2, 2)) if datasets._at(date(2024, 2, 2)) < ms("2024-02-01T04:00:00+00:00")
+             else ms("2024-02-01T04:00:00+00:00")),  # the first commit: the rule, capped at the commit
+            (31.3, ms("2024-04-01T04:00:00+00:00"))]  # revised by the third commit, at its time
+        feb = store.dataset_versions("shiller", name, "SP500", datasets._at(date(2024, 2, 1)))
+        assert [v["available_at"] for v in feb] == [ms("2024-03-01T04:00:00+00:00")]  # new in the second commit
+        mid_march = store.dataset_values("shiller", name, "PE10", as_of=ms("2024-03-15T00:00:00+00:00"))
+        assert mid_march["value"].tolist() == [17.05, 31.1, 32.2]  # February's value came on 1 March; 31.3 not yet
+        assert len(store.dataset_files(name)) == 3 and all(f["origin"] for f in store.dataset_files(name).values())
+        assert fetch(store, ["shiller-us-market-monthly"], today=TODAY, log=lambda *_: None, force=True) == {name: 0}
+
+
+def test_values_stored_before_versioning_are_carried_over(tmp_path):
+    import sqlite3
+    from contextlib import closing
+
+    (tmp_path / "datasets").mkdir()
+    with closing(sqlite3.connect(tmp_path / "datasets" / "cftc.db")) as c, c:
+        c.execute("CREATE TABLE observations (dataset TEXT NOT NULL, series TEXT NOT NULL, ts INTEGER NOT NULL, "
+                  "value REAL NOT NULL, PRIMARY KEY (dataset, series, ts)) WITHOUT ROWID")
+        c.execute("INSERT INTO observations VALUES ('cftc-cot-legacy', '001602:open_interest', ?, 400000)",
+                  (datasets._at(date(2026, 10, 20)),))
+    with Store(tmp_path / "m.db") as store:
+        datasets.upgrade_legacy(store, log=lambda *_: None)
+        got = store.dataset_versions("cftc", "cftc-cot-legacy", "001602:open_interest", datasets._at(date(2026, 10, 20)))
+        assert [v["value"] for v in got] == [400000.0]
+        assert got[0]["available_at"] <= datasets._cot_published(datasets._at(date(2026, 10, 20)))
+        assert store.dataset_legacy("cftc") == ([], [])
+
+
+def test_shiller_dates_in_every_format_the_files_have_used():
+    d = datasets._shiller_date
+    assert [d("2026-09-01"), d("1871.01"), d("1871.1"), d("1871.04166"), d("1871.95833")] == [
+        date(2026, 9, 1), date(1871, 1, 1), date(1871, 10, 1), date(1871, 1, 1), date(1871, 12, 1)]

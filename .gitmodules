@@ -1,0 +1,9 @@
+[submodule "data/github/datasets/s-and-p-500"]
+	path = data/github/datasets/s-and-p-500
+	url = https://github.com/datasets/s-and-p-500
+[submodule "data/github/datasets/s-and-p-500-companies"]
+	path = data/github/datasets/s-and-p-500-companies
+	url = https://github.com/datasets/s-and-p-500-companies
+[submodule "data/github/datasets/commodity-prices"]
+	path = data/github/datasets/commodity-prices
+	url = https://github.com/datasets/commodity-prices

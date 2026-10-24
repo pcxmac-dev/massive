@@ -48,13 +48,13 @@ refresh, so the French library's revisions are lost.
 1. **Derivatives out of the GUI, with a causal mode.** Done: `calc/derivatives.py`; `Model.causal`
    (trailing window, value at t from data up to t; tests prove later data never changes it). The
    chart keeps the centred window for viewing.
-2. **Split `storage.py` by responsibility**, the `Store` class composing the parts and keeping its
-   interface: feed files (bars, ticks), coverage ledger, audits and quality, directory and listings
-   (with icons and reference details), datasets, app state (layouts, runs, kv). Pure moves.
-3. **Point-in-time storage.** `available_at` (publication time by each source's rule) and
-   `stored_at` on raw observations; corrections stored as new versions; an `as_of(t)` read path.
-   Datasets first (revisions are routine there: undo the replace-on-refresh), then feed bars.
-   Raw dataset files kept locally with checksums; GitHub-hosted datasets as pinned git submodules.
+2. **Split `storage.py` by responsibility.** Done: `storage/` is a package; the `Store` composes one
+   part per responsibility (feeds, watchlist, ledger, audits, markets, directory, datasets, app
+   state, maintenance; shared schema and helpers), each moved verbatim in its own commit.
+3. **Point-in-time storage.** Datasets done: every version of every value with `available_at`,
+   `stored_at` and `origin`; revisions and withdrawals are versions; `as_of` reads; raw downloads
+   kept locally by checksum; GitHub-hosted datasets are pinned git submodules whose commit history
+   is imported version by version. Feed bars next.
 4. **Derived results with provenance.** A `derivations` record (inputs and their versions, code
    version, settings) for bars built from ticks, composites, quality scores, audits and indicators;
    derived values stored apart from raw ones.
