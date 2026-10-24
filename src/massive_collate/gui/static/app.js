@@ -819,24 +819,44 @@ kc.registerIndicator({
     const data = c.getDataList();
     const { from, to } = c.getVisibleRange();
     if (!data.length || to <= from || state.model.kind !== 'price') return true;
-    let some = 0;
-    for (let i = from; i < to; i++) if (data[i]?.derived) some++;
-    renderDerivedChip(some, to - from);
-    if (!some || some === to - from) return true;
-    ctx.save();
-    ctx.setLineDash([]);
-    ctx.strokeStyle = '#9aa0a6'; ctx.globalAlpha = 0.85; ctx.lineWidth = 1;
+    let some = 0, interp = 0;
     for (let i = from; i < to; i++) {
-      const d = data[i];
-      if (!d?.derived) continue;
-      ctx.beginPath(); ctx.arc(px(xAxis, i), yAxis.convertToPixel(d.low) + 6, 2.5, 0, Math.PI * 2); ctx.stroke();
+      if (data[i]?.interp) interp++;
+      else if (data[i]?.derived) some++;
+    }
+    renderDerivedChip(some + interp, to - from, interp);
+    ctx.save();
+    if (interp) {
+      // Interpolated history (no data at this interval): a dashed violet line, a style used nowhere else.
+      ctx.strokeStyle = INTERP_COLOR; ctx.lineWidth = 1.6; ctx.setLineDash([6, 4]); ctx.globalAlpha = 0.95;
+      ctx.beginPath();
+      let pen = false;
+      for (let i = Math.max(0, from - 1); i < Math.min(data.length, to + 1); i++) {
+        const d = data[i];
+        if (!d?.interp) { pen = false; continue; }
+        const x = px(xAxis, i), y = yAxis.convertToPixel(d.close);
+        if (pen) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+        pen = true;
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    if (some && some + interp < to - from) {
+      ctx.strokeStyle = '#9aa0a6'; ctx.globalAlpha = 0.85; ctx.lineWidth = 1;
+      for (let i = from; i < to; i++) {
+        const d = data[i];
+        if (!d?.derived || d.interp) continue;
+        ctx.beginPath(); ctx.arc(px(xAxis, i), yAxis.convertToPixel(d.low) + 6, 2.5, 0, Math.PI * 2); ctx.stroke();
+      }
     }
     ctx.restore();
     return true;
   },
 });
 
-function renderDerivedChip(some, total) {
+const INTERP_COLOR = '#b07cff';  // interpolated history only
+
+function renderDerivedChip(some, total, interp = 0) {
   let chip = $('derivedChip');
   if (!chip) {
     chip = document.createElement('span');
@@ -846,7 +866,12 @@ function renderDerivedChip(some, total) {
   }
   const label = periodLabel(state.period);
   chip.hidden = !some;
-  chip.textContent = some === total ? 'derived*' : '◦ derived*';
+  chip.textContent = interp ? 'interpolated*' : some === total ? 'derived*' : '◦ derived*';
+  if (interp) {
+    chip.title = `* Interpolated data: where no ${label} data exists, the dashed violet line is drawn between the `
+      + '1-minute bars\' volume-weighted prices (derived, not trades); candles only where real data exists.';
+    return;
+  }
   chip.title = some === total && state.derivedFrom
     ? `* Derived data: no feed sends ${label} candles for this symbol; these are built here from ${state.derivedFrom}.`
     : some === total

@@ -187,3 +187,31 @@ def test_a_feeds_own_frames_are_collected_and_replace_the_built_ones(store):
     assert got["minute5"] == 1 and got["hour1"] == 1
     assert conn.execute("SELECT COUNT(*) FROM built_bars WHERE multiplier=5").fetchone()[0] == 0  # replaced
     assert store.coverage("SPCX", "minute:5", received_only=True).get("fake")
+
+
+def test_seconds_can_go_on_past_the_second_layer_interpolated_from_minutes(store, monkeypatch):
+    from massive_collate.gui import bars as gui_bars
+    from massive_collate.gui.bars import BarEngine
+    from massive_collate.gui.profile_gaps import uncovered
+
+    monkeypatch.setattr(gui_bars, "INTERPOLATED", frozenset({"BTCUSD"}))  # off for every symbol now
+
+    assert uncovered((0, 100), [(10, 20), (15, 30), (50, 60)]) == [(0, 10), (30, 50), (60, 100)]
+    t0 = _ms("2026-10-20 10:00", "UTC")
+    mins = [{"t": t0 + i * 60_000, "o": 100.0 + i, "h": 100.5 + i, "l": 99.5 + i, "c": 100.0 + i, "v": 1.0,
+             "vw": 100.0 + i} for i in range(10)]
+    mins += [{"t": t0 + (20 + i) * 60_000, "o": 200.0, "h": 200.0, "l": 200.0, "c": 200.0, "v": 1.0, "vw": 200.0}
+             for i in range(3)]  # after a 10-minute gap
+    store.upsert_bars("coinbase", "BTCUSD", "minute", 1, mins)
+    secs = [{"t": t0 + 22 * 60_000 + i * 1000, "o": 200.0, "h": 200.0, "l": 200.0, "c": 200.0, "v": 0.1, "n": 1}
+            for i in range(60)]  # the last minute in seconds
+    store.upsert_built_bars("coinbase", "BTCUSD", "second", 1, secs, 7)
+    store.add_coverage("coinbase", "BTCUSD", "second", t0 + 22 * 60_000, t0 + 23 * 60_000, origin="ticks")
+    page = BarEngine(store).bars("coinbase", "BTCUSD", "second", 1, "extended", limit=5000)
+    bars = {b["timestamp"]: b for b in page["bars"]}
+    real = [b for b in bars.values() if not b.get("interp")]
+    assert len(real) == 60
+    mid = bars[t0 + 60_000]  # half way between minute 0's middle (100 at 0:30) and minute 1's (101 at 1:30)
+    assert mid["interp"] and mid["derived"] and mid["close"] == pytest.approx(100.5) and mid["volume"] == 0
+    assert t0 + 15 * 60_000 not in bars  # nothing drawn across the 10-minute gap
+    assert "interpolated" in page

@@ -268,9 +268,14 @@ def lod_aggregate(bars: pd.DataFrame, k: int) -> pd.DataFrame:
 
 
 EXTRA_COLUMNS = ("yang_start", "yang", "switch", "up", "env_high", "env_low", "dev_sd", "venues_n", "q1", "med", "q3",
-                 "derived")
+                 "derived", "interp")
 # Derived models stored as bars: not feeds of their own in the merged view.
 MODEL_SOURCES = ("composite",)
+# Symbols whose second intervals continue back past their one-second data with values interpolated
+# from their minute bars. None for now: crypto has free sources of real seconds (trades), which are
+# collected instead; kept for symbols with no such source.
+INTERPOLATED: frozenset = frozenset()
+INTERP_GAP_MS = 5 * 60_000  # minutes further apart than this are a gap: nothing is drawn across it
 
 
 def utc_days(s) -> bool:
@@ -290,7 +295,8 @@ def to_records(bars: pd.DataFrame) -> list[dict]:
         r = {"timestamp": int(t), **{c: cols[c][i] for c in COLUMNS}}
         for c, values in extra.items():
             v = values[i]
-            r[c] = None if isinstance(v, float) and np.isnan(v) else (bool(v) if c in ("yang", "yang_start", "up", "derived") else v)
+            r[c] = None if isinstance(v, float) and np.isnan(v) else (
+                bool(v) if c in ("yang", "yang_start", "up", "derived", "interp") else v)
         records.append(r)
     return records
 
@@ -928,8 +934,12 @@ class BarEngine:
     def _fine_page(self, s: Series, span: int, session: str, to_ms: int | None, since_ms: int | None,
                    limit: int) -> dict:
         """A page of second bars read from the layer: widen the window backwards until it holds
-        `limit` bars or the layer's start is reached."""
+        `limit` bars or the layer's start is reached. For INTERPOLATED symbols the history goes
+        on past the layer, interpolated from the minute bars (`_interpolated`)."""
+        interp = s.ticker in INTERPOLATED and not s.frame.empty
         first = min(a for a, _ in s.fine_spans)
+        if interp:
+            first = min(first, int(epoch_ms(s.frame.index[:1])[0]))
         last = max(b for _, b in s.fine_spans)
         if since_ms is not None:
             bars = self._fine_bars(s, span, session, since_ms, last + 1000)
@@ -939,12 +949,58 @@ class BarEngine:
         while True:
             lo = max(first, hi - width)
             bars = self._fine_bars(s, span, session, lo, hi)
+            if interp:
+                bars = self._with_interpolated(s, bars, span, lo, hi)
             if len(bars) >= limit or lo <= first:
                 break
             width *= 4
         sel = bars.tail(limit)
         more = len(bars) > limit or lo > first
-        return {"bars": to_records(sel), "more": bool(more), "total": int(len(bars)), "fine": True}
+        page = {"bars": to_records(sel), "more": bool(more), "total": int(len(bars)), "fine": True}
+        if interp and "interp" in sel and sel["interp"].any():
+            page["interpolated"] = (f"no one-second data here: a line interpolated from the {s.kind} bars' "
+                                    "volume-weighted prices (derived, not trades)")
+        return page
+
+    def _with_interpolated(self, s: Series, bars: pd.DataFrame, span: int, lo: int, hi: int) -> pd.DataFrame:
+        """`bars` (real second bars of [lo, hi)) with the time the one-second layer does not cover
+        filled every `span` seconds by straight lines between the minute bars' volume-weighted
+        prices (each at its minute's middle). Marked interpolated and derived; no volume. Minutes
+        more than INTERP_GAP_MS apart are a gap: nothing is drawn across it."""
+        from .profile_gaps import uncovered
+
+        step = span * 1000
+        holes = uncovered((lo, hi), s.fine_spans)
+        if not holes:
+            return bars
+        m = s.frame[(s.frame.index >= pd.Timestamp(lo - INTERP_GAP_MS, unit="ms", tz="UTC"))
+                    & (s.frame.index < pd.Timestamp(hi + INTERP_GAP_MS, unit="ms", tz="UTC"))]
+        if len(m) < 2:
+            return bars
+        knots = epoch_ms(m.index) + 30_000  # each minute's middle
+        vol = m["volume"].to_numpy(dtype=float)
+        price = np.where(vol > 0, m["turnover"].to_numpy(dtype=float) / np.where(vol > 0, vol, 1), m["close"].to_numpy(dtype=float))
+        out = []
+        for a, b in holes:
+            t = np.arange(-(-a // step) * step, b, step, dtype=np.int64)
+            t = t[(t >= knots[0]) & (t <= knots[-1])]
+            if not len(t):
+                continue
+            i = np.searchsorted(knots, t, side="right")
+            gap = (knots[np.clip(i, 0, len(knots) - 1)] - knots[np.clip(i - 1, 0, len(knots) - 1)]) > INTERP_GAP_MS
+            t = t[~gap]
+            out.append(pd.DataFrame({"t": t, "v": np.interp(t, knots, price)}))
+        if not out:
+            return bars
+        f = pd.concat(out)
+        idx = pd.to_datetime(f["t"].to_numpy(), unit="ms", utc=True).tz_convert(ET)
+        filled = pd.DataFrame({"open": f["v"].to_numpy(), "high": f["v"].to_numpy(), "low": f["v"].to_numpy(),
+                               "close": f["v"].to_numpy(), "volume": 0.0, "turnover": 0.0, "trades": 0,
+                               "derived": True, "interp": True}, index=idx)
+        if bars.empty:
+            return filled
+        bars = bars.assign(interp=False)
+        return pd.concat([bars, filled]).sort_index(kind="stable")
 
     def _resampled(self, s: Series, period: str, span: int, session: str) -> pd.DataFrame:
         if self._windowed(s, period):  # whole-series uses (projection, chart types): the latest day of seconds

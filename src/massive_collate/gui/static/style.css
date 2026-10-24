@@ -605,3 +605,4 @@ table.l2 tr.at td { background: color-mix(in srgb, var(--accent, #2962ff) 18%, t
 .w-table .w-x button { border: 0; background: none; color: var(--muted); cursor: pointer; visibility: hidden; }
 .w-table tr:hover .w-x button { visibility: visible; }
 .w-empty { padding: 8px 4px; white-space: normal; }
+.derived-tag.interp { color: #b07cff; border-color: #b07cff; }
