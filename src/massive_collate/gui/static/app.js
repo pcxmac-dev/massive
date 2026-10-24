@@ -353,7 +353,7 @@ chart.setDataLoader({
   unsubscribeBar: () => { clearInterval(state.poll); closeStream(); },
 });
 
-window.addEventListener('resize', () => { chart.resize(); applyNowPosition(); });
+window.addEventListener('resize', () => { chart.resize(); applyNowPosition(); placeHighlightMask(); });
 
 function closeStream() {
   state.stream?.close();
@@ -440,7 +440,7 @@ nowHandle.addEventListener('dblclick', () => {
   applyNowPosition();
   chart.scrollToRealTime(200);
 });
-chart.subscribeAction('onVisibleRangeChange', () => requestAnimationFrame(placeNowHandle));
+chart.subscribeAction('onVisibleRangeChange', () => requestAnimationFrame(() => { placeNowHandle(); placeHighlightMask(); }));
 window.addEventListener('massive:activity', () => requestAnimationFrame(placeNowHandle));  // live or not, again
 
 // -- level of detail -------------------------------------------------------------------
@@ -1616,6 +1616,15 @@ const FOURIER_CYCLES = 3;
 const FOURIER_MAX_HARMONIC = 400;  // a cycle of at least view / 400 bars: plenty for any screen
 let fourierFit = { key: '', from: 0, to: 0, values: [], periods: [] };
 
+// The bars the Fourier fit is made from: a highlight's on the Analysis view, else those in view.
+function fourierRange(c) {
+  const data = c.getDataList();
+  const span = highlightSpan();
+  if (span) return [barIndexAt(data, span.from), barIndexAt(data, span.to + 1)];
+  const { from, to } = c.getVisibleRange();
+  return [Math.max(0, from), to];
+}
+
 function fitFourier(data, from, to, k = FOURIER_CYCLES) {
   const key = `${from}:${to}:${data[to - 1]?.timestamp}:${data[to - 1]?.close}:${k}`;
   if (fourierFit.key === key) return fourierFit;
@@ -1651,20 +1660,17 @@ kc.registerIndicator({
   figures: [],
   calc: (list) => list.map(() => ({})),
   createTooltipDataSource: ({ chart: c }) => {
-    const { from, to } = c.getVisibleRange();
-    const fit = fitFourier(c.getDataList(), Math.max(0, from), to);
+    const fit = fitFourier(c.getDataList(), ...fourierRange(c));
     const p = state.period || { type: 'minute', span: 1 };
     const barMs = ({ second: 1, minute: 60, hour: 3600, day: 86400, week: 604800, month: 2629800, year: 31557600 }[p.type] || 60)
       * p.span * 1000 * lodFor();
     const text = fit.periods.length
-      ? `${fit.periods.length} strongest cycles in view: ${fit.periods.map((b) => `${b.toFixed(b < 10 ? 1 : 0)} bars (${fmtDuration(b * barMs)})`).join(' · ')}`
+      ? `${fit.periods.length} strongest cycles ${highlightSpan() ? 'in the highlight' : 'in view'}: ${fit.periods.map((b) => `${b.toFixed(b < 10 ? 1 : 0)} bars (${fmtDuration(b * barMs)})`).join(' · ')}`
       : 'too few bars in view';
     return { name: 'Fourier', calcParamsText: '', features: [], legends: [{ title: '', value: { text, color: '#ab47bc' } }] };
   },
   draw: ({ ctx, chart: c, xAxis, yAxis }) => {
-    const data = c.getDataList();
-    const { from, to } = c.getVisibleRange();
-    const fit = fitFourier(data, Math.max(0, from), to);
+    const fit = fitFourier(c.getDataList(), ...fourierRange(c));
     if (!fit.values.length) return true;
     ctx.save();
     ctx.strokeStyle = '#ab47bc'; ctx.lineWidth = 2; ctx.lineJoin = 'round';
@@ -2453,7 +2459,48 @@ function currentHighlight() {
   return highlightSummary(pa, pb, ext.key === key ? ext.stats : null);
 }
 
+// -- Analysis: a highlight focuses the indicators --------------------------------------------
+// On the Analysis view, with a highlight drawn, everything outside its time span is greyed out
+// across the price and every indicator pane, so the indicators are read for the boxed bars only;
+// the Fourier fit is made from those bars alone (fourierRange).
+const hlMask = [document.createElement('div'), document.createElement('div')];
+hlMask.forEach((m) => { m.className = 'hl-mask'; m.hidden = true; $('chart').append(m); });
+
+function highlightSpan() {
+  if (state.workspace !== 'analysis') return null;
+  const o = chart.getOverlays({ groupId: 'user', name: 'measure' })
+    .find((x) => x.points?.length >= 2 && x.points.every((p) => p.timestamp != null));
+  if (!o) return null;
+  const [a, b] = o.points.map((p) => p.timestamp);
+  return { from: Math.min(a, b), to: Math.max(a, b) };
+}
+
+// The first bar at or after `ts` in the loaded data (its length when none is).
+function barIndexAt(data, ts) {
+  let lo = 0, hi = data.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (data[mid].timestamp < ts) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+
+function placeHighlightMask() {
+  const span = highlightSpan();
+  const data = chart.getDataList();
+  const w = plotWidth();
+  if (!span || !w || !data.length) { hlMask.forEach((m) => { m.hidden = true; }); return; }
+  const half = chart.getBarSpace().bar / 2;
+  const x = (i) => chart.convertToPixel({ dataIndex: i }, { paneId: 'candle_pane' }).x;
+  const i1 = barIndexAt(data, span.from), i2 = Math.min(data.length - 1, barIndexAt(data, span.to + 1) - 1);
+  const x1 = Math.max(0, Math.min(w, x(i1) - half)), x2 = Math.max(0, Math.min(w, x(i2) + half));
+  const h = `${chart.getSize('x_axis_pane')?.top ?? 0}px`;
+  const [left, right] = hlMask;
+  Object.assign(left.style, { left: '0px', width: `${x1}px`, height: h });
+  Object.assign(right.style, { left: `${x2}px`, width: `${Math.max(0, w - x2)}px`, height: h });
+  left.hidden = !(x1 > 0);
+  right.hidden = !(x2 < w);
+}
+
 function renderHighlightPanel() {
+  placeHighlightMask();
   const s = currentHighlight();
   const box = $('pHighlight');
   if (!s) {

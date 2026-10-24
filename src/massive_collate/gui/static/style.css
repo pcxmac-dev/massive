@@ -560,6 +560,10 @@ button.ds-item.on { box-shadow: inset 3px 0 0 var(--accent); }
   background: repeating-linear-gradient(to bottom, var(--now-line) 0 4px, transparent 4px 8px); }
 body.light .now-line { --now-line: #a4aab2; }
 .now-line[hidden] { display: none; }
+/* Analysis: outside a highlight, the price and indicators greyed out */
+.hl-mask { position: absolute; top: 0; pointer-events: none; z-index: 3;
+  background: color-mix(in srgb, var(--bg) 68%, transparent); }
+.hl-mask[hidden] { display: none; }
 /* Limits table: the feed fetching now is marked. */
 .act-table.limits tr.live td:first-child { box-shadow: inset 2px 0 0 var(--accent, #2962ff); }
 .act-table.limits .warn { color: var(--warn, #d9a441); }
