@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import threading
 import time
@@ -27,7 +28,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-LIVE_COINS = ("BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LTC", "LINK")
+from . import killswitch
+
+LIVE_COINS =("BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LTC", "LINK")
 RECORDER_KEY = "live-recorder"
 STATUS_KEY = "live:status"
 OPEN_KEY = "live:open"  # {ticker: ms}: the symbols chart pages have open (gui/server.py notes them)
@@ -50,8 +53,13 @@ LOCK_CHECK_SECONDS = 30.0  # how often the recorder makes sure it still holds it
 # failure in a row (1 s up to MAX_BACKOFF) and starts over only after a connection that held for
 # STABLE_SECONDS. A server that accepts and at once drops the connection (Coinbase: "subscription
 # limit reached") is otherwise asked again every second, forever.
+# Past that, the kill policy (killswitch.py): a refusal, or FLAP_LIMIT connections dropped within
+# STABLE_SECONDS of connecting, kills the stream for 30 min and up; it is not tried while killed.
 MAX_BACKOFF = 300.0
 STABLE_SECONDS = 60.0
+KILL_CHECK_SECONDS = 30.0  # while a stream is killed: how often it looks whether the kill ended (or was lifted)
+REAP_SECONDS = 300.0  # how often the recorder looks for other recorder processes (and ends them)
+RECORDER_COMMAND = re.compile(r"-m\s+massive_collate\s+live\s*$")  # a recorder (not `live status`, `live stop`)
 DAY_MS = 86_400_000
 PING = "ping"  # keepalive by WebSocket ping frames rather than a message
 
@@ -97,7 +105,7 @@ class CoinbaseStream:
 
     def parse(self, msg: dict) -> list[tuple[str, dict]]:
         kind = msg.get("type")
-        if kind == "error":
+        if kind == "error":  # e.g. "Failed to subscribe" "subscription limit reached": a refusal
             raise ConnectionError(f"coinbase: {msg.get('message')} {msg.get('reason') or ''}".strip())
         if kind not in ("match", "last_match"):
             return []
@@ -121,6 +129,9 @@ class BitstampStream:
         event = msg.get("event")
         if event == "bts:request_reconnect":
             raise Reconnect("bitstamp asked for a new connection")
+        if event == "bts:error":
+            data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+            raise ConnectionError(f"bitstamp: {data.get('message') or msg}")
         if event != "trade":
             return []
         d = msg["data"]
@@ -271,9 +282,31 @@ class Recorder:
         return True
 
     def _run_stream(self, stream) -> None:
+        from .storage import Store
+
+        with Store(self.db_path) as store:  # kills are read and written from this thread: its own connection
+            self._stream_loop(stream, store)
+
+    def _killed(self, stream, store) -> bool:
+        """Whether the stream is killed (killswitch): then it is shown so and waited on, a while."""
+        k = killswitch.killed(store, stream.source, "live")
+        with self._lock:
+            self._status[stream.source]["killed"] = k
+            if k:
+                self._status[stream.source].update(
+                    connected=False, error=f"killed until {k['until'][11:16]} UTC: {k['why']}"[:200])
+        if k:
+            left = (datetime.fromisoformat(k["until"]) - datetime.now(timezone.utc)).total_seconds()
+            self.stop.wait(max(1.0, min(KILL_CHECK_SECONDS, left)))
+        return bool(k)
+
+    def _stream_loop(self, stream, store) -> None:
         backoff, failures = 1.0, 0
+        flaps = killswitch.Flapping()
         dynamic = getattr(stream, "dynamic", False)
         while not self.stop.is_set():
+            if self._killed(stream, store):
+                continue
             if dynamic and not self._wanted:  # nothing to stream: no connection
                 self.stop.wait(WANT_SECONDS)
                 continue
@@ -287,6 +320,7 @@ class Recorder:
                     self._status[stream.source].update(connected=True, since=datetime.now(timezone.utc).isoformat(),
                                                        error=None)
                 self.log(f"live: {stream.source} connected ({'stocks' if dynamic else f'{len(self.coins)} coins'})")
+                store.feed_event(stream.source, "live", "connected")
                 connected_at, misses, pongs = time.monotonic(), 0, 0
                 self._heard[stream.source] = int(time.time() * 1000)
                 while not self.stop.is_set():
@@ -323,9 +357,25 @@ class Recorder:
             except Exception as e:  # noqa: BLE001 - any error: down, logged, tried again (a dead thread stayed "connected")
                 if not isinstance(e, (OSError, ConnectionError, ValueError, KeyError)):
                     e = ConnectionError(f"{type(e).__name__}: {e}")
-                if connected_at is not None and time.monotonic() - connected_at >= STABLE_SECONDS:
+                held = connected_at is not None and time.monotonic() - connected_at >= STABLE_SECONDS
+                if held:
                     backoff, failures = 1.0, 0  # it had been working: a new failure, not more of the same
                 failures += 1
+                refused = killswitch.is_refusal(e)
+                if connected_at is not None or refused:
+                    store.feed_event(stream.source, "live", "refused" if refused else "dropped",
+                                     seconds=round(time.monotonic() - connected_at, 1) if connected_at is not None else None,
+                                     detail=str(e))
+                if not self.stop.is_set() and (refused or not held and flaps.drop(time.monotonic())):
+                    why = str(e) if refused else (f"{killswitch.FLAP_LIMIT} connections dropped within "
+                                                  f"{STABLE_SECONDS:.0f} s of connecting, the last: {e}")
+                    killswitch.strike(store, stream.source, "live", why, log=self.log)
+                    with self._lock:
+                        self._since.pop(stream.source, None)
+                        self._subs[stream.source] = {}
+                    flaps.clear()
+                    backoff, failures = 1.0, 0
+                    continue  # the top of the loop waits the kill out
                 with self._lock:
                     self._since.pop(stream.source, None)
                     self._subs[stream.source] = {}
@@ -459,7 +509,11 @@ class Recorder:
         stocks = any(getattr(s, "dynamic", False) for s in self.streams)
         with Store(self.db_path) as store:
             total, last_log, last_derive, last_want, last_lock = 0, time.time(), time.time(), 0.0, time.time()
+            last_reap = 0.0
             while True:
+                if self.locks and time.time() - last_reap > REAP_SECONDS:  # the lock holder: one recorder, strictly
+                    last_reap = time.time()
+                    reap_strays(self.log)
                 if self.locks and time.time() - last_lock > LOCK_CHECK_SECONDS:
                     last_lock = time.time()
                     if not self.holds_locks():
@@ -537,6 +591,27 @@ def release_locks(locks: list[Path]) -> None:
 
     for path in locks:
         release(path)
+
+
+def recorders() -> list[int]:
+    """Recorder processes on this machine, other than this process and its own launcher."""
+    from .proc import ancestors, processes
+
+    rows = processes()
+    mine = ancestors(os.getpid(), rows)
+    return [pid for pid, _, cmd in rows if pid not in mine and RECORDER_COMMAND.search(cmd.strip().strip('"'))]
+
+
+def reap_strays(log=print, others=None, terminate=None) -> int:
+    """End every other recorder on this machine (run by the one holding the machine lock): a
+    duplicate doubles the connections to the exchanges. Returns how many were ended."""
+    from .proc import terminate as end
+
+    strays = recorders() if others is None else others
+    ended = sum(1 for pid in strays if (terminate or end)(pid))
+    if ended:
+        log(f"live: ended {ended} other recorder process{'es' if ended > 1 else ''} (one recorder per machine)")
+    return ended
 
 
 def start_detached(db_path: Path) -> bool:

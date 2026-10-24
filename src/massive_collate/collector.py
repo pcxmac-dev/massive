@@ -34,7 +34,12 @@ EOD_READY_HOUR_ET = 20
 
 
 class StopRun(Exception):
-    """The run must stop: request cap reached, or the API is rate limiting us."""
+    """The run must stop: request cap reached, or the API is rate limiting us. `strike`: the
+    feed misbehaved (refused, or failing): its fetching is killed (killswitch.py)."""
+
+    def __init__(self, message: str = "", strike: bool = False):
+        super().__init__(message)
+        self.strike = strike
 
 
 @dataclass
@@ -85,7 +90,7 @@ def _guard(pages: Iterator[list[dict]]) -> Iterator[list[dict]]:
     except BudgetExhausted as e:
         raise StopRun(f"request cap reached ({e})") from e
     except RateLimited as e:
-        raise StopRun(f"rate limited ({e.message}); stopping until the next run") from e
+        raise StopRun(f"rate limited ({e.message}); stopping until the next run", strike=True) from e
 
 
 # -- resolution --------------------------------------------------------------
@@ -108,7 +113,7 @@ def resolve_resolution(
             except BudgetExhausted as e:
                 raise StopRun(f"request cap reached ({e})") from e
             except RateLimited as e:
-                raise StopRun(f"rate limited ({e.message})") from e
+                raise StopRun(f"rate limited ({e.message})", strike=True) from e
             store.set_entitlement(source.name, asset, resolution, ok)
         if ok:
             log(f"{ticker}: finest resolution on your plan is '{resolution}'")
@@ -596,7 +601,7 @@ def _guard_call(fn: Callable, *args, **kwargs):
     except BudgetExhausted as e:
         raise StopRun(f"request cap reached ({e})") from e
     except RateLimited as e:
-        raise StopRun(f"rate limited ({e.message}); stopping until the next run") from e
+        raise StopRun(f"rate limited ({e.message}); stopping until the next run", strike=True) from e
 
 
 class Refusals:
@@ -842,6 +847,7 @@ def sync(
                          key=lambda w: (_backfilling(w, floors[w["asset"]]), order.get(w["ticker"], len(order)),
                                         w["ticker"]))
         refusals = Refusals(store, source.name)
+        server_fails = 0  # symbols in a row whose server failed (5xx, no answer): FETCH_FAILURES kill the feed
         while pending:
             item, urgent = _next_item(pending, store, now)
             try:
@@ -958,11 +964,21 @@ def sync(
                         log(f"{ticker}: {source.name} archive complete; closed (not asked again)")
                 elif asset == "stock":
                     fetch_icon(source, store, ticker, log)
-            except RateLimited as e:  # the server says slow down: the run stops (until the next one)
-                raise StopRun(f"rate limited ({e.message}); stopping until the next run") from e
+            except RateLimited as e:  # the server says slow down: the run stops and the feed is killed
+                raise StopRun(f"rate limited ({e.message}); stopping until the next run", strike=True) from e
             except SourceError as e:  # this symbol's own error (404, 5xx after retries, an unexpected
                 # answer): it is skipped this run, the others go on, and one failing run after run waits a day
                 log(f"{item['ticker']}: {e}; skipped this run" + refusals.note(item["ticker"], now, str(e)))
+                from . import killswitch
+
+                if not isinstance(e, NotEntitled) and killswitch.is_refusal(e, e.status):  # no to the feed, not one symbol
+                    raise StopRun(f"refused by {source.name} ({e})", strike=True) from e
+                server_fails = server_fails + 1 if e.status == 0 or e.status >= 500 else 0
+                if server_fails >= killswitch.FETCH_FAILURES:
+                    raise StopRun(f"{server_fails} symbols in a row failed on {source.name}'s side (last: {e})",
+                                  strike=True) from e
+                continue
+            server_fails = 0  # a symbol went through: the feed works
         if closed:
             log(f"{source.name}: {closed} symbols closed (archive complete), not asked")
         if capped:
@@ -982,6 +998,10 @@ def sync(
     except StopRun as e:
         result.stopped = str(e)
         log(f"stopped: {e}")
+        if e.strike:  # refused, or failing: the feed's fetching is killed (killswitch.py)
+            from . import killswitch
+
+            killswitch.strike(store, source.name, "fetch", str(e), log=log)
         # rows of the symbol it stopped in were stored page by page: count them too
         result.rows = max(result.rows, store.rows_saved - saved_before)
     return result

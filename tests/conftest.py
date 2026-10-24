@@ -28,6 +28,16 @@ def no_recorders(monkeypatch, tmp_path):
     monkeypatch.setenv("LIVE_STOCKS", "off")
     monkeypatch.setenv("MASSIVE_LIVE_LOCK", str(tmp_path / "machine-live.lock"))  # never the real machine's
     monkeypatch.setattr(live, "start_detached", lambda db_path: False)
+    # Nor see or end the machine's processes: a test recorder holding its locks reaps "other"
+    # recorders (live.reap_strays), and once ended the user's real one.
+    from massive_collate import proc
+
+    monkeypatch.setattr(proc, "processes", lambda: [])
+
+    def no_terminate(pid):
+        raise AssertionError(f"a test tried to end process {pid}")
+
+    monkeypatch.setattr(proc, "terminate", no_terminate)
 
 
 class FakeResponse:

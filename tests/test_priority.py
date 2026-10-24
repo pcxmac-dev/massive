@@ -181,8 +181,10 @@ def test_pausing_stops_background_fetching_before_its_next_request_and_resumes(t
         p = collector.set_pause(store, True, now, minutes=600)  # asked for 10 h: two at most
         assert p["until"] == "2026-10-24T20:00:00+00:00" and collector.pause_state(store, now)["until"] == p["until"]
         assert collector.pause_state(store, now + timedelta(hours=2, seconds=1)) is None  # it ends on its own
+        real = datetime.now(timezone.utc)  # the client's check reads the clock: a pause from now
+        until = collector.set_pause(store, True, real, minutes=30)["until"]
         check = cli._pause_check(store, every=0)
-        assert check().startswith("fetching paused by you until 20:00")
+        assert check() == f"fetching paused by you until {until[11:16]} UTC"
 
         session = FakeSession([FakeResponse(body={"results": []})])
         client = MassiveClient("k", session=session, request_budget=10)

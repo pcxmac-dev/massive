@@ -116,6 +116,59 @@ def owns(path: Path) -> bool:
         return False
 
 
+def processes() -> list[tuple[int, int, str]]:
+    """(pid, parent pid, command line) of the Python processes this user can see; [] when they
+    cannot be listed. Windows: the system's own process table (CIM); elsewhere /proc."""
+    import subprocess
+
+    if os.name == "nt":
+        script = ("Get-CimInstance Win32_Process -Filter \"Name like 'python%'\" | "
+                  "ForEach-Object { \"$($_.ProcessId)`t$($_.ParentProcessId)`t$($_.CommandLine)\" }")
+        try:
+            out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                                 capture_output=True, text=True, timeout=60,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+        except (OSError, subprocess.SubprocessError):
+            return []
+        rows = []
+        for line in out.splitlines():
+            parts = line.split("\t", 2)
+            if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+                rows.append((int(parts[0]), int(parts[1]), parts[2]))
+        return rows
+    rows = []
+    for d in Path("/proc").glob("[0-9]*"):
+        try:
+            cmd = (d / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()
+            ppid = int((d / "stat").read_text().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        if "python" in cmd:
+            rows.append((int(d.name), ppid, cmd))
+    return rows
+
+
+def terminate(pid: int) -> bool:
+    """End a process (TerminateProcess on Windows, SIGTERM elsewhere). Whether it was told to."""
+    import signal
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except OSError:
+        return False
+
+
+def ancestors(pid: int, rows: list[tuple[int, int, str]]) -> set[int]:
+    """`pid` and its parents among `rows` (a venv's launcher runs the interpreter as its child)."""
+    parent = {p: pp for p, pp, _ in rows}
+    out, p = set(), pid
+    while p and p not in out:
+        out.add(p)
+        p = parent.get(p)
+    return out
+
+
 def release(path: Path) -> None:
     """Remove a lock file this process holds (never one another process took since)."""
     try:

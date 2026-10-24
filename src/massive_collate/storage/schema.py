@@ -49,6 +49,16 @@ CREATE TABLE IF NOT EXISTS request_days (   -- requests made per feed per UTC da
     PRIMARY KEY (source, day)
 );
 
+CREATE TABLE IF NOT EXISTS feed_events (    -- every connection's and run's outcome, per feed (killswitch.py)
+    at      TEXT NOT NULL,                      -- UTC, ISO
+    feed    TEXT NOT NULL,
+    kind    TEXT NOT NULL,                      -- live | fetch
+    outcome TEXT NOT NULL,                      -- connected, dropped, refused, killed, released; ok, stopped, failed, skipped
+    seconds REAL,                               -- live: how long the connection held; fetch: the run's requests
+    detail  TEXT
+);
+CREATE INDEX IF NOT EXISTS feed_events_by_feed ON feed_events (feed, kind, at);
+
 CREATE TABLE IF NOT EXISTS grouped_days (
     source     TEXT NOT NULL,
     day        TEXT NOT NULL,        -- YYYY-MM-DD

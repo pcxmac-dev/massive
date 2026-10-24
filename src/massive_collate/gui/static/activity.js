@@ -255,7 +255,7 @@
 
   // Every server's state and limits beside what this machine keeps to and has used.
   const HEALTH_CLASS = { ok: 'run-ok', fetching: 'fetching', idle: '', done: 'run-ok', limited: 'backfilling',
-                         down: 'run-error', off: '' };
+                         down: 'run-error', off: '', killed: 'run-error' };
   function limitsHtml(rows) {
     const t = Date.now() / 1000;
     const health = Object.fromEntries((data.health || []).map((h) => [h.source, h]));

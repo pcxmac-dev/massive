@@ -12,6 +12,7 @@ from .. import collector
 from ..collector import ET, history_floor
 from .. import freshness
 from ..config import Settings, Tier
+from .. import killswitch
 from ..live import RECORDER_KEY, STATUS_KEY
 from ..storage import Store
 
@@ -344,6 +345,9 @@ def health(store: Store, settings: Settings, now: datetime, limit_rows: list[dic
             state, why = "off", "this copy of the app is offline (MASSIVE_OFFLINE): it fetches nothing"
         elif p is None or not p.assets:
             state, why = "off", f"key not set ({KEY_NAMES.get(name, 'key')})"
+        elif kill := killswitch.killed(store, name, "fetch", now):
+            state, why = "killed", (f"killed until {kill['until'][11:16]} UTC (strike {kill.get('strikes', 1)}): "
+                                    f"{kill['why'][:140]}; `kills release {name}` lifts it")
         elif running and running.get("source") == name:
             state, why = "fetching", f"running now: {running.get('requests') or 0:,} requests"
         elif lim.get("leftToday") == 0:

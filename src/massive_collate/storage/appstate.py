@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .common import _now, _now_precise
@@ -132,6 +132,47 @@ class AppStateStore:
                 "UPDATE runs SET status='abandoned', finished_at=COALESCE(finished_at, ?), "
                 "message=COALESCE(message, '') || ' (run did not finish)' WHERE status='running'", (_now(),)
             ).rowcount
+
+    EVENT_DAYS = 30  # feed_events older than this are dropped as new ones come
+
+    def feed_event(self, feed: str, kind: str, outcome: str, seconds: float | None = None, detail: str = "",
+                   now: datetime | None = None) -> None:
+        """Record one outcome of a feed's live connection or fetch run (the evidence the kill
+        policy and the `feeds` report work from)."""
+        now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        cutoff = (now - timedelta(days=self.EVENT_DAYS)).isoformat(timespec="seconds")
+        with self.conn:
+            self.conn.execute("INSERT INTO feed_events VALUES (?, ?, ?, ?, ?, ?)",
+                              (now.isoformat(timespec="seconds"), feed, kind, outcome, seconds, detail[:300]))
+            self.conn.execute("DELETE FROM feed_events WHERE feed=? AND kind=? AND at < ?", (feed, kind, cutoff))
+
+    def feed_events(self, feed: str | None = None, since: datetime | None = None, limit: int = 200) -> list[dict]:
+        """Recorded outcomes, newest first."""
+        sql, args = "SELECT at, feed, kind, outcome, seconds, detail FROM feed_events WHERE 1=1", []
+        if feed:
+            sql += " AND feed=?"
+            args.append(feed)
+        if since:
+            sql += " AND at >= ?"
+            args.append(since.astimezone(timezone.utc).isoformat(timespec="seconds"))
+        rows = self.conn.execute(sql + " ORDER BY at DESC, rowid DESC LIMIT ?", [*args, limit]).fetchall()
+        return [dict(zip(("at", "feed", "kind", "outcome", "seconds", "detail"), r)) for r in rows]
+
+    def feed_scores(self, since: datetime) -> list[dict]:
+        """Per feed and kind since `since`: how many of each outcome, and how long live
+        connections held (median, of those that ended)."""
+        out: dict[tuple[str, str], dict] = {}
+        for feed, kind, outcome, n in self.conn.execute(
+                "SELECT feed, kind, outcome, COUNT(*) FROM feed_events WHERE at >= ? GROUP BY 1, 2, 3",
+                (since.astimezone(timezone.utc).isoformat(timespec="seconds"),)):
+            out.setdefault((feed, kind), {"feed": feed, "kind": kind, "outcomes": {}})["outcomes"][outcome] = n
+        for (feed, kind), row in out.items():
+            held = [s for (s,) in self.conn.execute(
+                "SELECT seconds FROM feed_events WHERE feed=? AND kind=? AND outcome IN ('dropped', 'refused') "
+                "AND seconds IS NOT NULL AND at >= ? ORDER BY seconds",
+                (feed, kind, since.astimezone(timezone.utc).isoformat(timespec="seconds")))]
+            row["medianHeld"] = held[len(held) // 2] if held else None
+        return sorted(out.values(), key=lambda r: (r["feed"], r["kind"]))
 
     def count_request(self, source: str, n: int = 1, now: datetime | None = None) -> None:
         """Count requests on the day (UTC) they are made, not the day their run began."""

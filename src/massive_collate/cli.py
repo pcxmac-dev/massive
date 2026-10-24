@@ -14,7 +14,7 @@ from typing import Iterator
 
 from . import analysis, charts, collector
 from .config import ConfigError, Settings, load_settings
-from .errors import SourceError
+from .errors import NotEntitled, SourceError
 from .sessions import ET
 from .symbols import resolve
 from .sources import ARCHIVAL, BUILDERS, DataSource, build_source, feed_profiles, supports
@@ -89,6 +89,14 @@ def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource
         return
     with Store(settings.db_path) as store, run_lock(settings.db_path):
         store.close_abandoned_runs()  # we hold the lock, so anything still "running" died
+        from . import killswitch
+
+        kill = killswitch.killed(store, args.source, "fetch")
+        if kill:  # the kill policy: nothing is sent to a killed feed until the kill ends or the user lifts it
+            log(f"{args.source}: killed until {kill['until'][:16].replace('T', ' ')} UTC ({kill['why']}); nothing sent")
+            store.feed_event(args.source, "fetch", "skipped", detail=f"killed until {kill['until']}")
+            yield None, store, log  # type: ignore[misc]
+            return
         budget = _budget(settings, store, args.source)
         if budget == 0:
             log(f"daily request cap of {settings.max_requests_per_day} reached for {args.source}; nothing sent")
@@ -114,9 +122,13 @@ def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource
         except collector.StopRun as e:
             status, message = "stopped", str(e)
             log(f"stopped: {e}")
-        except SourceError as e:
+            if e.strike:
+                killswitch.strike(store, args.source, "fetch", str(e), log=log)
+        except SourceError as e:  # the run as a whole failed on the server's side, or was refused
             status, message = "error", str(e)
             log(f"error: {e}")
+            if not isinstance(e, NotEntitled) and (killswitch.is_refusal(e, e.status) or e.status == 0 or e.status >= 500):
+                killswitch.strike(store, args.source, "fetch", str(e), log=log)
         except Exception as e:
             status, message = "error", repr(e)
             raise
@@ -125,6 +137,8 @@ def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource
             raise
         finally:
             store.finish_run(run_id, source.requests_made, getattr(args, "_rows", 0), status, message)
+            store.feed_event(args.source, "fetch", {"ok": "ok", "stopped": "stopped"}.get(status, "failed"),
+                             seconds=source.requests_made, detail=f"{command}: {message}")
             log(f"{command}: {source.requests_made} requests used")
 
 
@@ -406,6 +420,9 @@ def cmd_live(args, settings: Settings) -> int:
 
     from . import live
 
+    if args.action == "stop":  # every recorder on this machine (the strays of old versions too)
+        print(f"{live.reap_strays(log=print)} recorder process(es) ended")
+        return 0
     if args.action == "status":
         with Store(settings.db_path) as store:
             beat, raw = store.kv_get(live.RECORDER_KEY), store.kv_get(live.STATUS_KEY)
@@ -462,6 +479,39 @@ def cmd_derive(args, settings: Settings) -> int:
         n = _derive(store, set(args.tickers) if args.tickers else None,
                     Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
     print(f"{n:,} derived bars stored")
+    return 0
+
+
+def cmd_kills(args, settings: Settings) -> int:
+    """The kill policy (killswitch.py): the kills in force and each feed's outcomes (list), or a
+    kill by hand, or lifting one (only the user lifts a kill)."""
+    from datetime import timedelta, timezone
+
+    from . import killswitch
+    from .sources import BUILDERS
+
+    feeds = list(BUILDERS) + ["iex"]
+    with Store(settings.db_path) as store:
+        if args.action == "kill":
+            kinds = killswitch.KINDS if args.kind == "both" else (args.kind,)
+            for kind in kinds:
+                k = killswitch.strike(store, args.feed, kind, f"by hand: {args.why}", minutes=args.hours * 60)
+                print(f"{args.feed} {kind}: killed until {k['until'][:16].replace('T', ' ')} UTC")
+            return 0
+        if args.action == "release":
+            lifted = killswitch.release(store, args.feed, killswitch.KINDS if args.kind == "both" else (args.kind,))
+            print(f"{args.feed}: {', '.join(lifted) + ' released' if lifted else 'nothing was killed'}")
+            return 0
+        kills = killswitch.kills(store, feeds)
+        print("Killed:" if kills else "Killed: none")
+        for k in kills:
+            print(f"  {k['feed']:9} {k['kind']:5} until {k['until'][:16].replace('T', ' ')} UTC, strike {k['strikes']}"
+                  f" ({k.get('by', 'policy')}): {k['why']}")
+        since = datetime.now(timezone.utc) - timedelta(hours=args.hours)
+        print(f"Outcomes in the last {args.hours:g} h:")
+        for r in store.feed_scores(since):
+            held = f", connections held {r['medianHeld']:.0f} s (median)" if r["medianHeld"] is not None else ""
+            print(f"  {r['feed']:9} {r['kind']:5} " + ", ".join(f"{n} {o}" for o, n in sorted(r["outcomes"].items())) + held)
     return 0
 
 
@@ -998,9 +1048,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_derive)
 
     s = sub.add_parser("live", help="live trades (crypto: the exchanges' public streams; stocks: Alpaca's IEX stream): "
-                                     "run, start (background) or status")
-    s.add_argument("action", nargs="?", choices=["run", "start", "status"], default="run")
+                                     "run, start (background), status, or stop (every recorder on this machine)")
+    s.add_argument("action", nargs="?", choices=["run", "start", "status", "stop"], default="run")
     s.set_defaults(func=cmd_live)
+
+    s = sub.add_parser("kills", help="the kill policy: killed feeds and each feed's outcomes; kill or release one")
+    s.add_argument("action", choices=["list", "kill", "release"], nargs="?", default="list")
+    s.add_argument("feed", nargs="?", help="kill/release: the feed (massive, alpaca, coinbase, bitstamp, iex ...)")
+    s.add_argument("--kind", choices=["live", "fetch", "both"], default="both")
+    s.add_argument("--hours", type=float, default=24.0, help="list: how far back; kill: for how long")
+    s.add_argument("--why", default="no reason given", help="kill: the reason kept with it")
+    s.set_defaults(func=cmd_kills)
 
     s = sub.add_parser("inventory", help="what a symbol holds on every feed, frame by frame (sent, *derived, not built)")
     s.add_argument("ticker")
