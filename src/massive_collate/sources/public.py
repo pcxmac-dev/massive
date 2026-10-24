@@ -6,6 +6,9 @@ for personal research; each keeps to its published limits and identifies itself.
 
 - Bitstamp (bitstamp.net): crypto minute bars, no key; BTC/USD from August 2011. Minutes without
   trades come back as flat zero-volume bars and are dropped, as the other feeds have no bar then.
+  An exchange of its own, so a live feed (its data is not a copy of another exchange's).
+- Coinbase (coinbase.com) and Bitfinex (bitfinex.com): crypto minute and day bars, no key; live
+  exchange feeds for the composite and reference models (Coinbase is the reference for crypto).
 - Cboe (cboe.com): daily OHLC of Cboe's indices (VIX from 1990 ...), one file per index, no key.
 - Tiingo (tiingo.com): US stock daily bars from 1962 with a free account key (TIINGO_API_KEY).
   Raw prices are adjusted here for splits only, from Tiingo's split factors, so they continue the
@@ -100,6 +103,7 @@ BITSTAMP_STEPS = {"minute": 60, "hour": 3600, "day": 86400}
 class BitstampSource(_Archive):
     name = "bitstamp"
     assets = ("crypto",)
+    archival = False  # an exchange: its own market, still trading
     PAGE = 1000  # bars per request (the API's maximum)
 
     def resolutions(self, asset: str) -> tuple[str, ...]:
@@ -136,6 +140,109 @@ class BitstampSource(_Archive):
     def instrument(self, ticker: str, resolve_exchange: bool = True) -> Instrument:
         pair = ticker.upper().removeprefix("X:")
         return Instrument(ticker=pair, name=f"{pair[:-3]}/{pair[-3:]} on Bitstamp", details={"venue": "Bitstamp"})
+
+
+# -- Coinbase and Bitfinex ------------------------------------------------------------------------
+
+CRYPTO_PAIRS = {"BTCUSD", "ETHUSD", "LTCUSD", "BCHUSD", "SOLUSD", "XRPUSD", "DOGEUSD", "ADAUSD", "AVAXUSD",
+                "LINKUSD", "DOTUSD", "XLMUSD", "UNIUSD", "BTCEUR", "ETHEUR", "ETHBTC"}
+
+
+def _pair(ticker: str) -> tuple[str, str]:
+    t = ticker.upper().removeprefix("X:")
+    for quote in ("USD", "EUR", "BTC"):
+        if t.endswith(quote) and len(t) > len(quote):
+            return t[:-len(quote)], quote
+    return t, ""
+
+
+class CoinbaseSource(_Archive):
+    """Coinbase Exchange public candles: 300 per request, newest first (time, low, high, open, close,
+    volume). Minutes without trades have no candle."""
+
+    name = "coinbase"
+    assets = ("crypto",)
+    archival = False
+    PAGE = 300
+    STEPS = {"minute": 60, "hour": 3600, "day": 86400}
+
+    def resolutions(self, asset: str) -> tuple[str, ...]:
+        return ("minute",) if asset == "crypto" else ()
+
+    def covers(self, ticker: str) -> bool:
+        return ticker.upper().removeprefix("X:") in CRYPTO_PAIRS
+
+    def bar_pages(self, ticker, start, end, timespan, multiplier=1, descending=False, asset="crypto",
+                  limit: int | None = None) -> Iterator[list[dict]]:
+        if timespan not in self.STEPS or multiplier != 1:
+            raise ValueError(f"Coinbase granularities: {tuple(self.STEPS)}")
+        base, quote = _pair(ticker)
+        step = self.STEPS[timespan]
+        a, b = _bounds(start, end)
+        a_s, b_s = -(-a // 1000) // step * step, b // 1000
+        windows = []
+        t = a_s
+        while t < b_s:
+            windows.append((t, min(b_s, t + self.PAGE * step)))
+            t += self.PAGE * step
+        for lo, hi in (reversed(windows) if descending else windows):
+            iso = lambda s: datetime.fromtimestamp(s, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+            rows = self.client.get(f"/products/{base}-{quote}/candles",
+                                   {"granularity": step, "start": iso(lo), "end": iso(hi - step)})
+            bars = [{"t": int(r[0]) * 1000, "o": float(r[3]), "h": float(r[2]), "l": float(r[1]), "c": float(r[4]),
+                     "v": float(r[5]), "vw": None, "n": None} for r in rows or [] if lo <= int(r[0]) < hi]
+            bars.sort(key=lambda x: -x["t"] if descending else x["t"])
+            yield bars[:limit] if limit else bars
+            if limit:
+                return
+
+    def instrument(self, ticker: str, resolve_exchange: bool = True) -> Instrument:
+        base, quote = _pair(ticker)
+        return Instrument(ticker=base + quote, name=f"{base}/{quote} on Coinbase", details={"venue": "Coinbase"})
+
+
+class BitfinexSource(_Archive):
+    """Bitfinex public candles: up to 10,000 per request ([ms, open, close, high, low, volume]).
+    Prices carry 5 significant digits (whole dollars for Bitcoin)."""
+
+    name = "bitfinex"
+    assets = ("crypto",)
+    archival = False
+    PAGE = 10000
+    FRAMES = {"minute": ("1m", 60_000), "hour": ("1h", 3_600_000), "day": ("1D", 86_400_000)}
+
+    def resolutions(self, asset: str) -> tuple[str, ...]:
+        return ("minute",) if asset == "crypto" else ()
+
+    def covers(self, ticker: str) -> bool:
+        return ticker.upper().removeprefix("X:") in CRYPTO_PAIRS
+
+    def bar_pages(self, ticker, start, end, timespan, multiplier=1, descending=False, asset="crypto",
+                  limit: int | None = None) -> Iterator[list[dict]]:
+        if timespan not in self.FRAMES or multiplier != 1:
+            raise ValueError(f"Bitfinex frames: {tuple(self.FRAMES)}")
+        base, quote = _pair(ticker)
+        frame, step = self.FRAMES[timespan]
+        a, b = _bounds(start, end)
+        hi = b - 1
+        lo = a
+        while lo <= hi:
+            params = {"start": lo, "end": hi, "limit": limit or self.PAGE, "sort": -1 if descending else 1}
+            rows = self.client.get(f"/candles/trade:{frame}:t{base}{quote}/hist", params) or []
+            bars = [{"t": int(r[0]), "o": float(r[1]), "c": float(r[2]), "h": float(r[3]), "l": float(r[4]),
+                     "v": float(r[5]), "vw": None, "n": None} for r in rows if a <= int(r[0]) < b]
+            yield bars
+            if limit or len(rows) < (limit or self.PAGE):
+                return
+            stamps = [int(r[0]) for r in rows]
+            if descending:
+                hi = min(stamps) - 1
+            else:
+                lo = max(stamps) + 1
+
+    def instrument(self, ticker: str, resolve_exchange: bool = True) -> Instrument:
+        base, quote = _pair(ticker)
+        return Instrument(ticker=base + quote, name=f"{base}/{quote} on Bitfinex", details={"venue": "Bitfinex"})
 
 
 # -- Cboe ---------------------------------------------------------------------------------------
@@ -253,5 +360,5 @@ class TiingoSource(_Archive):
         yield bars[:limit] if limit else bars
 
 
-__all__ = ["PublicClient", "BitstampSource", "CboeSource", "TiingoSource", "split_adjust", "BITSTAMP_PAIRS",
-           "CBOE_INDICES"]
+__all__ = ["PublicClient", "BitstampSource", "CoinbaseSource", "BitfinexSource", "CboeSource", "TiingoSource",
+           "split_adjust", "BITSTAMP_PAIRS", "CRYPTO_PAIRS", "CBOE_INDICES"]

@@ -1,7 +1,10 @@
 """One feed per span: what a feed may download for a series.
 
-Every span of a ticker's series is downloaded by exactly one feed (the `coverage` ledger in the
-store records who holds what). Before a feed asks for anything it takes the span it could fetch
+Every span of a ticker's series is downloaded by exactly one feed per market (the `coverage` ledger
+in the store records who holds what). Feeds of different markets are not copies of each other:
+Coinbase's and Kraken's Bitcoin, Nasdaq's and NYSE's trades of a stock, are different data that
+the composite model combines; feeds of the same market (two consolidated tapes, SIP via Alpaca and
+via Massive) are copies, and only one of them downloads a span. Before a feed asks for anything it takes the span it could fetch
 now (its plan's history floor to the newest data its plan has published) and removes
 
 - everything any feed already holds (whoever got there first keeps it), and
@@ -32,6 +35,15 @@ class FeedProfile:
     assets: frozenset = field(default_factory=frozenset)
     priority: int = 99  # position in SOURCE_PRIORITY (lower first)
     tick_days: int = 365  # ticks are backfilled this far where the feed collects them
+    venues: dict = field(default_factory=dict)  # asset class -> the market its data is ('sip', 'coinbase', ...)
+
+
+def same_market(feeds: dict, a: str, b: str, asset: str) -> bool:
+    """Whether two feeds' data of an asset class is the same market (then one download per span)."""
+    pa, pb = feeds.get(a), feeds.get(b)
+    va = pa.venues.get(asset, "") if pa else ""
+    vb = pb.venues.get(asset, "") if pb else ""
+    return va == vb
 
 
 def ms(t: datetime) -> int:
@@ -97,9 +109,10 @@ def tick_floor(store, profile: FeedProfile, ticker: str, today: date, floor: dat
     return lo
 
 
-def rank(profile: FeedProfile, resolution: str, scores: dict) -> tuple:
+def rank(profile: FeedProfile, resolution: str, scores: dict, quality: float = 1.0) -> tuple:
+    """Best first: finer resolution, then quality (composite.py), then audited accuracy, then priority."""
     accuracy = (scores.get(profile.name) or {}).get("accuracy")
-    return (RES_RANK.get(resolution, 2), -(accuracy or 0.0), profile.priority, profile.name)
+    return (RES_RANK.get(resolution, 2), -round(quality, 3), -(accuracy or 0.0), profile.priority, profile.name)
 
 
 def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, asset: str, timespan: str,
@@ -110,7 +123,8 @@ def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, ass
     today = now.astimezone(ET).date()
     lo, hi = day_start_ms(floor), frontier_ms(asset, me.tier, now, timespan)
     gaps = [(lo, hi)] if lo < hi else []
-    held = [s for spans in store.coverage(ticker, timespan).values() for s in spans]
+    held = [s for src, spans in store.coverage(ticker, timespan).items() if same_market(feeds, src, me.name, asset)
+            for s in spans]
     # what this feed already asked for and found empty is done for it (not for others)
     held += store.coverage(ticker, timespan, source=me.name, include_none=True).get(me.name, [])
     gaps = subtract(gaps, held)
@@ -124,11 +138,12 @@ def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, ass
     if gaps and timespan in ("minute", "second"):
         # Bars are built here from ticks: the window a feed collects ticks for is not downloaded
         # as bars (by it or anyone), even before the ticks arrive.
-        held_ticks = [s for spans in store.coverage(ticker, "trades").values() for s in spans]
+        held_ticks = [s for src, spans in store.coverage(ticker, "trades").items()
+                      if same_market(feeds, src, me.name, asset) for s in spans]
         gaps = subtract(gaps, held_ticks)
         for f in feeds.values():
             row = watch.get((f.name, ticker.upper()))
-            if row and row.get("resolution") == "trades" and asset in f.assets:
+            if row and row.get("resolution") == "trades" and asset in f.assets and same_market(feeds, f.name, me.name, asset):
                 f_floor = history_floor(f.tier, today)
                 if listed_from:
                     f_floor = max(f_floor, listed_from)
@@ -139,12 +154,17 @@ def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, ass
                 gaps = subtract(gaps, subtract(window, subtract(ticks_none, ticks_held)))
     if gaps:
         scores = store.audit_scores()
-        mine = rank(me, (watch.get((me.name, ticker.upper())) or {}).get("resolution", "auto"), scores)
+        from .composite import quality_of
+
+        mine = rank(me, (watch.get((me.name, ticker.upper())) or {}).get("resolution", "auto"), scores,
+                    quality_of(store, me.name, asset))
         for peer in feeds.values():
             row = watch.get((peer.name, ticker.upper()))
             if peer.name == me.name or row is None or asset not in peer.assets:
                 continue
-            if rank(peer, row.get("resolution", "auto"), scores) >= mine:
+            if not same_market(feeds, peer.name, me.name, asset):
+                continue  # another market's data is not a copy of this feed's
+            if rank(peer, row.get("resolution", "auto"), scores, quality_of(store, peer.name, asset)) >= mine:
                 continue
             p_floor = history_floor(peer.tier, today)
             if listed_from:

@@ -5,9 +5,28 @@ in a local database, and analyses and charts it. Two feeds plug in behind the sa
 Massive (massive.com, formerly Polygon.io) and Alpaca (alpaca.markets: US stocks from 2016 with
 keys, crypto from Kraken's book without).
 
+## Assets on several exchanges: reference, composite, quality
+
+Exchanges differ by a little, and a consolidated tape's extremes are set by whichever exchange
+printed furthest out (Massive's Bitcoin highs are Bitfinex's premium prints). So an asset traded on
+several exchanges has, beside each exchange's own data:
+
+- a reference model: one exchange, the gold standard (Coinbase for crypto; for a US stock its
+  primary listing exchange, from exchange-tagged ticks once they are stored);
+- a composite model: per bar, every exchange's bar weighted by volume x quality, with the deviation
+  across exchanges (standard deviation of the closes, spread, envelope of highs and lows), drawn as
+  a band on the chart;
+- quality scores (0-1) for every source: measured for exchanges (each against the median of the
+  others: distance, outlier share, completeness), a prior by provenance otherwise. A low score lowers
+  a source's weight in the composite and its rank for display and reporting.
+
+Crypto is the case study (four exchanges, recent 90 days, `CRYPTO_VENUE_DAYS`); the same models
+apply to stocks once exchange-tagged consolidated ticks are collected (Alpaca keys).
+
 ## Several feeds, one download per span
 
-Each span of a symbol's series is downloaded by exactly one feed. A ledger (`coverage` table)
+Each span of a symbol's series is downloaded by exactly one feed of a market (two consolidated
+tapes are copies; two exchanges are not, and the composite needs both). A ledger (`coverage` table)
 records which feed holds which span; before any request a feed drops what any feed already holds
 and what a better-ranked feed can serve now. Ranking: resolution first (ticks, seconds, minutes),
 then accuracy measured in audits, then `SOURCE_PRIORITY`. The app shows where each bar came from
@@ -98,6 +117,7 @@ python -m massive_collate gui                  # chart app in your browser (loca
 | `sources/alpaca.py` | Alpaca source: stocks (SIP, keys) and crypto (Kraken, no key), same caps and retries |
 | `coverage.py` | One feed per span: what a feed may download, given the ledger and the ranking |
 | `audit.py` | Feed-against-feed audits: comparison, box stats, verdicts |
+| `composite.py` | Composite and reference models across exchanges; quality scores |
 | `models.py` | `Instrument` (`Stock`, `ETF`) → `Exchange` → `Country` |
 | `storage.py` | SQLite: ticks, bars, exchanges, watchlist, run log |
 | `collector.py` | Sync logic: resolution probing, gap filling (newest first), shared listing checks |

@@ -128,8 +128,13 @@ def _regular_close(d) -> time | None:
 
 
 def _aggregate(groups) -> pd.DataFrame:
-    out = groups.agg({"open": "first", "high": "max", "low": "min", "close": "last",
-                      "volume": "sum", "turnover": "sum", "trades": "sum"})
+    spec = {"open": "first", "high": "max", "low": "min", "close": "last",
+            "volume": "sum", "turnover": "sum", "trades": "sum"}
+    if "env_high" in getattr(groups, "obj", pd.DataFrame()).columns:  # composite: the deviation across exchanges
+        spec.update(env_high="max", env_low="min", venues_n="max", dev_sq="mean")
+    out = groups.agg(spec)
+    if "dev_sq" in out:
+        out["dev_sd"] = np.sqrt(out.pop("dev_sq"))  # root mean square of the bars' deviations
     count = groups["close"].count()
     return out[count > 0]
 
@@ -219,7 +224,9 @@ def lod_aggregate(bars: pd.DataFrame, k: int) -> pd.DataFrame:
     return out
 
 
-EXTRA_COLUMNS = ("yang_start", "yang", "switch", "up")
+EXTRA_COLUMNS = ("yang_start", "yang", "switch", "up", "env_high", "env_low", "dev_sd", "venues_n")
+# Derived models stored as bars: not feeds of their own in the merged view.
+MODEL_SOURCES = ("composite",)
 
 
 def to_records(bars: pd.DataFrame) -> list[dict]:
@@ -294,8 +301,9 @@ class BarEngine:
     combined in `priority` order (feeds not listed come after, alphabetically).
     """
 
-    def __init__(self, store: Store, cache_size: int = 64, priority: list[str] | None = None):
+    def __init__(self, store: Store, cache_size: int = 64, priority: list[str] | None = None, quality=None):
         self.priority = priority or []
+        self.quality = quality  # feed -> 0..1, for display priority (best first)
         self.store = store
         self._series: dict[tuple, tuple] = {}
         self._bars: OrderedDict[tuple, pd.DataFrame] = OrderedDict()
@@ -318,7 +326,9 @@ class BarEngine:
                      and w["asset"] == "future"}  # continuous futures are stored under their contracts
         fine = {s for s, k in stored if k in ("trades", "second")}
         order = {s: i for i, s in enumerate(self.priority)}
-        return sorted(have, key=lambda s: (s not in fine, order.get(s, len(order)), s))
+        have -= set(MODEL_SOURCES)
+        quality = self.quality or (lambda s: 1.0)
+        return sorted(have, key=lambda s: (s not in fine, -quality(s), order.get(s, len(order)), s))
 
     def _fingerprint(self, source: str, ticker: str) -> tuple:
         item = self._watch_item(source, ticker)
@@ -434,6 +444,14 @@ class BarEngine:
         prices = frame[["open", "high", "low", "close"]].to_numpy().ravel()
         fine = [(a, b) for src, _, a, b in self.store.coverage_detail(ticker, "second") if src == source] \
             if kind == "minute" and "second" in kinds else []
+        if source in MODEL_SOURCES:  # the composite carries its deviation across exchanges
+            stats = self.store.composite_stats(ticker, kind)
+            if not stats.empty:
+                idx = pd.to_datetime(stats["ts"], unit="ms", utc=True).dt.tz_convert(ET)
+                extra = pd.DataFrame({"env_high": stats["env_h"].to_numpy(), "env_low": stats["env_l"].to_numpy(),
+                                      "dev_sq": (stats["sd_bps"].to_numpy() / 1e4 * stats["env_h"].to_numpy()) ** 2,
+                                      "venues_n": stats["venues"].to_numpy()}, index=pd.DatetimeIndex(idx))
+                frame = frame.join(extra, how="left")
         return Series(
             source, ticker, kind, frame.sort_index(), daily,
             price_precision=decimals(prices, cap=6, minimum=2),

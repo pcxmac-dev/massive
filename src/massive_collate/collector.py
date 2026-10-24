@@ -57,6 +57,8 @@ def history_floor(tier: Tier, today: date) -> date:
     except ValueError:  # 29 February
         floor = today.replace(year=today.year - years, day=28)
     floor += timedelta(days=1)
+    if tier.history_days:
+        floor = max(floor, today - timedelta(days=tier.history_days))
     return max(floor, tier.history_start) if tier.history_start else floor
 
 

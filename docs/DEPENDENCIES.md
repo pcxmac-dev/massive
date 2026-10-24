@@ -54,6 +54,21 @@ requests are refused before anything is sent.
 | Asset record (name, exchange, active) | trading API `/v2/assets/{T}` | `check_listing` | weekly, unless another feed checked the ticker this week (shared) | 1 | ✅ |
 | Exchange codes (trade venues) | `/v2/stocks/meta/exchanges` | `sync_exchanges` | once | 1 | ✅ |
 
+### Exchanges, composite and reference models, quality
+
+| Exchange feed | Endpoint | Key | History kept | Cost | Status |
+|---|---|---|---|---|---|
+| Coinbase (reference for crypto) | `api.exchange.coinbase.com/products/{P}/candles` (300 per request) | none | `CRYPTO_VENUE_DAYS` (90) | ~430 requests per pair for 90 days | ✅ |
+| Bitfinex | `api-pub.bitfinex.com/v2/candles/trade:1m:t{P}/hist` (10,000 per request; 5 significant digits) | none | 90 days | ~13 requests | ✅ |
+| Bitstamp | `bitstamp.net/api/v2/ohlc/{p}/` (1,000 per request) | none | from 2011 | ~8,000 requests once | ✅ |
+| Kraken (via Alpaca `us-1`) | see Alpaca | none | ticks 1 year, minute from 2021 | - | ✅ |
+
+The one-download rule holds within a market (feeds whose data is the same market: SIP via Massive,
+Alpaca or Tiingo); different exchanges are different data and each keeps its own history. The
+composite (`composite.py`, source `composite`, `composite_stats` table) is rebuilt after each sync
+from the exchange feeds (consolidations are not inputs); exchange quality is re-measured daily over
+30 days. Quality priors: exchange / official 1.0, consolidated or vendor 0.9, research 0.85, mirror 0.8.
+
 ### Ticks: highest resolution within reason
 
 Measured from stored bars (Oct 2026): the 101 watched stocks print about 21 million trades a day

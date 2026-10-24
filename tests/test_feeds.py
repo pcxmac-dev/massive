@@ -217,5 +217,28 @@ def test_fetcher_rows_show_what_this_feed_still_needs(store):
     rows = {r["ticker"]: r for r in symbol_rows(store, settings, "alpaca", NOW)}
     assert rows["AAPL"]["state"] == "blocked" and rows["AAPL"]["note"] == "keys not set"
     assert rows["AAPL"]["requestsLeft"] == 0
-    # crypto: Alpaca takes only what Massive (better ranked here) cannot serve: from 2016 to Massive's floor
-    assert rows["BTCUSD"]["state"] != "blocked" and 3200 < rows["BTCUSD"]["gapDays"] < 3260
+    # crypto: Kraken (via Alpaca) is another market than Massive's consolidated Bitcoin, so it fills its
+    # own history from 2016 whatever Massive holds; two feeds of the same market would share it instead
+    assert rows["BTCUSD"]["state"] != "blocked" and 3940 < rows["BTCUSD"]["gapDays"] < 3950
+
+
+def test_one_download_per_span_holds_within_a_market_not_across(store):
+    from massive_collate.config import load_settings
+    from massive_collate.sources import feed_profiles
+
+    settings = load_settings(env={"MASSIVE_API_KEY": "x", "ALPACA_API_KEY_ID": "k", "ALPACA_API_SECRET_KEY": "s"},
+                             env_file=None)
+    feeds = feed_profiles(settings)
+    for feed in ("massive", "alpaca"):
+        store.watch(feed, ["AAPL"], "minute")
+    store.watch("massive", ["BTCUSD"], "minute")
+    store.watch("coinbase", ["BTCUSD"], "minute")
+    store.upsert_bars("massive", "AAPL", "minute", 1, [{"t": ms(datetime(2026, 10, 20, 10, tzinfo=ET)), "o": 1, "h": 1,
+                                                      "l": 1, "c": 1, "v": 1}])
+    store.upsert_bars("massive", "BTCUSD", "minute", 1, [{"t": ms(datetime(2026, 10, 20, 10, tzinfo=ET)), "o": 1,
+                                                        "h": 1, "l": 1, "c": 1, "v": 1}])
+    held = ms(datetime(2026, 10, 20, 10, tzinfo=ET))
+    sip = plan(store, feeds["alpaca"], feeds, "AAPL", "stock", "minute", date(2024, 10, 22), NOW)
+    assert not any(a <= held < b for a, b in sip)  # same market (SIP): the span Massive holds is not fetched again
+    venue = plan(store, feeds["coinbase"], feeds, "BTCUSD", "crypto", "minute", date(2026, 9, 1), NOW)
+    assert any(a <= held < b for a, b in venue)  # Coinbase is its own market: it fetches that span too

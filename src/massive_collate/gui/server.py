@@ -32,8 +32,32 @@ class ChartApp:
     def __init__(self, store: Store, priority: list[str] | None = None, settings: Settings | None = None):
         self.store = store
         self.settings = settings or load_settings(env={}, env_file=None)
-        self.engine = BarEngine(store, priority=priority)
+        self.engine = BarEngine(store, priority=priority, quality=self._feed_quality)
         self._lock = self.engine.lock
+
+    def _feed_quality(self, feed: str) -> float:
+        """A feed's best quality over asset classes (display priority between feeds)."""
+        from ..composite import quality_of
+
+        return max((quality_of(self.store, feed, a) for a in ("stock", "crypto", "index", "fx", "future")), default=1.0)
+
+    def models(self, ticker: str, asset: str, sources: list[str]) -> dict | None:
+        """The models of an asset traded on several exchanges: the gold-standard reference (one
+        exchange), the composite across exchanges, the consolidated tape, and each exchange's quality."""
+        from ..composite import exchange_feeds, quality_of, reference_feed
+        from ..sources import feed_profiles
+
+        feeds = feed_profiles(self.settings)
+        exch = {f: v for f, v in exchange_feeds(feeds, asset).items() if f in sources}
+        if len(exch) < 2:
+            return None
+        consolidated = next((f for f in sources if f in feeds and feeds[f].venues.get(asset) in ("consolidated", "sip")), None)
+        with self._lock:
+            has_composite = self.store.bar_edges("composite", ticker, "minute") is not None
+            exchanges = sorted(({"feed": f, "exchange": v, "quality": round(quality_of(self.store, f, asset), 3)}
+                                for f, v in exch.items()), key=lambda x: -x["quality"])
+        return {"reference": reference_feed(feeds, asset, set(sources)), "composite": has_composite,
+                "consolidated": consolidated, "exchanges": exchanges}
 
     def symbols(self) -> list[dict]:
         """One entry per ticker, with every feed that has data for it."""
@@ -69,6 +93,7 @@ class ChartApp:
                 "exchange": mic, "exchangeName": names.get(mic, mic) if mic else None,
                 "listed": str(w["listed_from"]) if w.get("listed_from") else None,
                 "feeds": feeds,
+                "models": self.models(ticker, w.get("asset") or "stock", [f["source"] for f in feeds]),
                 "icon": ticker in icons,
                 "market": _market(snapshot, ticker, w),
                 **_sector(ticker, profiles.get(ticker), w.get("asset") or "stock", (snapshot.get(ticker) or {}).get("close")),
@@ -295,7 +320,8 @@ class ChartApp:
     def audit_summary(self, ticker: str | None = None, limit: int = 40) -> dict:
         with self._lock:
             rows = self.store.audits(limit, ticker)
-            return {"audits": rows, "scores": self.store.audit_scores(), "queued": len(self.store.audit_queue())}
+            return {"audits": rows, "scores": self.store.audit_scores(), "queued": len(self.store.audit_queue()),
+                    "quality": self.store.qualities()}
 
     def feeds(self) -> list[dict]:
         from ..sources import ARCHIVAL, BUILDERS, feed_profiles

@@ -139,12 +139,13 @@ def test_closed_feeds_are_not_started_and_can_be_reopened(tmp_path, monkeypatch,
     monkeypatch.setenv("MASSIVE_API_KEY", "k")
     settings = cli.load_settings(env_file=None)
     with Store(db) as s:
-        s.watch_spec("bitstamp", resolve("BTCUSD"))
-        s.set_closed("bitstamp", "BTCUSD", NOW)
-    assert cli._feed_closed(settings, "bitstamp") and cli._feed_closed(settings, "cboe")  # nothing watched: closed too
+        s.watch_spec("tiingo", resolve("AAPL"))
+        s.set_closed("tiingo", "AAPL", NOW)
+    assert cli._feed_closed(settings, "tiingo") and cli._feed_closed(settings, "cboe")  # nothing watched: closed too
+    assert not cli._feed_closed(settings, "bitstamp")  # an exchange: live
     assert not cli._feed_closed(settings, "massive")
     assert cli.main(["feeds"]) == 0
     out = capsys.readouterr().out
-    assert "bitstamp  closed feed (public archive)" in out and "closed: archive complete" in out
-    assert cli.main(["feeds", "reopen", "bitstamp", "BTCUSD"]) == 0
-    assert not cli._feed_closed(settings, "bitstamp")
+    assert "tiingo    closed feed (public archive)" in out and "closed: archive complete" in out
+    assert cli.main(["feeds", "reopen", "tiingo", "AAPL"]) == 0
+    assert not cli._feed_closed(settings, "tiingo")

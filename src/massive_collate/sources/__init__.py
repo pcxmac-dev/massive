@@ -9,7 +9,7 @@ from ..symbols import ASSETS
 from ..ratelimit import RateLimiter
 from .base import RESOLUTIONS, DataSource
 from .alpaca import TRADING_URLS, AlpacaClient, AlpacaSource
-from .public import BitstampSource, CboeSource, PublicClient, TiingoSource
+from .public import BitfinexSource, BitstampSource, CboeSource, CoinbaseSource, PublicClient, TiingoSource
 from .massive import MassiveClient, MassiveSource
 
 
@@ -39,6 +39,18 @@ def _build_bitstamp(settings: Settings, request_budget: int | None) -> DataSourc
                                        request_budget=request_budget))
 
 
+def _build_coinbase(settings: Settings, request_budget: int | None) -> DataSource:
+    tier = settings.for_source("coinbase").tier
+    return CoinbaseSource(PublicClient("https://api.exchange.coinbase.com", rate_limiter=RateLimiter(tier.requests_per_minute),
+                                       request_budget=request_budget))
+
+
+def _build_bitfinex(settings: Settings, request_budget: int | None) -> DataSource:
+    tier = settings.for_source("bitfinex").tier
+    return BitfinexSource(PublicClient("https://api-pub.bitfinex.com/v2", rate_limiter=RateLimiter(tier.requests_per_minute),
+                                       request_budget=request_budget))
+
+
 def _build_cboe(settings: Settings, request_budget: int | None) -> DataSource:
     tier = settings.for_source("cboe").tier
     return CboeSource(PublicClient("https://cdn-api.cboe.com/api/global/us_indices/daily_prices",
@@ -56,28 +68,33 @@ BUILDERS: dict[str, Callable[[Settings, int | None], DataSource]] = {
     "massive": _build_massive,
     "alpaca": _build_alpaca,
     "bitstamp": _build_bitstamp,
+    "coinbase": _build_coinbase,
+    "bitfinex": _build_bitfinex,
     "cboe": _build_cboe,
     "tiingo": _build_tiingo,
 }
 # Closed feeds (public archives): each symbol is filled once, then never asked again.
-ARCHIVAL = frozenset({"bitstamp", "cboe", "tiingo"})
+ARCHIVAL = frozenset({"cboe", "tiingo"})
 
 
 # Asset classes each feed can collect at all (with keys / on some plan). Watching a symbol puts it
 # on every feed that can; the coverage ledger then keeps them from downloading the same span.
 SUPPORTED_ASSETS: dict[str, frozenset] = {"massive": frozenset(ASSETS), "alpaca": frozenset({"stock", "crypto"}),
-                                          "bitstamp": frozenset({"crypto"}), "cboe": frozenset({"index"}),
+                                          "bitstamp": frozenset({"crypto"}), "coinbase": frozenset({"crypto"}),
+                                          "bitfinex": frozenset({"crypto"}), "cboe": frozenset({"index"}),
                                           "tiingo": frozenset({"stock"})}
 
 
 def supports(feed: str, spec) -> bool:
     """Whether a feed can hold a symbol at all (its asset class, and for the archives, its list)."""
-    from .public import BITSTAMP_PAIRS, CBOE_INDICES
+    from .public import BITSTAMP_PAIRS, CBOE_INDICES, CRYPTO_PAIRS
 
     if spec.asset not in SUPPORTED_ASSETS.get(feed, frozenset()):
         return False
     if feed == "bitstamp":
         return spec.ticker.upper() in BITSTAMP_PAIRS
+    if feed in ("coinbase", "bitfinex"):
+        return spec.ticker.upper() in CRYPTO_PAIRS
     if feed == "cboe":
         return spec.source_ticker.upper().removeprefix("I:") in CBOE_INDICES
     return True
@@ -98,12 +115,30 @@ def feed_profiles(settings: Settings) -> dict[str, FeedProfile]:
             assets = frozenset({"crypto"} | ({"stock"} if a and a.has_keys else set()))
         elif name == "tiingo":
             assets = frozenset({"stock"}) if settings.tiingo_api_key else frozenset()
-        elif name in ("bitstamp", "cboe"):
+        elif name in ("bitstamp", "coinbase", "bitfinex", "cboe"):
             assets = SUPPORTED_ASSETS[name]
         else:
             assets = frozenset(ASSETS)
-        out[name] = FeedProfile(name, tier, assets, i, tick_days=settings.tick_history_days)
+        out[name] = FeedProfile(name, tier, assets, i, tick_days=settings.tick_history_days,
+                                venues=markets(name, settings))
     return out
+
+
+def markets(feed: str, settings: Settings) -> dict[str, str]:
+    """Which market each asset class of a feed is: feeds of the same market are copies (one
+    download per span between them); different markets are combined by the composite model."""
+    if feed == "massive":
+        return {"stock": "sip", "index": "index", "fx": "otc", "crypto": "consolidated", "future": "cme"}
+    if feed == "alpaca":
+        a = settings.alpaca
+        loc = a.crypto_loc if a else "us-1"
+        return {"stock": a.feed if a else "sip", "crypto": "alpaca" if loc == "us" else "kraken"}
+    if feed == "tiingo":
+        return {"stock": "sip"}
+    if feed == "cboe":
+        return {"index": "index"}
+    return {"crypto": feed}  # bitstamp, coinbase, bitfinex: each its own exchange
+
 
 
 def build_source(name: str, settings: Settings, request_budget: int | None = None) -> DataSource:

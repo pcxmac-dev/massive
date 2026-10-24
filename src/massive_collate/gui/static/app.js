@@ -783,7 +783,7 @@ $('typeSelect').addEventListener('change', (e) => {
 // -- symbol selection ----------------------------------------------------------
 // The fetcher activity dialog opens a symbol it lists; new symbols may have arrived since startup.
 window.addEventListener('massive:open-symbol', (e) => {
-  loadSymbols().then(() => selectSymbol(e.detail, MERGED)).catch(showError);
+  loadSymbols().then(() => selectSymbol(e.detail)).catch(showError);
 });
 
 async function loadSymbols() {
@@ -794,7 +794,10 @@ function symbolInfo(ticker) {
   return state.symbols.find((s) => s.ticker === ticker) || { ticker, feeds: [] };
 }
 
-async function selectSymbol(ticker, source = MERGED) {
+// An asset on several exchanges opens on its reference (gold-standard exchange) unless a feed or
+// model is asked for.
+async function selectSymbol(ticker, source = null) {
+  source = source ?? symbolInfo(ticker).models?.reference ?? MERGED;
   resetLod();
   const meta = await api('/api/meta', { source, ticker, adjust: state.adjust });
   $('ethBtn').hidden = meta.aroundTheClock;  // fx and futures trade around the clock
@@ -828,12 +831,63 @@ function renderFeeds(info) {
   const sel = $('feedSelect');
   sel.innerHTML = '';
   const feeds = info.feeds || [];
+  const m = info.models;
   const add = (value, label) => { const o = document.createElement('option'); o.value = value; o.textContent = label; sel.append(o); };
-  add(MERGED, feeds.length > 1 ? `All feeds (${feeds.map((f) => f.source).join(' > ')})` : `Feed: ${feeds[0]?.source || '-'}`);
-  if (feeds.length > 1) feeds.forEach((f) => add(f.source, `Only ${f.source}`));
+  if (m) {  // an asset on several exchanges: its models first
+    const q = Object.fromEntries((m.exchanges || []).map((x) => [x.feed, x.quality]));
+    if (m.reference) add(m.reference, `Reference: ${m.reference} (gold standard)`);
+    if (m.composite) add('composite', `Composite: ${m.exchanges.length} exchanges, with deviation`);
+    if (m.consolidated) add(m.consolidated, `Consolidated: ${m.consolidated}`);
+    feeds.filter((f) => f.source !== m.reference && f.source !== m.consolidated)
+      .forEach((f) => add(f.source, `Exchange: ${f.source}${q[f.source] != null ? ` (quality ${q[f.source].toFixed(2)})` : ''}`));
+    add(MERGED, 'All feeds, merged');
+  } else {
+    add(MERGED, feeds.length > 1 ? `All feeds (${feeds.map((f) => f.source).join(' > ')})` : `Feed: ${feeds[0]?.source || '-'}`);
+    if (feeds.length > 1) feeds.forEach((f) => add(f.source, `Only ${f.source}`));
+  }
   sel.value = state.source;
   sel.hidden = !feeds.length;
+  chart.removeIndicator({ name: 'XDEV' });
+  if (state.source === 'composite') chart.createIndicator({ name: 'XDEV', paneId: 'candle_pane' }, true);
 }
+
+// Composite model: the deviation across exchanges around each bar - a faint envelope from the
+// lowest low to the highest high of any exchange, and a band of one standard deviation of the
+// exchanges' closes around the composite close.
+kc.registerIndicator({
+  name: 'XDEV',
+  shortName: 'Exchanges',
+  series: 'price',
+  figures: [],
+  calc: (list) => list.map(() => ({})),
+  createTooltipDataSource: ({ indicator, crosshair, chart: c }) => {
+    const d = c.getDataList()[crosshair.dataIndex ?? -1];
+    const text = d && d.dev_sd != null
+      ? `${d.venues_n} exchanges · σ ${(d.dev_sd / d.close * 1e4).toFixed(1)} bps · range ${d.env_low?.toFixed?.(2)}–${d.env_high?.toFixed?.(2)}`
+      : '';
+    return { name: 'Exchanges', calcParamsText: '', features: [], legends: text ? [{ title: '', value: { text, color: '#9aa0ae' } }] : [] };
+  },
+  draw: ({ ctx, chart: c, xAxis, yAxis }) => {
+    const data = c.getDataList();
+    const { from, to } = c.getVisibleRange();
+    const lo = Math.max(0, from - 1), hi = Math.min(data.length, to + 1);
+    const pts = [];
+    for (let i = lo; i < hi; i++) if (data[i].env_high != null) pts.push(i);
+    if (!pts.length) return true;
+    const x = (i) => xAxis.convertToPixel(i), y = (v) => yAxis.convertToPixel(v);
+    const band = (top, bottom, fill) => {
+      ctx.beginPath();
+      pts.forEach((i, k) => ctx[k ? 'lineTo' : 'moveTo'](x(i), y(top(data[i]))));
+      for (let k = pts.length - 1; k >= 0; k--) ctx.lineTo(x(pts[k]), y(bottom(data[pts[k]])));
+      ctx.closePath(); ctx.fillStyle = fill; ctx.fill();
+    };
+    ctx.save();
+    band((d) => d.env_high, (d) => d.env_low, 'rgba(120,123,134,0.12)');
+    band((d) => d.close + (d.dev_sd || 0), (d) => d.close - (d.dev_sd || 0), 'rgba(41,98,255,0.22)');
+    ctx.restore();
+    return true;
+  },
+});
 
 $('feedSelect').addEventListener('change', (e) => selectSymbol(state.ticker, e.target.value).catch(showError));
 
@@ -1102,7 +1156,7 @@ $('symbolList').addEventListener('click', async (e) => {
     const item = state.switcherScope === 'stocks' ? directory.items.find((r) => r.ticker === t) : null;
     if (item && !item.watched) { mapPick = item; renderMapPick(); return; }  // pick, then + Watch
     $('symbolDialog').close();
-    selectSymbol(t, MERGED).catch(showError);
+    selectSymbol(t).catch(showError);
     return;
   }
   const add = e.target.closest('[data-watch]');
@@ -1124,7 +1178,7 @@ $('symbolList').addEventListener('click', async (e) => {
   if (!t) return;
   if (t.classList.contains('dir') && t.dataset.watched !== '1') return;  // placeholder: nothing collected yet
   $('symbolDialog').close();
-  selectSymbol(t.dataset.ticker, MERGED).catch(showError);
+  selectSymbol(t.dataset.ticker).catch(showError);
 });
 $('scopeTabs').addEventListener('click', (e) => {
   const b = e.target.closest('[data-scope]');

@@ -255,6 +255,33 @@ CREATE TABLE IF NOT EXISTS audits (
     report    TEXT                -- JSON: box stats and pass rates per field, offsets, worst bars
 );
 
+-- Composite model of an asset traded on several exchanges (bars under source 'composite'): the
+-- deviation across exchanges per bar (see composite.py).
+CREATE TABLE IF NOT EXISTS composite_stats (
+    ticker    TEXT    NOT NULL,
+    timespan  TEXT    NOT NULL,
+    ts        INTEGER NOT NULL,
+    venues    INTEGER,           -- exchanges in the bar
+    sd_bps    REAL,              -- weighted standard deviation of their closes, bps
+    range_bps REAL,              -- highest minus lowest close, bps
+    env_h     REAL,              -- highest high of any exchange
+    env_l     REAL,              -- lowest low of any exchange
+    members   TEXT,              -- the exchanges, comma-separated
+    outliers  TEXT,              -- exchanges far from the others' composite
+    PRIMARY KEY (ticker, timespan, ts)
+) WITHOUT ROWID;
+
+-- How far a source can be trusted for display and reporting (0-1), per asset class: measured for
+-- exchanges (leave-one-out against the others), else a prior by provenance.
+CREATE TABLE IF NOT EXISTS quality (
+    subject   TEXT    NOT NULL,  -- a feed, an exchange or a dataset
+    asset     TEXT    NOT NULL,
+    score     REAL    NOT NULL,
+    details   TEXT,              -- JSON: what the score was measured from
+    updated   TEXT    NOT NULL,
+    PRIMARY KEY (subject, asset)
+);
+
 -- Spans waiting to be audited by another feed (queued after a download, done in that feed's run).
 CREATE TABLE IF NOT EXISTS audit_queue (
     ticker    TEXT    NOT NULL,
@@ -496,7 +523,7 @@ class Store:
         df = pd.concat(frames) if frames else pd.DataFrame(
             columns=["ts", "open", "high", "low", "close", "volume", "vwap", "transactions"])
         df = df.sort_values("ts", kind="stable").drop_duplicates("ts")  # one feed per span: no real duplicates
-        df["time"] = pd.to_datetime(df.pop("ts"), unit="ms", utc=True).dt.tz_convert("America/New_York")
+        df["time"] = pd.to_datetime(df["ts"], unit="ms", utc=True).dt.tz_convert("America/New_York")  # ts kept: ms
         return df.reset_index(drop=True)
 
     def bar_range(self, source: str, ticker: str, timespan: str, multiplier: int = 1) -> tuple[int, int] | None:
@@ -922,6 +949,51 @@ class Store:
             if newest is not None and (best is None or newest > best[1]):
                 best = (src, newest)
         return best
+
+    # -- composite model and quality -----------------------------------------
+
+    def save_composite(self, ticker: str, timespan: str, comp: pd.DataFrame) -> int:
+        """Composite bars (source 'composite') and their deviation across exchanges."""
+        if comp.empty:
+            return 0
+        ticker = ticker.upper()
+        bars = [{"t": int(t), "o": r.o, "h": r.h, "l": r.l, "c": r.c, "v": r.v,
+                 "vw": None if pd.isna(r.vw) else r.vw, "n": None if pd.isna(r.n) else int(r.n)}
+                for t, r in zip(comp.index, comp.itertuples())]
+        self.upsert_bars("composite", ticker, timespan, 1, bars)
+        rows = [(ticker, timespan, int(t), int(r.venues), float(r.sd_bps), float(r.range_bps), float(r.env_h),
+                 float(r.env_l), r.members, r.outliers) for t, r in zip(comp.index, comp.itertuples())]
+        with self.conn:
+            self.conn.executemany("INSERT OR REPLACE INTO composite_stats VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+        self._wrote()
+        return len(rows)
+
+    def composite_stats(self, ticker: str, timespan: str, lo_ms: int | None = None, hi_ms: int | None = None) -> pd.DataFrame:
+        sql = ("SELECT ts, venues, sd_bps, range_bps, env_h, env_l, members, outliers FROM composite_stats "
+               "WHERE ticker=? AND timespan=?")
+        args: list = [ticker.upper(), timespan]
+        if lo_ms is not None:
+            sql += " AND ts >= ?"
+            args.append(lo_ms)
+        if hi_ms is not None:
+            sql += " AND ts < ?"
+            args.append(hi_ms)
+        return pd.read_sql_query(sql + " ORDER BY ts", self.conn, params=args)
+
+    def set_quality(self, subject: str, asset: str, score: float, details: dict | None = None) -> None:
+        with self.conn:
+            self.conn.execute("INSERT OR REPLACE INTO quality VALUES (?, ?, ?, ?, ?)",
+                              (subject, asset, float(score), json.dumps(details or {}), _now()))
+
+    def quality(self, subject: str, asset: str) -> dict | None:
+        row = self.conn.execute("SELECT score, details, updated FROM quality WHERE subject=? AND asset=?",
+                                (subject, asset)).fetchone()
+        return {"score": row[0], "details": json.loads(row[1] or "{}"), "updated": row[2]} if row else None
+
+    def qualities(self) -> list[dict]:
+        return [{"subject": s, "asset": a, "score": sc, "details": json.loads(d or "{}"), "updated": u}
+                for s, a, sc, d, u in self.conn.execute(
+                    "SELECT subject, asset, score, details, updated FROM quality ORDER BY asset, score DESC")]
 
     # -- audits -------------------------------------------------------------
 

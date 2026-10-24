@@ -199,6 +199,12 @@ def cmd_sync(args, settings: Settings) -> int:
             ran += 1
         except ConfigError as e:
             errors.append(f"{name}: {e}")  # feed not configured on this machine
+    if ran:  # composite models and exchange quality from what the feeds hold (no requests)
+        from . import composite
+
+        with Store(settings.db_path) as store:
+            composite.refresh(store, feed_profiles(settings), collector.now_et(),
+                              log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
     if not ran and errors:
         raise ConfigError("; ".join(errors))
     for e in errors:
