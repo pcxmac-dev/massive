@@ -1478,12 +1478,12 @@ $('symbolDialog').addEventListener('keydown', (e) => {
 });
 
 // -- intervals and session -----------------------------------------------------
-const PERIOD_LABEL = { second: 's', minute: 'm', hour: 'h', day: 'D', week: 'W', month: 'M' };
+const PERIOD_LABEL = { second: 's', minute: 'm', hour: 'h', day: 'D', week: 'W', month: 'M', year: 'Y' };
 
 // The interval menu: every interval is offered; one no source of this symbol can build is greyed out.
 const periodLabel = (p) => (p.type === 'day' || p.type === 'week' || p.type === 'month' ? PERIOD_LABEL[p.type]
   : `${p.span}${PERIOD_LABEL[p.type]}`);
-const PERIOD_NAMES = { second: 'second', minute: 'minute', hour: 'hour', day: 'day', week: 'week', month: 'month' };
+const PERIOD_NAMES = { second: 'second', minute: 'minute', hour: 'hour', day: 'day', week: 'week', month: 'month', year: 'year' };
 
 function renderPeriods() {
   const box = $('periods');
@@ -1505,7 +1505,18 @@ function renderPeriods() {
     box.replaceChildren(sel);
   }
   sel.innerHTML = '';
-  for (const p of state.meta?.allPeriods || state.meta?.periods || []) {
+  const offered = state.meta?.allPeriods || state.meta?.periods || [];
+  // An interval no longer offered (a saved 10s, 3m, 15m or 45m): 1 minute, or the first this symbol has.
+  if (offered.length && !offered.some((p) => p.type === state.period.type && p.span === state.period.span && p.available !== false)) {
+    const pick = offered.find((p) => p.type === 'minute' && p.span === 1 && p.available !== false)
+      || offered.find((p) => p.available !== false);
+    if (pick) {
+      state.period = { type: pick.type, span: pick.span };
+      prefs.set('period', state.period);
+      queueMicrotask(() => chart.setPeriod(state.period));
+    }
+  }
+  for (const p of offered) {
     const o = document.createElement('option');
     o.value = `${p.type}:${p.span}`;
     o.textContent = `${p.span} ${PERIOD_NAMES[p.type]}${p.span > 1 ? 's' : ''}`;

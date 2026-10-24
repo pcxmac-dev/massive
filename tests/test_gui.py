@@ -382,6 +382,7 @@ def test_every_interval_is_offered_and_those_the_data_cannot_build_are_marked(tm
     eng = BarEngine(_store_with_bars(tmp_path))
     s = eng.series("massive", "SPCX")
     every = {(p["type"], p["span"]): p["available"] for p in eng.all_periods(s)}
-    assert [k for k in every if k[0] == "second"] == [("second", 1), ("second", 10), ("second", 30)]
+    assert list(every) == [("second", 1), ("second", 30), ("minute", 1), ("minute", 5), ("minute", 30), ("hour", 1),
+                           ("hour", 2), ("hour", 4), ("day", 1), ("week", 1), ("month", 1), ("year", 1)]
     assert not every[("second", 1)] and every[("minute", 1)] and every[("day", 1)]  # minute data: no seconds
     assert {"type": "second", "span": 1} not in eng.periods(s) and {"type": "minute", "span": 5} in eng.periods(s)

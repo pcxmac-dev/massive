@@ -564,8 +564,8 @@ class BarEngine:
             stored_hw=max((hi for _, hi in hw.values()), default=0), loaded_at=monotonic(),
         )
 
-    PERIOD_CHOICES = (("second", (1, 10, 30)), ("minute", (1, 3, 5, 15, 30, 45)),
-                      ("hour", (1, 2, 4)), ("day", (1,)), ("week", (1,)), ("month", (1,)))
+    PERIOD_CHOICES = (("second", (1, 30)), ("minute", (1, 5, 30)), ("hour", (1, 2, 4)),
+                      ("day", (1,)), ("week", (1,)), ("month", (1,)), ("year", (1,)))
 
     def periods(self, series: Series) -> list[dict]:
         """Intervals that can be built exactly from the stored data (seconds where second bars
