@@ -141,3 +141,14 @@ def test_the_oldest_daily_bar_dates_the_start_of_a_sources_history():
             yield [{"t": int(datetime(2003, 9, 10, tzinfo=ET).timestamp() * 1000)}]
 
     assert MassiveSource(Client()).oldest_day("AAPL", today=TODAY) == date(2003, 9, 10)
+
+
+def test_a_plan_change_finds_each_symbols_resolution_again_but_bulk_stays_at_minutes(store):
+    _listings(store)
+    store.watch("massive", ["KO"], "minute", exchange="XNYS")  # chosen one by one (resolved on the old plan)
+    store.watch("massive", ["ESZ6"], "minute", asset="future")
+    initializer.initialize(store, ["massive", "alpaca"])
+    assert initializer.load_bulk(store) == ["AAPL", "PENNY", "QUIET"]  # KO was watched before: not bulk
+    assert cli.reresolve(store, "massive") == 1
+    rows = {w["ticker"]: w["resolution"] for w in store.watchlist("massive")}
+    assert rows == {"KO": "auto", "ESZ6": "minute", "AAPL": "minute", "PENNY": "minute", "QUIET": "minute"}

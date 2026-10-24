@@ -213,15 +213,31 @@ TIER_KEY = "tier:massive"
 
 def _note_tier(store: Store, settings: Settings, log) -> None:
     """When MASSIVE_TIER changes, what the old plan refused may be allowed now (or the reverse):
-    Massive's cached entitlements and the market days it refused are asked again."""
+    Massive's cached entitlements and the market days it refused are asked again, and each
+    symbol's resolution is found again (the old plan's finest was remembered)."""
     seen = store.kv_get(TIER_KEY)
     if seen == settings.tier.name:
         return
     if seen:
         store.clear_entitlements("massive")
         days = store.clear_denied_days("massive")
-        log(f"massive plan changed ({seen} -> {settings.tier.name}): entitlements and {days} refused days asked again")
+        n = reresolve(store, "massive")
+        log(f"massive plan changed ({seen} -> {settings.tier.name}): entitlements, {days} refused days "
+            f"and {n} symbols' resolutions asked again")
     store.kv_set(TIER_KEY, settings.tier.name)
+
+
+def reresolve(store: Store, feed: str) -> int:
+    """Set a feed's symbols back to `auto` (found again on the next sync), except futures (their
+    contracts decide) and the initializer's bulk symbols (kept at minutes). Returns symbols reset."""
+    from .initializer import load_bulk
+
+    bulk = set(load_bulk(store))
+    reset = [w["ticker"] for w in store.watchlist(feed)
+             if w["resolution"] != "auto" and w["asset"] != "future" and w["ticker"] not in bulk]
+    for ticker in reset:
+        store.set_resolution(feed, ticker, "auto")
+    return len(reset)
 
 
 def cmd_plan(args, settings: Settings) -> int:

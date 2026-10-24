@@ -90,6 +90,25 @@ def test_finer_resolution_outranks_priority(store):
     gaps = plan(store, feeds["fake"], feeds, "SPCX", "stock", "minute", date(2024, 10, 22), NOW)
     assert gaps == []  # the tick feed can serve the whole span, so the minute feed takes none of it
     store.watch("other", ["SPCX"], "minute")
+    # Same resolution: the fresher plan (15 min delayed) outranks the end-of-day one
+    assert plan(store, feeds["fake"], feeds, "SPCX", "stock", "minute", date(2024, 10, 22), NOW) == []
+    assert plan(store, feeds["other"], feeds, "SPCX", "stock", "minute", date(2024, 10, 22), NOW)
+
+
+def test_with_resolution_and_freshness_equal_priority_decides(store):
+    store.watch("fake", ["SPCX"], "minute")
+    store.watch("other", ["SPCX"], "minute")
+    feeds = {"fake": FeedProfile("fake", FREE, STOCKS, 0), "other": FeedProfile("other", FREE, STOCKS, 1)}
+    assert plan(store, feeds["fake"], feeds, "SPCX", "stock", "minute", date(2024, 10, 22), NOW)
+    assert plan(store, feeds["other"], feeds, "SPCX", "stock", "minute", date(2024, 10, 22), NOW) == []
+
+
+def test_a_real_time_plan_with_ticks_takes_the_spans_from_a_delayed_one(store):
+    """SPCX: Massive Advanced (ticks, real time) over Alpaca Basic (ticks, 15 minutes behind)."""
+    store.watch("fake", ["SPCX"], "trades")
+    store.watch("other", ["SPCX"], "trades")
+    feeds = {"fake": FeedProfile("fake", TIERS["advanced"], STOCKS, 1), "other": FeedProfile("other", ALPACA, STOCKS, 0)}
+    assert plan(store, feeds["other"], feeds, "SPCX", "stock", "minute", date(2024, 10, 22), NOW) == []
     assert plan(store, feeds["fake"], feeds, "SPCX", "stock", "minute", date(2024, 10, 22), NOW)
 
 

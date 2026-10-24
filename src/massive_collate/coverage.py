@@ -10,8 +10,14 @@ now (its plan's history floor to the newest data its plan has published) and rem
 - everything any feed already holds (whoever got there first keeps it), and
 - everything a better-ranked feed watching the same ticker could fetch now.
 
-Feeds rank by resolution first (ticks, then seconds, then minutes), then by accuracy measured in
-audits, then by SOURCE_PRIORITY. Only audits fetch a span twice, and they store no bars.
+Which feed downloads a span (`rank`), best first:
+1. availability: only feeds whose plan reaches the span are asked at all (history floor to newest);
+2. precision: the finer resolution it collects (ticks, then seconds, then minutes);
+3. freshness: how far its plan trails real time (real time, then delayed, then end of day);
+4. quality measured against the other exchanges, then accuracy measured in audits;
+5. SOURCE_PRIORITY.
+So of two copies of the consolidated tape, the real-time one with ticks takes the spans (Massive
+Advanced over Alpaca's 15-minute delayed tape). Only audits fetch a span twice, and they store no bars.
 """
 from __future__ import annotations
 
@@ -123,10 +129,19 @@ def tick_floor(store, profile: FeedProfile, ticker: str, today: date, floor: dat
     return lo
 
 
-def rank(profile: FeedProfile, resolution: str, scores: dict, quality: float = 1.0) -> tuple:
-    """Best first: finer resolution, then quality (composite.py), then audited accuracy, then priority."""
+def latency(tier: Tier, asset: str) -> float:
+    """Seconds a plan's newest data trails real time for an asset class (a day: end of day)."""
+    d = freshness.plan_delay(tier, asset)
+    return d.lag.total_seconds() if d.kind == "delay" else 86_400.0
+
+
+def rank(profile: FeedProfile, resolution: str, scores: dict, quality: float = 1.0,
+         asset: str | None = None) -> tuple:
+    """Best first (see the module's docstring): finer resolution, then fresher plan for `asset`,
+    then quality (composite.py), then audited accuracy, then priority."""
     accuracy = (scores.get(profile.name) or {}).get("accuracy")
-    return (RES_RANK.get(resolution, 2), -round(quality, 3), -(accuracy or 0.0), profile.priority, profile.name)
+    return (RES_RANK.get(resolution, 2), latency(profile.tier, asset) if asset else 0.0, -round(quality, 3),
+            -(accuracy or 0.0), profile.priority, profile.name)
 
 
 def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, asset: str, timespan: str,
@@ -175,14 +190,14 @@ def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, ass
         from .composite import quality_of
 
         mine = rank(me, (watch.get((me.name, ticker.upper())) or {}).get("resolution", "auto"), scores,
-                    quality_of(store, me.name, asset))
+                    quality_of(store, me.name, asset), asset)
         for peer in feeds.values():
             row = watch.get((peer.name, ticker.upper()))
             if peer.name == me.name or row is None or asset not in peer.assets:
                 continue
             if not same_market(feeds, peer.name, me.name, asset):
                 continue  # another market's data is not a copy of this feed's
-            if rank(peer, row.get("resolution", "auto"), scores, quality_of(store, peer.name, asset)) >= mine:
+            if rank(peer, row.get("resolution", "auto"), scores, quality_of(store, peer.name, asset), asset) >= mine:
                 continue
             p_floor = history_floor(peer.tier, today, asset)
             if listed_from:
