@@ -136,10 +136,7 @@ def compare(owner: list[dict], auditor: list[dict], step_ms: int = 60_000, judge
 
 
 def _stored(store, source: str, ticker: str, timespan: str, a: int, b: int) -> list[dict]:
-    rows = store.conn.execute(
-        "SELECT ts, open, high, low, close, volume, vwap, transactions FROM bars WHERE source=? AND ticker=? "
-        "AND timespan=? AND multiplier=1 AND ts >= ? AND ts < ? ORDER BY ts", (source, ticker.upper(), timespan, a, b))
-    return [dict(zip(("t", "o", "h", "l", "c", "v", "vw", "n"), r)) for r in rows]
+    return [dict(zip(("t", "o", "h", "l", "c", "v", "vw", "n"), r)) for r in store.bar_rows(source, ticker, timespan, a, b)]
 
 
 def audit_span(auditor, store, ticker: str, timespan: str, a: int, b: int, owner: str, reason: str,

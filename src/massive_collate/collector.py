@@ -119,7 +119,7 @@ def tick_space(store: Store, min_free_gb: int) -> str:
     of it). Remembered in kv so the planner and the Fetcher know."""
     import shutil
 
-    where = store.ticks_path.parent if store.ticks_path else Path.home()
+    where = store.feeds_dir if store.feeds_dir and store.feeds_dir.is_dir() else Path.home()
     free_gb = shutil.disk_usage(where).free / 1e9
     state = "stop" if free_gb < min_free_gb / TICK_STOP_FRACTION else "no-backfill" if free_gb < min_free_gb else "ok"
     if state == "ok":

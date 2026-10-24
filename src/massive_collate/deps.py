@@ -94,11 +94,11 @@ def checks(store: Store, settings, source: str = "massive", now: datetime | None
                          f"{used} of {a.max_requests_per_day} used today"))
     import shutil
 
-    free_gb = shutil.disk_usage(store.ticks_path.parent if store.ticks_path else Path.home()).free / 1e9
+    free_gb = shutil.disk_usage(store.feeds_dir if store.feeds_dir and store.feeds_dir.is_dir() else Path.home()).free / 1e9
     min_free = getattr(settings, "tick_min_free_gb", 250)
     paused = store.kv_get("ticks:backfill-paused")
-    out.append(Check("Ticks", "Tick file and disk", "WARN" if paused or free_gb < min_free * 2 else "OK",
-                     f"{store.ticks_bytes() / 1e9:.1f} GB in {store.ticks_path.name if store.ticks_path else 'memory'}, "
+    out.append(Check("Ticks", "Tick files and disk", "WARN" if paused or free_gb < min_free * 2 else "OK",
+                     f"{store.ticks_bytes() / 1e9:.1f} GB in the feeds' tick files, "
                      f"{free_gb:,.0f} GB free" + (f"; backfill paused ({paused})" if paused else ""),
                      f"tick backfill pauses under {min_free} GB free (TICK_MIN_FREE_GB); "
                      "free space or lower TICK_HISTORY_DAYS" if paused or free_gb < min_free * 2 else ""))

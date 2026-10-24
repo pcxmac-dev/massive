@@ -6,7 +6,9 @@ Working notes so work can resume in a fresh session. Newest first.
 
 - **Collector** (`python -m massive_collate ...`): runs hourly via Windows Task Scheduler
   (`MassiveCollateSync`, `.venv\Scripts\pythonw.exe -m massive_collate sync`). Free Massive plan.
-  Data in `~/MassiveData/massive.db`; log in `~/MassiveData/logs/massive-collate.log`.
+  Data in `~/MassiveData`: shared tables in `massive.db`, each feed's bars in `feeds/<feed>.db`, its ticks in
+  `feeds/<feed>-ticks.db` (split 2026-10-23; pre-split backups `backups/pre-split-20261023-215938*.db`, 12 GB);
+  log in `~/MassiveData/logs/massive-collate.log`.
 - **Watchlist**: `SPCX::NASDAQ` (SpaceX Class A, listed 2026-06-12). Free plan gives 1-minute bars
   (ticks and 1-second refused). Stored: 85k minute bars 04:00–20:00 ET + 91 official daily bars.
   Overnight (BOATS, 20:00–04:00) is not in Massive's data; needs another source.

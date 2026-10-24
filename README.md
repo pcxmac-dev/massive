@@ -74,8 +74,14 @@ Set your key and plan as user environment variables (Windows PowerShell):
 [Environment]::SetEnvironmentVariable("MASSIVE_TIER", "free", "User")
 ```
 
-Data is stored in `~/MassiveData/massive.db` (override with `MASSIVE_DB`), with
-logs, charts and backups beside it. Nothing is stored in the repository.
+Data is stored in `~/MassiveData` (override the main file with `MASSIVE_DB`), with
+logs, charts and backups beside it. Nothing is stored in the repository. Each feed has files of
+its own: `feeds/<feed>.db` holds its bars (the composite model's file also its deviation stats)
+and `feeds/<feed>-ticks.db` its trades. The main file `massive.db` keeps what the feeds share: the
+watchlist, the coverage ledger, audits, quality scores, the directory and the chart app's layouts.
+A database from before this layout is moved once with `admin split-feeds` (it backs up first,
+checks every copy against its original, and only then removes the old copies); until then the
+app refuses to open it.
 
 ## Usage
 
@@ -88,7 +94,7 @@ python -m massive_collate exchanges --refresh  # exchange list
 python -m massive_collate analyze SPCX         # statistics + per-exchange breakdown
 python -m massive_collate chart SPCX --rule 1s --sma 20 50 --ticks
 python -m massive_collate export SPCX --kind trades --out spcx.csv
-python -m massive_collate admin check|vacuum|backup
+python -m massive_collate admin check|vacuum|backup [--ticks]|split-feeds
 python -m massive_collate gui                  # chart app in your browser (localhost only)
 ```
 

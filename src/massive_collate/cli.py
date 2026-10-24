@@ -18,7 +18,7 @@ from .errors import SourceError
 from .sessions import ET
 from .symbols import resolve
 from .sources import ARCHIVAL, BUILDERS, DataSource, build_source, feed_profiles, supports
-from .storage import Store, ticks_backup_path
+from .storage import Store, feeds_backup_dir
 
 TASK_NAME = "MassiveCollateSync"
 LOCK_STALE_SECONDS = 6 * 3600
@@ -446,6 +446,7 @@ def cmd_status(args, settings: Settings) -> int:
     with Store(settings.db_path) as store:
         s = store.summary()
         print(f"database: {s['db_path']} ({s['size_bytes'] / 1e6:.1f} MB)")
+        print(f"feeds: {s['feeds_dir']} " + ", ".join(f"{k} {v / 1e9:.2f} GB" for k, v in s["feed_bytes"].items()))
         for src in BUILDERS:
             feed = settings.for_source(src)
             t = feed.tier
@@ -458,7 +459,7 @@ def cmd_status(args, settings: Settings) -> int:
         for w in store.watchlist():
             print("  " + _watch_line(w))
         print("\nticks:")
-        print(f"  tick file: {store.ticks_path} ({store.ticks_bytes() / 1e9:.2f} GB)")
+        print(f"  tick files: {store.ticks_bytes() / 1e9:.2f} GB in {store.feeds_dir}")
         for src, t, n, lo, hi in s["trades"]:
             print(f"  {src:8} {t:8} {_ns(lo)} -> {_ns(hi)}")
         print("\nbars:")
@@ -475,6 +476,12 @@ def _ns(ns: int) -> str:
 
 
 def cmd_admin(args, settings: Settings) -> int:
+    if args.action == "split-feeds":
+        from .splitfeeds import split
+
+        with run_lock(settings.db_path):  # no sync may write while the data moves
+            split(settings.db_path, log=print)
+        return 0
     with Store(settings.db_path) as store:
         if args.action == "check":
             print(f"integrity: {store.integrity_check()}")
@@ -484,8 +491,8 @@ def cmd_admin(args, settings: Settings) -> int:
             print("vacuumed")
         elif args.action == "backup":
             dest = args.dest or settings.db_path.parent / "backups" / f"massive-{datetime.now():%Y%m%d-%H%M%S}.db"
-            print(f"backup written to {store.backup(Path(dest), ticks=args.ticks)}"
-                  + (f" (ticks: {ticks_backup_path(Path(dest))})" if args.ticks else " (main file; add --ticks for the tick file)"))
+            print(f"backup written to {store.backup(Path(dest), ticks=args.ticks)}, feeds in {feeds_backup_dir(Path(dest))}"
+                  + (" (with ticks)" if args.ticks else " (bars only; add --ticks for the tick files)"))
         elif args.action == "reset-denied":
             print(f"cleared {store.clear_denied(args.source)} denied days")
     return 0
@@ -655,9 +662,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_status)
 
     s = sub.add_parser("admin", help="database maintenance")
-    s.add_argument("action", choices=["check", "vacuum", "backup", "reset-denied"])
+    s.add_argument("action", choices=["check", "vacuum", "backup", "reset-denied", "split-feeds"],
+                   help="split-feeds: move every feed's data from the single-file layout to files of its own")
     s.add_argument("--dest")
-    s.add_argument("--ticks", action="store_true", help="backup: also copy the tick file (large)")
+    s.add_argument("--ticks", action="store_true", help="backup: also copy the tick files (large)")
     s.set_defaults(func=cmd_admin)
 
     for name, func, helptext in (

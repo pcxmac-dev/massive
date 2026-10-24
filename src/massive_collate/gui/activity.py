@@ -160,7 +160,7 @@ def _ticks(store: Store, settings: Settings) -> dict:
     """The tick store: size, free disk, the backfill window and whether backfill is paused."""
     import shutil
 
-    free = shutil.disk_usage(store.ticks_path.parent if store.ticks_path else Path.home()).free
+    free = shutil.disk_usage(store.feeds_dir if store.feeds_dir and store.feeds_dir.is_dir() else Path.home()).free
     series = sum(1 for _, _, k in store.stored_series() if k == "trades")
     return {"bytes": store.ticks_bytes(), "freeBytes": free, "series": series,
             "days": getattr(settings, "tick_history_days", 365), "paused": store.kv_get("ticks:backfill-paused") or None}

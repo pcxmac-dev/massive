@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from massive_collate.storage import Store, ticks_backup_path
+from massive_collate.storage import Store, feeds_backup_dir
 
 
 def _trade(ns: int, seq: int = 1, price: float = 10.0) -> dict:
@@ -107,11 +107,13 @@ def test_grouped_days_and_denied(store):
 def test_backup_and_integrity(tmp_path):
     with Store(tmp_path / "db" / "m.db") as s:
         s.upsert_trades("s", "X", [_trade(1)])
+        s.upsert_bars("s", "X", "minute", 1, [{"t": 60_000, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}])
         assert s.integrity_check() == "ok"
-        assert s.ticks_path == tmp_path / "db" / "ticks.db" and s.ticks_path.exists()  # ticks in their own file
+        assert (tmp_path / "db" / "feeds" / "s-ticks.db").exists()  # ticks in a file of their own
         plain = s.backup(tmp_path / "b" / "plain.db")
         dest = s.backup(tmp_path / "b" / "copy.db", ticks=True)
-    with Store(plain, ticks_path=tmp_path / "b" / "none.db") as copy:
-        assert len(copy.load_trades("X")) == 0  # the main file alone has no ticks
-    with Store(dest, ticks_path=ticks_backup_path(dest)) as copy:
-        assert len(copy.load_trades("X")) == 1
+    with Store(plain, feeds_dir=feeds_backup_dir(plain)) as copy:
+        assert len(copy.load_trades("X")) == 0  # bars only by default: no ticks
+        assert len(copy.load_bars(["X"], "minute")) == 1
+    with Store(dest, feeds_dir=feeds_backup_dir(dest)) as copy:
+        assert len(copy.load_trades("X")) == 1 and len(copy.load_bars(["X"], "minute")) == 1

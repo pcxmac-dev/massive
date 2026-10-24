@@ -75,8 +75,8 @@ Measured from stored bars (Oct 2026): the 101 watched stocks print about 21 mill
 (NVDA 1.8M, median stock 120k); Bitcoin on Kraken about 160k. A stored tick takes 72 bytes, so
 ticks grow by about 1.5 GB a day (~390 GB a year) for ~2,200 requests a day. Every tick back to
 2016 would be ~2.2 TB and 3 million requests, so: ticks are collected going forward always and
-backfilled one year (`TICK_HISTORY_DAYS`), minute bars cover everything older. Ticks live in their
-own file (`ticks.db` beside `massive.db`; `admin backup --ticks` copies it). Tick backfill pauses
+backfilled one year (`TICK_HISTORY_DAYS`), minute bars cover everything older. Each feed's ticks
+live in a file of their own (`feeds/<feed>-ticks.db`; `admin backup --ticks` copies them). Tick backfill pauses
 below `TICK_MIN_FREE_GB` (250) free, all tick downloads below a fifth of that.
 
 One-second and minute bars are built here from the ticks, applying the consolidated tape's
