@@ -97,7 +97,7 @@ def test_a_feeds_frames_are_built_once_marked_and_rebuilt_where_minutes_change(s
     n = derive.build_series(store, "massive", "SPCX", "stock", log=lambda *_: None)
     conn = store._bars("massive")
     count = dict(conn.execute("SELECT timespan || multiplier, COUNT(*) FROM built_bars GROUP BY 1").fetchall())
-    assert count == {"minute5": 156, "hour1": 14, "day1": 1} and n == 171
+    assert count == {"minute5": 156, "minute30": 26, "hour1": 14, "hour2": 8, "hour4": 4, "day1": 1} and n == 209
     assert derive.build_series(store, "massive", "SPCX", "stock", log=lambda *_: None) == 0  # nothing changed
     store.upsert_bars("massive", "SPCX", "minute", 1, [{**_minutes("2026-10-20 10:00", 1)[0], "h": 999.0}])
     assert derive.build_series(store, "massive", "SPCX", "stock", log=lambda *_: None) > 0
@@ -215,3 +215,64 @@ def test_seconds_can_go_on_past_the_second_layer_interpolated_from_minutes(store
     assert mid["interp"] and mid["derived"] and mid["close"] == pytest.approx(100.5) and mid["volume"] == 0
     assert t0 + 15 * 60_000 not in bars  # nothing drawn across the 10-minute gap
     assert "interpolated" in page
+
+
+def test_frames_are_only_built_upward_seconds_to_30s_and_days_to_weeks_months_years(store):
+    secs = [{"t": _ms("2026-10-20 10:00") + i * 1000, "o": 100 + i, "h": 101 + i, "l": 99 + i, "c": 100.5 + i,
+             "v": 1, "vw": 100 + i, "n": 1} for i in range(65)]
+    store.upsert_built_bars("alpaca", "BTCUSD", "second", 1, secs, 1)
+    days = [_bar(f"2026-{m:02d}-{d:02d} 00:00", 100.0 + d, tz="UTC") for m, d in ((9, 28), (9, 30), (10, 1), (10, 2))]
+    store.upsert_bars("alpaca", "BTCUSD", "day", 1, days)
+    store.watch("alpaca", ["BTCUSD"], "trades", asset="crypto")
+    store.upsert_bars("tiingo", "KO", "day", 1, [_bar("2026-10-19 00:00", 70.0)])  # a feed with daily bars only
+    derive.run(store, log=lambda *_: None)
+    conn = store._bars("alpaca")
+    count = dict(conn.execute("SELECT timespan || multiplier, COUNT(*) FROM built_bars GROUP BY 1").fetchall())
+    assert count["second30"] == 3 and count["week1"] == 1 and count["month1"] == 2 and count["year1"] == 1
+    months = conn.execute("SELECT ts FROM built_bars WHERE timespan='month' ORDER BY ts").fetchall()
+    assert [m for (m,) in months] == [_ms("2026-09-01 00:00", "UTC"), _ms("2026-10-01 00:00", "UTC")]
+    kinds = {k for (k,) in store._bars("tiingo").execute("SELECT DISTINCT timespan FROM built_bars")}
+    assert kinds == {"week", "month", "year"}  # nothing finer than what it sent: gaps stay gaps
+    assert store.kv_get(derive.PROGRESS_KEY) == ""  # cleared when the run ends
+
+
+def test_multi_hour_bins_start_at_midnight_in_the_day_zone():
+    rows = pd.DataFrame(_minutes("2026-10-20 09:30", 300))  # 09:30 .. 14:29 New York
+    rows["ts"], rows["time"] = rows["t"], pd.to_datetime(rows["t"], unit="ms", utc=True).dt.tz_convert(ET)
+    m = rows.rename(columns={"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume", "vw": "vwap",
+                             "n": "transactions"})
+    four = derive.aggregate(m, "hour", 4, "stock")
+    assert [pd.Timestamp(b["t"], unit="ms", tz="UTC").tz_convert(ET).strftime("%H:%M") for b in four] == ["08:00", "12:00"]
+    utc = derive.aggregate(m, "hour", 4, "crypto")  # 13:30-18:29 UTC: bins at 12:00 and 16:00 UTC
+    assert [pd.Timestamp(b["t"], unit="ms", tz="UTC").strftime("%H:%M") for b in utc] == ["12:00", "16:00"]
+
+
+def test_bars_a_feed_sent_at_the_charts_interval_are_prime(store):
+    """Alpaca sends 5-minute bars: those show unmarked; 5-minute bars built from minutes where it sent
+    none stay derived; and a feed's clock hours never land on a stock chart's hours from the open."""
+    store.upsert_bars("alpaca", "SPCX", "minute", 1, _minutes("2026-10-20 09:30", 15))  # 09:30 .. 09:44
+    store.upsert_bars("alpaca", "SPCX", "minute", 5, [_bar("2026-10-20 09:35", 500.0, volume=99.0)])
+    store.upsert_bars("alpaca", "SPCX", "hour", 1, [_bar("2026-10-20 09:00", 700.0)])
+    eng = BarEngine(store)
+    five = eng.bars("alpaca", "SPCX", "minute", 5, "regular")["bars"]
+    assert [(b["close"], b["derived"]) for b in five] == [(104.25, True), (500.0, False), (114.25, True)]
+    assert five[1]["volume"] == 99.0  # the feed's own bar, whole
+    hour = eng.bars("alpaca", "SPCX", "hour", 1, "regular")["bars"]
+    assert all(b["derived"] for b in hour) and hour[0]["close"] != 700.0  # 09:30-aligned: the 09:00 bar stays out
+
+
+def test_the_status_bar_hears_what_is_being_built_while_it_runs(store):
+    import json
+    from datetime import datetime, timezone
+
+    from massive_collate.gui.activity import derive_progress
+
+    now = datetime(2026, 10, 24, 12, tzinfo=timezone.utc)
+    at = int(now.timestamp() * 1000)
+    store.kv_set(derive.PROGRESS_KEY, json.dumps({"source": "alpaca", "ticker": "MRVL", "from": "1m",
+                                                  "to": ["5m", "1h"], "n": 3, "of": 9, "at": at - 5_000}))
+    assert derive_progress(store, now)["to"] == ["5m", "1h"]
+    store.kv_set(derive.PROGRESS_KEY, json.dumps({"n": 3, "of": 9, "at": at - 600_000}))
+    assert derive_progress(store, now) is None  # not heard from in minutes: over
+    store.kv_set(derive.PROGRESS_KEY, "")
+    assert derive_progress(store, now) is None

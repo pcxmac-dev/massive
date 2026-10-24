@@ -6,17 +6,25 @@ database apart from what it sent (built_bars, under a derivation record) and rea
 bar the feed sends for the same time replaces the built one (storage: bars_replace_built), and a
 built bar is never stored where the feed's own exists, so history fetched later takes over.
 
+Frames are only ever built upward, from finer data (CHAINS); nothing finer is made from coarser
+bars, so a gap in the finer data stays a gap.
+
 - 1 s and 1 min from ticks: ticks.py (with the trade-condition rules), as the ticks arrive.
-- 5 min, 1 h and 1 day from the 1-minute bars (the feed's own first, built ones where it sent
-  none): here. Minutes and hours are clock bins (the same in New York and UTC: whole-hour
-  offsets). Days are New York dates (regular session for stocks and indices, the whole date
-  for futures) and UTC dates for crypto and forex, stamped as those feeds stamp their own.
-- Incremental: whatever a feed's minutes have had stored since the last build (stored_at) is
-  rebuilt, from the start of the day before the earliest change, so a corrected minute rebuilds
-  the frames above it; a first build covers everything held.
+- 30 s from the 1-second bars.
+- 5 and 30 min, 1, 2 and 4 h and 1 day from the 1-minute bars (the feed's own first, built ones
+  where it sent none). Minutes are clock bins; hours are bins from midnight in the series' day
+  zone (New York, UTC for crypto and forex), the same for 1 h on both. Days are New York dates
+  (regular session for stocks and indices, the whole date for futures) and UTC dates for crypto
+  and forex, stamped as those feeds stamp their own.
+- 1 week (from Monday), 1 month and 1 year from the daily bars (the feed's official ones first).
+- Incremental: whatever a feed's base bars have had stored since the last build (stored_at) is
+  rebuilt, from the start of the day before the earliest change (weeks, months and years: all of
+  them, they are few), so a corrected minute rebuilds the frames above it; a first build covers
+  everything held. While it runs, kv `derive:progress` says what it is building (the status bar).
 """
 from __future__ import annotations
 
+import json
 import time as time_module
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -28,12 +36,25 @@ from . import provenance
 from .sessions import is_nyse_holiday, nyse_early_close
 
 ET = ZoneInfo("America/New_York")
-STANDARD = (("second", 1), ("minute", 1), ("minute", 5), ("hour", 1), ("day", 1))
-FROM_MINUTES = (("minute", 5), ("hour", 1), ("day", 1))
-KEY = "derive:{}:{}"  # source, ticker -> minutes stored after this (ms) are not built from yet
-CHUNK_DAYS = 60
+# Each base frame and the frames built from it, finest first.
+CHAINS = (
+    ("second", (("second", 30),)),
+    ("minute", (("minute", 5), ("minute", 30), ("hour", 1), ("hour", 2), ("hour", 4), ("day", 1))),
+    ("day", (("week", 1), ("month", 1), ("year", 1))),
+)
+FROM_MINUTES = dict(CHAINS)["minute"]
+STANDARD = (("second", 1), ("minute", 1), *(f for _, frames in CHAINS for f in frames))
+KEY = "derive:v2:{}:{}:{}"  # source, ticker, base -> base bars stored after this (ms) are not built from yet
+PROGRESS_KEY = "derive:progress"
+CHUNK_DAYS = {"second": 5, "minute": 60}
 SLACK_MS = 60_000  # writers' stored_at can commit out of order: look back a minute
 UTC_DAYS = ("crypto", "fx")
+LABELS = {"second": "s", "minute": "m", "hour": "h", "day": "D", "week": "W", "month": "M", "year": "Y"}
+
+
+def label(timespan: str, multiplier: int = 1) -> str:
+    """1m, 30s, 4h, 1D ... as the chart's interval menu writes them."""
+    return f"{multiplier}{LABELS.get(timespan, timespan)}"
 
 
 def day_zone(asset: str):
@@ -55,19 +76,45 @@ def _regular(times: pd.Series) -> np.ndarray:
     return np.array([c is not None and time(9, 30) <= x < c for x, c in zip(t, close)], dtype=bool)
 
 
-def aggregate(minutes: pd.DataFrame, timespan: str, multiplier: int, asset: str) -> list[dict]:
-    """Bars of one frame from 1-minute bars (columns ts, open, high, low, close, volume, vwap,
+def _local_midnights(times: pd.Series, zone) -> np.ndarray:
+    """Each row's midnight (ms) in `zone`."""
+    dates = times.dt.tz_convert(zone).dt.date
+    midnight = {d: _midnight_ms(d, zone) for d in dates.unique()}
+    return dates.map(midnight).to_numpy(dtype="int64")
+
+
+def _period_starts(times: pd.Series, timespan: str, zone) -> np.ndarray:
+    """The midnight (ms, in `zone`) of each row's week (from Monday), month or year."""
+    dates = times.dt.tz_convert(zone).dt.date
+
+    def start(d: date) -> date:
+        if timespan == "week":
+            return d - timedelta(days=d.weekday())
+        return d.replace(day=1) if timespan == "month" else d.replace(month=1, day=1)
+    starts = {d: _midnight_ms(start(d), zone) for d in dates.unique()}
+    return dates.map(starts).to_numpy(dtype="int64")
+
+
+def aggregate(bars: pd.DataFrame, timespan: str, multiplier: int, asset: str) -> list[dict]:
+    """Bars of one frame from finer bars (columns ts, open, high, low, close, volume, vwap,
     transactions, time), as feeds send them: t (bar start, ms), o, h, l, c, v, vw, n."""
-    m = minutes
+    m = bars
+    zone = day_zone(asset)
     if timespan == "day" and asset in ("stock", "index"):
         m = m[_regular(m["time"])]
     if m.empty:
         return []
     ts = m["ts"].to_numpy(dtype="int64")
-    if timespan == "minute":
+    if timespan == "second":
+        key = ts // (multiplier * 1000) * (multiplier * 1000)
+    elif timespan == "minute":
         key = ts // (multiplier * 60_000) * (multiplier * 60_000)
     elif timespan == "hour":
-        key = ts // (multiplier * 3_600_000) * (multiplier * 3_600_000)
+        step = multiplier * 3_600_000
+        midnight = _local_midnights(m["time"], zone)
+        key = midnight + (ts - midnight) // step * step
+    elif timespan in ("week", "month", "year"):
+        key = _period_starts(m["time"], timespan, zone)
     elif asset in UTC_DAYS:
         key = ts // 86_400_000 * 86_400_000
     else:  # the New York date, stamped at its midnight
@@ -84,62 +131,82 @@ def aggregate(minutes: pd.DataFrame, timespan: str, multiplier: int, asset: str)
             for t, o, h, l, c, v, w, n in zip(g.index, g["o"], g["h"], g["l"], g["c"], g["v"], vw, g["n"])]
 
 
-def build_series(store, source: str, ticker: str, asset: str = "stock", log=print) -> int:
-    """Build (or rebuild) the frames above 1 minute for one series from what changed since the last
-    build. Returns bars stored."""
-    key = KEY.format(source, ticker)
+def build_chain(store, source: str, ticker: str, base: str, asset: str = "stock") -> int:
+    """Build (or rebuild) the frames above one base frame (CHAINS) for one series from what
+    changed since the last build. Returns bars stored."""
+    frames = dict(CHAINS)[base]
+    key = KEY.format(source, ticker, base)
     started = int(time_module.time() * 1000)
     built_to = int(store.kv_get(key) or -1)
-    edges = store.bar_edges(source, ticker, "minute")
+    edges = store.bar_edges(source, ticker, base)
     if edges is None:
         return 0
-    if built_to < 0:  # a first build covers everything held (minutes from before stored_at have none)
+    if built_to < 0:  # a first build covers everything held (bars from before stored_at have none)
         lo = edges[0]
     else:
-        changed = store.bars_changed_since(source, ticker, ["minute"], built_to)
-        if "minute" not in changed:
+        changed = store.bars_changed_since(source, ticker, [base], built_to)
+        if base not in changed:
             return 0
-        lo = changed["minute"][0]
+        lo = edges[0] if base == "day" else changed[base][0]  # weeks, months, years: all again
     zone = day_zone(asset)
     first = datetime.fromtimestamp(lo / 1000, zone).date() - timedelta(days=1)
     last = datetime.fromtimestamp(edges[1] / 1000, zone).date() + timedelta(days=1)
     did = provenance.record(store, "bars-from-bars", f"{source}:{ticker}", {
-        "from": "minute", "frames": [f"{m}{t}" for t, m in FROM_MINUTES],
+        "from": base, "frames": [label(t, m) for t, m in frames],
         "days": "UTC dates" if zone is timezone.utc else
                 ("New York dates, regular session" if asset in ("stock", "index") else "New York dates"),
         "method": "first open, highest high, lowest low, last close, summed volume and trades, volume-weighted "
-                  "average price; the feed's own minutes first, built ones where it sent none"},
-        {"bars": f"{source}:{ticker}:minute"}, (_midnight_ms(first, zone), _midnight_ms(last, zone)))
+                  "average price; the feed's own bars first, built ones where it sent none; only upward"},
+        {"bars": f"{source}:{ticker}:{base}"}, (_midnight_ms(first, zone), _midnight_ms(last, zone)))
     stored = 0
     day = first
     while day < last:
-        end = min(last, day + timedelta(days=CHUNK_DAYS))
-        minutes = store.bars_window([source], ticker, "minute", _midnight_ms(day, zone), _midnight_ms(end, zone))
-        if len(minutes):
-            for timespan, multiplier in FROM_MINUTES:
+        end = min(last, day + timedelta(days=CHUNK_DAYS.get(base, 100_000)))
+        window = store.bars_window([source], ticker, base, _midnight_ms(day, zone), _midnight_ms(end, zone))
+        if len(window):
+            for timespan, multiplier in frames:
                 stored += store.upsert_built_bars(source, ticker, timespan, multiplier,
-                                                  aggregate(minutes, timespan, multiplier, asset), did)
+                                                  aggregate(window, timespan, multiplier, asset), did)
         day = end
     store.set_derivation_rows(did, stored)
-    # Minutes stored before this build started reading are in it, but a write committed late can
+    # Bars stored before this build started reading are in it, but a write committed late can
     # carry an earlier stored_at: the next build looks again from a minute before.
     store.kv_set(key, str(started - SLACK_MS))
     return stored
 
 
+def build_series(store, source: str, ticker: str, asset: str = "stock", log=print) -> int:
+    """The frames built from a series' 1-minute bars (see build_chain). Returns bars stored."""
+    return build_chain(store, source, ticker, "minute", asset)
+
+
 def run(store, sources=None, tickers=None, log=print) -> int:
-    """Build the frames for every series of 1-minute bars on the given feeds (every feed by
-    default), or for the given tickers only. Returns bars stored."""
+    """Build the frames above every base frame of every series on the given feeds (every feed by
+    default), or for the given tickers only: seconds, then minutes, then days (days built from
+    minutes feed the weeks). Returns bars stored."""
     wanted = {t.upper() for t in tickers} if tickers else None
     assets = {(w["source"], w["ticker"]): w["asset"] for w in store.watchlist()}
-    total = 0
+    bases = dict.fromkeys(base for base, _ in CHAINS)
+    series: dict[tuple[str, str], set] = {}
     for source, ticker, kind in store.stored_series():
-        if kind != "minute" or (sources and source not in sources) or (wanted and ticker not in wanted):
+        if kind not in bases or (sources and source not in sources) or (wanted and ticker not in wanted):
             continue
         if source == "composite":  # the composite model is derived through and through: it has its own build
             continue
-        n = build_series(store, source, ticker, assets.get((source, ticker), "stock"), log)
-        if n:
-            log(f"derive {source}:{ticker}: {n:,} bars for {', '.join(f'{m}{t[0]}' for t, m in FROM_MINUTES)}")
-        total += n
+        series.setdefault((source, ticker), set()).add(kind)
+    total = 0
+    for i, ((source, ticker), kinds) in enumerate(sorted(series.items())):
+        asset = assets.get((source, ticker), "stock")
+        for base in (b for b in bases if b in kinds or (b == "day" and "minute" in kinds)):
+            frames = dict(CHAINS)[base]
+            store.kv_set(PROGRESS_KEY, json.dumps({
+                "source": source, "ticker": ticker, "from": label(base), "to": [label(t, m) for t, m in frames],
+                "n": i + 1, "of": len(series), "at": int(time_module.time() * 1000)}))
+            n = build_chain(store, source, ticker, base, asset)
+            if n:
+                log(f"derive {source}:{ticker}: {n:,} bars for {', '.join(label(t, m) for t, m in frames)} "
+                    f"from {label(base)}")
+            total += n
+    if series:
+        store.kv_set(PROGRESS_KEY, "")
     return total

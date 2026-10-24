@@ -305,6 +305,24 @@ def limits(store: Store, settings: Settings, now: datetime) -> list[dict]:
     return rows
 
 
+DERIVE_FRESH_MS = 120_000  # a build not heard from for this long has ended (or died)
+
+
+def derive_progress(store: Store, now: datetime) -> dict | None:
+    """What derive.py is building now (frames from finer bars, for the status bar), or None."""
+    import json
+
+    from ..derive import PROGRESS_KEY
+
+    try:
+        p = json.loads(store.kv_get(PROGRESS_KEY) or "null")
+    except ValueError:
+        return None
+    if not isinstance(p, dict) or now.timestamp() * 1000 - p.get("at", 0) > DERIVE_FRESH_MS:
+        return None
+    return p
+
+
 def activity(store: Store, settings: Settings, db_path: Path, source: str = "massive",
              now: datetime | None = None, log_lines: int = 200) -> dict:
     now = (now or datetime.now(timezone.utc)).astimezone(ET)
@@ -348,6 +366,7 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
         "directory": _directory(store, source, settings, used),
         "ticks": _ticks(store, settings),
         "liveFeeds": live_feeds(store, settings, source, now),
+        "derive": derive_progress(store, now),
         "limits": limits(store, settings, now),
         "priority": {t: {"at": v["at"].isoformat(), "runs": v["runs"]}
                      for t, v in collector.priority_requests(store, now).items()},

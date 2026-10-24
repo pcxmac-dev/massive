@@ -382,6 +382,7 @@ main > .view[hidden] { display: none; }
 .net-status .ok { color: var(--up); }
 .net-status .bad { color: var(--down); }
 #netText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }
+#netText .net-derived { color: var(--muted); font-style: italic; }
 .net-spin { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--border); border-top-color: var(--accent);
   animation: spin .8s linear infinite; display: inline-block; flex: none; }
 .net-bar { width: 120px; height: 7px; border: 1px solid var(--border); border-radius: 2px; overflow: hidden; flex: none;

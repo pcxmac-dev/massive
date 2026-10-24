@@ -181,6 +181,15 @@
       msg = `Fetcher${data.live.current ? `: ${esc(data.live.current)}` : ''} · ${num(data.live.requests)} req`;
       busy = true;
     }
+    // Frames built from finer bars (derive.py): what, from what, for which series, how far along.
+    const d = data?.derive;
+    if (d && (!msg || !busy)) {
+      msg = `Building ${esc(d.to.join(', '))} from ${esc(d.from)} bars <span class="net-derived">*derived</span> · `
+        + `${esc(d.source)}:${esc(d.ticker)} (${num(d.n)} of ${num(d.of)})`;
+      progress = d.of ? d.n / d.of : null;
+      busy = true;
+      cls = '';
+    }
     text.innerHTML = msg ? `${busy ? '<span class="net-spin"></span>' : ''}${msg}` : '';
     text.className = cls;
     bar.hidden = progress == null && !busy;

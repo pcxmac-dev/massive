@@ -1005,6 +1005,33 @@ class BarEngine:
         bars = bars.assign(interp=False)
         return pd.concat([bars, filled]).sort_index(kind="stable")
 
+    def _with_sent(self, s: Series, bars: pd.DataFrame, period: str, span: int) -> tuple[pd.DataFrame, bool]:
+        """Original data is prime: where a feed sent bars of this very interval (Alpaca's 5-minute
+        and hourly bars, say), they take the place of the ones built here at the same times (the
+        best-ranked feed's first), unmarked. Only times the chart's own bins have: a feed's clock
+        hours do not land on a stock chart's hours from the open, so those stay built; and no
+        bars are added where the finer data has none (a gap stays a gap). Returns (bars, whether any
+        came from a feed: then every bar carries its own mark)."""
+        if bars.empty:
+            return bars, False
+        feeds = [f for f in (self.sources_for(s.ticker) if s.source == MERGED else [s.source]) if f not in MODEL_SOURCES]
+        start = bars.index[0].date()
+        parts = []
+        with self._lock:
+            for feed in feeds:
+                df = self.store.load_bars([s.ticker], period, span, start=start, source=feed)
+                if len(df):
+                    df = frame_from_bars(df)
+                    parts.append(df[~df["derived"]])
+        sent = merge_frames(parts) if parts else None
+        common = bars.index.intersection(sent.index) if sent is not None else []
+        if not len(common):
+            return bars, False
+        bars = bars.assign(derived=True)  # built here from finer bars ...
+        bars.loc[common, COLUMNS] = sent.loc[common, COLUMNS].to_numpy()
+        bars.loc[common, "derived"] = False  # ... except where the feed sent this interval
+        return bars, True
+
     def _resampled(self, s: Series, period: str, span: int, session: str) -> pd.DataFrame:
         if self._windowed(s, period):  # whole-series uses (projection, chart types): the latest day of seconds
             last = max(b for _, b in s.fine_spans)
@@ -1031,6 +1058,8 @@ class BarEngine:
             bars = resample(s.frame, period, span, session, align_hours_to_open=s.asset in ("stock", "index"),
                             utc_days=utc_days(s))
             sent = period == s.kind and span == 1 and s.source not in MODEL_SOURCES  # a feed's own interval
+            if not sent and period in ("second", "minute", "hour"):
+                bars, sent = self._with_sent(s, bars, period, span)
         bars = bars.assign(derived=bars["derived"].astype(bool) if sent and "derived" in bars else True)
         with self._lock:
             self._bars[key] = bars
