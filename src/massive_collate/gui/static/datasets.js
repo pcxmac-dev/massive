@@ -487,7 +487,7 @@
     const pw = W - left - right;
     const x = (t) => left + (t - lo) / Math.max(1, hi - lo) * pw;
     const invX = (px) => lo + (px - left) / pw * (hi - lo);
-    geom = { x, invX, lo, hi, full: [fa, fb], left, right, W, charts: [] };
+    geom = { x, invX, lo, hi, full: [fa, fb], left, right, W, charts: [], allT: [lo] };  // allT: set once drawn
     const marks = visibleMarks();
     units.forEach((unit, gi) => {
       const ls = lines.filter((l) => l.unit === unit);
