@@ -32,6 +32,8 @@ def _build_massive(settings: Settings, request_budget: int | None) -> DataSource
         rate_limiter=_limiter("massive", settings),
         request_budget=request_budget,
     )
+    # Asset classes on another plan keep that plan's rate (the free plan: 5 a minute per class).
+    client.class_limiters = {a: RateLimiter(t.requests_per_minute, 60.0) for a, t in settings.tier.by_asset}
     return MassiveSource(client)
 
 

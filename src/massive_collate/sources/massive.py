@@ -6,7 +6,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any, Callable, Iterator
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import requests
 
@@ -36,6 +36,8 @@ class MassiveClient:
         self.base_url = base_url.rstrip("/")
         self._host = urlparse(self.base_url).netloc
         self._limiter = rate_limiter or RateLimiter(None)
+        # Asset classes on another plan, with that plan's rate (asset_class: which a request is).
+        self.class_limiters: dict[str, RateLimiter] = {}
         self._session = session or requests.Session()
         self._headers = {"Authorization": f"Bearer {api_key}"}
         self._max_retries = max_retries
@@ -70,7 +72,7 @@ class MassiveClient:
         for attempt in range(self._max_retries + 1):
             if self.request_budget is not None and self.requests_made >= self.request_budget:
                 raise BudgetExhausted(f"request cap of {self.request_budget} reached")
-            self._limiter.acquire()
+            self.class_limiters.get(asset_class(url), self._limiter).acquire()
             resp = self._session.get(url, params=params, headers=self._headers, timeout=self._timeout)
             self.requests_made += 1
             if self.on_request:
@@ -370,6 +372,21 @@ def normalize_future_bar(b: dict, timespan: str) -> dict:
         "v": volume, "vw": dollar / volume if dollar is not None and volume else None,
         "n": b.get("transactions"),
     }
+
+
+def asset_class(url: str) -> str:
+    """The Massive asset class a request belongs to (each class has its own plan and rate): by its
+    ticker's prefix (X: crypto, C: currencies, I: indices), its futures or market path, else stocks."""
+    path = unquote(urlparse(url).path)
+    if path.startswith("/futures/"):
+        return "future"
+    for prefix, asset in (("X:", "crypto"), ("C:", "fx"), ("I:", "index")):
+        if f"/{prefix}" in path:
+            return asset
+    for market, asset in (("/market/crypto", "crypto"), ("/market/fx", "fx"), ("/indices", "index")):
+        if market in path:
+            return asset
+    return "stock"
 
 
 def _first(pages: Iterator[list[dict]]) -> Iterator[list[dict]]:

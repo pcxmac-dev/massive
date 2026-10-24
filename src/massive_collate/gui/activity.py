@@ -123,10 +123,10 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
     today = now.date()
     profiles = feed_profiles(settings)
     settings = settings.for_source(source)
-    floor = history_floor(settings.tier, today)
     me = profiles.get(source)
     rows = []
     for item in store.watchlist(source):
+        floor = history_floor(settings.tier, today, item["asset"])
         if item["asset"] == "future":
             contracts = {t for _, t in store.rolls(source, item["source_ticker"])}  # source_ticker = product
             spans = [e for e in (store.bar_edges(source, t) for t in contracts) if e]

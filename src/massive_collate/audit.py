@@ -210,7 +210,7 @@ def audit_span(auditor, store, ticker: str, timespan: str, a: int, b: int, owner
 def _window(me: FeedProfile, asset: str, timespan: str, now: datetime) -> tuple[int, int]:
     from .collector import history_floor
 
-    return day_start_ms(history_floor(me.tier, now.astimezone(ET).date())), frontier_ms(asset, me.tier, now, timespan)
+    return day_start_ms(history_floor(me.tier, now.astimezone(ET).date(), asset)), frontier_ms(asset, me.tier, now, timespan)
 
 
 def run_audits(source, store, me: FeedProfile, feeds: dict[str, FeedProfile], now: datetime,

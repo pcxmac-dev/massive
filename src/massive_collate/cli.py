@@ -176,6 +176,9 @@ def _share_limits(client, store: Store, name: str, log) -> None:
 
     limiter.share(KvLedger(store, name))
     limiter.on_wait = lambda s: waiting(s, f"limit: {limiter.describe()}")
+    for asset, lim in getattr(client, "class_limiters", {}).items():  # Massive: each class's own window
+        lim.share(KvLedger(store, f"{name}:{asset}"))
+        lim.on_wait = (lambda lm, a: lambda s: waiting(s, f"{a} limit: {lm.describe()}"))(lim, asset)
     client.on_retry = lambda s, status: waiting(s, f"server answered {status}; trying again")
 
 

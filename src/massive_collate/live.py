@@ -41,6 +41,12 @@ FLUSH_SECONDS = 2.0
 DERIVE_SECONDS = 60.0  # the time frames above a minute are rebuilt this often for the symbols streamed
 RULES_SECONDS = 3600.0  # trade condition rules (stocks) are reread this often
 RECV_TIMEOUT = 20.0
+# Sanity check for a stream that keeps failing: the wait before connecting again doubles with each
+# failure in a row (1 s up to MAX_BACKOFF) and starts over only after a connection that held for
+# STABLE_SECONDS. A server that accepts and at once drops the connection (Coinbase: "subscription
+# limit reached") is otherwise asked again every second, forever.
+MAX_BACKOFF = 300.0
+STABLE_SECONDS = 60.0
 DAY_MS = 86_400_000
 PING = "ping"  # keepalive by WebSocket ping frames rather than a message
 
@@ -264,13 +270,13 @@ class Recorder:
         return True
 
     def _run_stream(self, stream) -> None:
-        backoff = 1.0
+        backoff, failures = 1.0, 0
         dynamic = getattr(stream, "dynamic", False)
         while not self.stop.is_set():
             if dynamic and not self._wanted:  # nothing to stream: no connection
                 self.stop.wait(WANT_SECONDS)
                 continue
-            ws = None
+            ws, connected_at = None, None
             try:
                 ws = self.connect(stream.url)
                 for m in stream.subscribe(() if dynamic else self.coins):
@@ -280,7 +286,7 @@ class Recorder:
                     self._status[stream.source].update(connected=True, since=datetime.now(timezone.utc).isoformat(),
                                                        error=None)
                 self.log(f"live: {stream.source} connected ({'stocks' if dynamic else f'{len(self.coins)} coins'})")
-                backoff, misses, pongs = 1.0, 0, 0
+                connected_at, misses, pongs = time.monotonic(), 0, 0
                 while not self.stop.is_set():
                     if dynamic and not self._follow(stream, ws):
                         with self._lock:  # none wanted any more: the connection is closed
@@ -311,15 +317,19 @@ class Recorder:
                             for ticker, t in trades:
                                 self._buffer[(stream.source, ticker)].append(t)
             except (OSError, ConnectionError, ValueError, KeyError) as e:
+                if connected_at is not None and time.monotonic() - connected_at >= STABLE_SECONDS:
+                    backoff, failures = 1.0, 0  # it had been working: a new failure, not more of the same
+                failures += 1
                 with self._lock:
                     self._since.pop(stream.source, None)
                     self._subs[stream.source] = {}
-                    self._status[stream.source].update(connected=False, error=str(e)[:200])
+                    self._status[stream.source].update(connected=False, error=str(e)[:200], failures=failures)
                 if not self.stop.is_set():
                     wait = max(backoff, getattr(e, "wait", 0))
-                    self.log(f"live: {stream.source} disconnected ({e}); again in {wait:.0f} s")
+                    self.log(f"live: {stream.source} disconnected ({e}); again in {wait:.0f} s"
+                             + (f" ({failures} failures in a row)" if failures > 1 else ""))
                     self.stop.wait(wait)
-                    backoff = min(60.0, backoff * 2)
+                    backoff = min(MAX_BACKOFF, backoff * 2)
             finally:
                 if ws is not None:
                     try:

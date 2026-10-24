@@ -4,8 +4,10 @@ Settings come from environment variables, optionally loaded from a `.env` file
 (variables already set in the environment win):
 
     MASSIVE_API_KEY   required for any API call
-    MASSIVE_TIER      free | starter | developer | advanced   (default: free); sets the history the
-                      collector reaches back to. `python -m massive_collate plan` finds your plan
+    MASSIVE_TIER      free | starter | developer | advanced   (default: free): your Stocks plan; sets
+                      the history the collector reaches back to. `python -m massive_collate plan` finds it
+    MASSIVE_TIER_INDICES / _CURRENCIES / _CRYPTO / _FUTURES   the plan of each other asset class
+                      (Massive sells one per class; default: free)
     MASSIVE_RPM       override the tier's requests-per-minute limit (0 = unlimited)
     MASSIVE_DB        path of the SQLite database (default: ~/MassiveData/massive.db)
     MASSIVE_BASE_URL  API base URL (default: https://api.massive.com)
@@ -62,6 +64,8 @@ class Tier:
     history_years: int | None  # None = no plan limit
     history_start: date | None = None  # the source holds nothing older (Alpaca: 2016)
     history_days: int | None = None  # collect only this far back (a case-study venue feed)
+    # Plans of other asset classes on the same source ((asset, Tier), ...): Massive sells one per class.
+    by_asset: tuple = ()
 
 
 # Backfill depth used when a plan has no history limit and its source no known start.
@@ -76,6 +80,19 @@ TIERS: dict[str, Tier] = {
     # Advanced: all of Massive's stock history, which begins 2003-09-10 (`plan`, 2026-10-24).
     "advanced": Tier("advanced", requests_per_minute=None, history_years=None, history_start=date(2003, 9, 10)),
 }
+
+
+def asset_tier(tier: Tier, asset: str | None) -> Tier:
+    """The plan for one asset class: the tier's own, unless it carries another for that class."""
+    for a, t in tier.by_asset if asset else ():
+        if a == asset:
+            return t
+    return tier
+
+
+# The variables naming Massive's plan for each asset class besides stocks (MASSIVE_TIER).
+MASSIVE_CLASS_TIERS = {"index": "MASSIVE_TIER_INDICES", "fx": "MASSIVE_TIER_CURRENCIES",
+                       "crypto": "MASSIVE_TIER_CRYPTO", "future": "MASSIVE_TIER_FUTURES"}
 
 
 def tier_for(reach: dict[str, bool]) -> str:
@@ -254,7 +271,9 @@ def read_env_file(path: Path) -> dict[str, str]:
 # starts) are not in its environment; on Windows they are read from the user's saved variables.
 KEY_NAMES = ("MASSIVE_API_KEY", "ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY", "APCA_API_KEY_ID",
              "APCA_API_SECRET_KEY", "TIINGO_API_KEY")
-PLAN_NAMES = ("MASSIVE_TIER", "ALPACA_PLAN")  # changed when a plan is bought: read the same way
+# Changed when a plan is bought (and its caps with it): read the same way.
+PLAN_NAMES = ("MASSIVE_TIER", *MASSIVE_CLASS_TIERS.values(), "MASSIVE_MAX_REQUESTS_PER_RUN",
+              "MASSIVE_MAX_REQUESTS_PER_DAY", "ALPACA_PLAN")
 
 
 def saved_user_keys() -> dict[str, str]:
@@ -297,7 +316,15 @@ def load_settings(
 
     rpm = _int_setting(merged, "MASSIVE_RPM")
     if rpm is not None:
-        tier = Tier(tier.name, rpm or None, tier.history_years)
+        tier = replace(tier, requests_per_minute=rpm or None)
+    classes = []
+    for asset, var in MASSIVE_CLASS_TIERS.items():
+        name = (merged.get(var) or "free").strip().lower()
+        if name not in TIERS:
+            raise ConfigError(f"Unknown {var} {name!r}; choose one of {', '.join(TIERS)}")
+        if name != tier.name:
+            classes.append((asset, TIERS[name]))
+    tier = replace(tier, by_asset=tuple(classes))
 
     per_run = _int_setting(merged, "MASSIVE_MAX_REQUESTS_PER_RUN")
     per_day = _int_setting(merged, "MASSIVE_MAX_REQUESTS_PER_DAY")

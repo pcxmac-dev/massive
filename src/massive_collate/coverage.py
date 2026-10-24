@@ -162,7 +162,7 @@ def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, ass
             row = watch.get((f.name, ticker.upper()))
             if f.name != me.name and row and row.get("resolution") == "trades" and asset in f.assets \
                     and same_market(feeds, f.name, me.name, asset):
-                f_floor = history_floor(f.tier, today)
+                f_floor = history_floor(f.tier, today, asset)
                 if listed_from:
                     f_floor = max(f_floor, listed_from)
                 t_lo = tick_floor(store, f, ticker, today, f_floor)
@@ -184,7 +184,7 @@ def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, ass
                 continue  # another market's data is not a copy of this feed's
             if rank(peer, row.get("resolution", "auto"), scores, quality_of(store, peer.name, asset)) >= mine:
                 continue
-            p_floor = history_floor(peer.tier, today)
+            p_floor = history_floor(peer.tier, today, asset)
             if listed_from:
                 p_floor = max(p_floor, listed_from)
             window = [(day_start_ms(p_floor), frontier_ms(asset, peer.tier, now, timespan))]

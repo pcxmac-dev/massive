@@ -120,7 +120,39 @@ def test_a_stream_reconnects_after_it_drops(tmp_path):
                                    "price": "1", "size": "1", "time": "2026-10-24T07:00:00Z"})])
 
     rec.connect = connect
-    rec.stop.wait = lambda timeout=None: rec.stop.is_set()  # no real backoff sleeps
+    waits = []
+    rec.stop.wait = lambda timeout=None: waits.append(timeout) or rec.stop.is_set()  # no real backoff sleeps
     rec._run_stream(rec.streams[0])
     assert len(calls) == 3 and len(rec._buffer[("coinbase", "BTCUSD")]) == 2  # one trade per connection that ran
     assert rec._status["coinbase"]["connected"] is True  # reconnected after each drop (stopped while connected)
+    # Each connection dropped at once: the waits grow, they do not start over at a second each time.
+    assert waits == [1.0, 2.0] and rec._status["coinbase"]["failures"] == 2
+
+
+def test_a_stream_that_held_starts_its_backoff_over(tmp_path, monkeypatch):
+    rec = live.Recorder(tmp_path / "m.db", coins=("BTC",), sources=("coinbase",), log=lambda *_: None)
+    clock = [1000.0]
+    monkeypatch.setattr(live.time, "monotonic", lambda: clock[0])
+    calls, waits = [], []
+
+    class Drop:
+        def send(self, m):
+            pass
+
+        def recv(self):
+            clock[0] += live.STABLE_SECONDS if len(calls) == 3 else 1  # only the third connection holds a while
+            raise ConnectionError("dropped")
+
+        def close(self):
+            pass
+
+    def connect(url):
+        calls.append(url)
+        if len(calls) >= 5:
+            rec.stop.set()
+        return Drop()
+
+    rec.connect = connect
+    rec.stop.wait = lambda timeout=None: waits.append(timeout) or rec.stop.is_set()
+    rec._run_stream(rec.streams[0])
+    assert waits == [1.0, 2.0, 1.0, 2.0]  # after the connection that held: from a second again

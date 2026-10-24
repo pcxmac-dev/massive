@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from .config import Tier
+from .config import Tier, asset_tier
 from .sessions import MarketCalendar
 
 ET = ZoneInfo("America/New_York")
@@ -66,6 +66,7 @@ PLAN_DELAYS["alpaca-plus"] = {"stock": Delay("delay"), "crypto": Delay("delay")}
 
 
 def plan_delay(tier: Tier, asset: str) -> Delay:
+    tier = asset_tier(tier, asset)  # Massive: each asset class on its own plan
     return PLAN_DELAYS.get(tier.name, PLAN_DELAYS["free"]).get(asset, Delay("eod"))
 
 

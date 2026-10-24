@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Iterator
 from zoneinfo import ZoneInfo
 
-from .config import UNLIMITED_BACKFILL_YEARS, Tier
+from .config import UNLIMITED_BACKFILL_YEARS, Tier, asset_tier
 from .errors import BudgetExhausted, NotEntitled, RateLimited, SourceError
 from . import freshness
 from .futures import candidate_contracts, roll_schedule
@@ -49,10 +49,11 @@ def now_et() -> datetime:
     return datetime.now(ET)
 
 
-def history_floor(tier: Tier, today: date) -> date:
-    """Oldest date we may request on this plan (one day of margin inside a plan's years). A plan
-    without a limit reaches back to where its source's history begins (`history_start`), or
-    UNLIMITED_BACKFILL_YEARS when that is not known."""
+def history_floor(tier: Tier, today: date, asset: str | None = None) -> date:
+    """Oldest date we may request on this plan (one day of margin inside a plan's years); with
+    `asset`, on that asset class's plan. A plan without a limit reaches back to where its source's
+    history begins (`history_start`), or UNLIMITED_BACKFILL_YEARS when that is not known."""
+    tier = asset_tier(tier, asset)
     if tier.history_years is None and tier.history_start:
         floor = tier.history_start
     else:
@@ -580,6 +581,47 @@ def _guard_call(fn: Callable, *args, **kwargs):
         raise StopRun(f"rate limited ({e.message}); stopping until the next run") from e
 
 
+class Refusals:
+    """Sanity check for a symbol a feed's plan refuses run after run: after REFUSAL_LIMIT runs in a
+    row it is left alone for REFUSAL_PAUSE (asked again sooner only when the chart opens it), so a
+    lasting refusal does not cost requests and fill the log every hour. Kept in kv
+    `refusals:<feed>` as {ticker: {n, at, why}}; an answer clears it."""
+
+    LIMIT, PAUSE = 3, timedelta(hours=24)
+
+    def __init__(self, store: Store, feed: str):
+        import json
+
+        self.store, self.key = store, f"refusals:{feed}"
+        try:
+            raw = json.loads(store.kv_get(self.key) or "{}")
+        except ValueError:
+            raw = {}
+        self.rows: dict = raw if isinstance(raw, dict) else {}
+
+    def _save(self) -> None:
+        import json
+
+        self.store.kv_set(self.key, json.dumps(self.rows))
+
+    def paused(self, ticker: str, now: datetime) -> bool:
+        r = self.rows.get(ticker)
+        return bool(r and r["n"] >= self.LIMIT and now - datetime.fromisoformat(r["at"]) < self.PAUSE)
+
+    def note(self, ticker: str, now: datetime, why: str) -> str:
+        """Count a refusal; returns what the log line should add."""
+        r = self.rows.get(ticker) or {"n": 0}
+        self.rows[ticker] = {"n": r["n"] + 1, "at": now.isoformat(), "why": str(why)[:200]}
+        self._save()
+        n = self.rows[ticker]["n"]
+        return f" (refused {n} runs in a row: left alone for {self.PAUSE.total_seconds() / 3600:.0f} h)" \
+            if n >= self.LIMIT else ""
+
+    def clear(self, ticker: str) -> None:
+        if self.rows.pop(ticker, None) is not None:
+            self._save()
+
+
 def _backfilling(item: dict, floor: date) -> bool:
     if item["asset"] == "future":
         return item.get("synced_at") is None
@@ -682,7 +724,7 @@ def sync(
     """
     now = (now or now_et()).astimezone(ET)
     today = now.date()
-    floor = history_floor(tier, today)
+    floors = {a: history_floor(tier, today, a) for a in ASSETS}  # each asset class on its own plan
     result = SyncResult()
     feeds = dict(feeds or {})
     me = feeds.get(source.name) or FeedProfile(source.name, tier, frozenset(ASSETS))
@@ -713,7 +755,9 @@ def sync(
 
         order = load_order(store)
         pending = sorted(store.watchlist(source.name),
-                         key=lambda w: (_backfilling(w, floor), order.get(w["ticker"], len(order)), w["ticker"]))
+                         key=lambda w: (_backfilling(w, floors[w["asset"]]), order.get(w["ticker"], len(order)),
+                                        w["ticker"]))
+        refusals = Refusals(store, source.name)
         while pending:
             item, urgent = _next_item(pending, store, now)
             ticker, asset = item["ticker"], item["asset"]
@@ -730,6 +774,10 @@ def sync(
             if not source.serves(asset):  # e.g. Alpaca stocks without keys: nothing is sent
                 waiting[asset] = waiting.get(asset, 0) + 1
                 continue
+            if not urgent and refusals.paused(ticker, now):  # refused run after run: left alone a while
+                result.skipped += 1
+                continue
+            floor = floors[asset]
             if (only is None or published_only) and synced and not _due(
                     asset, tier, synced, now, 0.0 if urgent or only is not None else refresh_hours):
                 result.skipped += 1
@@ -741,8 +789,10 @@ def sync(
                 try:
                     n = sync_future(source, store, item, floor, today, log)
                 except NotEntitled as e:
-                    log(f"{ticker}: futures refused by your plan ({e.message}); skipped")
+                    log(f"{ticker}: futures refused by your plan ({e.message}); skipped"
+                        + refusals.note(ticker, now, e.message))
                     continue
+                refusals.clear(ticker)
                 result.rows += n
                 log(f"{ticker}: {n} rows ({source.requests_made - spent} requests)")
                 store.set_synced(source.name, ticker, now)
@@ -783,10 +833,12 @@ def sync(
                 else:
                     n = sync_bars(source, store, ticker, resolution, item_floor, until, **span)
             except NotEntitled as e:
-                log(f"{ticker} {resolution}: refused by your plan ({e.message}); re-checking resolution next run")
+                log(f"{ticker} {resolution}: refused by your plan ({e.message}); re-checking resolution next run"
+                    + refusals.note(ticker, now, e.message))
                 store.set_resolution(source.name, ticker, "auto")
                 store.clear_entitlements(source.name)  # the plan may have changed: probe again
                 continue
+            refusals.clear(ticker)
             result.rows += n
             store.set_backfilled(source.name, ticker, item_floor)  # every span it should hold is in
             if resolution != "day":
@@ -1146,7 +1198,7 @@ def scan(
         if feeds and source.name in feeds and item["asset"] != "future" and item["resolution"] != "trades":
             if not source.serves(item["asset"]) or not plan(
                     store, feeds[source.name], feeds, item["ticker"], item["asset"], "minute",
-                    history_floor(tier, now.date()), now, item.get("listed_from")):
+                    history_floor(tier, now.date(), item["asset"]), now, item.get("listed_from")):
                 row["new"] = False  # nothing this feed should fetch: another feed holds or will serve it
                 continue
         if probes >= probe_limit:
@@ -1207,7 +1259,7 @@ def sync_market_daily(
     now = (now or now_et()).astimezone(ET)
     today = now.date()
     newest = today if now.hour >= EOD_READY_HOUR_ET else today - timedelta(days=1)
-    floor = history_floor(tier, today)
+    floor = history_floor(tier, today, "stock")
     known = store.grouped_days(source.name)
     denied = [d for d, s in known.items() if s == "denied"]
     if denied:
