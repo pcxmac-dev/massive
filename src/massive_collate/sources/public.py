@@ -32,7 +32,7 @@ import requests
 from ..errors import NotEntitled, SourceError
 from ..models import Instrument, Stock
 from ..ratelimit import RateLimiter
-from .base import DataSource
+from .base import DataSource, Page
 from .massive import MassiveClient
 
 ET = ZoneInfo("America/New_York")
@@ -203,7 +203,7 @@ class CoinbaseSource(_Archive):
             bars = [{"t": int(r[0]) * 1000, "o": float(r[3]), "h": float(r[2]), "l": float(r[1]), "c": float(r[4]),
                      "v": float(r[5]), "vw": None, "n": None} for r in rows or [] if lo <= int(r[0]) < hi]
             bars.sort(key=lambda x: -x["t"] if descending else x["t"])
-            yield bars[:limit] if limit else bars
+            yield Page(bars[:limit] if limit else bars, window=(lo * 1000, hi * 1000))
             if limit:
                 return
 

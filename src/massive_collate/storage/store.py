@@ -48,6 +48,7 @@ class Store(ProvenanceStore, AdminStore, FeedStore, DatasetStore, DirectoryStore
         # Data-version caches: SQLite's data_version changes when another connection (the
         # collector) commits, per file; _writes counts this store's own market-data writes.
         self._writes = 0
+        self.rows_saved = 0  # bars and trades a feed sent, stored by this instance (a run's count)
         self._cache: dict = {}
         self._scan_feeds()
 

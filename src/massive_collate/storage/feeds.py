@@ -334,6 +334,7 @@ class FeedStore:
         with feed.conn:
             feed.conn.executemany("INSERT OR REPLACE INTO ticks.trades VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
         self._wrote()
+        self.rows_saved += len(rows)
         return len(rows)
 
     def withdraw_trades(self, source: str, ticker: str, seqs: Iterable[int], since_ns: int) -> list[int]:
@@ -408,6 +409,7 @@ class FeedStore:
         with conn:
             conn.executemany(_UPSERT_BAR, rows)
         self._wrote()
+        self.rows_saved += len(rows)
         return len(rows)
 
     def upsert_built_bars(self, source: str, ticker: str, timespan: str, multiplier: int, bars: Iterable[dict],

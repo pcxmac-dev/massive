@@ -284,3 +284,60 @@ def test_audits_are_one_hour_spot_checks_within_two_percent_of_a_run():
     Client.request_budget = 250
     assert allowance(Src()) == 5
     assert allowance(object()) == 1  # no cap known: one audit
+
+
+def test_a_capped_run_through_empty_history_resumes_past_what_it_walked(store):
+    """Coinbase pages by windows of time: before a coin was listed every window is empty. A run
+    stopped by its cap there must record what it walked, or every run walks it again."""
+    from massive_collate import collector
+    from massive_collate.errors import BudgetExhausted
+    from massive_collate.sources.base import DataSource, Page
+
+    DAY = 86_400_000
+    start = ms(datetime(2026, 1, 1, tzinfo=timezone.utc))
+
+    class Windows(DataSource):
+        name = "win"
+
+        def __init__(self, budget):
+            self.made, self.budget, self.asked = 0, budget, []
+
+        @property
+        def requests_made(self):
+            return self.made
+
+        def bar_pages(self, ticker, lo, hi, timespan, multiplier=1, descending=False, asset="crypto"):
+            a, b = int(lo.timestamp() * 1000), int(hi.timestamp() * 1000)
+            for w in range(b - DAY, a - 1, -DAY):  # a day per page, newest first
+                if self.made >= self.budget:
+                    raise BudgetExhausted("cap")
+                self.made += 1
+                self.asked.append(w)
+                rows = [{"t": w + h * 3_600_000, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1} for h in range(24)] \
+                    if w >= start + 8 * DAY else []  # data only from the 9th day on
+                yield Page(rows, window=(w, w + DAY))
+
+        def trade_pages(self, *a, **k):
+            return iter(())
+
+        def is_entitled(self, *a, **k):
+            return True
+
+        def exchanges(self):
+            return []
+
+        def instrument(self, ticker, resolve_exchange=True):
+            raise NotImplementedError
+
+    src = Windows(budget=6)
+    a, b = start, start + 10 * DAY
+    with pytest.raises(collector.StopRun):
+        collector._fill(src, store, "ADAUSD", "minute", a, b, "ADAUSD", "crypto", False, False)
+    assert store.coverage("ADAUSD", "minute")["win"] == [(start + 8 * DAY, b)]  # the two days with data
+    def walked():  # held or asked-and-empty, as one stretch
+        return subtract([(a, b)], store.coverage("ADAUSD", "minute", source="win", include_none=True)["win"])
+
+    assert walked() == [(a, start + 4 * DAY)]  # ... and the four empty days walked before the cap: only these left
+    src2 = Windows(budget=100)  # the next run asks only for what is left
+    collector._fill(src2, store, "ADAUSD", "minute", a, start + 4 * DAY, "ADAUSD", "crypto", False, False)
+    assert len(src2.asked) == 4 and walked() == []

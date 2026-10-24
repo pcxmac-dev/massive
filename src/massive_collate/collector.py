@@ -287,8 +287,12 @@ def _fill(source: DataSource, store: Store, ticker: str, timespan: str, a: int, 
     lo, hi = datetime.fromtimestamp(a / 1000, ET), datetime.fromtimestamp(b / 1000, ET)
     span, mult = frame_parts(timespan)
     for page in _guard(source.bar_pages(fetch, lo, hi, span, mult, descending=True, asset=asset)):
+        window = getattr(page, "window", None)
         page = [x for x in page if a <= int(x["t"]) < b]
         if not page:
+            if window and not frontier and max(a, window[0]) < min(b, window[1]):
+                # asked, and the feed has nothing there: recorded now, so a capped run resumes past it
+                store.add_coverage(source.name, ticker, timespan, max(a, window[0]), min(b, window[1]), origin="none")
             continue
         saved += _store_bars(store, source, ticker, timespan, page, invert)
         times = [int(x["t"]) for x in page]
@@ -726,6 +730,7 @@ def sync(
     today = now.date()
     floors = {a: history_floor(tier, today, a) for a in ASSETS}  # each asset class on its own plan
     result = SyncResult()
+    saved_before = store.rows_saved
     feeds = dict(feeds or {})
     me = feeds.get(source.name) or FeedProfile(source.name, tier, frozenset(ASSETS))
     feeds[source.name] = me
@@ -884,6 +889,8 @@ def sync(
     except StopRun as e:
         result.stopped = str(e)
         log(f"stopped: {e}")
+        # rows of the symbol it stopped in were stored page by page: count them too
+        result.rows = max(result.rows, store.rows_saved - saved_before)
     return result
 
 

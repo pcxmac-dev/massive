@@ -18,6 +18,16 @@ RESOLUTIONS_BY_ASSET = {
 RESOLUTIONS = RESOLUTIONS_BY_ASSET["stock"]
 
 
+class Page(list):
+    """A page of bars that also says which window of time it asked for ([lo, hi) ms), so an empty
+    page still tells the sync how far it has looked: a run stopped by its cap in a long stretch
+    without data (before a coin was listed) resumes past it instead of walking it again."""
+
+    def __init__(self, rows=(), window: tuple[int, int] | None = None):
+        super().__init__(rows)
+        self.window = window
+
+
 class DataSource(ABC):
     name: str = "base"
 
