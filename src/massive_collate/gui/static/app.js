@@ -330,6 +330,7 @@ chart.setDataLoader({
       es.onmessage = (e) => {
         if (sub !== state.subscription || kind !== state.model.kind) return;
         const msg = JSON.parse(e.data);
+        if (msg.reload) { chart.resetData(); return; }  // a model: its values moved back in time
         if ((msg.model || 'price') !== kind) return;
         const last = chart.getDataList().at(-1)?.timestamp ?? 0;
         const bars = msg.bars.filter((b) => b.timestamp >= last);

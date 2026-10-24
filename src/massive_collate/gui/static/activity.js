@@ -65,7 +65,8 @@
     try {
       // `open`: the chart's symbol, so the live recorder streams it (stocks, from IEX).
       const open = openTicker ? `&open=${encodeURIComponent(openTicker)}` : '';
-      const res = await fetch(`/api/activity?lines=300&source=${encodeURIComponent(feed)}${open}`);
+      const res = await fetch(`/api/activity?lines=300&source=${encodeURIComponent(feed)}${open}`,
+        { headers: { 'X-Massive-Charts': '1' } });  // the app's own page: its open symbol counts
       if (!res.ok) throw new Error(String(res.status));
       data = await res.json();
       window.dispatchEvent(new CustomEvent('massive:activity', { detail: data }));

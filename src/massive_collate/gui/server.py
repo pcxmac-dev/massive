@@ -168,7 +168,10 @@ class ChartApp:
             return out
 
     def bars(self, q: dict[str, str]) -> dict:
-        limit = min(int(q.get("limit", 1000)), MAX_LIMIT)
+        limit = int(q.get("limit", 1000))
+        if not 1 <= limit:
+            raise ValueError("limit must be at least 1")
+        limit = min(limit, MAX_LIMIT)
         style = Style(
             type=q.get("type", "candles"),
             box=float(q["box"]) if q.get("box") else None,
@@ -213,13 +216,20 @@ class ChartApp:
         while _time.monotonic() < end and not (stop and stop()):
             fp = self.engine.fingerprint(q["source"], q["ticker"])
             if fp != seen:
-                seen = fp
-                page = self.bars({**q, "since": str(since)})
-                if page["bars"]:
-                    since = page["bars"][-1]["timestamp"]
-                    msg = {"bars": page["bars"], "model": (page.get("model") or {}).get("kind")}
-                    yield b"data: " + json.dumps(msg, allow_nan=False).encode() + b"\n\n"
-                    beat = _time.monotonic()
+                first, seen = seen is None, fp
+                if q.get("model", "price") != "price":
+                    # a model's values move back in time when a bar arrives (a centred window; a Fourier
+                    # fit, all of it): the page loads again rather than taking the newest bars only
+                    if not first:
+                        yield b"data: " + json.dumps({"reload": True}).encode() + b"\n\n"
+                        beat = _time.monotonic()
+                else:
+                    page = self.bars({**q, "since": str(since)})
+                    if page["bars"]:
+                        since = page["bars"][-1]["timestamp"]
+                        msg = {"bars": page["bars"], "model": None}
+                        yield b"data: " + json.dumps(finite(msg), allow_nan=False).encode() + b"\n\n"
+                        beat = _time.monotonic()
             if _time.monotonic() - beat > self.STREAM_KEEPALIVE:
                 yield b": keep-alive\n\n"
                 beat = _time.monotonic()
@@ -237,7 +247,7 @@ class ChartApp:
             details = next((d for d in (self.store.details(f, s.ticker) for f in feeds) if d), None)
             exchanges = self.store.exchanges()
         daily = s.daily if s.daily is not None and not s.daily.empty else resample(
-            s.frame, "day", 1, "extended", utc_days=s.asset in ("crypto", "fx"))
+            s.frame, "day", 1, "extended", utc_days=s.asset in ("crypto", "fx"), session_hours=6 if s.asset == "future" else 0)
         mic = watch.get("exchange") or (details or {}).get("primary_exchange")
         names = {r.mic: r.name for r in exchanges.itertuples() if r.mic}
         out = {
@@ -804,7 +814,9 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                         return self._send(HTTPStatus.NOT_FOUND, b"no icon", "text/plain")  # no SVG: it can carry script
                     return self._send(HTTPStatus.OK, data, mime)
                 if url.path == "/api/activity":
-                    return self._json(app.activity(q))
+                    # `open` writes (the live recorder streams it): only from this app's own pages
+                    mine = self.headers.get("X-Massive-Charts") == "1"
+                    return self._json(app.activity({**q, "open": q.get("open") if mine else None}))
                 if url.path == "/api/exchanges":
                     return self._json(app.exchanges())
                 if url.path == "/api/audits":

@@ -76,6 +76,7 @@ class Series:
     # when the series was last loaded whole (monotonic seconds).
     stored_hw: int = 0
     loaded_at: float = 0.0
+    fp: tuple = ()  # the store's fingerprint this series was loaded at (what results from it are cached under)
 
     @property
     def around_the_clock(self) -> bool:
@@ -163,7 +164,7 @@ def _aggregate(groups) -> pd.DataFrame:
 
 def resample(
     frame: pd.DataFrame, period: str, span: int = 1, session: str = "regular", align_hours_to_open: bool = True,
-    utc_days: bool = False,
+    utc_days: bool = False, session_hours: int = 0,
 ) -> pd.DataFrame:
     """Aggregate a fine frame into bars. `session` is "regular" (09:30-16:00 ET) or "extended"."""
     if frame.empty:
@@ -172,28 +173,31 @@ def resample(
         frame = regular_session(frame)
         if frame.empty:
             return frame.copy()
-    return _aggregate(frame.groupby(bin_keys(frame.index, period, span, align_hours_to_open, utc_days)))
+    return _aggregate(frame.groupby(bin_keys(frame.index, period, span, align_hours_to_open, utc_days, session_hours)))
 
 
 def bin_keys(index: pd.DatetimeIndex, period: str, span: int = 1, align_hours_to_open: bool = True,
-             utc_days: bool = False) -> pd.DatetimeIndex:
+             utc_days: bool = False, session_hours: int = 0) -> pd.DatetimeIndex:
     """The start of the bar each timestamp falls in (what `resample` groups by)."""
     if period in INTRADAY:
         # US equities: hour bars line up with the 09:30 open, like TradingView. Around-the-clock
         # markets (fx, futures) use clock hours.
         offset = 570 * 60 if period == "hour" and align_hours_to_open else 0
         return wall_clock_bins(index, period, span, offset)
-    return calendar_key(index, period, utc=utc_days)
+    return calendar_key(index, period, utc=utc_days, session_hours=session_hours)
 
 
-def bar_end(start: pd.Timestamp, period: str, span: int) -> pd.Timestamp:
-    """Where a bar starting at `start` ends (exclusive), in New York wall-clock time."""
+def bar_end(start: pd.Timestamp, period: str, span: int, utc: bool = False) -> pd.Timestamp:
+    """Where a bar starting at `start` ends (exclusive): in New York wall-clock time, or in UTC for
+    the UTC days, weeks and months of crypto and forex (a New York step is an hour off on the
+    days the clocks change, and a UTC month's end is not New York's)."""
     if period in INTRADAY:
         return start + pd.Timedelta(seconds=span * _UNIT_SECONDS[period])
-    local = start.tz_convert(ET).tz_localize(None)
+    zone = "UTC" if utc else ET
+    local = start.tz_convert(zone).tz_localize(None)
     step = {"day": pd.DateOffset(days=1), "week": pd.DateOffset(days=7), "month": pd.DateOffset(months=1),
             "year": pd.DateOffset(years=1)}[period]
-    return (local + step).tz_localize(ET, nonexistent="shift_forward", ambiguous=True)
+    return (local + step).tz_localize(zone, nonexistent="shift_forward", ambiguous=True).tz_convert(ET)
 
 
 _UNIT_SECONDS = {"second": 1, "minute": 60, "hour": 3600}
@@ -218,12 +222,13 @@ def wall_clock_bins(index: pd.DatetimeIndex, period: str, span: int, offset_seco
     return bins.tz_localize(ET, ambiguous=is_dst, nonexistent="shift_forward")
 
 
-def calendar_key(index: pd.DatetimeIndex, period: str, utc: bool = False) -> pd.DatetimeIndex:
+def calendar_key(index: pd.DatetimeIndex, period: str, utc: bool = False, session_hours: int = 0) -> pd.DatetimeIndex:
     """Start of the day/week (Monday)/month/year each timestamp falls in, in US/Eastern; with
     `utc`, of the UTC day/week/month (crypto and forex days are UTC days, as their feeds stamp
-    them), still given in US/Eastern."""
+    them), still given in US/Eastern. `session_hours`: a session that starts that many hours
+    before midnight belongs to the next day (futures: 6, CME's 18:00 open)."""
     zone = "UTC" if utc else ET
-    local = index.tz_convert(zone).tz_localize(None).normalize()
+    local = (index.tz_convert(zone).tz_localize(None) + pd.Timedelta(hours=session_hours)).normalize()
     if period == "day":
         key = local
     elif period == "week":
@@ -277,6 +282,11 @@ MODEL_SOURCES = ("composite",)
 # collected instead; kept for symbols with no such source.
 INTERPOLATED: frozenset = frozenset()
 INTERP_GAP_MS = 5 * 60_000  # minutes further apart than this are a gap: nothing is drawn across it
+
+
+def session_hours(s) -> int:
+    """Hours before midnight a series' day starts: futures trade CME sessions from 18:00 New York."""
+    return 6 if getattr(s, "asset", None) == "future" else 0
 
 
 def utc_days(s) -> bool:
@@ -333,7 +343,7 @@ def merge_frames(frames: list[pd.DataFrame], bucket: str | None = None) -> pd.Da
     if not tagged:
         return frames[0].iloc[0:0] if frames else pd.DataFrame(columns=COLUMNS)
     both = pd.concat(tagged)
-    slot = both.index.floor(bucket) if bucket else both.index
+    slot = both.index.tz_convert("UTC").floor(bucket) if bucket else both.index  # UTC: the repeated hour is fine
     owner = pd.Series(both["_rank"].to_numpy(), index=slot).groupby(level=0).min()
     keep = both["_rank"].to_numpy() == owner.reindex(slot).to_numpy()
     return both[keep].sort_index(kind="stable").drop(columns="_rank")
@@ -364,7 +374,7 @@ class BarEngine:
         self.priority = priority or []
         self.quality = quality  # feed -> 0..1, for display priority (best first)
         self.store = store
-        self._series: dict[tuple, tuple] = {}
+        self._series: dict[tuple, tuple] = _BoundedCache(48)  # each a whole history: not every symbol ever opened
         self._bars: OrderedDict[tuple, pd.DataFrame] = OrderedDict()
         self._cache_size = cache_size
         self._future_cache: OrderedDict = _BoundedCache(16)
@@ -390,9 +400,9 @@ class BarEngine:
             have = {s for s, _ in stored}
             rows = self.store.watchlist(ticker=ticker)
             have |= {w["source"] for w in rows if w["asset"] == "future"}  # continuous futures are stored under their contracts
-        reference = REFERENCE.get(next((w["asset"] for w in rows), "stock"))
-        fine = {s for s, k in stored if k in ("trades", "second")}
-        return self.rank_sources(have, fine, reference, self.quality or (lambda s: 1.0))
+            reference = REFERENCE.get(next((w["asset"] for w in rows), "stock"))
+            fine = {s for s, k in stored if k in ("trades", "second")}
+            return self.rank_sources(have, fine, reference, self.quality or (lambda s: 1.0))
 
     def rank_sources(self, have: set, fine: set, reference: str | None, quality) -> list[str]:
         """`have` best first, as sources_for ranks them (for callers that hold the series and the
@@ -430,6 +440,7 @@ class BarEngine:
                 s = self._merge(ticker, [p for p in parts if p]) if parts is not None else self._load(source, ticker, adjust)
             if s is not None:
                 s.adjust = adjust
+                s.fp = fp
             self._series[key] = (fp, s)
             return s
 
@@ -440,19 +451,28 @@ class BarEngine:
             p = parts[0]
             return Series(MERGED, ticker, p.kind, p.frame, p.daily, p.price_precision, p.volume_precision,
                           p.asset, p.rolls, fine_sources=p.fine_sources, fine_spans=p.fine_spans)
-        # Common base = the coarsest of the feeds; finer feeds are aggregated up to it exactly.
-        base = max((p.kind for p in parts), key=BASE_KINDS.index)
+        # A feed of daily bars only (Tiingo, Cboe) adds days, not the base: with it in the base, every
+        # intraday interval of the merged chart would go.
+        day_only = [p for p in parts if p.kind == "day"]
+        finer = [p for p in parts if p.kind != "day"] or day_only
+        # Common base = the coarsest of the other feeds; finer feeds are aggregated up to it exactly
+        # (and so are derived).
+        base = max((p.kind for p in finer), key=BASE_KINDS.index)
         frames = []
-        for p in parts:
+        for p in finer:
             if p.kind == base or base == "trades":
                 frames.append(p.frame)
             elif base in INTRADAY:
-                frames.append(resample(p.frame, base, 1, session="extended"))
+                frames.append(resample(p.frame, base, 1, session="extended", align_hours_to_open=p.asset in ("stock", "index"),
+                                       utc_days=utc_days(p)).assign(derived=True))
             else:
-                frames.append(_aggregate(p.frame.groupby(calendar_key(p.frame.index, "day", utc=utc_days(p)))))
+                frames.append(_aggregate(p.frame.groupby(calendar_key(p.frame.index, "day", utc=utc_days(p),
+                                                                      session_hours=session_hours(p)))).assign(derived=True))
         # Official daily bars come from whichever feed holds each day (one feed per span), so they
-        # are combined day by day like the intraday bars, best-ranked feed first.
+        # are combined day by day like the intraday bars, best-ranked feed first; then the daily-only
+        # feeds' days.
         dailies = [p.daily for p in parts if p.daily is not None and not p.daily.empty]
+        dailies += [p.frame for p in day_only if p is not finer[0] and not p.frame.empty]
         daily = merge_frames(dailies) if dailies else None
         return Series(
             MERGED, ticker, base, merge_frames(frames, "1min" if base == "trades" else None), daily,
@@ -638,7 +658,7 @@ class BarEngine:
             # The chart type and its parameters are part of the key: aggregates of Renko bricks
             # must never be served for line break (or candles) and vice versa.
             key = ("lod", s.source, s.ticker, s.adjust, period, span, session, lod, tuple(sorted(used.items())),
-                   self._series[(s.source, s.ticker, s.adjust)][0])
+                   model, s.fp)
             with self._lock:
                 cached = self._bars.get(key)
             if cached is None:
@@ -702,7 +722,8 @@ class BarEngine:
             all_bars = self._modelled(s, all_bars, period, span, session, model)
         if all_bars.empty:
             return {"timestamps": [], "last": None, "total": 0}
-        item = next((w for w in self.store.watchlist(ticker=s.ticker) if w["asset"] == "future"), None)
+        with self._lock:
+            item = next((w for w in self.store.watchlist(ticker=s.ticker) if w["asset"] == "future"), None)
         product = item["source_ticker"] if item else None
         total = len(all_bars)
         k = lod if (lod > 1 and style.type in LOD_TYPES) else 1
@@ -737,7 +758,7 @@ class BarEngine:
         elif style.type in ("renko", "range"):
             used["box"] = box
         key = (s.source, s.ticker, s.adjust, period, span, session, tuple(sorted(used.items())),
-               self._series[(s.source, s.ticker, s.adjust)][0])
+               s.fp)
         with self._lock:
             if key in self._bars:
                 self._bars.move_to_end(key)
@@ -766,7 +787,7 @@ class BarEngine:
         frame = regular_session(s.frame) if session == "regular" else s.frame
         if frame.empty:
             return frame.copy()
-        return _aggregate(frame.groupby(calendar_key(frame.index, "day", utc=utc_days(s))))
+        return _aggregate(frame.groupby(calendar_key(frame.index, "day", utc=utc_days(s), session_hours=session_hours(s))))
 
     def _boxed(self, s: Series, period: str, span: int, session: str) -> tuple[pd.DataFrame, dict]:
         """Time bars with q1/med/q3: the volume-weighted quartiles of the price traded inside each
@@ -779,7 +800,7 @@ class BarEngine:
         finer = BASE_SECONDS[s.kind] < PERIOD_SECONDS[period] * span and not self._windowed(s, period)
         unit = "trades" if s.kind == "trades" else f"{s.kind} bars"
         used = {"type": BOX, "from": unit if finer else None}
-        key = ("box", s.source, s.ticker, s.adjust, period, span, session, self._series[(s.source, s.ticker, s.adjust)][0])
+        key = ("box", s.source, s.ticker, s.adjust, period, span, session, s.fp)
         with self._lock:
             if key in self._bars:
                 self._bars.move_to_end(key)
@@ -822,7 +843,7 @@ class BarEngine:
         ts = epoch_ms(bars.index)
         i = len(ts) - 1 if at_ms is None else max(0, int(np.searchsorted(ts, int(at_ms), side="right")) - 1)
         start = bars.index[i]
-        end = bar_end(start, period, span)
+        end = bar_end(start, period, span, utc=utc_days(s))
         lo, hi = int(ts[i]), int(end.value // 1_000_000)
         bar = bars.iloc[i]
         # The day the bar is in (as the daily bars count days), from its daily bar.
@@ -869,8 +890,9 @@ class BarEngine:
         }
 
     def _modelled(self, s: Series, bars: pd.DataFrame, period: str, span: int, session: str, model: Model) -> pd.DataFrame:
-        key = ("model", s.source, s.ticker, s.adjust, period, span, session, model,
-               self._series[(s.source, s.ticker, s.adjust)][0])
+        # the bars' own span too: a range's window of seconds is not the chart's latest day
+        edge = (int(epoch_ms(bars.index[:1])[0]), int(epoch_ms(bars.index[-1:])[0]), len(bars)) if len(bars) else ()
+        key = ("model", s.source, s.ticker, s.adjust, period, span, session, model, edge, s.fp)
         with self._lock:
             if key in self._bars:
                 self._bars.move_to_end(key)
@@ -943,7 +965,8 @@ class BarEngine:
             raw = self.store.bars_window(s.fine_sources, s.ticker, "second", lo_ms, hi_ms)
         if raw.empty:
             return pd.DataFrame(columns=COLUMNS, index=pd.DatetimeIndex([], tz=ET))
-        return resample(frame_from_bars(raw), "second", span, session)
+        out = resample(frame_from_bars(raw), "second", span, session)
+        return out if span == 1 else out.assign(derived=True)  # 30 s from seconds: built here
 
     def _fine_page(self, s: Series, span: int, session: str, to_ms: int | None, since_ms: int | None,
                    limit: int) -> dict:
@@ -1047,27 +1070,29 @@ class BarEngine:
         if self._windowed(s, period):  # whole-series uses (projection, chart types): the latest day of seconds
             last = max(b for _, b in s.fine_spans)
             return self._fine_bars(s, span, session, last - 86_400_000, last + 1000)
-        fp = self._series[(s.source, s.ticker, s.adjust)][0]
+        fp = s.fp
         key = (s.source, s.ticker, s.adjust, period, span, session, fp)
         with self._lock:
             if key in self._bars:
                 self._bars.move_to_end(key)
                 return self._bars[key]
-        if period in CALENDAR and s.daily is not None and not s.daily.empty:
+        official = s.daily if s.daily is not None and not s.daily.empty else (
+            s.frame if s.kind == "day" and not s.frame.empty else None)  # a feed of daily bars only
+        if period in CALENDAR and official is not None:
             # Official daily bars (closing auction included); weeks/months group those. Days after the
             # last official one (today's, growing as the session goes; days the feed has not published)
             # are built from the finer data, on the same day boundaries.
-            daily = s.daily.copy()
-            daily.index = calendar_key(daily.index, "day", utc=utc_days(s))
+            daily = official.copy()
+            daily.index = calendar_key(daily.index, "day", utc=utc_days(s), session_hours=session_hours(s))
             built = self._built_days(s, session).assign(derived=True)
             daily = pd.concat([daily, built[built.index > daily.index.max()]])
             if s.asset in ("stock", "index"):  # no session on weekends/holidays: stray feed rows
                 daily = daily[[_regular_close(d.date()) is not None for d in daily.index]]
             bars = daily if period == "day" else _aggregate(daily.groupby(calendar_key(daily.index, period, utc=utc_days(s))))
-            sent = period == "day"
+            sent = period == "day" and s.source not in MODEL_SOURCES  # the composite's days are a model's
         else:
             bars = resample(s.frame, period, span, session, align_hours_to_open=s.asset in ("stock", "index"),
-                            utc_days=utc_days(s))
+                            utc_days=utc_days(s), session_hours=session_hours(s))
             sent = period == s.kind and span == 1 and s.source not in MODEL_SOURCES  # a feed's own interval
             if not sent and period in ("second", "minute", "hour"):
                 bars, sent = self._with_sent(s, bars, period, span)

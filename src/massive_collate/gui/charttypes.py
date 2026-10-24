@@ -105,6 +105,7 @@ def renko(bars: pd.DataFrame, box: float) -> pd.DataFrame:
     close; continuing needs one box beyond the last brick, reversing needs two."""
     if box <= 0:
         raise ValueError("box size must be positive")
+    _check_bricks(bars["close"].to_numpy(dtype=float) if not bars.empty else np.array([]), box)
     out = _Out()
     if bars.empty:
         return out.frame()
@@ -259,12 +260,23 @@ def point_figure(bars: pd.DataFrame, box: float, reversal: int = 3) -> pd.DataFr
 
 # -- Range bars -----------------------------------------------------------------
 
+MAX_BRICKS = 200_000  # more would be a page no chart can draw and a server's memory gone
+
+
+def _check_bricks(prices: np.ndarray, box: float) -> None:
+    """Refuse a box so small that the moves would make more than MAX_BRICKS bricks."""
+    if len(prices) > 1 and float(np.abs(np.diff(prices)).sum()) / box > MAX_BRICKS:
+        raise ValueError(f"box size too small for this range: more than {MAX_BRICKS:,} bricks; choose a larger box")
+
+
 def range_bars(fine: pd.DataFrame, size: float) -> pd.DataFrame:
     """Bars that each span exactly `size` from high to low; each opens at the previous close.
 
     Exact when `fine` is ticks. From bars, the order of high and low inside a bar is
     unknown; the path is assumed open -> nearer extreme -> farther extreme -> close.
     """
+    if size > 0 and not fine.empty:
+        _check_bricks(fine["close"].to_numpy(dtype=float), size)
     if size <= 0:
         raise ValueError("range size must be positive")
     out = _Out()

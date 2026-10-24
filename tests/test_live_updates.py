@@ -110,5 +110,10 @@ def test_the_stream_reports_models_and_refuses_bad_requests(store):
     app = ChartApp(store)
     q = {"source": "coinbase", "ticker": "BTCUSD", "period": "minute", "span": "1", "session": "extended",
          "since": str(_ms("2026-10-20 19:20")), "model": "d1", "window": "9"}
+    # A model's values move back in time when a bar arrives: the page is told to load again (the
+    # first look sends nothing: the page has just loaded it).
+    looks = iter([("fp", 1), ("fp", 2)])
+    app.engine.fingerprint = lambda *a: next(looks, ("fp", 2))
+    app.STREAM_CHECK = 0
     msg = json.loads(next(app.stream(q)).removeprefix(b"data: "))
-    assert msg["model"] == "d1" and msg["bars"]
+    assert msg == {"reload": True}
