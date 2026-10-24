@@ -24,6 +24,7 @@ LIVE_COINS = ("BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LTC", "LINK")
 RECORDER_KEY = "live-recorder"
 STATUS_KEY = "live:status"
 FLUSH_SECONDS = 2.0
+DERIVE_SECONDS = 60.0  # the time frames above a minute are rebuilt this often for the coins streamed
 RECV_TIMEOUT = 20.0
 DAY_MS = 86_400_000
 
@@ -218,9 +219,15 @@ class Recorder:
         for t in threads:
             t.start()
         with Store(self.db_path) as store:
-            total, last_log = 0, time.time()
+            total, last_log, last_derive = 0, time.time(), time.time()
             while not self.stop.wait(FLUSH_SECONDS):
                 total += self.flush(store)
+                if time.time() - last_derive > DERIVE_SECONDS:
+                    from . import derive
+
+                    derive.run(store, sources={s.source for s in self.streams},
+                               tickers={f"{c}USD" for c in self.coins}, log=lambda *_: None)
+                    last_derive = time.time()
                 if time.time() - last_log > 600:
                     self.log(f"live: {total:,} trades recorded in the last 10 min")
                     total, last_log = 0, time.time()

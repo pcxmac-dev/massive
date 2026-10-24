@@ -56,7 +56,7 @@ def test_new_revised_and_built_bars_are_spliced_in_exactly(store, monkeypatch):
     pd.testing.assert_frame_equal(s.frame, whole.frame)
     pd.testing.assert_frame_equal(s.daily, whole.daily)
     assert len(s.frame) == 607 and s.frame["close"].iloc[599] == 99.0
-    assert s.frame.loc[pd.Timestamp("2026-10-20 19:34", tz=ET), "close"] == 17.01  # built first, as a whole load
+    assert s.frame.loc[pd.Timestamp("2026-10-20 19:34", tz=ET), "close"] == pytest.approx(16.05)  # the feed's own, not built
     assert s.daily["close"].iloc[-1] == 12.5
 
 

@@ -255,6 +255,7 @@ def _sync(args, settings: Settings) -> int:
         logger = Logger(settings.db_path.parent / "logs" / "massive-collate.log")
         with Store(settings.db_path) as store:
             composite.refresh(store, feed_profiles(settings), collector.now_et(), log=logger)
+            _derive(store, tickers, logger)  # the time frames the feeds do not send, from what just arrived
             if args.all_sources and not tickers:  # research datasets fetched before, when due (never starts one)
                 from . import datasets
 
@@ -346,6 +347,33 @@ def cmd_live(args, settings: Settings) -> int:
         recorder.stop.set()
     finally:
         lock.unlink(missing_ok=True)
+    return 0
+
+
+SUPERSEDED_KEY = "derive:superseded:v1"
+
+
+def _derive(store: Store, tickers, log) -> int:
+    """Built bars a feed has since sent its own for go (once: later the database does it as they
+    arrive), then the frames above 1 minute are built where anything changed (derive.py)."""
+    from . import derive
+
+    if not store.kv_get(SUPERSEDED_KEY):
+        for feed in BUILDERS:
+            n = store.drop_superseded_built(feed)
+            if n:
+                log(f"derive {feed}: {n:,} built bars replaced by the feed's own")
+        store.kv_set(SUPERSEDED_KEY, datetime.now().isoformat(timespec="seconds"))
+    return derive.run(store, tickers=tickers, log=log)
+
+
+def cmd_derive(args, settings: Settings) -> int:
+    """Build every feed's candles for the time frames it does not send (5 min, 1 h, 1 day from its
+    1-minute bars), marked derived; what changed since the last build, or everything the first time."""
+    with Store(settings.db_path) as store:
+        n = _derive(store, set(args.tickers) if args.tickers else None,
+                    Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
+    print(f"{n:,} derived bars stored")
     return 0
 
 
@@ -825,6 +853,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--tail", type=int, default=12, help="show: how many of the newest values")
     s.add_argument("--as-of", type=_date, help="show: the values as public on that date (YYYY-MM-DD)")
     s.set_defaults(func=cmd_datasets)
+
+    s = sub.add_parser("derive", help="build each feed's candles for the time frames it does not send (marked derived)")
+    s.add_argument("--tickers", nargs="+", metavar="TICKER", help="only these symbols")
+    s.set_defaults(func=cmd_derive)
 
     s = sub.add_parser("live", help="live crypto from the exchanges' public streams: run, start (background) or status")
     s.add_argument("action", nargs="?", choices=["run", "start", "status"], default="run")

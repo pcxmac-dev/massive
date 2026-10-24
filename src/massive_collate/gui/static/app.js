@@ -231,6 +231,7 @@ chart.setDataLoader({
       if (type === 'init') {
         state.styleUsed = res.style;
         state.approximate = res.approximate || null;
+        state.derivedFrom = res.derivedFrom || null;
         state.baseTotal = (res.total || 0) * lodFor();  // bars at full detail
         if (applyModelPrecision(res)) return;  // reloads once with the right precision
         // A new model or chart type can change the value range completely; KLineChart only
@@ -798,9 +799,59 @@ function applyChartType() {
   if (state.chartType === 'area' && !gpuDraws) chart.setStyles({ candle: { area: { lineColor: LINE } } });
   chart.removeIndicator({ name: 'CHART_STYLE' });
   if (custom && !gpuDraws) chart.createIndicator({ name: 'CHART_STYLE', paneId: 'candle_pane' }, true);
+  chart.removeIndicator({ name: 'DERIVED_MARKS' });
+  chart.createIndicator({ name: 'DERIVED_MARKS', paneId: 'candle_pane' }, true);
 }
 
 function px(xAxis, i) { return xAxis.convertToPixel(i); }
+
+// Derived candles: built here (from ticks, or finer bars) where the feed sent none at this interval.
+// When the candles on screen mix the feed's own with derived ones, each derived one gets a small
+// ring under it; when all are derived, the chip beside the interval menu says so instead.
+kc.registerIndicator({
+  name: 'DERIVED_MARKS',
+  shortName: '',
+  series: 'price',
+  figures: [],
+  calc: (list) => list.map(() => ({})),
+  createTooltipDataSource: () => ({ name: '', calcParamsText: '', features: [], legends: [] }),
+  draw: ({ ctx, chart: c, xAxis, yAxis }) => {
+    const data = c.getDataList();
+    const { from, to } = c.getVisibleRange();
+    if (!data.length || to <= from || state.model.kind !== 'price') return true;
+    let some = 0;
+    for (let i = from; i < to; i++) if (data[i]?.derived) some++;
+    renderDerivedChip(some, to - from);
+    if (!some || some === to - from) return true;
+    ctx.save();
+    ctx.setLineDash([]);
+    ctx.strokeStyle = '#9aa0a6'; ctx.globalAlpha = 0.85; ctx.lineWidth = 1;
+    for (let i = from; i < to; i++) {
+      const d = data[i];
+      if (!d?.derived) continue;
+      ctx.beginPath(); ctx.arc(px(xAxis, i), yAxis.convertToPixel(d.low) + 6, 2.5, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.restore();
+    return true;
+  },
+});
+
+function renderDerivedChip(some, total) {
+  let chip = $('derivedChip');
+  if (!chip) {
+    chip = document.createElement('span');
+    chip.id = 'derivedChip';
+    chip.className = 'derived-chip';
+    $('periods').append(chip);
+  }
+  const label = periodLabel(state.period);
+  chip.hidden = !some;
+  chip.textContent = some === total ? 'derived*' : '◦ derived*';
+  chip.title = some === total
+    ? `* Derived data: no feed sends ${label} candles for this symbol; these are built here from ${state.derivedFrom || 'finer data'}.`
+    : `* Candles marked ◦ (${some} of ${total} on screen) are derived: built here from finer data where the feed sent none `
+      + 'at this interval. The feed\'s own replace them when they arrive.';
+}
 
 kc.registerIndicator({
   name: 'CHART_STYLE',

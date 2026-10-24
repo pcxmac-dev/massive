@@ -115,6 +115,8 @@ def frame_from_bars(bars: pd.DataFrame) -> pd.DataFrame:
         "open": df["open"], "high": df["high"], "low": df["low"], "close": df["close"],
         "volume": df["volume"].fillna(0), "turnover": (px * df["volume"]).fillna(0),
         "trades": df["transactions"].fillna(0) if "transactions" in df else 0,
+        # built here (from ticks, or finer bars) rather than sent by the feed at this interval
+        "derived": df["derived"].astype(bool) if "derived" in df else False,
     })
 
 
@@ -147,6 +149,8 @@ def _regular_close(d) -> time | None:
 def _aggregate(groups) -> pd.DataFrame:
     spec = {"open": "first", "high": "max", "low": "min", "close": "last",
             "volume": "sum", "turnover": "sum", "trades": "sum"}
+    if "derived" in getattr(groups, "obj", pd.DataFrame()).columns:
+        spec["derived"] = "max"
     if "env_high" in getattr(groups, "obj", pd.DataFrame()).columns:  # composite: the deviation across exchanges
         spec.update(env_high="max", env_low="min", venues_n="max", dev_sq="mean")
     out = groups.agg(spec)
@@ -257,11 +261,14 @@ def lod_aggregate(bars: pd.DataFrame, k: int) -> pd.DataFrame:
         "open": g["open"].first(), "high": g["high"].max(), "low": g["low"].min(), "close": g["close"].last(),
         "volume": g["volume"].sum(), "turnover": g["turnover"].sum(), "trades": g["trades"].sum(),
     })
+    if "derived" in bars:
+        out["derived"] = g["derived"].max()
     out.index = bars.index[::k][: len(out)]
     return out
 
 
-EXTRA_COLUMNS = ("yang_start", "yang", "switch", "up", "env_high", "env_low", "dev_sd", "venues_n", "q1", "med", "q3")
+EXTRA_COLUMNS = ("yang_start", "yang", "switch", "up", "env_high", "env_low", "dev_sd", "venues_n", "q1", "med", "q3",
+                 "derived")
 # Derived models stored as bars: not feeds of their own in the merged view.
 MODEL_SOURCES = ("composite",)
 
@@ -283,7 +290,7 @@ def to_records(bars: pd.DataFrame) -> list[dict]:
         r = {"timestamp": int(t), **{c: cols[c][i] for c in COLUMNS}}
         for c, values in extra.items():
             v = values[i]
-            r[c] = None if isinstance(v, float) and np.isnan(v) else (bool(v) if c in ("yang", "yang_start", "up") else v)
+            r[c] = None if isinstance(v, float) and np.isnan(v) else (bool(v) if c in ("yang", "yang_start", "up", "derived") else v)
         records.append(r)
     return records
 
@@ -625,6 +632,9 @@ class BarEngine:
         page = self._page(all_bars, to_ms, since_ms, limit)
         page["style"] = used
         page["total"] = int(len(all_bars))
+        # What the candles were built from when no feed sends this interval (all of them derived).
+        page["derivedFrom"] = None if (period == s.kind and span == 1) or (period == "day" and s.daily is not None) \
+            else ("trades" if s.kind == "trades" else f"1-{s.kind} bars")
         if not model.is_price:
             from dataclasses import asdict
 
@@ -952,14 +962,17 @@ class BarEngine:
             # are built from the finer data, on the same day boundaries.
             daily = s.daily.copy()
             daily.index = calendar_key(daily.index, "day", utc=utc_days(s))
-            built = self._built_days(s, session)
+            built = self._built_days(s, session).assign(derived=True)
             daily = pd.concat([daily, built[built.index > daily.index.max()]])
             if s.asset in ("stock", "index"):  # no session on weekends/holidays: stray feed rows
                 daily = daily[[_regular_close(d.date()) is not None for d in daily.index]]
             bars = daily if period == "day" else _aggregate(daily.groupby(calendar_key(daily.index, period, utc=utc_days(s))))
+            sent = period == "day"
         else:
             bars = resample(s.frame, period, span, session, align_hours_to_open=s.asset in ("stock", "index"),
                             utc_days=utc_days(s))
+            sent = period == s.kind and span == 1 and s.source not in MODEL_SOURCES  # a feed's own interval
+        bars = bars.assign(derived=bars["derived"].astype(bool) if sent and "derived" in bars else True)
         with self._lock:
             self._bars[key] = bars
             if len(self._bars) > self._cache_size:
