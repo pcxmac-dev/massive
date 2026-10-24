@@ -4,22 +4,20 @@ one part per responsibility, the other modules of this package."""
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 import threading
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Sequence, TYPE_CHECKING
-from zoneinfo import ZoneInfo
 
 import pandas as pd
+
+from .common import _ET, _date_ms, _distinct, _feed_name, _now, _now_precise
 
 if TYPE_CHECKING:
     from ..models import Exchange
 
-
-_ET = ZoneInfo("America/New_York")
 
 # A feed's own files, in the `feeds` folder beside the main file: <feed>.db holds its bars (the
 # composite model's file also their deviation stats) and <feed>-ticks.db its trades, attached as
@@ -415,14 +413,6 @@ ON CONFLICT (ticker, timespan, multiplier, ts) DO UPDATE SET
 """
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def _now_precise() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
-
-
 class LayoutLimit(Exception):
     """The maximum number of saved layouts has been reached."""
 
@@ -432,10 +422,6 @@ def _layout_name(name: str) -> str:
     if not name or len(name) > 60:
         raise ValueError("layout name must be 1-60 characters")
     return name
-
-
-def _date_ms(d: date) -> int:
-    return int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp() * 1000)
 
 
 def _bar_row(ticker: str, timespan: str, multiplier: int, bar: dict) -> tuple:
@@ -454,13 +440,6 @@ def feeds_backup_dir(dest: Path) -> Path:
 
 def datasets_backup_dir(dest: Path) -> Path:
     return dest.with_name(dest.stem + "-datasets")
-
-
-FEED_NAME = re.compile(r"[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*")
-
-
-def _feed_name(name: str) -> bool:
-    return bool(FEED_NAME.fullmatch(name)) and not name.endswith("-ticks")
 
 
 class OldLayout(RuntimeError):
@@ -483,23 +462,6 @@ def old_layout(conn: sqlite3.Connection, path: Path | None) -> list[str]:
     if path is not None and path.with_name("ticks.db").exists():
         found.append("ticks.db")
     return found
-
-
-def _distinct(conn: sqlite3.Connection, table: str, cols: tuple[str, ...], rest: tuple[str, ...]) -> list[tuple]:
-    """Distinct values of a primary-key prefix `cols`. Each step seeks past the whole key
-    (`rest` = the remaining integer key columns, set to their maximum), so rows sharing a
-    prefix are skipped in the index rather than read."""
-    names = ", ".join(cols)
-    key = ", ".join(cols + rest)
-    top = (2**63 - 1,) * len(rest)
-    out: list[tuple] = []
-    row = conn.execute(f"SELECT {names} FROM {table} ORDER BY {names} LIMIT 1").fetchone()
-    while row is not None:
-        out.append(tuple(row))
-        row = conn.execute(
-            f"SELECT {names} FROM {table} WHERE ({key}) > ({', '.join('?' * (len(cols) + len(rest)))}) "
-            f"ORDER BY {key} LIMIT 1", tuple(row) + top).fetchone()
-    return out
 
 
 class _Feed:
