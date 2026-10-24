@@ -1,11 +1,6 @@
-"""Local SQLite store for ticks, bars, exchanges, the watchlist and an audit log of runs.
+"""The Store: one object over the main file and the feed and dataset files. Its methods come from
+one part per responsibility, the other modules of this package."""
 
-Each feed's market data has database files of its own (feeds/<feed>.db for its bars,
-feeds/<feed>-ticks.db for its trades), and so has each research dataset provider
-(datasets/<provider>.db), so one provider's data can be backed up, checked or removed apart from
-the others. The main file keeps what they share: the watchlist, the coverage ledger, the ledger of
-dataset files, audits, quality scores, the directory and the chart app's state.
-"""
 from __future__ import annotations
 
 import json
@@ -15,15 +10,16 @@ import threading
 from contextlib import closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Sequence
+from typing import Iterable, Sequence, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-_ET = ZoneInfo("America/New_York")
-
 if TYPE_CHECKING:
-    from .models import Exchange
+    from ..models import Exchange
+
+
+_ET = ZoneInfo("America/New_York")
 
 # A feed's own files, in the `feeds` folder beside the main file: <feed>.db holds its bars (the
 # composite model's file also their deviation stats) and <feed>-ticks.db its trades, attached as
