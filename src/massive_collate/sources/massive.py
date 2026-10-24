@@ -132,6 +132,30 @@ class MassiveSource(DataSource):
             return False
         return True
 
+    PLAN_DEPTHS = (3, 6, 11, 21)  # years back the plan probe asks for daily bars
+
+    def plan_reach(self, ticker: str = "AAPL", today: date | None = None) -> dict[str, bool]:
+        """What the key's plan may ask for, one small request each: a week of daily bars at
+        PLAN_DEPTHS years back (`day_<n>y`: data returned), then second bars, trades and quotes of
+        the last week (`config.tier_for` names the plan)."""
+        today = today or datetime.now(timezone.utc).date()
+        out: dict[str, bool] = {}
+        for years in self.PLAN_DEPTHS:
+            start = today - timedelta(days=round(years * 365.25))
+            try:
+                out[f"day_{years}y"] = bool(next(iter(self._bar_pages(ticker, start, start + timedelta(days=7), "day",
+                                                                      1, False, limit=1)), []))
+            except NotEntitled:
+                out[f"day_{years}y"] = False
+        out["second"] = self.is_entitled("second", ticker)
+        out["trades"] = self.is_entitled("trades", ticker)
+        try:
+            self.client.get(f"/v3/quotes/{ticker.upper()}", {"limit": 1})
+            out["quotes"] = True
+        except NotEntitled:
+            out["quotes"] = False
+        return out
+
     def trade_pages(self, ticker, gte_ns=None, lt_ns=None, descending=False):
         return self._trade_pages(ticker, gte_ns, lt_ns, descending)
 

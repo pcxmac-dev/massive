@@ -488,8 +488,8 @@ def check_listing(source: DataSource, store: Store, item: dict, today: date, log
     if checked and (today - checked).days < LISTING_RECHECK_DAYS and store.details(source.name, ticker):
         return Listing(True, item["listed_from"])
     # Another feed checked this ticker this week: share its answer instead of asking again.
-    for other in store.watchlist():
-        if (other["ticker"] == ticker and other["source"] != source.name and other["checked_at"]
+    for other in store.watchlist(ticker=ticker):
+        if (other["source"] != source.name and other["checked_at"]
                 and (today - other["checked_at"]).days < LISTING_RECHECK_DAYS and store.details(other["source"], ticker)):
             store.set_listing(source.name, ticker, other["listed_from"], other["figi"], other["checked_at"],
                               other["name"], other["kind"], other["exchange"])
@@ -702,8 +702,13 @@ def sync(
             fetch_news(source, store, now, log)
             from .gui.world import PROXIES
             fetch_market_moves(source, store, now, PROXIES, log)
-        # Keep complete symbols current first; backfills take what budget is left.
-        pending = sorted(store.watchlist(source.name), key=lambda w: (_backfilling(w, floor), w["ticker"]))
+        # Keep complete symbols current first; backfills take what budget is left, in the
+        # initializer's order (most traded first; initializer.py), then by ticker.
+        from .initializer import load_order
+
+        order = load_order(store)
+        pending = sorted(store.watchlist(source.name),
+                         key=lambda w: (_backfilling(w, floor), order.get(w["ticker"], len(order)), w["ticker"]))
         while pending:
             item, urgent = _next_item(pending, store, now)
             ticker, asset = item["ticker"], item["asset"]
@@ -739,7 +744,7 @@ def sync(
                 continue
             if asset == "stock" and archival:  # an archive has no reference data: use the other feeds'
                 listing = Listing(True, item["listed_from"] or next(
-                    (w["listed_from"] for w in store.watchlist() if w["ticker"] == ticker and w["listed_from"]), None))
+                    (w["listed_from"] for w in store.watchlist(ticker=ticker) if w["listed_from"]), None))
             elif asset == "stock":  # listing/identity checks only apply to listed securities
                 listing = check_listing(source, store, item, today, log)
                 if not listing.ok:
@@ -748,7 +753,7 @@ def sync(
                 check_reference(source, store, item, today, log)
                 listing = Listing(True)
             item_floor = max(floor, listing.listed_from) if listing.listed_from else floor
-            item = next(w for w in store.watchlist(source.name) if w["ticker"] == ticker)
+            item = store.watchlist(source.name, ticker)[0]
             # a retired symbol has nothing after its last listed day: only its history is filled
             until = min(now, datetime.combine(item["retired_on"] + timedelta(days=1), datetime.min.time(), tzinfo=ET)) \
                 if item.get("retired_on") else now

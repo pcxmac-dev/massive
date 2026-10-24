@@ -199,7 +199,7 @@ class ChartApp:
             raise LookupError(f"no data stored for {source}:{ticker}")
         feeds = self.engine.sources_for(s.ticker) if source == "*" else [source]
         with self._lock:
-            watch = next((w for w in self.store.watchlist() if w["ticker"] == s.ticker and w["source"] in feeds), {})
+            watch = next((w for w in self.store.watchlist(ticker=s.ticker) if w["source"] in feeds), {})
             details = next((d for d in (self.store.details(f, s.ticker) for f in feeds) if d), None)
             exchanges = self.store.exchanges()
         daily = s.daily if s.daily is not None and not s.daily.empty else resample(
@@ -295,7 +295,7 @@ class ChartApp:
         from .markets import symbol_sessions
 
         with self._lock:
-            item = next((w for w in self.store.watchlist() if w["ticker"] == q["ticker"].upper()), None)
+            item = next(iter(self.store.watchlist(ticker=q["ticker"])), None)
             s = self.engine.series(q.get("source", "*"), q["ticker"])
         asset = s.asset if s else (item or {}).get("asset", "stock")
         product = item["source_ticker"] if item and item["asset"] == "future" else None
@@ -520,7 +520,7 @@ class ChartApp:
         ticker = ticker.upper()
         now = datetime.now(timezone.utc)
         with self._lock:
-            feeds = sorted({w["source"] for w in self.store.watchlist() if w["ticker"] == ticker})
+            feeds = sorted({w["source"] for w in self.store.watchlist(ticker=ticker)})
             if not feeds:
                 raise LookupError(f"{ticker} is not on the watchlist")
             asked = collector.priority_requests(self.store, now).get(ticker)

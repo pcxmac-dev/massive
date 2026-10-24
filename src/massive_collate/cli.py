@@ -205,6 +205,67 @@ def cmd_watch(args, settings: Settings) -> int:
     return 0
 
 
+TIER_KEY = "tier:massive"
+
+
+def _note_tier(store: Store, settings: Settings, log) -> None:
+    """When MASSIVE_TIER changes, what the old plan refused may be allowed now (or the reverse):
+    Massive's cached entitlements and the market days it refused are asked again."""
+    seen = store.kv_get(TIER_KEY)
+    if seen == settings.tier.name:
+        return
+    if seen:
+        store.clear_entitlements("massive")
+        days = store.clear_denied_days("massive")
+        log(f"massive plan changed ({seen} -> {settings.tier.name}): entitlements and {days} refused days asked again")
+    store.kv_set(TIER_KEY, settings.tier.name)
+
+
+def cmd_plan(args, settings: Settings) -> int:
+    """Which Massive stocks plan the key has, from what it may ask for (seven small requests),
+    next to MASSIVE_TIER, which sets how far back the collector reaches."""
+    import json
+
+    from .config import TIERS, tier_for
+
+    args.source = "massive"
+    with api_run(args, settings, "plan") as (source, store, log):
+        if source is None:
+            return 0
+        reach = source.plan_reach(args.ticker)
+        found = tier_for(reach)
+        log("plan: " + ", ".join(f"{k} {'yes' if v else 'no'}" for k, v in reach.items()) + f" -> {found}")
+        store.kv_set("plan:massive", json.dumps({"at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                                                 "reach": reach, "tier": found}))
+        years = TIERS[found].history_years
+        print(f"Massive plan found: {found} ({f'{years} years' if years else 'all'} of history); "
+              f"MASSIVE_TIER is {settings.tier.name}")
+        if found != settings.tier.name:
+            print(f"Set the user environment variable MASSIVE_TIER={found} for the collector to use it.")
+    return 0
+
+
+def cmd_initialize(args, settings: Settings) -> int:
+    """One-time: every listed stock of the exchanges onto the watchlist of every stock feed, most
+    traded first (initializer.py). Sends no requests; the hourly syncs then backfill them in
+    that order, within each feed's caps."""
+    from . import initializer
+    from .sources import SUPPORTED_ASSETS
+
+    feeds = [f for f in BUILDERS if "stock" in SUPPORTED_ASSETS.get(f, ())]
+    exchanges = tuple(e.strip().upper() for e in args.exchanges.split(",") if e.strip())
+    with Store(settings.db_path) as store:
+        out = initializer.initialize(store, feeds, exchanges, by=args.by, dry_run=args.dry_run)
+    print(f"{out['listed']:,} listings on {', '.join(exchanges)} ({out['ranked']:,} with recent volume), "
+          f"ranked by {'traded value' if args.by == 'value' else 'shares traded'}")
+    print("most traded: " + ", ".join(out["top"]))
+    for feed, n in out["added"].items():
+        print(f"  {feed:8} {n:,} {'would be ' if args.dry_run else ''}added")
+    if out["listed"] == 0:
+        print("the directory has no listings for those exchanges yet: a sync fills it")
+    return 0
+
+
 def cmd_sync(args, settings: Settings) -> int:
     """Sync every configured feed (or just --source), each within its own limits, holding the
     run lock for the whole run (released between feeds, another run could take it and this one
@@ -218,6 +279,7 @@ def _sync(args, settings: Settings) -> int:
     names = list(BUILDERS) if args.all_sources else [args.source]
     with Store(settings.db_path) as store:
         separated = store.kv_get("built-bars:separated:v1")
+        _note_tier(store, settings, Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
     from . import live
 
     if args.all_sources and (settings.live_coins or live.stock_keys(settings)) and not settings.offline:
@@ -828,6 +890,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--port", type=int, default=8765)
     s.add_argument("--no-browser", action="store_true")
     s.set_defaults(func=cmd_gui)
+
+    s = sub.add_parser("plan", help="find which Massive plan your key has (seven small requests)")
+    s.add_argument("--ticker", default="AAPL", help="a symbol with long history (default AAPL)")
+    s.set_defaults(func=cmd_plan)
+
+    s = sub.add_parser("initialize", help="one-time: every NYSE and Nasdaq listing onto the watchlist, "
+                                          "most traded first (no requests)")
+    s.add_argument("--exchanges", default="XNYS,XNAS", help="exchange MICs (default XNYS,XNAS)")
+    s.add_argument("--by", choices=("value", "shares"), default="value",
+                   help="rank by traded value (default) or shares traded")
+    s.add_argument("--dry-run", action="store_true", help="show what would be added")
+    s.set_defaults(func=cmd_initialize)
 
     s = sub.add_parser("probe", help="find the finest resolution your plan allows for a ticker")
     s.add_argument("ticker")

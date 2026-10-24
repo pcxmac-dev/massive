@@ -601,6 +601,11 @@ class FeedStore:
             (source, day.isoformat(), status, count, _now()),
         )
 
+    def clear_denied_days(self, source: str) -> int:
+        """Forget the market days a plan refused (asked again after a plan change). Returns days."""
+        with self.conn:
+            return self.conn.execute("DELETE FROM grouped_days WHERE source=? AND status='denied'", (source,)).rowcount
+
     def grouped_days(self, source: str) -> dict[date, str]:
         cur = self.conn.execute("SELECT day, status FROM grouped_days WHERE source=?", (source,))
         return {date.fromisoformat(d): s for d, s in cur}

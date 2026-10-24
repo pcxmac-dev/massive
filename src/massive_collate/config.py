@@ -4,7 +4,8 @@ Settings come from environment variables, optionally loaded from a `.env` file
 (variables already set in the environment win):
 
     MASSIVE_API_KEY   required for any API call
-    MASSIVE_TIER      free | starter | developer | advanced   (default: free)
+    MASSIVE_TIER      free | starter | developer | advanced   (default: free); sets the history the
+                      collector reaches back to. `python -m massive_collate plan` finds your plan
     MASSIVE_RPM       override the tier's requests-per-minute limit (0 = unlimited)
     MASSIVE_DB        path of the SQLite database (default: ~/MassiveData/massive.db)
     MASSIVE_BASE_URL  API base URL (default: https://api.massive.com)
@@ -74,6 +75,19 @@ TIERS: dict[str, Tier] = {
     "developer": Tier("developer", requests_per_minute=None, history_years=10),
     "advanced": Tier("advanced", requests_per_minute=None, history_years=None),
 }
+
+
+def tier_for(reach: dict[str, bool]) -> str:
+    """The Massive stocks plan (TIERS) a plan probe's reach matches (MassiveSource.plan_reach):
+    Advanced has quotes and more than 10 years, Developer trades and 10 years, Starter 5 years,
+    the free plan 2."""
+    if reach.get("quotes") or reach.get("day_11y") or reach.get("day_21y"):
+        return "advanced"
+    if reach.get("trades") or reach.get("day_6y"):
+        return "developer"
+    if reach.get("day_3y") or reach.get("second"):
+        return "starter"
+    return "free"
 
 
 # Alpaca market data plans (docs.alpaca.markets, Oct 2026). Basic is free: every US exchange (SIP)
@@ -239,10 +253,12 @@ def read_env_file(path: Path) -> dict[str, str]:
 # starts) are not in its environment; on Windows they are read from the user's saved variables.
 KEY_NAMES = ("MASSIVE_API_KEY", "ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY", "APCA_API_KEY_ID",
              "APCA_API_SECRET_KEY", "TIINGO_API_KEY")
+PLAN_NAMES = ("MASSIVE_TIER", "ALPACA_PLAN")  # changed when a plan is bought: read the same way
 
 
 def saved_user_keys() -> dict[str, str]:
-    """The API keys among the user's saved environment variables (the Windows registry's user Environment key)."""
+    """The API keys and plan names among the user's saved environment variables (the Windows
+    registry's user Environment key): a process started before they were saved still sees them."""
     if os.name != "nt":
         return {}
     try:
@@ -250,7 +266,7 @@ def saved_user_keys() -> dict[str, str]:
 
         out = {}
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
-            for name in KEY_NAMES:
+            for name in KEY_NAMES + PLAN_NAMES:
                 try:
                     value, _ = winreg.QueryValueEx(key, name)
                 except FileNotFoundError:

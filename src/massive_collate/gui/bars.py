@@ -373,7 +373,7 @@ class BarEngine:
         self._lock = self.lock
 
     def _watch_item(self, source: str, ticker: str) -> dict | None:
-        return next((w for w in self.store.watchlist(source) if w["ticker"] == ticker), None)
+        return next(iter(self.store.watchlist(source, ticker)), None)
 
     def sources_for(self, ticker: str) -> list[str]:
         """Feeds holding a ticker, best first: a feed with ticks (finer data) for it ranks first,
@@ -383,8 +383,8 @@ class BarEngine:
         with self._lock:
             stored = [(s, k) for s, t, k in self.store.stored_series() if t == ticker.upper()]
             have = {s for s, _ in stored}
-            have |= {w["source"] for w in self.store.watchlist() if w["ticker"] == ticker.upper()
-                     and w["asset"] == "future"}  # continuous futures are stored under their contracts
+            have |= {w["source"] for w in self.store.watchlist(ticker=ticker)
+                     if w["asset"] == "future"}  # continuous futures are stored under their contracts
         fine = {s for s, k in stored if k in ("trades", "second")}
         order = {s: i for i, s in enumerate(self.priority)}
         have -= set(MODEL_SOURCES)
@@ -691,7 +691,7 @@ class BarEngine:
             all_bars = self._modelled(s, all_bars, period, span, session, model)
         if all_bars.empty:
             return {"timestamps": [], "last": None, "total": 0}
-        item = next((w for w in self.store.watchlist() if w["ticker"] == s.ticker and w["asset"] == "future"), None)
+        item = next((w for w in self.store.watchlist(ticker=s.ticker) if w["asset"] == "future"), None)
         product = item["source_ticker"] if item else None
         total = len(all_bars)
         k = lod if (lod > 1 and style.type in LOD_TYPES) else 1

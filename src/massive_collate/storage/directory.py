@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timedelta, timezone
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from .common import _now
 
@@ -195,6 +195,22 @@ class DirectoryStore:
                     (source, *types)).fetchone()
         return {"listed": dict(listed), "venues": dict(venues), "retired": retired, "companies": companies,
                 "iconsChecked": decided[0] or 0, "icons": int(decided[1] or 0)}
+
+    def listings_by_volume(self, source: str, exchanges: Sequence[str], by: str = "value",
+                           skip_types: Sequence[str] = ()) -> list[dict]:
+        """Active stock listings on `exchanges`, most traded first: average daily traded value
+        (shares x VWAP) over the market snapshot's sessions, or shares with by="shares". Listings
+        without a snapshot come last, by ticker. [{ticker, exchange, type, name, measure}]"""
+        measure = "AVG(s.volume * COALESCE(s.vwap, s.close))" if by == "value" else "AVG(s.volume)"
+        skip = f"AND COALESCE(d.type, '') NOT IN ({','.join('?' * len(skip_types))})" if skip_types else ""
+        rows = self.conn.execute(
+            f"""SELECT d.ticker, d.exchange, d.type, d.name, {measure} AS m FROM directory d
+                LEFT JOIN market_snapshot s ON s.source=d.source AND s.ticker=d.ticker
+                WHERE d.source=? AND d.kind='stock' AND d.retired_on IS NULL
+                  AND d.exchange IN ({','.join('?' * len(exchanges))}) {skip}
+                GROUP BY d.ticker ORDER BY m IS NULL, m DESC, d.ticker""",
+            (source, *exchanges, *skip_types))
+        return [{"ticker": t, "exchange": e, "type": ty, "name": n, "measure": m} for t, e, ty, n, m in rows]
 
     def save_market_snapshot(self, source: str, day: date, bars: list[dict]) -> int:
         rows = [(source, day.isoformat(), b["T"].upper(), b.get("c"), b.get("v"), b.get("vw")) for b in bars if b.get("T")]

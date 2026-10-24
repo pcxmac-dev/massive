@@ -150,7 +150,7 @@ def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, ass
     def empty(feed: str) -> list[tuple[int, int]]:
         """Where a feed was asked and has nothing: a better-ranked feed does not stand in the way there."""
         return subtract(nothing.get(feed, []), holds.get(feed, []))
-    watch = {(w["source"], w["ticker"]): w for w in store.watchlist() if w["ticker"] == ticker.upper()}
+    watch = {(w["source"], w["ticker"]): w for w in store.watchlist(ticker=ticker)}
     if gaps and timespan in ("minute", "second"):
         # Bars are built here from ticks: the window another feed collects ticks for is left to it
         # (even before the ticks arrive). The tick feed itself still downloads its own bars there,

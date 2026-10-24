@@ -96,15 +96,22 @@ class WatchlistStore:
                 "DELETE FROM watchlist WHERE source=? AND ticker=?", [(source, t.upper()) for t in tickers]
             )
 
-    def watchlist(self, source: str | None = None) -> list[dict]:
+    def watchlist(self, source: str | None = None, ticker: str | None = None) -> list[dict]:
+        """Watchlist entries, of one feed and/or one ticker (`ticker` reads by index: with thousands
+        of symbols, per-symbol code asks for its own rows rather than scanning them all)."""
         sql = (
             "SELECT source, ticker, resolution, backfilled_to, exchange, listed_from, figi, checked_at, "
             "name, kind, asset, source_ticker, invert, rank, synced_at, closed_at, retired_on FROM watchlist"
         )
-        params: list = []
+        where, params = [], []
         if source:
-            sql += " WHERE source=?"
+            where.append("source=?")
             params.append(source)
+        if ticker:
+            where.append("ticker=?")
+            params.append(ticker.upper())
+        if where:
+            sql += " WHERE " + " AND ".join(where)
 
         def d(v: str | None) -> date | None:
             return date.fromisoformat(v) if v else None

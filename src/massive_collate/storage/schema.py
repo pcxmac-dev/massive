@@ -202,6 +202,7 @@ CREATE TABLE IF NOT EXISTS coverage (
     PRIMARY KEY (source, ticker, timespan, start_ms)
 );
 CREATE INDEX IF NOT EXISTS coverage_series ON coverage (ticker, timespan);
+CREATE INDEX IF NOT EXISTS watchlist_ticker ON watchlist (ticker);
 
 -- Audits: a second feed's copy of a stored span, compared in memory (see audit.py). Only the
 -- comparison is kept, never the second copy.
