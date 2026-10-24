@@ -1,0 +1,5 @@
+blue-marble.jpg and black-marble.jpg are NASA Earth Observatory imagery (Blue Marble Next Generation,
+Reto Stockli, NASA Earth Observatory; Black Marble 2016, NASA Earth Observatory images by Joshua Stevens,
+using Suomi NPP VIIRS data from Miguel Roman, NASA's Goddard Space Flight Center). NASA imagery is not
+copyrighted and may be used freely; NASA asks to be credited as the source. See VERSION for the files'
+origin and checksums.

@@ -91,10 +91,13 @@
         const sy = Math.min(map.height - 1, Math.floor(v * map.height));
         const i = (sy * map.width + sx) * 4, o = (py * n + px) * 4;
         const z = Math.sqrt(Math.max(0, 1 - rho * rho));  // facing the viewer (and, by day, the Sun)
-        const light = mode === 'day' ? 0.35 + 0.65 * z : 0.75 + 0.6 * z;
-        out.data[o] = Math.min(255, map.data[i] * light);
-        out.data[o + 1] = Math.min(255, map.data[i + 1] * light);
-        out.data[o + 2] = Math.min(255, map.data[i + 2] * light);
+        // By day the Sun lights the disc from the centre; by night the cities shine over a faint
+        // deep blue, so the globe still reads against a dark rail at 22 px.
+        const light = mode === 'day' ? 0.6 + 0.55 * z : 1.3 + 0.5 * z;
+        const base = mode === 'day' ? [0, 0, 0] : [10, 18, 42];
+        out.data[o] = Math.min(255, base[0] + map.data[i] * light);
+        out.data[o + 1] = Math.min(255, base[1] + map.data[i + 1] * light);
+        out.data[o + 2] = Math.min(255, base[2] + map.data[i + 2] * light);
         out.data[o + 3] = rho > 0.97 ? Math.round(255 * (1 - rho) / 0.03) : 255;  // a soft edge
       }
     }
@@ -140,5 +143,6 @@
 
   load();
   setInterval(tick, 60_000);
-  window.GlobeIcon = { update: tick };
+  // frame(mode, hour): one frame as a canvas (for a look at the day and night sides), null before the images load
+  window.GlobeIcon = { update: tick, frame: (mode, hour) => (textures ? render(mode, hour) : null) };
 })();

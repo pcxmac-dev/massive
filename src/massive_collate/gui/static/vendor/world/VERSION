@@ -2,3 +2,9 @@ world-atlas 2.0.2 (ISC), countries-110m.json and countries-50m.json: https://cdn
 Data: Natural Earth (public domain), https://www.naturalearthdata.com/
 time-zones.json: built by tools/build_timezones.py from Natural Earth 1:10m time zones v5.1.2 (public domain),
 https://cdn.jsdelivr.net/gh/nvkelso/natural-earth-vector@v5.1.2/geojson/ne_10m_time_zones.geojson, and the tz database.
+blue-marble.jpg: NASA Earth Observatory, Blue Marble Next Generation, December 2004 (5400x2700, 1,878,742 bytes,
+sha256 3d38a8ecaceb1cdb51ced7f831e9ac18d261950049616feff6892efcae0dcc26),
+https://eoimages.gsfc.nasa.gov/images/imagerecords/74000/74218/world.200412.3x5400x2700.jpg (public domain, NASA).
+black-marble.jpg: NASA Earth Observatory, Black Marble 2016, 0.1 degree (3600x1800, 779,638 bytes,
+sha256 d87de751a264e4f8ff69c68de5dab9606daee87a6f15ae743c93200743bd7ec1),
+https://eoimages.gsfc.nasa.gov/images/imagerecords/144000/144898/BlackMarble_2016_01deg.jpg (public domain, NASA).
