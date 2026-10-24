@@ -206,6 +206,27 @@ derivation record). Keys are read from user environment variables only. Plan pri
 
 ## 5. Gaps and ideas (not handled yet)
 
+### Using every source fully (audit of the free tiers, 2026-10-24)
+
+From the providers' current documentation (sources listed in the audit notes). Ranked by value for
+the cost; requests are estimates.
+
+| # | Gap | Source | Cost | Notes |
+|---|---|---|---|---|
+| 1 | **Massive's 5 requests/min is per asset class** (stocks, options, indices, currencies, futures each have their own; reference endpoints a separate bucket) and no daily cap is documented | Massive (massive.com knowledge base) | none | the limiter runs one 5/min window for all classes, and 2,000/day is our own cap: a window per class would multiply throughput within the plan |
+| 2 | Full 1-minute history on the crypto exchanges | Coinbase 1m from 2015 (~19,700 requests for BTC at 10/s, ~33 min); Bitfinex 1m from 2013 (~715 per pair at 30/min) | as shown | we keep 90 days on both |
+| 3 | Each exchange's own 5 min / 1 h / 1 day candles (received, replacing derived) | Coinbase (300/request), Bitstamp (1,000), Bitfinex (10,000), Alpaca crypto | 5m ~3,950, 1h ~330, 1d ~14 per Coinbase pair | `derive.py` builds them now; received ones replace them |
+| 4 | **Real order books (level 2) for crypto**, live | Coinbase `level2_batch` (public; full `level2` needs auth) or Advanced Trade `level2` (public), Bitstamp `diff_order_book` (+ REST snapshot per connect), Kraken `book` (depth 1000), Bitfinex `book` (len 250) | no REST cost; heavy storage | the Analysis view's level 2 is virtual (traded volume) until then |
+| 5 | Massive economy series: treasury yields (1962-), inflation (1947-), expectations, labour market, funding conditions | `/fed/v1/...` (every plan) | ~10 to backfill, ~5 a day | reference bucket |
+| 6 | Massive dividends, splits, IPOs, short interest and short volume, float, ticker events | `/stocks/v1/...`, `/vX/reference/...` | ~150 to backfill, a few a day | corporate actions also make adjustment explicit |
+| 7 | Massive Basic for options (contracts, per-contract end-of-day bars), indices (non-flagship), currencies (grouped daily), futures (from 2017) | Massive | per class, own 5/min | SPX, DJI, RUT and VIX are not on Indices Basic |
+| 8 | Kraken directly (trades from 2013 at ~1 req/s; WS trades and OHLC) | Kraken public | trades backfill very large | Kraken data now comes via Alpaca (`us-1`) |
+| 9 | L3 order flow and funding | Bitstamp `live_orders` (public), `order_data` (30 days); Bitstamp/Bitfinex funding and derivatives status | low | |
+| 10 | Alpaca with free keys: SIP bars older than 15 min (10,000 per request at 200/min), IEX live (30 symbols), corporate actions, Benzinga news, screener, options chains with Greeks (from Feb 2024) | Alpaca | — | waiting for `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` |
+| 11 | Cboe put/call ratios (CSVs 2006-2019, archive 1995-2003; daily pages after), CFE volume and open interest; check SKEW/VIX3M on the same URL pattern | Cboe public files | a few files, 1 page a day | |
+| 12 | Tiingo with a free key: adjusted end of day (500 symbols/month, 1,000 requests/day), Dow 30 fundamentals, IEX reference-price and crypto WebSockets | Tiingo | — | waiting for `TIINGO_API_KEY` |
+
+
 | Gap | Why it matters | Possible source | Status |
 |---|---|---|---|
 | News outside the US | the ticker's headlines are US-only, so world exchanges light up only for calendar events and big moves | a non-US news API (cost, licence) | ❌ |
