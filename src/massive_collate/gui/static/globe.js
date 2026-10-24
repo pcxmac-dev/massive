@@ -772,8 +772,9 @@
       ctx.globalAlpha = 1;
       ctx.strokeStyle = perf != null ? (STATE_COLOR[m.state] || STATE_COLOR.unknown) : (dark ? '#0b0e15' : '#fff');
       ctx.lineWidth = perf != null ? 1.6 : 1; ctx.stroke();
-      // only operating exchanges are named on the map (and the hovered or featured one)
-      if (m.state === 'open' || m.state === 'break' || m === hover || featured) labelled.push({ m, p, perf });
+      // only operating exchanges are named on the map (and the one under the pointer); a closed one
+      // the news ticker features keeps just its steady gold ring
+      if (m.state === 'open' || m.state === 'break' || m === hover) labelled.push({ m, p, perf });
     }
     drawLabels(labelled, g, dark);
     // colour legend
@@ -801,8 +802,8 @@
   }
   let lastInfo = '';
 
-  // Label boxes for the exchanges operating now (stock, FX and crypto alike; a closed one only when
-  // hovered or featured), by one convention: markers closer than CLUSTER px on screen (a
+  // Label boxes for the exchanges operating now (stock, FX and crypto alike; a closed one only while
+  // hovered), by one convention: markers closer than CLUSTER px on screen (a
   // city's exchanges, FX centre and crypto exchanges, or neighbours at this zoom) share one box: the
   // city (or cities) in bold, coloured by state, then a line per market: its code (the exchange's
   // MIC, FX, or a crypto exchange's name), its important indexes joined by " · " (an FX centre's
