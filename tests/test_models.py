@@ -50,6 +50,47 @@ def test_gaps_split_segments_so_no_spike():
     assert no_reset.max() > 1  # without resets the jump is a spike
 
 
+def test_edges_follow_the_data_instead_of_one_polynomial():
+    rng = np.random.default_rng(11)
+    y = np.cumsum(rng.normal(size=300))
+    d2 = savgol_derivative(y, 101, 3, 2)
+    # The newest 50 bars (half a window) each have their own window: not a straight line
+    tail = d2[-50:]
+    assert np.abs(np.diff(tail, 2)).max() > 1e-6
+    # and the newest value is exactly the one computable at that bar (the trailing window)
+    assert np.isclose(d2[-1], savgol_derivative_causal(y, 101, 3, 2)[-1])
+    assert np.allclose(d2[-50:], savgol_derivative_causal(y, 101, 3, 2)[-50:])
+    # The oldest bars mirror it: the window starting at the bar
+    head = savgol_derivative(y[::-1], 101, 3, 2)[::-1]  # 2nd derivative is unchanged by reversal
+    assert np.allclose(d2[:50], head[:50])
+
+
+def test_edges_of_a_segment_barely_longer_than_the_window():
+    # 105 bars, window 101: most edge bars have no full window ending (or starting) at them;
+    # they use the nearest full window's fit, and everything stays exact for polynomials.
+    x = np.arange(105, dtype=float)
+    y = 2 + 3 * x - 0.5 * x**2 + 0.01 * x**3
+    assert np.allclose(savgol_derivative(y, 101, 3, 1), 3 - x + 0.03 * x**2)
+    assert np.allclose(savgol_derivative(y, 101, 3, 2), -1 + 0.06 * x)
+    rng = np.random.default_rng(5)
+    noisy = y + rng.normal(size=105)
+    d1 = savgol_derivative(noisy, 101, 3, 1)
+    assert np.isfinite(d1).all()
+    assert np.isclose(d1[-1], savgol_derivative_causal(noisy, 101, 3, 1)[-1])  # the newest: its own window
+
+
+def test_a_segment_shorter_than_the_window_has_no_values():
+    # 30 bars then, after a gap, 8: a 9-bar window fits only in the first stretch. Fitted to the
+    # 8 alone, the "slope" would be one polynomial's derivative whatever the window asked for.
+    rng = np.random.default_rng(3)
+    long = _bars(100 + np.cumsum(rng.normal(size=30)), start="2026-10-20 09:30")
+    short = _bars(100 + np.cumsum(rng.normal(size=8)), start="2026-10-21 09:30")
+    out = apply_model(pd.concat([long, short]), Model("d2", per="bar", window=9), 60)
+    assert len(out) == 30 and out.index[-1] == long.index[-1]
+    assert len(apply_model(short, Model("d1", per="bar", window=9), 60)) == 0
+    assert len(apply_model(short, Model("integral", per="bar", window=9), 60)) == 8  # an area needs no window
+
+
 def test_integral_trapezoid_and_gaps_add_nothing():
     b = _bars([10, 12, 14, 16])  # base = 0, 2, 4, 6 ; per bar trapezoids 1, 3, 5
     out = apply_model(b, Model("integral", per="bar"), 60)["close"].to_numpy()

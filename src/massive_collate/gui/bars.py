@@ -503,8 +503,11 @@ class BarEngine:
         if not model.is_price and style.type not in TIME_TYPES:
             raise ValueError("derivatives and integrals apply to time-based chart types")
         all_bars, used = self._styled(s, period, span, session, style)
+        hidden = 0
         if not model.is_price:
+            priced = len(all_bars)
             all_bars = self._modelled(s, all_bars, period, span, session, model)
+            hidden = priced - len(all_bars)  # bars in stretches too short for the window
             used = {**used, "model": model.kind, "window": model.window, "basis": model.basis, "per": model.per}
         if lod > 1 and style.type in LOD_TYPES:
             # The chart type and its parameters are part of the key: aggregates of Renko bricks
@@ -531,6 +534,7 @@ class BarEngine:
 
             page["model"] = {"kind": model.kind, "unit": model.unit_label(),
                              "precision": model_precision(all_bars["close"].to_numpy()),
+                             "hidden": int(hidden), "window": model.window,
                              # an indicator is derived on request: how, with what code, and whether it looks ahead
                              "derivation": {"kind": "indicator", "code": code_version(), "settings": asdict(model),
                                             "lookAhead": not model.causal}}

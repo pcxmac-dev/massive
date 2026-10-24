@@ -4,8 +4,13 @@ Market data is discrete, noisy and has gaps, so:
 
 - Derivatives use a Savitzky-Golay filter: a polynomial is least-squares fitted over a
   sliding window of bars and differentiated exactly. It smooths without the lag of a
-  moving average and is exact for polynomials up to the fit order. Edges use the fit
-  of the first/last full window.
+  moving average and is exact for polynomials up to the fit order.
+- Edges: a centred window does not fit in the first and last half window of bars. Taking
+  the first/last full window for all of them would draw one polynomial there (the slope
+  a parabola, the 2nd derivative a straight line, for hours of the newest bars). Instead
+  each edge bar has its own full-length window: on the right the one ending at it (the
+  value a live system had at that bar; it becomes the centred value as later bars
+  arrive), on the left the one starting at it.
 - Two windows. Centred (the default, for viewing): the value at a bar is fitted from the
   bars around it, so it uses later bars and a historical value is not what was knowable
   then. Causal (`Model.causal`, for backtests and signals): the window ends at the bar,
@@ -13,7 +18,10 @@ Market data is discrete, noisy and has gaps, so:
   arrive; it lags a little (half a window) in exchange. At the start of a segment the
   causal window grows from the first bar and stays empty until it holds order + 1 bars.
 - The series is split into segments at gaps (overnight, weekends, halts) so a gap never
-  appears as a spike. Within a segment, bars are taken as evenly spaced at the chart
+  appears as a spike. A centred derivative needs a whole window inside its segment: in a
+  segment shorter than the window the fit would be one polynomial through the whole
+  segment (a parabola for the slope, a straight line for the 2nd derivative, whatever the
+  smoothing), so such a segment has no values rather than a misleading curve. Within a segment, bars are taken as evenly spaced at the chart
   interval, and results are scaled to the chosen time unit.
 - Basis "log" works on ln(price) and reports in percent, comparable across symbols and
   price levels.
@@ -24,6 +32,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 import pandas as pd
@@ -75,8 +84,20 @@ def savgol_coefficients(window: int, order: int, deriv: int) -> np.ndarray:
     return pinv[deriv] * math.factorial(deriv)
 
 
+@lru_cache(maxsize=4096)
+def savgol_point_coefficients(window: int, order: int, deriv: int, at: int) -> np.ndarray:
+    """Weights giving the `deriv`-th derivative (per sample) of the window's fit at its sample
+    `at` (0 = oldest, window - 1 = newest)."""
+    x = np.arange(window, dtype=float) - at
+    pinv = np.linalg.pinv(np.vander(x, order + 1, increasing=True))
+    out = pinv[deriv] * math.factorial(deriv)
+    out.flags.writeable = False  # shared by the cache
+    return out
+
+
 def savgol_derivative(y: np.ndarray, window: int, order: int, deriv: int) -> np.ndarray:
-    """Derivative (per sample) of y. Edges are evaluated from the first/last full window's fit."""
+    """Derivative (per sample) of y. Each edge bar uses its own full-length window: ending at it
+    on the right, starting at it on the left (see the module notes)."""
     n = len(y)
     out = np.full(n, np.nan)
     if n == 0:
@@ -89,22 +110,29 @@ def savgol_derivative(y: np.ndarray, window: int, order: int, deriv: int) -> np.
     half = w // 2
     coeffs = savgol_coefficients(w, order, deriv)
     out[half:n - half] = np.convolve(y, coeffs[::-1], mode="valid")
-    # Edges: fit the first and last full windows and differentiate the polynomial there.
-    xs = np.arange(w, dtype=float)
-    for lo, idx in ((0, range(0, half)), (n - w, range(n - half, n))):
-        poly = np.polynomial.polynomial.polyfit(xs, y[lo:lo + w], order)
-        der = np.polynomial.polynomial.polyder(poly, deriv) if deriv else poly
-        for i in idx:
-            out[i] = np.polynomial.polynomial.polyval(i - lo, der)
+    # Right edge: the window ending at the bar; bars before the first full window use its fit.
+    start = max(n - half, w - 1)
+    out[start:] = np.convolve(y[start - w + 1:], savgol_point_coefficients(w, order, deriv, w - 1)[::-1], mode="valid")
+    if start > n - half:
+        out[n - half:start] = _fit_at(y[:w], order, deriv, np.arange(n - half, start))
+    # Left edge: the window starting at the bar; bars after the last full window's start use its fit.
+    end = min(half, n - w + 1)
+    out[:end] = np.convolve(y[:end + w - 1], savgol_point_coefficients(w, order, deriv, 0)[::-1], mode="valid")
+    if end < half:
+        out[end:half] = _fit_at(y[n - w:], order, deriv, np.arange(end, half) - (n - w))
     return out
+
+
+def _fit_at(window_y: np.ndarray, order: int, deriv: int, xs: np.ndarray) -> np.ndarray:
+    """The `deriv`-th derivative of the window's polynomial fit at positions xs (0 = its first sample)."""
+    poly = np.polynomial.polynomial.polyfit(np.arange(len(window_y), dtype=float), window_y, order)
+    return np.polynomial.polynomial.polyval(xs, np.polynomial.polynomial.polyder(poly, deriv) if deriv else poly)
 
 
 def savgol_trailing_coefficients(window: int, order: int, deriv: int) -> np.ndarray:
     """Weights giving the `deriv`-th derivative (per sample) at the newest sample of the window:
     samples at x = -(window - 1) .. 0, evaluated at 0."""
-    x = np.arange(-(window - 1), 1, dtype=float)
-    pinv = np.linalg.pinv(np.vander(x, order + 1, increasing=True))
-    return pinv[deriv] * math.factorial(deriv)
+    return savgol_point_coefficients(window, order, deriv, window - 1)
 
 
 def savgol_derivative_causal(y: np.ndarray, window: int, order: int, deriv: int) -> np.ndarray:
@@ -150,6 +178,8 @@ def apply_model(bars: pd.DataFrame, model: Model, step_seconds: float) -> pd.Dat
         derivative = savgol_derivative_causal if model.causal else savgol_derivative
         for s in np.unique(seg):
             m = seg == s
+            if not model.causal and m.sum() < model.window:
+                continue  # shorter than the window: no honest slope here (see the module notes)
             value[m] = derivative(y[m], model.window, model.order, deriv) * steps_per_unit ** deriv
     else:  # integral: trapezoid area of (y - y0) in (basis x time unit), gaps contribute nothing
         base = y - y[0]
