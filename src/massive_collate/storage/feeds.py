@@ -739,11 +739,23 @@ class FeedStore:
         """{feed: bytes of its bar file and its write-ahead log}."""
         return {f.name: sum(p.stat().st_size for p in f.files() if "-ticks.db" not in p.name) for f in self._open_feeds()}
 
-    def newest_any(self, ticker: str, timespan: str) -> tuple[str, int] | None:
-        """(feed, ms) of the newest bar of a series in any feed: one index seek per feed holding it."""
+    def series_holders(self) -> dict[tuple[str, str], list[str]]:
+        """{(ticker, kind): [feeds holding it]}, from one look at the stored series: callers asking
+        about thousands of symbols take it once (each stored_series() call checks every feed file
+        for changes, and a sync writing meanwhile makes each check rebuild the list)."""
+        out: dict[tuple[str, str], list[str]] = {}
+        for s, t, k in self.stored_series():
+            out.setdefault((t, k), []).append(s)
+        return out
+
+    def newest_any(self, ticker: str, timespan: str, holders: dict | None = None) -> tuple[str, int] | None:
+        """(feed, ms) of the newest bar of a series in any feed: one index seek per feed holding it
+        (`holders`: series_holders() taken once by a caller asking about many symbols)."""
         ticker = ticker.upper()
         best = None
-        for src in {s for s, t, k in self.stored_series() if t == ticker and k == timespan}:
+        feeds = (holders.get((ticker, timespan), ()) if holders is not None
+                 else {s for s, t, k in self.stored_series() if t == ticker and k == timespan})
+        for src in feeds:
             newest = max((m for m in (self._bars(src).execute(  # MAX alone is answered from the index's last entry
                 f"SELECT MAX(ts) FROM {table} WHERE ticker=? AND timespan=? AND multiplier=1",
                 (ticker, timespan)).fetchone()[0] for table in _BAR_TABLES) if m is not None), default=None)

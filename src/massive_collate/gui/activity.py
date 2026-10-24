@@ -133,6 +133,7 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
     profiles = feed_profiles(settings)
     settings = settings.for_source(source)
     me = profiles.get(source)
+    holders = store.series_holders()  # once, not once a symbol
     rows, items = [], []
     for item in store.watchlist(source):
         floor = history_floor(settings.tier, today, item["asset"])
@@ -142,7 +143,7 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
             edges = (min(e[0] for e in spans), max(e[1] for e in spans)) if spans else None
         else:
             edges = store.bar_edges(source, item["ticker"])
-        newest = store.newest_any(item["ticker"], "minute") if item["asset"] != "future" else None
+        newest = store.newest_any(item["ticker"], "minute", holders) if item["asset"] != "future" else None
         row = symbol_status(item, edges, floor, today, now, settings.tier, current,
                             store.probe(source, item["ticker"]), newest[1] if newest else None,
                             10_000 if source == "alpaca" else None)
