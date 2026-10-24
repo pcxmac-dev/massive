@@ -2,6 +2,35 @@
 
 Working notes so work can resume in a fresh session. Newest first.
 
+## State (2026-10-24, night)
+
+- **Bug sweeps done** (5, with erroneous process behaviour in mind; 564 tests): processes and
+  locks (`proc.py`: "pid start" stamps, no age-based staleness), fetching (per-symbol errors skip
+  the symbol, network retries, empty windows recorded), storage and derived data, the chart
+  engine and server, and the front end (no snap-back on redraw or resize, calendar and globe
+  loaders that cannot storm, one outage = one step of the request pause, last symbol picked
+  wins, crypto/fx days in UTC, http(s)-only headline links, watchlist rows updated in place).
+- **Appraisal quick wins** (docs/APPRAISAL.md says which): `Store.kv_json` / `kv_update` (atomic
+  across processes), 30 s SQLite busy wait, one `clear_denied`, the Fetcher's state order one
+  list. `synchronous=NORMAL` deliberately not done (bars and coverage are in different files).
+- **Per-symbol data across feeds**: `inventory.py` → `python -m massive_collate inventory TICKER`,
+  `/api/inventory`, "Data by feed" in the side panel (● sent, * derived, ○ not built yet, with a
+  "Build missing" button that runs `derive --tickers` locally). The sync now builds each symbol's
+  derived frames right after its fetch (`derive.build_symbol`); a rebuild covers only the changed
+  span (`changed_span`); chunks read a day either side, so CME sessions across a chunk edge are
+  whole. The real database had no v3 derive markers yet (the long Massive run started before);
+  the first build per series covers its whole history.
+- **Needs the user**: ~34 stray live recorders (old code, started before the machine lock) still
+  run and reconnect to Coinbase every second ("subscription limit reached", ~20 refusals a minute
+  at 11:36): stop them (command in the session) and start one recorder (`live start`). The chart
+  app on 8765 runs the old server code until restarted (the page scripts are new; the inventory
+  panel stays empty until then).
+- **Deferred** (found in the sweeps, not done): splits after download (needs corporate actions);
+  a stored_at index or series catalog for change detection at 7,900 symbols; composite gap
+  rebuild; an archive hole when a better feed backfills later; load_bars start/end date
+  semantics; derivation row counts inflated by the live recorder; preferred shares (ticker case);
+  an intermittent test_datasets checksum failure seen once, not reproduced (12/12 passes).
+
 ## State (2026-10-24, evening)
 
 - **Plans and caps**: Massive **Advanced** for stocks (`python -m massive_collate plan` probes it:
