@@ -13,6 +13,14 @@ from massive_collate.storage import Store
 
 
 @pytest.fixture(autouse=True)
+def no_saved_keys(monkeypatch):
+    """Tests never read the user's real API keys (saved user environment variables)."""
+    from massive_collate import config
+
+    monkeypatch.setattr(config, "saved_user_keys", lambda: {})
+
+
+@pytest.fixture(autouse=True)
 def no_recorders(monkeypatch):
     """Tests never start the live recorder: `sync` would start a real detached process (with real
     exchange connections) pointed at the test's temporary folder."""

@@ -242,3 +242,26 @@ def test_one_download_per_span_holds_within_a_market_not_across(store):
     assert not any(a <= held < b for a, b in sip)  # same market (SIP): the span Massive holds is not fetched again
     venue = plan(store, feeds["coinbase"], feeds, "BTCUSD", "crypto", "minute", date(2026, 9, 1), NOW)
     assert any(a <= held < b for a, b in venue)  # Coinbase is its own market: it fetches that span too
+
+
+def test_audits_are_one_hour_spot_checks_within_two_percent_of_a_run():
+    import random
+
+    from massive_collate.audit import allowance, spot
+
+    rng = random.Random(4)
+    a, b = 0, 86_400_000
+    s0, s1 = spot(a, b, rng)
+    assert s1 - s0 == 3_600_000 and a <= s0 and s1 <= b and s0 % 60_000 == 0
+    assert spot(0, 600_000, rng) == (0, 600_000)  # shorter than an hour: all of it
+
+    class Client:
+        request_budget = 3000
+
+    class Src:
+        client = Client()
+
+    assert allowance(Src()) == 60  # 2 % of 3,000
+    Client.request_budget = 250
+    assert allowance(Src()) == 5
+    assert allowance(object()) == 1  # no cap known: one audit

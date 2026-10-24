@@ -93,7 +93,9 @@ removes what any feed holds and what a better-ranked feed can serve now (ranking
 audited accuracy, then `SOURCE_PRIORITY`); see `coverage.py`. Only audits download a span twice:
 `audit.py` compares the second copy bar by bar (timing to the second, OHLC, high-low range, volume,
 VWAP, trade count; box stats; margin of error 5 bps or 1 cent per price, 5 % volume) and stores the
-comparison, never the bars. Audits run after new data (queued for the other feed) and at random
+comparison, never the bars. Audits are spot checks, not inspections of whole datasets: each
+compares one random hour of a span, and a run's audits stop once they have used 2 % of its request
+cap (`audit.AUDIT_SHARE`). They run after new data (queued for the other feed) and at random
 (`AUDITS_PER_RUN`, `AUDITS_RANDOM_PER_RUN`), or with `python -m massive_collate audit`.
 
 ### Research datasets (`datasets.py`)

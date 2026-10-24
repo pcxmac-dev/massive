@@ -39,6 +39,24 @@ PRICE_FIELDS = ("o", "h", "l", "c")
 NAMES = {"o": "open", "h": "high", "l": "low", "c": "close", "range": "high-low range", "v": "volume",
          "vw": "VWAP", "n": "trade count"}
 QUEUE_MAX_AGE = timedelta(days=7)
+# Audits are spot checks, not inspections of whole datasets: each compares one random hour of a
+# span, and a run's audits stop once they have used AUDIT_SHARE of its request cap.
+AUDIT_SHARE = 0.02
+SPOT_MS = 3_600_000
+
+
+def spot(a: int, b: int, rng: random.Random) -> tuple[int, int]:
+    """A random SPOT_MS window of [a, b), on whole minutes (all of it when shorter)."""
+    if b - a <= SPOT_MS:
+        return a, b
+    start = a + int(rng.random() * (b - a - SPOT_MS)) // 60_000 * 60_000
+    return start, start + SPOT_MS
+
+
+def allowance(source) -> int:
+    """Requests a run's audits may use: AUDIT_SHARE of its cap, at least one audit."""
+    cap = getattr(getattr(source, "client", None), "request_budget", None)
+    return max(1, int(cap * AUDIT_SHARE)) if cap else 1
 # What each feed's crypto bars are (the same pair can be different markets).
 VENUES = {("massive", "crypto"): "consolidated across exchanges", ("alpaca", "crypto"): "one exchange's book (Kraken)"}
 
@@ -196,14 +214,18 @@ def _window(me: FeedProfile, asset: str, timespan: str, now: datetime) -> tuple[
 
 
 def run_audits(source, store, me: FeedProfile, feeds: dict[str, FeedProfile], now: datetime,
-               queued: int = 2, random_count: int = 1, log=print, rng: random.Random | None = None) -> int:
-    """Audit other feeds' data with this feed: first spans queued after their downloads, then
-    random sessions of their stored history. Only spans this feed can serve on its plan."""
+               queued: int = 2, random_count: int = 1, log=print, rng: random.Random | None = None,
+               requests: int | None = None) -> int:
+    """Spot-audit other feeds' data with this feed: first spans queued after their downloads, then
+    random sessions of their stored history, each by one random hour (`spot`). Only spans this
+    feed can serve on its plan; with `requests`, no more audits once they have used that many."""
     rng = rng or random.Random()
     mine = {w["ticker"]: w for w in store.watchlist(source.name)}
     done = 0
+    start = source.requests_made
+    spent = lambda: requests is not None and source.requests_made - start >= requests  # noqa: E731
     for q in store.audit_queue(exclude_owner=me.name):
-        if done >= queued:
+        if done >= queued or spent():
             break
         w = mine.get(q["ticker"])
         if datetime.fromisoformat(q["queued_at"]).replace(tzinfo=timezone.utc) < now - QUEUE_MAX_AGE:
@@ -218,13 +240,17 @@ def run_audits(source, store, me: FeedProfile, feeds: dict[str, FeedProfile], no
         lo, hi = _window(me, w["asset"], q["timespan"], now)
         if not (lo <= q["start_ms"] and q["end_ms"] <= hi):
             continue  # not on this feed's plan yet (e.g. end of day): a later run
-        audit_span(source, store, q["ticker"], q["timespan"], q["start_ms"], q["end_ms"], q["owner"], "after-download", log)
+        s0, s1 = spot(q["start_ms"], q["end_ms"], rng)
+        audit_span(source, store, q["ticker"], q["timespan"], s0, s1, q["owner"], "after-download", log)
         store.dequeue_audit(q["ticker"], q["timespan"], q["start_ms"], q["owner"])
         done += 1
     for _ in range(random_count):
+        if spent():
+            break
         pick = random_span(store, source, me, now, rng, mine, feeds)
         if pick:
-            audit_span(source, store, *pick, "random", log)
+            ticker, timespan, s0, s1, owner = pick
+            audit_span(source, store, ticker, timespan, *spot(s0, s1, rng), owner, "random", log)
             done += 1
     return done
 

@@ -14,8 +14,9 @@ Settings come from environment variables, optionally loaded from a `.env` file
                            symbols are already only refreshed when their plan should have new data)
     SOURCE_PRIORITY   feed order when sources overlap (default: massive,alpaca); a span is downloaded by
                       one feed only, ranked by resolution, then audited accuracy, then this order
-    AUDITS_PER_RUN    audits of another feed's newly downloaded data per feed run (default: 2)
-    AUDITS_RANDOM_PER_RUN   audits of a random stored session per feed run (default: 1)
+    AUDITS_PER_RUN    spot audits of another feed's newly downloaded data per feed run (default: 2)
+    AUDITS_RANDOM_PER_RUN   spot audits of a random stored session per feed run (default: 1); each
+                      compares one random hour, and a run's audits use at most 2 % of its requests
     TICK_HISTORY_DAYS how far back ticks are backfilled where a feed has them (default: 365); ticks
                       are collected going forward always, minute bars cover the history before
     TICK_MIN_FREE_GB  tick backfill pauses when the disk has less free space (default: 250); below
@@ -230,6 +231,33 @@ def read_env_file(path: Path) -> dict[str, str]:
     return values
 
 
+# API keys set as user environment variables after a process started (the chart app, the runs it
+# starts) are not in its environment; on Windows they are read from the user's saved variables.
+KEY_NAMES = ("MASSIVE_API_KEY", "ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY", "APCA_API_KEY_ID",
+             "APCA_API_SECRET_KEY", "TIINGO_API_KEY")
+
+
+def saved_user_keys() -> dict[str, str]:
+    """The API keys among the user's saved environment variables (the Windows registry's user Environment key)."""
+    if os.name != "nt":
+        return {}
+    try:
+        import winreg
+
+        out = {}
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            for name in KEY_NAMES:
+                try:
+                    value, _ = winreg.QueryValueEx(key, name)
+                except FileNotFoundError:
+                    continue
+                if value:
+                    out[name] = str(value)
+        return out
+    except OSError:
+        return {}
+
+
 def load_settings(
     env: Mapping[str, str] | None = None,
     env_file: Path | None = Path(".env"),
@@ -237,6 +265,8 @@ def load_settings(
     merged: MutableMapping[str, str] = {}
     if env_file is not None:
         merged.update(read_env_file(env_file))
+    if env is None:
+        merged.update(saved_user_keys())  # the process's own environment still wins
     merged.update(os.environ if env is None else env)
 
     tier_name = merged.get("MASSIVE_TIER", "free").strip().lower()

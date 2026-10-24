@@ -812,8 +812,9 @@ def sync(
             log(f"{source.name}: " + ", ".join(f"{n} {a} symbols" for a, n in sorted(waiting.items()))
                 + " not collected by this feed here (see `deps`: keys or plan)")
         if only is None and any(audits) and not archival:
-            from .audit import run_audits
-            run_audits(source, store, me, feeds, now, queued=audits[0], random_count=audits[1], log=log)
+            from .audit import allowance, run_audits
+            run_audits(source, store, me, feeds, now, queued=audits[0], random_count=audits[1], log=log,
+                       requests=allowance(source))  # spot checks: 2 % of the run's cap
         if only is None and directory_allowance > 0 and not archival and source.serves("stock"):  # placeholders and icons: leftover budget only
             spent = source.requests_made
             refresh_directory(source, store, today, log)

@@ -115,3 +115,14 @@ def test_env_file_does_not_override_environment(tmp_path):
     f.write_text("MASSIVE_API_KEY=fromfile\nMASSIVE_TIER=starter\n")
     s = load_settings(env={"MASSIVE_API_KEY": "fromenv"}, env_file=f)
     assert s.api_key == "fromenv" and s.tier.name == "starter"
+
+
+def test_keys_saved_after_a_process_started_are_read(monkeypatch):
+    from massive_collate import config
+
+    monkeypatch.delenv("ALPACA_API_KEY_ID", raising=False)
+    monkeypatch.setattr(config, "saved_user_keys", lambda: {"ALPACA_API_KEY_ID": "PKSAVED", "MASSIVE_API_KEY": "saved"})
+    monkeypatch.setenv("MASSIVE_API_KEY", "fromenv")
+    s = load_settings(env_file=None)
+    assert s.alpaca.key_id == "PKSAVED" and s.api_key == "fromenv"  # the process's own environment wins
+    assert load_settings(env={}, env_file=None).alpaca.key_id is None  # an explicit environment is used alone
