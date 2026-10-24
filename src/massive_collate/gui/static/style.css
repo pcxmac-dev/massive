@@ -241,14 +241,19 @@ dialog::backdrop { background: rgba(0, 0, 0, .5); }
 #rail button.active::before { content: ""; position: absolute; left: -4px; top: 10px; bottom: 10px; width: 2px;
   border-radius: 1px; background: var(--accent); }
 #rail hr { width: 70%; border: 0; border-top: 1px solid var(--border); margin: 4px auto; }
-#rail button.busy { color: var(--accent); }
+/* Rail icons are grey unless selected, then blue (busy or not: the spinning badge says so). The
+   Live icon is the exception: red and pulsing while live data arrives (liveicon.js), blue with a
+   whitish pulse when selected. The Stock icon is the symbol's own logo: a grey ring, blue selected. */
 #railLive { opacity: .5; }
 #railLive.available { opacity: .85; }
-#railLive.recording { color: var(--down); opacity: 1; }
-.rail-badge { position: absolute; right: 2px; bottom: 2px; color: var(--accent); background: var(--panel);
+#railLive.recording { opacity: 1; }
+.rail-badge { position: absolute; right: 2px; bottom: 2px; color: inherit; background: var(--panel);
   border-radius: 50%; display: grid; place-items: center; }
 .rail-count { position: absolute; right: 2px; top: 2px; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 9px;
-  font-size: 11px; line-height: 18px; color: #fff; background: var(--accent); }
+  font-size: 11px; line-height: 18px; color: var(--panel); background: var(--muted); }
+#rail button.active .rail-count { color: #fff; background: var(--accent); }
+#rail .sym-icon { box-shadow: 0 0 0 2px var(--muted); }
+#rail button.active .sym-icon { box-shadow: 0 0 0 2px var(--accent); }
 .pane[hidden] { display: none; }
 .small { font-size: 11px; }
 button.primary { background: var(--accent); color: #fff; margin: 8px 0 4px; display: inline-flex; align-items: center; gap: 6px; }

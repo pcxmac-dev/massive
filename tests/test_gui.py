@@ -386,3 +386,23 @@ def test_every_interval_is_offered_and_those_the_data_cannot_build_are_marked(tm
                            ("hour", 2), ("hour", 4), ("day", 1), ("week", 1), ("month", 1), ("year", 1)]
     assert not every[("second", 1)] and every[("minute", 1)] and every[("day", 1)]  # minute data: no seconds
     assert {"type": "second", "span": 1} not in eng.periods(s) and {"type": "minute", "span": 5} in eng.periods(s)
+
+
+def test_exchanges_without_a_mic_never_break_the_markets_endpoint(tmp_path):
+    """Alpaca's SIP rows have no MIC: NaN in the frame (and NaN is true), which made /api/markets
+    fail with 'Out of range float values are not JSON compliant' and the page retry it endlessly."""
+    import pandas as pd
+
+    from massive_collate.gui.markets import markets
+    from massive_collate.gui.server import finite
+    from massive_collate.sessions import MarketCalendar
+
+    ex = pd.DataFrame([{"source": "alpaca", "id": 83, "name": "Securities Information Processor", "mic": float("nan"), "country": "US",
+                        "acronym": "S", "type": "exchange"},
+                       {"source": "massive", "id": 10, "name": "New York Stock Exchange", "mic": "XNYS",
+                        "country": "US", "acronym": "NYSE", "type": "exchange"}])
+    out = markets(MarketCalendar(), ex, [])
+    stocks = next(m for m in out["markets"] if m["exchanges"] and m["exchanges"][0]["mic"] == "XNYS")
+    assert stocks["exchanges"] == [{"name": "New York Stock Exchange", "mic": "XNYS"}]
+    json.dumps(out, allow_nan=False)
+    assert finite({"a": [1.0, float("nan"), {"b": float("inf")}], "c": "x"}) == {"a": [1.0, None, {"b": None}], "c": "x"}

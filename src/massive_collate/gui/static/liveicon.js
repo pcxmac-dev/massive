@@ -1,4 +1,5 @@
-// The Live rail icon comes alive while the open symbol is streaming, in one of two effects
+// The Live rail icon comes alive while live data is arriving (any feed streaming, not only the
+// open symbol), in red; with the Live view selected, in blue with a whitish pulse. Two effects
 // (chosen in the Live view, kept per viewer; the heartbeat unless another is chosen):
 //  - ROYGBIV pulse: a red dot beating at the centre; rings spread out from it through red,
 //    orange, yellow, green, blue, indigo and violet, brighter where they cross the icon's
@@ -15,6 +16,12 @@
   const SIZE = 32;  // the icon is drawn 32 px wide (the rail's icon size) from a 24-unit box
   const OUTER = 9, DISC = 4, BAND = 1, EDGE = 10.8;  // the icon's ring and disc (units); fades end at EDGE
   const RED = '#ff3b3b';
+  // Not selected: red. Selected: the rail's blue, its pulse whitish.
+  const PALETTES = {
+    red: { trace: '#ff7a7a', glow: RED, pen: '#fff2f2', dot: RED, dotCore: '#fff2f2', ringTo: null },
+    blue: { trace: '#5b8cff', glow: '#e6eeff', pen: '#ffffff', dot: '#5b8cff', dotCore: '#ffffff', ringTo: '#eef3ff' },
+  };
+  let palette = PALETTES.red;
   const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)');
   let effect = EFFECTS[prefs.get('liveEffect', 'heartbeat')] ? prefs.get('liveEffect', 'heartbeat') : 'heartbeat';
   let active = false, frame = 0, canvas = null, ctx = null, dpr = 1;
@@ -39,11 +46,11 @@
     return button;
   }
 
-  // Whether the effect runs: the open symbol is live, and an effect is chosen.
-  function update(isLive) {
+  // Whether the effect runs: live data is arriving, and an effect is chosen.
+  function update(receiving) {
     const button = mount();
     if (!button) return;
-    active = !!isLive && effect !== 'off';
+    active = !!receiving && effect !== 'off';
     button.classList.toggle('fx', active);
     button.dataset.effect = effect;  // the heartbeat dims the icon behind its trace
     if (active && !frame) frame = requestAnimationFrame(draw);
@@ -58,13 +65,21 @@
     if (!EFFECTS[name]) return;
     effect = name;
     prefs.set('liveEffect', name);
-    update(typeof isLive === 'function' && isLive());
+    update(receiving());
+  }
+
+  const receiving = () => (window.Activity?.data?.liveFeeds?.liveTickers || []).length > 0;
+
+  // The selection changed: one frame in the new colours (the animation, if running, keeps them).
+  function redraw() {
+    if (active && !frame) frame = requestAnimationFrame(draw);
   }
 
   function draw(now) {
     frame = 0;
     if (!active || !ctx) return;
     const t = reduced?.matches ? 0.4 : (now - t0) / 1000;
+    palette = canvas.parentElement?.classList.contains('active') ? PALETTES.blue : PALETTES.red;
     ctx.setTransform(dpr * SIZE / 24, 0, 0, dpr * SIZE / 24, 0, 0);
     ctx.clearRect(0, 0, 24, 24);
     ctx.translate(12, 12);
@@ -102,7 +117,8 @@
   function pulse(t) {
     for (let k = 0; k < RINGS; k++) {
       const r = ((t / PULSE + k / RINGS) % 1) * EDGE;
-      const color = rainbow(r), fade = fadeOut(r);
+      const color = palette.ringTo ? mix(palette.dot, palette.ringTo, Math.min(1, r / OUTER)) : rainbow(r);
+      const fade = fadeOut(r);
       ctx.strokeStyle = color;
       ctx.globalAlpha = 0.3 * fade;  // dim over the empty parts of the icon
       ctx.lineWidth = 1.3;
@@ -118,7 +134,7 @@
     // The red dot, beating as each ring leaves.
     const beat = Math.pow(0.5 + 0.5 * Math.cos(((t / PULSE) * RINGS % 1) * Math.PI * 2), 3);
     const g = ctx.createRadialGradient(0, 0, 0, 0, 0, DISC);
-    g.addColorStop(0, '#fff2f2'); g.addColorStop(0.35, RED); g.addColorStop(1, 'rgba(255,59,59,0)');
+    g.addColorStop(0, palette.dotCore); g.addColorStop(0.35, palette.dot); g.addColorStop(1, `${palette.dot}00`);
     ctx.globalAlpha = 0.65 + 0.35 * beat;
     ctx.fillStyle = g;
     ctx.beginPath(); ctx.arc(0, 0, 2.6 + 1.4 * beat, 0, Math.PI * 2); ctx.fill();
@@ -134,10 +150,16 @@
     return -(g(0.16, 0.03, 1.1) - g(0.31, 0.012, 1.3) + g(0.34, 0.013, 6.8) - g(0.37, 0.012, 2.3) + g(0.6, 0.05, 1.8));
   }
 
+  function beatGlow(t) {  // 1 at the QRS spike just past the pen, fading over the beat
+    const phase = ((((t / BEAT) % 1) + 1) % 1);
+    return Math.exp(-(((phase - 0.34 + 1) % 1) * 6));
+  }
+
   function heartbeat(t) {
     const steps = 96, length = PEN + EDGE;
     ctx.lineWidth = 1.6; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-    ctx.strokeStyle = '#ff7a7a'; ctx.shadowColor = RED; ctx.shadowBlur = 3;
+    ctx.strokeStyle = palette.trace; ctx.shadowColor = palette.glow;
+    ctx.shadowBlur = palette === PALETTES.blue ? 2 + 4 * beatGlow(t) : 3;  // selected: a whitish glow on each beat
     let px = PEN, py = ecg((((t / BEAT) % 1) + 1) % 1);
     for (let i = 1; i <= steps; i++) {  // from the pen back across the circle: older the further back
       const s = (i / steps) * length;
@@ -149,9 +171,9 @@
     }
     ctx.shadowBlur = 0;
     ctx.globalAlpha = 1;
-    ctx.fillStyle = '#fff2f2';  // the pen
+    ctx.fillStyle = palette.pen;  // the pen
     ctx.beginPath(); ctx.arc(PEN, ecg((((t / BEAT) % 1) + 1) % 1), 1.1, 0, Math.PI * 2); ctx.fill();
   }
 
-  window.LiveIcon = { update, set, get effect() { return effect; }, EFFECTS };
+  window.LiveIcon = { update, set, redraw, get effect() { return effect; }, EFFECTS };
 })();

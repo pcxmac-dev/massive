@@ -55,10 +55,17 @@
 
   // One frame: an orthographic view centred on (decl, lon), drawn like the Markets view's globe
   // (globe.js: sphere, graticule, outlines, limb).
-  function render(lon, decl) {
+  // Grey unless the Markets view is selected, then blue, like every rail icon.
+  const PALETTES = {
+    grey: { line: 'rgba(150,155,165,', glow: ['rgba(150,155,165,0.10)', 'rgba(150,155,165,0.02)'] },
+    blue: { line: 'rgba(130,165,255,', glow: ['rgba(41,98,255,0.22)', 'rgba(41,98,255,0.04)'] },
+  };
+
+  function render(lon, decl, selected = false) {
     const dpr = Math.min(4, Math.max(1, window.devicePixelRatio || 1));
-    const key = `${lon}:${decl}:${dpr}`;
+    const key = `${lon}:${decl}:${dpr}:${selected}`;
     if (cache.has(key)) return cache.get(key);
+    const colours = selected ? PALETTES.blue : PALETTES.grey;
     const n = Math.round(SIZE * dpr);
     const c = document.createElement('canvas');
     c.width = c.height = n;
@@ -81,14 +88,14 @@
         pen = true;
       }
     };
-    const line = 'rgba(160,170,200,';  // the Markets view's line colour (dark)
+    const line = colours.line;
 
     // sphere
     g.beginPath(); g.arc(cx, cy, r, 0, 2 * Math.PI);
     g.fillStyle = '#0b0f18'; g.fill();
     const grad = g.createRadialGradient(cx - r * 0.3, cy - r * 0.35, r * 0.1, cx, cy, r);
-    grad.addColorStop(0, 'rgba(41,98,255,0.18)');
-    grad.addColorStop(1, 'rgba(41,98,255,0.03)');
+    grad.addColorStop(0, colours.glow[0]);
+    grad.addColorStop(1, colours.glow[1]);
     g.fillStyle = grad; g.fill();
 
     // graticule, every 15 degrees; the equator brighter
@@ -115,8 +122,8 @@
   function update() {
     const button = document.getElementById('railMarkets');
     if (!button || !outlines) return false;
-    const lon = facing(), decl = declination();
-    const frame = render(lon, decl);
+    const lon = facing(), decl = declination(), selected = button.classList.contains('active');
+    const frame = render(lon, decl, selected);
     let canvas = button.querySelector('canvas.globe-icon');
     if (!canvas) {
       button.innerHTML = '';
@@ -125,7 +132,7 @@
       canvas.setAttribute('aria-hidden', 'true');
       button.append(canvas);
     }
-    const key = `${lon}:${decl}:${frame.width}`;
+    const key = `${lon}:${decl}:${frame.width}:${selected}`;
     if (canvas.dataset.key !== key) {
       canvas.width = frame.width; canvas.height = frame.height;
       canvas.style.width = canvas.style.height = `${SIZE}px`;

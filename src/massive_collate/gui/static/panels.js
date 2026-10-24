@@ -56,6 +56,8 @@
       b.classList.toggle('dim', on && chartPanelHidden);
       b.setAttribute('aria-pressed', String(on));
     }
+    window.LiveIcon?.redraw();  // the selected one is drawn blue
+    window.GlobeIcon?.update();
   }
 
   const RAIL_ICON = 32;  // px; the buttons (style.css #rail) leave room around it
@@ -77,10 +79,12 @@
       : 'Fetcher: historical data (sessions before the current one)';
     const live = activity?.liveFeeds;
     if (!$('railLive').querySelector('svg')) $('railLive').insertAdjacentHTML('afterbegin', icon('record', RAIL_ICON));
-    window.LiveIcon?.update(isLive());  // the open symbol streaming: the icon's effect runs
+    const streaming = live?.liveTickers || [];
+    window.LiveIcon?.update(streaming.length > 0);  // live data arriving: the icon's effect runs
     $('railLive').classList.toggle('recording', !!live?.recording);
     $('railLive').classList.toggle('available', !!live?.available && !live?.recording);
     $('railLive').title = isLive() ? `Live feeds: ${state.ticker} is streaming now`
+      : streaming.length ? `Live feeds: ${streaming.length} symbol${streaming.length > 1 ? 's' : ''} streaming now`
       : live?.recording ? 'Live feeds: recording the current session'
         : live?.available ? 'Live feeds: delayed data available, not recording' : 'Live feeds: none on your plan';
   }

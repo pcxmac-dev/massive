@@ -40,13 +40,49 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
+// Sanity check for every request the page reads with: the same request is never sent again while
+// one is on its way (callers share its answer), and an endpoint that keeps failing (no answer, or
+// the server busy or broken) is not asked again until a pause has passed: 2 s, doubling up to
+// 5 min, ended by its next answer. Without it a loop that asked every frame piled up thousands of
+// requests while the server was busy, until the browser had none left
+// (net::ERR_INSUFFICIENT_RESOURCES) and every other request on the page failed with it.
+const apiInflight = new Map();  // url -> promise of its answer
+const apiFailing = new Map();   // path -> { count, until, message }
+const API_PAUSE_MS = [2_000, 300_000];
+
+function apiFailed(path, message) {
+  const f = apiFailing.get(path) || { count: 0 };
+  f.count += 1;
+  f.until = Date.now() + Math.min(API_PAUSE_MS[1], API_PAUSE_MS[0] * 2 ** (f.count - 1));
+  f.message = message;
+  apiFailing.set(path, f);
+}
+
 async function api(path, params = {}) {
   const url = new URL(path, location.origin);
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null) url.searchParams.set(k, v);
-  const res = await fetch(url);
-  const body = await res.json();
-  if (!res.ok) throw new Error(body.error || res.statusText);
-  return body;
+  const key = url.toString();
+  if (apiInflight.has(key)) return apiInflight.get(key);
+  const f = apiFailing.get(url.pathname);
+  if (f && Date.now() < f.until) {
+    throw new Error(`${url.pathname}: ${f.message} (${f.count} failure${f.count > 1 ? 's' : ''} in a row; trying again in ${Math.ceil((f.until - Date.now()) / 1000)} s)`);
+  }
+  const answer = (async () => {
+    let res;
+    try {
+      res = await fetch(url);
+    } catch (err) {
+      apiFailed(url.pathname, 'no answer from the chart app');
+      throw err;
+    }
+    const body = await res.json().catch(() => ({}));
+    if (res.status >= 500 || res.status === 429) apiFailed(url.pathname, body.error || res.statusText);
+    else apiFailing.delete(url.pathname);  // an answer, even a refusal: the endpoint works
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    return body;
+  })().finally(() => apiInflight.delete(key));
+  apiInflight.set(key, answer);
+  return answer;
 }
 
 function showError(err) {
@@ -332,7 +368,9 @@ function isLive() {
 // -- the current time's place on screen -----------------------------------------------------
 // The newest bar can be kept anywhere across the chart (half way, 80 % to the right ...): drag the
 // "now" handle on the time axis; double-click it to put the newest bar back at the right edge. While
-// the chart is at the newest bar it follows it, so history moves left as time goes on.
+// the chart is at the newest bar it follows it, so history moves left as time goes on. The handle
+// (with its clock) and its line show only while the symbol streams live: for a symbol that is not
+// moving (its market closed, no live feed) the crosshair's own time label is the time shown.
 const DEFAULT_RIGHT_OFFSET = 80;  // the chart library's own default
 state.nowAt = prefs.get('nowAt', null);  // fraction of the plot width, or null: the right edge
 
@@ -368,7 +406,7 @@ function placeNowHandle() {
   const last = data[data.length - 1];
   const x = last ? chart.convertToPixel({ timestamp: last.timestamp }, { paneId: 'candle_pane' }).x : NaN;
   const w = plotWidth();
-  const show = Number.isFinite(x) && x >= 0 && x <= w;
+  const show = isLive() && Number.isFinite(x) && x >= 0 && x <= w;
   nowHandle.hidden = nowLine.hidden = !show;
   if (show) {
     nowHandle.style.left = nowLine.style.left = `${x}px`;
@@ -403,6 +441,7 @@ nowHandle.addEventListener('dblclick', () => {
   chart.scrollToRealTime(200);
 });
 chart.subscribeAction('onVisibleRangeChange', () => requestAnimationFrame(placeNowHandle));
+window.addEventListener('massive:activity', () => requestAnimationFrame(placeNowHandle));  // live or not, again
 
 // -- level of detail -------------------------------------------------------------------
 // Zoomed out past half a pixel per bar, the chart is fed exact aggregates of k consecutive

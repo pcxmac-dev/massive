@@ -66,7 +66,8 @@ def markets(cal: MarketCalendar, exchanges, watch: list[dict], now: datetime | N
     now = (now or datetime.now(timezone.utc)).astimezone(ET)
     us = exchanges[(exchanges["country"] == "US") & (exchanges["type"].isin(US_VENUE_TYPES))] \
         if len(exchanges) and "country" in exchanges else exchanges.iloc[0:0] if len(exchanges) else []
-    venues = sorted({(r.name, r.mic) for r in us.itertuples() if r.mic}) if len(us) else []
+    # A missing MIC is NaN in the frame, and NaN is true: only real codes (Alpaca's SIP rows have none).
+    venues = sorted({(r.name, r.mic) for r in us.itertuples() if isinstance(r.mic, str) and r.mic}) if len(us) else []
     out = [{
         "id": "us-equities", "name": "US equities", "timezone": "America/New_York",
         "hours": "Pre-market 04:00, regular 09:30-16:00, after-hours to 20:00 ET",

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import mimetypes
 import subprocess
 import sys
@@ -21,6 +22,17 @@ from ..calc.derivatives import Model
 from .stats import details_subset, key_stats
 
 STATIC = Path(__file__).parent / "static"
+
+
+def finite(data):
+    """`data` with every NaN or infinity (a missing value from pandas) as None, for JSON."""
+    if isinstance(data, float):
+        return data if math.isfinite(data) else None
+    if isinstance(data, dict):
+        return {k: finite(v) for k, v in data.items()}
+    if isinstance(data, (list, tuple)):
+        return [finite(v) for v in data]
+    return data
 MAX_LIMIT = 20000
 MAX_BODY = 5 * 1024 * 1024
 WRITE_HEADER = "X-Massive-Charts"
@@ -636,7 +648,11 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 pass  # the page went away
 
         def _json(self, data, status: int = 200) -> None:
-            self._send(status, json.dumps(data, allow_nan=False).encode(), "application/json")
+            try:
+                body = json.dumps(data, allow_nan=False)
+            except ValueError:  # a NaN slipped in (pandas' missing value): sent as null, not a broken endpoint
+                body = json.dumps(finite(data), allow_nan=False)
+            self._send(status, body.encode(), "application/json")
 
         def _local(self) -> bool:
             # Only answer requests addressed to this machine (blocks DNS-rebinding from web pages).

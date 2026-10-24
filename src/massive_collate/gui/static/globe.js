@@ -37,10 +37,12 @@
   const TICK_MS = 6500;
 
   // -- data --------------------------------------------------------------------------------
+  // Asked for at most every 30 s whether or not the last try was answered (frame() calls this
+  // every frame: timed from the try, not the answer, a failing server is not asked 60 times a second).
   async function load() {
+    fetchedAt = Date.now();
     try {
       markets = await api('/api/markets');
-      fetchedAt = Date.now();
       nightCache = null;
       renderList();
       draw();
@@ -943,6 +945,7 @@
   function currentItem() { return news.items.length ? news.items[news.i % news.items.length] : null; }
 
   async function loadNews() {
+    news.fetchedAt = Date.now();  // timed from the try, like load()
     try {
       const res = await api('/api/announcements');
       const key = (x) => `${x.kind}|${x.text}`;
@@ -950,7 +953,6 @@
       news.items = res.items;
       const at = cur ? news.items.findIndex((x) => key(x) === key(cur)) : -1;
       news.i = at >= 0 ? at : 0;
-      news.fetchedAt = Date.now();
       renderTicker(false);
     } catch { /* keep the last items */ }
   }
