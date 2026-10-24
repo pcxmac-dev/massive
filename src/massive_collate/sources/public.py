@@ -80,6 +80,9 @@ class _Archive(DataSource):
     def covers(self, ticker: str) -> bool:
         return True
 
+    def serves(self, asset: str) -> bool:
+        return asset in self.assets
+
     def is_entitled(self, resolution: str, ticker: str, asset: str = "stock") -> bool:
         return asset in self.assets and resolution in self.resolutions(asset)  # public: no plan to probe
 

@@ -1,0 +1,270 @@
+"""Research datasets and reference sets: free public files, downloaded whole and kept locally.
+
+Unlike the feeds these are not price bars of watched symbols: factor and portfolio returns,
+market-level history, futures positioning, commodity prices, index membership with sector
+classes. Each file is fetched once; a file that will not change again (a finished year, an
+archive) is then closed and never fetched again, the others refresh on their own cadence (only
+once they have been fetched the first time with `datasets fetch`).
+
+- S&P 500 constituents with GICS sector and sub-industry (datasets/s-and-p-500-companies, ODC
+  PDDL): the market map's sectors for S&P 500 members.
+- Kenneth R. French Data Library (Tuck, Dartmouth): Fama/French 3 and 5 factors, 49 industry
+  portfolios; daily and monthly, from 1926 (1963 for 5 factors). Returns in percent.
+- Robert J. Shiller's US stock market data (S&P composite, dividends, earnings, CPI, rates, CAPE),
+  monthly from 1871, via the datasets/s-and-p-500 CSV (ODC PDDL).
+- World Bank commodity prices ("Pink Sheet"), monthly from 1960, via datasets/commodity-prices.
+- CFTC Commitments of Traders, legacy futures-only report, weekly from 1986: open interest and
+  commercial / non-commercial / small trader positions for every market.
+
+Not included: Norgate and CRSP (paid / licensed), Kaggle datasets (need a Kaggle login).
+"""
+from __future__ import annotations
+
+import csv
+import io
+import re
+import zipfile
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
+from typing import Callable
+from zoneinfo import ZoneInfo
+
+import requests
+
+ET = ZoneInfo("America/New_York")
+USER_AGENT = "massive-collate/1 (personal research; historical archive)"
+FRENCH = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/"
+CFTC = "https://www.cftc.gov/files/dea/history/"
+
+
+@dataclass
+class Parsed:
+    values: list[tuple[str, int, float]] = field(default_factory=list)  # (series, ts ms, value)
+    series: dict[str, tuple[str, str, str]] = field(default_factory=dict)  # series -> (title, unit, freq)
+    constituents: list[dict] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Dataset:
+    name: str
+    title: str
+    licence: str
+    files: Callable[[date], list[tuple[str, bool]]]  # today -> [(url, final: closes once imported)]
+    parse: Callable[[str, bytes], Parsed]
+    refresh_days: int  # how often the files that are not final are fetched again
+
+
+def _ms(d: date) -> int:
+    return int(datetime(d.year, d.month, d.day, tzinfo=ET).timestamp() * 1000)
+
+
+def _text(blob: bytes, url: str) -> str:
+    if url.endswith(".zip"):
+        with zipfile.ZipFile(io.BytesIO(blob)) as z:
+            return z.read(z.namelist()[0]).decode("latin-1")
+    return blob.decode("utf-8-sig", errors="replace")
+
+
+# -- parsers --------------------------------------------------------------------------------
+
+def parse_french(url: str, blob: bytes, section: str | None = None, unit: str = "%") -> Parsed:
+    """A French data library CSV: the first table (or the one after a heading containing
+    `section`): a header row then rows of YYYYMMDD / YYYYMM and values in percent."""
+    lines = _text(blob, url).splitlines()
+    out = Parsed()
+    start = 0
+    if section:
+        start = next((i for i, l in enumerate(lines) if section.lower() in l.lower()), 0)
+    header, freq = None, None
+    for line in lines[start:]:
+        cells = [c.strip() for c in line.split(",")]
+        if header is None:
+            if len(cells) > 1 and cells[0] == "" and any(cells[1:]):
+                header = cells
+            continue
+        if not cells[0].isdigit():
+            if out.values:
+                break  # the end of the first table
+            continue
+        key = cells[0]
+        if len(key) == 8:
+            d, freq = date(int(key[:4]), int(key[4:6]), int(key[6:])), "day"
+        elif len(key) == 6:
+            d, freq = date(int(key[:4]), int(key[4:]), 1), "month"
+        else:
+            break  # the annual table that follows the monthly one
+        for name, cell in zip(header[1:], cells[1:]):
+            try:
+                v = float(cell)
+            except ValueError:
+                continue
+            if v in (-99.99, -999):
+                continue  # the library's missing-value markers
+            out.values.append((name, _ms(d), v))
+    for name in (header or [])[1:]:
+        out.series[name] = (name, unit, freq or "")
+    return out
+
+
+def parse_shiller(url: str, blob: bytes) -> Parsed:
+    out = Parsed()
+    rows = csv.DictReader(io.StringIO(_text(blob, url)))
+    for r in rows:
+        d = date.fromisoformat(r.pop("Date")[:10])
+        for k, v in r.items():
+            try:
+                out.values.append((k, _ms(d), float(v)))
+            except (TypeError, ValueError):
+                continue
+    units = {"SP500": "index", "Dividend": "USD", "Earnings": "USD", "Consumer Price Index": "index",
+             "Long Interest Rate": "%", "Real Price": "USD", "Real Dividend": "USD", "Real Earnings": "USD",
+             "PE10": "ratio"}
+    for k in {s for s, _, _ in out.values}:
+        out.series[k] = (k, units.get(k, ""), "month")
+    return out
+
+
+def parse_commodities(url: str, blob: bytes) -> Parsed:
+    out = Parsed()
+    for r in csv.DictReader(io.StringIO(_text(blob, url))):
+        raw = r.pop("Date", None) or r.pop("date", None)
+        if not raw:
+            continue
+        d = date.fromisoformat(raw[:10]) if "-" in raw else date(int(raw[:4]), int(raw[5:7] or 1), 1)
+        for k, v in r.items():
+            try:
+                out.values.append((k, _ms(d), float(v)))
+            except (TypeError, ValueError):
+                continue
+    for k in {s for s, _, _ in out.values}:
+        out.series[k] = (k, "USD (nominal)", "month")
+    return out
+
+
+COT_FIELDS = {
+    "Open Interest (All)": "open_interest",
+    "Noncommercial Positions-Long (All)": "noncommercial_long",
+    "Noncommercial Positions-Short (All)": "noncommercial_short",
+    "Noncommercial Positions-Spreading (All)": "noncommercial_spreading",
+    "Commercial Positions-Long (All)": "commercial_long",
+    "Commercial Positions-Short (All)": "commercial_short",
+    "Nonreportable Positions-Long (All)": "small_long",
+    "Nonreportable Positions-Short (All)": "small_short",
+}
+
+
+def parse_cot(url: str, blob: bytes) -> Parsed:
+    """CFTC legacy futures-only report: one series per market code and field ('067651:open_interest')."""
+    out = Parsed()
+    for r in csv.DictReader(io.StringIO(_text(blob, url))):
+        code = (r.get("CFTC Contract Market Code") or "").strip()
+        raw = (r.get("As of Date in Form YYYY-MM-DD") or "").strip()
+        if not code or not raw:
+            continue
+        d = date.fromisoformat(raw)
+        name = (r.get("Market and Exchange Names") or code).strip()
+        for col, key in COT_FIELDS.items():
+            v = (r.get(col) or "").strip()
+            if v:
+                series = f"{code}:{key}"
+                out.values.append((series, _ms(d), float(v)))
+                out.series.setdefault(series, (f"{name}: {key.replace('_', ' ')}", "contracts", "week"))
+    return out
+
+
+GICS_TO_MAP = {"Information Technology": "Technology", "Consumer Discretionary": "Consumer Cyclical",
+               "Consumer Staples": "Consumer Defensive", "Financials": "Financial", "Health Care": "Healthcare",
+               "Materials": "Basic Materials"}
+
+
+def parse_constituents(url: str, blob: bytes) -> Parsed:
+    out = Parsed()
+    for r in csv.DictReader(io.StringIO(_text(blob, url))):
+        t = (r.get("Symbol") or "").strip().upper()
+        if not t:
+            continue
+        sector = (r.get("GICS Sector") or "").strip()
+        out.constituents.append({"index": "S&P 500", "ticker": t, "name": (r.get("Security") or "").strip(),
+                                 "sector": GICS_TO_MAP.get(sector, sector),
+                                 "industry": (r.get("GICS Sub-Industry") or "").strip(),
+                                 "added": (r.get("Date added") or "").strip() or None,
+                                 "cik": (r.get("CIK") or "").strip() or None})
+    return out
+
+
+def _cot_files(today: date) -> list[tuple[str, bool]]:
+    # 1986-2016 in one archive, then a file a year; a past year's file is final
+    return [(CFTC + "deacot1986_2016.zip", True)] + [
+        (f"{CFTC}deacot{y}.zip", y < today.year) for y in range(2017, today.year + 1)]
+
+
+DATASETS: dict[str, Dataset] = {d.name: d for d in (
+    Dataset("sp500-constituents", "S&P 500 members with GICS sector and sub-industry",
+            "ODC PDDL (datasets/s-and-p-500-companies)",
+            lambda t: [("https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv", False)],
+            parse_constituents, 7),
+    Dataset("french-3-factors-daily", "Fama/French 3 factors, daily (from 1926)", "Kenneth R. French Data Library",
+            lambda t: [(FRENCH + "F-F_Research_Data_Factors_daily_CSV.zip", False)], parse_french, 30),
+    Dataset("french-3-factors-monthly", "Fama/French 3 factors, monthly (from 1926)", "Kenneth R. French Data Library",
+            lambda t: [(FRENCH + "F-F_Research_Data_Factors_CSV.zip", False)], parse_french, 30),
+    Dataset("french-5-factors-daily", "Fama/French 5 factors (2x3), daily (from 1963)", "Kenneth R. French Data Library",
+            lambda t: [(FRENCH + "F-F_Research_Data_5_Factors_2x3_daily_CSV.zip", False)], parse_french, 30),
+    Dataset("french-49-industries-daily", "49 industry portfolios, value-weighted daily returns (from 1926)",
+            "Kenneth R. French Data Library",
+            lambda t: [(FRENCH + "49_Industry_Portfolios_daily_CSV.zip", False)],
+            lambda url, blob: parse_french(url, blob, section="Average Value Weighted Returns"), 30),
+    Dataset("shiller-us-market-monthly", "Shiller: S&P composite, dividends, earnings, CPI, rates, CAPE (from 1871)",
+            "Robert J. Shiller (shillerdata.com) via datasets/s-and-p-500, ODC PDDL",
+            lambda t: [("https://raw.githubusercontent.com/datasets/s-and-p-500/main/data/data.csv", False)],
+            parse_shiller, 30),
+    Dataset("world-bank-commodities-monthly", "World Bank commodity prices (Pink Sheet), monthly (from 1960)",
+            "World Bank via datasets/commodity-prices, ODC PDDL",
+            lambda t: [("https://raw.githubusercontent.com/datasets/commodity-prices/main/data/commodity-prices.csv", False)],
+            parse_commodities, 30),
+    Dataset("cftc-cot-legacy", "CFTC Commitments of Traders, legacy futures-only, weekly (from 1986)",
+            "CFTC (public domain)", _cot_files, parse_cot, 7),
+)}
+
+
+def due_files(store, ds: Dataset, today: date, force: bool = False) -> list[tuple[str, bool]]:
+    """Files to fetch now: never-fetched ones, and open ones older than the refresh cadence. A
+    final file once imported is closed and never fetched again."""
+    state = store.dataset_files(ds.name)
+    out = []
+    for url, final in ds.files(today):
+        s = state.get(url)
+        if s is None:
+            out.append((url, final))
+        elif s["closed"]:
+            continue
+        elif force or (today - s["fetched_at"].date()).days >= ds.refresh_days:
+            out.append((url, final))
+    return out
+
+
+def fetch(store, names: list[str] | None = None, today: date | None = None, force: bool = False,
+          session: requests.Session | None = None, log=print, only_started: bool = False) -> dict:
+    """Fetch (or refresh) datasets. `only_started`: refresh only datasets fetched before (the
+    scheduled sync never starts one by itself). Returns {name: files fetched}."""
+    today = today or datetime.now(ET).date()
+    session = session or requests.Session()
+    done = {}
+    for name in names or list(DATASETS):
+        ds = DATASETS[name]
+        if only_started and not store.dataset_files(name):
+            continue
+        n = 0
+        for url, final in due_files(store, ds, today, force):
+            resp = session.get(url, headers={"User-Agent": USER_AGENT}, timeout=120)
+            if resp.status_code == 404 and not final:
+                log(f"{name}: {url.rsplit('/', 1)[-1]} not published yet")
+                continue
+            resp.raise_for_status()
+            parsed = ds.parse(url, resp.content)
+            rows = store.save_dataset(name, parsed)
+            store.set_dataset_file(name, url, len(resp.content), closed=final)
+            log(f"{name}: {url.rsplit('/', 1)[-1]} ({len(resp.content) / 1e6:.2f} MB): {rows:,} values"
+                + ("; final, closed" if final else ""))
+            n += 1
+        done[name] = n
+    return done

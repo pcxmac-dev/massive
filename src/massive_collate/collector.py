@@ -710,7 +710,7 @@ def sync(
         if only is None and any(audits) and not archival:
             from .audit import run_audits
             run_audits(source, store, me, feeds, now, queued=audits[0], random_count=audits[1], log=log)
-        if only is None and directory_allowance > 0 and not archival:  # placeholders and icons: leftover budget only
+        if only is None and directory_allowance > 0 and not archival and source.serves("stock"):  # placeholders and icons: leftover budget only
             spent = source.requests_made
             refresh_directory(source, store, today, log)
             fill_directory_icons(source, store, directory_allowance - (source.requests_made - spent), today, log)
