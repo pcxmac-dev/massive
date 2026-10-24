@@ -6,8 +6,10 @@
    axis: each unit gets a chart of its own, stacked on the same time axis. Transforms: returns
    compounded into the growth of $1 from the start of the range, any series indexed to 100 at the
    start, COT net positions in contracts or as a share of open interest. A series keeps its colour
-   while others are added or removed. Hover (or the arrow keys) reads every series at a date; the
-   table view lists the values of the latest dates. */
+   while others are added or removed. The legend's entries show or hide what they name (a series;
+   for the COT report a trader group, in every view and market); the axes fit what is shown.
+   Hover (or the arrow keys) reads every series at a date; the table view lists the values of the
+   latest dates. */
 (() => {
   const $ = (id) => document.getElementById(id);
   const MAX = 8;
@@ -37,11 +39,11 @@
   const st = {
     status: [], name: saved.name || 'french-3-factors-daily', catalog: null, query: '',
     picked: saved.picked || {}, market: saved.market || COT_DEFAULT, range: saved.range || 'All',
-    transform: saved.transform || {}, logs: saved.logs || {}, table: false,
+    transform: saved.transform || {}, logs: saved.logs || {}, hidden: saved.hidden || {}, table: false,
     slots: {}, cache: new Map(), lines: [], hoverT: null, built: false, loading: 0,
   };
   const save = () => prefs.set('datasets', { name: st.name, picked: st.picked, market: st.market, range: st.range,
-    transform: st.transform, logs: st.logs });
+    transform: st.transform, logs: st.logs, hidden: st.hidden });
 
   // -- formatting ------------------------------------------------------------------------
   const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 });
@@ -141,21 +143,22 @@
         for (const x of ts) { const y = f(x); if (Number.isFinite(y)) { t.push(x); v.push(y); } }
         return { key, label, short, slot, unit, t, v, freq: 'week', dash };
       };
-      if (tf === 'oi') return [line('oi', 'Open interest', 1, (x) => at.open_interest.get(x), 'contracts')];
+      const of = (g, label, l) => ({ ...l, group: g, groupLabel: label });
+      if (tf === 'oi') return [of('oi', 'Open interest', line('oi', 'Open interest', 1, (x) => at.open_interest.get(x), 'contracts'))];
       if (tf === 'gross') {
         return GROUPS.flatMap(([g, label, short], i) => [
-          line(`${g}_long`, `${label}: long`, i + 1, (x) => at[`${g}_long`].get(x), 'contracts', false, `${short} long`),
-          line(`${g}_short`, `${label}: short`, i + 1, (x) => at[`${g}_short`].get(x), 'contracts', true, `${short} short`)]);
+          of(g, label, line(`${g}_long`, `${label}: long`, i + 1, (x) => at[`${g}_long`].get(x), 'contracts', false, `${short} long`)),
+          of(g, label, line(`${g}_short`, `${label}: short`, i + 1, (x) => at[`${g}_short`].get(x), 'contracts', true, `${short} short`))]);
       }
-      return GROUPS.map(([g, label, short], i) => line(g, `${label}: net`, i + 1, (x) => {
+      return GROUPS.map(([g, label, short], i) => of(g, label, line(g, `${label}: net`, i + 1, (x) => {
         const net = at[`${g}_long`].get(x) - at[`${g}_short`].get(x);
         return tf === 'netpct' ? net / at.open_interest.get(x) * 100 : net;
-      }, tf === 'netpct' ? '% of open interest' : 'contracts', false, short));
+      }, tf === 'netpct' ? '% of open interest' : 'contracts', false, short)));
     }
     const picked = st.picked[st.name] || [];
     const got = await values(st.name, picked);
     const raw = picked.filter((s) => got[s]).map((s) => ({ key: s, label: got[s].title || s, slot: slotOf(s),
-      unit: got[s].unit || '', t: got[s].t, v: got[s].v, freq: got[s].freq }));
+      unit: got[s].unit || '', t: got[s].t, v: got[s].v, freq: got[s].freq, group: s, groupLabel: got[s].title || s }));
     const lo = rangeStart(raw);
     return raw.map((l) => {
       const r = inRange(l.t, l.v, lo);
@@ -241,13 +244,28 @@
     return a > 0 && Math.abs(t[a - 1] - x) <= Math.abs(t[a] - x) ? a - 1 : a;
   }
 
+  const hiddenKeys = () => new Set(st.hidden[st.name] || []);
+  const present = () => st.lines.filter((l) => l.t.length);
+  const shown = () => { const off = hiddenKeys(); return present().filter((l) => !off.has(l.group)); };
+  function toggle(key) {
+    const off = hiddenKeys();
+    if (off.has(key)) off.delete(key); else off.add(key);
+    st.hidden[st.name] = [...off];
+    save();
+    hideHover();
+    draw();
+  }
+
   let geom = null;  // what the hover layer needs: the x scale and each chart's lines, scales and marks
   function draw() {
     const host = $('dsCharts');
     host.replaceChildren();
-    const lines = st.lines.filter((l) => l.t.length);
+    const all = present();
+    const lines = shown();
+    renderLegend(all);
     $('dsEmpty').hidden = !!lines.length;
-    if (!lines.length) { geom = null; renderLegend([]); renderTable([]); return; }
+    $('dsEmpty').textContent = all.length ? 'Everything is hidden: click a name above to show it.' : 'Pick series on the left.';
+    if (!lines.length) { geom = null; renderTable([]); return; }
     const units = [...new Set(lines.map((l) => l.unit))];
     const W = Math.max(320, host.clientWidth);
     const H = Math.max(260, host.clientHeight);
@@ -318,22 +336,35 @@
       geom.charts.push({ svg, ls, y, hover, cross, dots, unit });
     });
     geom.allT = [...new Set(lines.flatMap((l) => l.t))].sort((a, b) => a - b);
-    renderLegend(lines);
     renderTable(lines);
     if (st.hoverT != null) showHover(st.hoverT);
   }
 
-  function renderLegend(lines) {  // one series needs no legend: its name heads the axis and the picker
-    $('dsLegend').replaceChildren(...(lines.length < 2 ? [] : lines).map((l) => {
-      const item = document.createElement('span');
-      item.className = 'ds-legend-item';
-      const svg = el('svg', { width: 18, height: 10, 'aria-hidden': 'true' });
-      el('line', { x1: 1, x2: 17, y1: 5, y2: 5, class: `ds-key s${l.slot}${l.dash ? ' dash' : ''}` }, svg);
+  // One entry per identity (a series; a COT trader group with its net, long and short lines), each a
+  // button that shows or hides it. A lone series needs none: its name heads the axis and the picker.
+  function renderLegend(lines) {
+    const ids = [];
+    for (const l of lines) {
+      let id = ids.find((x) => x.key === l.group);
+      if (!id) ids.push(id = { key: l.group, label: l.groupLabel || l.label, lines: [] });
+      id.lines.push(l);
+    }
+    const off = hiddenKeys();
+    $('dsLegend').replaceChildren(...(ids.length < 2 ? [] : ids).map((id) => {
+      const hidden = off.has(id.key);
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = `ds-legend-item${hidden ? ' off' : ''}`;
+      b.dataset.key = id.key;
+      b.setAttribute('aria-pressed', String(!hidden));
+      b.title = `${hidden ? 'Show' : 'Hide'} ${id.label}`;
+      const svg = el('svg', { width: 4 + 16 * id.lines.length, height: 10, 'aria-hidden': 'true' });
+      id.lines.forEach((l, i) => el('line', { x1: 2 + 16 * i, x2: 15 + 16 * i, y1: 5, y2: 5,
+        class: `ds-key s${l.slot}${l.dash ? ' dash' : ''}` }, svg));
       const text = document.createElement('span');
-      text.textContent = l.label;
-      item.append(svg, text);
-      item.title = `${l.label} · ${l.unit}`;
-      return item;
+      text.textContent = id.label;
+      b.append(svg, text);
+      return b;
     }));
   }
 
@@ -450,7 +481,8 @@
     const tf = transform();
     const extra = tf === 'growth' ? 'Growth of $1: each return compounded from the start of the range, so lines start together. '
       : tf === 'index' ? 'Indexed: each series divided by its first value in the range, times 100. ' : '';
-    $('dsNote').textContent = extra + (NOTES[st.name] || '');
+    const toggles = isCot() ? 'Click a trader group in the legend to hide or show it. ' : 'Click a name in the legend to hide or show it. ';
+    $('dsNote').textContent = extra + toggles + (NOTES[st.name] || '');
   }
 
   async function refresh() {
@@ -530,14 +562,22 @@
     });
     $('dsTransform').addEventListener('change', (e) => { st.transform[st.name] = e.target.value; save(); renderControls(); refresh(); });
     $('dsLog').addEventListener('click', () => { st.logs[transform()] = !logOn(); save(); renderControls(); draw(); });
-    $('dsTable').addEventListener('click', () => { st.table = !st.table; renderControls(); renderTable(st.lines.filter((l) => l.t.length)); });
+    $('dsTable').addEventListener('click', () => { st.table = !st.table; renderControls(); renderTable(shown()); });
+    $('dsLegend').addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-key]');
+      if (b) toggle(b.dataset.key);
+    });
     $('dsSearch').addEventListener('input', (e) => { st.query = e.target.value; renderPicker(); });
     $('dsList').addEventListener('change', (e) => {
       const box = e.target.closest('input[type=checkbox]');
       if (!box) return;
       const picked = (st.picked[st.name] ||= []);
       if (box.checked && picked.length < MAX) { picked.push(box.value); slotOf(box.value); }
-      if (!box.checked) { st.picked[st.name] = picked.filter((s) => s !== box.value); freeSlot(box.value); }
+      if (!box.checked) {
+        st.picked[st.name] = picked.filter((s) => s !== box.value);
+        freeSlot(box.value);
+        st.hidden[st.name] = (st.hidden[st.name] || []).filter((k) => k !== box.value);  // picked again = shown
+      }
       save(); renderPicker(); refresh();
     });
     $('dsList').addEventListener('click', (e) => {

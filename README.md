@@ -118,7 +118,8 @@ python -m massive_collate gui                  # chart app in your browser (loca
   one chart per unit. Fama/French returns compounded into the growth of $1 (log scale), any series
   indexed to 100, Shiller CAPE, COT positioning per market (net long - short per trader group, in
   contracts or as a share of open interest); ranges 1Y to All, hover or arrow keys to read every
-  series at a date, and a table of the latest values.
+  series at a date, and a table of the latest values. Click a legend entry to hide or show it (for
+  COT a trader group: speculators, hedgers, small traders, in every view and market).
 
 ## Layout
 
