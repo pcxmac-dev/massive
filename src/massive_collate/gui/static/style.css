@@ -544,3 +544,9 @@ button.ds-item.on { box-shadow: inset 3px 0 0 var(--accent); }
 .now-handle[hidden] { display: none; }
 #modelWindow.warn { color: var(--warn, #d9a441); cursor: help; }
 .now-handle { font-variant-numeric: tabular-nums; }
+/* The current time across the price pane and every indicator pane. */
+/* Dashes of 4 px with 4 px gaps, as the chart's last-price line. */
+.now-line { position: absolute; top: 0; width: 1px; --now-line: #b4b9c0; opacity: .38; pointer-events: none; z-index: 3;
+  background: repeating-linear-gradient(to bottom, var(--now-line) 0 4px, transparent 4px 8px); }
+body.light .now-line { --now-line: #a4aab2; }
+.now-line[hidden] { display: none; }

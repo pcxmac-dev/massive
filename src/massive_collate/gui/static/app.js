@@ -275,16 +275,53 @@ chart.setDataLoader({
         if (res.bars.length) requestAnimationFrame(() => { window.renderCursor?.(); placeNowHandle(); });
       } catch { /* the next poll will retry */ } finally { state.polling = false; }
     };
-    // Live symbols every 2 s (the forming bar grows, new ones arrive and the chart follows), the rest every minute.
+    // A live symbol listens to the server's stream: new and growing bars arrive as the recorder
+    // stores them, the chart follows. Without a stream (or if it fails) live symbols are polled
+    // every 2 s, the rest every minute.
+    closeStream();
+    state.streamFailed = false;
+    const openStream = () => {
+      const list = chart.getDataList();
+      if (!list.length || PRICE_BASED.has(state.chartType)) return;
+      const kind = state.model.kind;
+      const q = new URLSearchParams(Object.entries({
+        source: symbol.source, ticker: symbol.ticker, period: period.type, span: period.span,
+        session: state.session, since: list[list.length - 1].timestamp, adjust: state.adjust, lod: lodFor(),
+        ...typeQuery(), ...modelQuery(),
+      }).filter(([, v]) => v !== undefined && v !== null));
+      const es = state.stream = new EventSource(`/api/stream?${q}`);
+      es.onmessage = (e) => {
+        if (sub !== state.subscription || kind !== state.model.kind) return;
+        const msg = JSON.parse(e.data);
+        if ((msg.model || 'price') !== kind) return;
+        const last = chart.getDataList().at(-1)?.timestamp ?? 0;
+        const bars = msg.bars.filter((b) => b.timestamp >= last);
+        bars.forEach((bar) => callback(bar));
+        if (bars.length) requestAnimationFrame(() => { window.renderCursor?.(); placeNowHandle(); });
+      };
+      es.addEventListener('end', () => { closeStream(); if (sub === state.subscription) openStream(); });
+      es.onerror = () => {
+        if (es.readyState === EventSource.CLOSED) { closeStream(); state.streamFailed = true; }  // poll instead
+      };
+    };
     state.lastPoll = Date.now();
     state.poll = setInterval(() => {
-      if (isLive() || Date.now() - state.lastPoll >= POLL_MS) { state.lastPoll = Date.now(); state.pollNow(); }
+      const live = isLive();
+      if (live && !state.stream && !state.streamFailed) openStream();
+      if (!live && state.stream) closeStream();
+      if (state.stream) return;  // pushed
+      if (live || Date.now() - state.lastPoll >= POLL_MS) { state.lastPoll = Date.now(); state.pollNow(); }
     }, LIVE_POLL_MS);
   },
-  unsubscribeBar: () => clearInterval(state.poll),
+  unsubscribeBar: () => { clearInterval(state.poll); closeStream(); },
 });
 
 window.addEventListener('resize', () => { chart.resize(); applyNowPosition(); });
+
+function closeStream() {
+  state.stream?.close();
+  state.stream = null;
+}
 
 // Whether the open symbol is streaming live right now (the activity poll's live tickers).
 function isLive() {
@@ -320,6 +357,10 @@ const tickNowClock = () => { nowHandle.textContent = NOW_CLOCK.format(new Date()
 tickNowClock();
 setInterval(tickNowClock, 1000);
 $('chart').append(nowHandle);
+// A light grey dashed line from the handle up through the price pane and every indicator pane.
+const nowLine = document.createElement('div');
+nowLine.className = 'now-line';
+$('chart').append(nowLine);
 
 function placeNowHandle() {
   const data = chart.getDataList();
@@ -327,8 +368,11 @@ function placeNowHandle() {
   const x = last ? chart.convertToPixel({ timestamp: last.timestamp }, { paneId: 'candle_pane' }).x : NaN;
   const w = plotWidth();
   const show = Number.isFinite(x) && x >= 0 && x <= w;
-  nowHandle.hidden = !show;
-  if (show) nowHandle.style.left = `${x}px`;
+  nowHandle.hidden = nowLine.hidden = !show;
+  if (show) {
+    nowHandle.style.left = nowLine.style.left = `${x}px`;
+    nowLine.style.height = `${chart.getSize('x_axis_pane')?.top ?? 0}px`;  // down to the time axis
+  }
   nowHandle.classList.toggle('live', isLive());
 }
 

@@ -9,7 +9,9 @@ from __future__ import annotations
 import math
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from dataclasses import replace
 from datetime import datetime, time
+from time import monotonic
 from zoneinfo import ZoneInfo
 from threading import RLock
 
@@ -58,6 +60,10 @@ class Series:
     # intervals read only the window the chart asks for.
     fine_sources: list = field(default_factory=list)
     fine_spans: list = field(default_factory=list)
+    # Tail updates (BarEngine._refresh_tail): the newest stored_at among the bars loaded, and
+    # when the series was last loaded whole (monotonic seconds).
+    stored_hw: int = 0
+    loaded_at: float = 0.0
 
     @property
     def around_the_clock(self) -> bool:
@@ -227,6 +233,7 @@ def lod_aggregate(bars: pd.DataFrame, k: int) -> pd.DataFrame:
 EXTRA_COLUMNS = ("yang_start", "yang", "switch", "up", "env_high", "env_low", "dev_sd", "venues_n")
 # Derived models stored as bars: not feeds of their own in the merged view.
 MODEL_SOURCES = ("composite",)
+BAR_KINDS = ("second", "minute", "hour", "day")  # series of bars (not ticks) that can take tail updates
 
 
 def to_records(bars: pd.DataFrame) -> list[dict]:
@@ -353,10 +360,9 @@ class BarEngine:
             cached = self._series.get(key)
             if cached and cached[0] == fp:
                 return cached[1]
-            if parts is not None:
-                s = self._merge(ticker, [p for p in parts if p])
-            else:
-                s = self._load(source, ticker, adjust)
+            s = self._refresh_tail(cached[1]) if parts is None and cached and cached[1] is not None else None
+            if s is None:
+                s = self._merge(ticker, [p for p in parts if p]) if parts is not None else self._load(source, ticker, adjust)
             if s is not None:
                 s.adjust = adjust
             self._series[key] = (fp, s)
@@ -427,6 +433,58 @@ class BarEngine:
                     "to": r.new, "gap": r.gap} for r in roll_list],
         )
 
+    def fingerprint(self, source: str, ticker: str) -> tuple:
+        """Changes whenever the symbol's stored data changes (the live stream's trigger)."""
+        ticker = ticker.upper()
+        with self._lock:
+            if source == MERGED:
+                return tuple(self._fingerprint(s, ticker) for s in self.sources_for(ticker))
+            return self._fingerprint(source, ticker)
+
+    # A change further back than this, or a series loaded whole longer ago than that, reloads
+    # it whole (deletions leave no stored_at behind; the reload catches them).
+    TAIL_DAYS = 3
+    FULL_RELOAD_SECONDS = 600
+    STORE_SLACK_MS = 60_000  # writers' stored_at can commit out of order: look back a minute
+
+    def _refresh_tail(self, s: Series) -> Series | None:
+        """The cached series with what was stored since it was loaded spliced in: the live
+        recorder adds or rebuilds the newest bars every few seconds, and reloading every bar
+        for that took a third of a second each time. Bars are reloaded from the day before the
+        earliest changed one (both tables, built bars first, exactly as a whole load reads
+        them). None when a whole reload is needed: futures, ticks, the composite, a change
+        older than TAIL_DAYS, daily bars appearing, or after FULL_RELOAD_SECONDS."""
+        if (s.asset == "future" or s.kind not in BAR_KINDS or s.source in MODEL_SOURCES or s.frame.empty
+                or monotonic() - s.loaded_at > self.FULL_RELOAD_SECONDS):
+            return None
+        kinds = [s.kind] if s.kind == "day" else [s.kind, "day"]
+        changed = self.store.bars_changed_since(s.source, s.ticker, kinds, s.stored_hw - self.STORE_SLACK_MS)
+        newest = int(epoch_ms(s.frame.index[-1:])[0])
+        if "day" in changed and s.kind != "day" and s.daily is None:
+            return None
+        if any(lo < newest - self.TAIL_DAYS * 86_400_000 for lo, _ in changed.values()):
+            return None
+        frame, daily, prices = s.frame, s.daily, [s.price_precision]
+        for kind, (lo, _) in changed.items():
+            start = (pd.Timestamp(lo, unit="ms", tz="UTC") - pd.Timedelta(days=1)).date()
+            cut = pd.Timestamp(start, tz="UTC")  # load_bars reads ts >= this
+            tail = frame_from_bars(self.store.load_bars([s.ticker], kind, 1, start=start, source=s.source))
+            prices.append(decimals(tail[["open", "high", "low", "close"]].to_numpy().ravel(), cap=6, minimum=2))
+            if kind == s.kind:
+                frame = pd.concat([frame[frame.index < cut], tail]).sort_index()
+            else:
+                daily = pd.concat([daily[daily.index < cut], tail]).sort_index()
+        fine = self._fine(s.source, s.ticker, s.kind)
+        return replace(s, frame=frame, daily=daily, price_precision=max(prices),
+                       fine_sources=[s.source] if fine else [], fine_spans=fine,
+                       stored_hw=max([s.stored_hw, *(hi for _, hi in changed.values())]))
+
+    def _fine(self, source: str, ticker: str, kind: str) -> list:
+        """Spans of one-second bars a minute series has (read by window, not loaded)."""
+        kinds = {k for src, t, k in self.store.stored_series() if src == source and t == ticker}
+        return [(a, b) for src, _, a, b in self.store.coverage_detail(ticker, "second") if src == source] \
+            if kind == "minute" and "second" in kinds else []
+
     def _load_plain(self, source: str, ticker: str) -> Series | None:
         kinds = {k for s, t, k in self.store.stored_series() if s == source and t == ticker}
         # Minute bars are the base wherever a feed has them (second bars built from its ticks are a
@@ -442,8 +500,9 @@ class BarEngine:
         if "day" in kinds and kind != "day":
             daily = frame_from_bars(self.store.load_bars([ticker], "day", 1, source=source))
         prices = frame[["open", "high", "low", "close"]].to_numpy().ravel()
-        fine = [(a, b) for src, _, a, b in self.store.coverage_detail(ticker, "second") if src == source] \
-            if kind == "minute" and "second" in kinds else []
+        fine = self._fine(source, ticker, kind)
+        hw = self.store.bars_changed_since(source, ticker, [kind] if kind == "day" else [kind, "day"], -1) \
+            if kind in BAR_KINDS else {}
         if source in MODEL_SOURCES:  # the composite carries its deviation across exchanges
             stats = self.store.composite_stats(ticker, kind)
             if not stats.empty:
@@ -457,6 +516,7 @@ class BarEngine:
             price_precision=decimals(prices, cap=6, minimum=2),
             volume_precision=decimals(frame["volume"].to_numpy(), cap=4),
             fine_sources=[source] if fine else [], fine_spans=fine,
+            stored_hw=max((hi for _, hi in hw.values()), default=0), loaded_at=monotonic(),
         )
 
     PERIOD_CHOICES = (("second", (1, 10, 30)), ("minute", (1, 3, 5, 15, 30, 45)),

@@ -151,6 +151,37 @@ class ChartApp:
             limit=limit, style=style, adjust=_adjust(q.get("adjust")), lod=int(q.get("lod", 1)), model=_model(q),
         )
 
+    STREAM_SECONDS = 300  # one stream's life; the page opens the next from where it got to
+    STREAM_CHECK = 0.5  # seconds between looks at the stored data
+    STREAM_KEEPALIVE = 15
+
+    def stream(self, q: dict[str, str], stop=None):
+        """Server-sent events for a live chart: whenever the symbol's stored data changes (the
+        live recorder writes every couple of seconds), the bars from the newest one the page
+        has, as /api/bars would give them. Runs alongside the page (a thread per stream) so the
+        Stock and Analysis charts follow the feed without asking. Ends after STREAM_SECONDS
+        with an `end` event."""
+        import time as _time
+
+        since = int(q["since"])
+        end = _time.monotonic() + self.STREAM_SECONDS
+        seen, beat = None, _time.monotonic()
+        while _time.monotonic() < end and not (stop and stop()):
+            fp = self.engine.fingerprint(q["source"], q["ticker"])
+            if fp != seen:
+                seen = fp
+                page = self.bars({**q, "since": str(since)})
+                if page["bars"]:
+                    since = page["bars"][-1]["timestamp"]
+                    msg = {"bars": page["bars"], "model": (page.get("model") or {}).get("kind")}
+                    yield b"data: " + json.dumps(msg, allow_nan=False).encode() + b"\n\n"
+                    beat = _time.monotonic()
+            if _time.monotonic() - beat > self.STREAM_KEEPALIVE:
+                yield b": keep-alive\n\n"
+                beat = _time.monotonic()
+            _time.sleep(self.STREAM_CHECK)
+        yield b"event: end\ndata: {}\n\n"
+
     def info(self, source: str, ticker: str, adjust: str = "none") -> dict:
         """Side panel: symbol, business details, key statistics and data coverage."""
         s = self.engine.series(source, ticker, _adjust(adjust))
@@ -478,6 +509,22 @@ def make_handler(app: ChartApp, port_ref: list[int]):
             self.end_headers()
             self.wfile.write(body)
 
+        def _stream(self, q: dict[str, str]) -> None:
+            if not q.get("since"):
+                return self._json({"error": "since is required"}, HTTPStatus.BAD_REQUEST)
+            app.bars({**{k: v for k, v in q.items() if k != "since"}, "limit": "1"})  # bad parameters fail here, as JSON
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            try:
+                for event in app.stream(q):
+                    self.wfile.write(event)
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass  # the page went away
+
         def _json(self, data, status: int = 200) -> None:
             self._send(status, json.dumps(data, allow_nan=False).encode(), "application/json")
 
@@ -560,6 +607,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.meta(q["source"], q["ticker"], q.get("adjust")))
                 if url.path == "/api/bars":
                     return self._json(app.bars(q))
+                if url.path == "/api/stream":
+                    return self._stream(q)
                 if url.path == "/api/info":
                     return self._json(app.info(q["source"], q["ticker"], q.get("adjust")))
                 if url.path == "/api/deps":

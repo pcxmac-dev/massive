@@ -554,8 +554,37 @@ class FeedStore:
 
     def series_fingerprint(self, source: str, ticker: str) -> tuple:
         """Value that changes whenever a ticker's stored data changes (for caching).
-        Recomputed only after the database has changed."""
-        return self._cached(("fp", source, ticker.upper()), lambda: self._fingerprint(source, ticker))
+        Recomputed only after that feed's files have changed: the live recorder writing one
+        feed every few seconds must not make every other feed count its rows again."""
+        feed = self._feed(source)
+        version = (feed.version() if feed is not None else None, self._writes)
+        key = ("fp", source, ticker.upper())
+        hit = self._cache.get(key)
+        if hit is not None and hit[0] == version:
+            return hit[1]
+        value = self._fingerprint(source, ticker)
+        self._cache[key] = (version, value)
+        return value
+
+    def bars_changed_since(self, source: str, ticker: str, timespans: Sequence[str], stored_after: int) -> dict:
+        """Per timespan, (earliest bar time, newest stored_at) of the ticker's bars, its own or
+        built, stored after `stored_after` (ms): what a cached series has to load again."""
+        feed = self._feed(source)
+        out: dict[str, tuple[int, int]] = {}
+        if feed is None or not timespans:
+            return out
+        marks = ",".join("?" * len(timespans))
+        for table in _BAR_TABLES:
+            rows = feed.conn.execute(
+                f"SELECT timespan, MIN(ts), MAX(stored_at) FROM {table} WHERE ticker=? AND timespan IN ({marks})"
+                " AND multiplier=1 AND stored_at > ? GROUP BY timespan",
+                (ticker.upper(), *timespans, stored_after)).fetchall()
+            for span, lo, hi in rows:
+                if lo is None:
+                    continue
+                was = out.get(span)
+                out[span] = (min(was[0], lo), max(was[1], hi)) if was else (lo, hi)
+        return out
 
     def _fingerprint(self, source: str, ticker: str) -> tuple:
         feed = self._feed(source)
