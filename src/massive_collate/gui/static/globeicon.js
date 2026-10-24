@@ -1,7 +1,7 @@
 // The Markets rail icon: the Markets view's wireframe globe in miniature, turned as the view turns
 // it, so the point where it is noon faces you: 24 frames, one per hour of UTC (the current
-// hour's is shown). Its sphere, graticule, coastlines and borders (Natural Earth 1:50m), limb and
-// noon marker, in its colours, at the screen's full pixel density.
+// hour's is shown). Its sphere, graticule, coastlines and borders (Natural Earth 1:50m) and limb,
+// in its colours, at the screen's full pixel density.
 (() => {
   'use strict';
 
@@ -39,7 +39,7 @@
   }
 
   // One frame: an orthographic view centred where it is noon at this hour, drawn like the Markets
-  // view's globe (globe.js: sphere, graticule, outlines, limb, noon marker).
+  // view's globe (globe.js: sphere, graticule, outlines, limb).
   function render(hour, decl) {
     const dpr = Math.min(4, Math.max(1, window.devicePixelRatio || 1));
     const key = `${hour}:${decl}:${dpr}`;
@@ -89,11 +89,9 @@
     for (const arc of outlines) polyline(arc);
     g.strokeStyle = `${line}0.75)`; g.lineWidth = 0.6 * dpr; g.lineJoin = 'round'; g.stroke();
 
-    // limb and the noon point (the view's sun marker)
+    // limb
     g.beginPath(); g.arc(cx, cy, r, 0, 2 * Math.PI);
     g.strokeStyle = `${line}0.55)`; g.lineWidth = 0.9 * dpr; g.stroke();
-    g.beginPath(); g.arc(cx, cy, 2.2 * dpr, 0, 2 * Math.PI);
-    g.strokeStyle = 'rgba(240,185,11,0.9)'; g.lineWidth = 1.1 * dpr; g.stroke();
     cache.set(key, c);
     return c;
   }
