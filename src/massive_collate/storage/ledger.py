@@ -65,15 +65,18 @@ class LedgerStore:
             (ticker.upper(), timespan))]
 
     def coverage(self, ticker: str, timespan: str, source: str | None = None,
-                 include_none: bool = False) -> dict[str, list[tuple[int, int]]]:
+                 include_none: bool = False, received_only: bool = False) -> dict[str, list[tuple[int, int]]]:
         """{feed: [(start, end), ...]} for a series, oldest first: the spans each feed holds. With
         `include_none`, also the spans a feed was asked for and has nothing in (its history starts
         later): done for that feed, still open for others. Series stored before the ledger existed
-        are entered from their stored range first (`_seed_coverage`)."""
+        are entered from their stored range first (`_seed_coverage`). With `received_only`, only
+        what feeds sent (not bars built here from their ticks)."""
         ticker = ticker.upper()
         self._seed_coverage(ticker, timespan)
         sql = "SELECT source, start_ms, end_ms FROM coverage WHERE ticker=? AND timespan=?"
-        if not include_none:
+        if received_only:
+            sql += " AND origin = 'download'"
+        elif not include_none:
             sql += " AND origin != 'none'"
         args: list = [ticker, timespan]
         if source:

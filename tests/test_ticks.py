@@ -77,9 +77,9 @@ def test_tick_feed_takes_the_window_builds_bars_and_downloads_minutes_only_befor
     assert len(secs) == 150 and list(mins["transactions"]) == [60, 60, 30]
     detail = store.coverage_detail("SPCX", "minute")
     assert any(o == "ticks" for _, o, _, _ in detail)
-    # minute bars were downloaded only before the tick window
+    # its own minute bars were downloaded too, the tick window included: they replace the built ones
     minute_calls = [(s, e) for _, s, e, ts, _ in src.bar_calls if ts == "minute"]
-    assert minute_calls and all(e <= datetime(2026, 9, 21, tzinfo=ET) for _, e in minute_calls)
+    assert minute_calls and max(e for _, e in minute_calls) > datetime(2026, 9, 21, tzinfo=ET)
 
 
 def test_minute_feed_leaves_the_tick_window_to_the_tick_feed(store):

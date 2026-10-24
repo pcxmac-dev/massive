@@ -123,27 +123,31 @@ def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, ass
     today = now.astimezone(ET).date()
     lo, hi = day_start_ms(floor), frontier_ms(asset, me.tier, now, timespan)
     gaps = [(lo, hi)] if lo < hi else []
-    held = [s for src, spans in store.coverage(ticker, timespan).items() if same_market(feeds, src, me.name, asset)
-            for s in spans]
-    # what this feed already asked for and found empty is done for it (not for others)
-    held += store.coverage(ticker, timespan, source=me.name, include_none=True).get(me.name, [])
-    gaps = subtract(gaps, held)
+    # Held: what a feed of the same market sent. Bars built here from ticks do not count: the
+    # feed's own bars replace them when they arrive (received over derived).
+    held = [s for src, spans in store.coverage(ticker, timespan, received_only=True).items()
+            if same_market(feeds, src, me.name, asset) for s in spans]
     nothing = store.coverage(ticker, timespan, include_none=True)  # feeds' spans incl. their empty ones
     holds = store.coverage(ticker, timespan)
+    # what this feed already asked for and found empty is done for it (not for others)
+    held += subtract(nothing.get(me.name, []), holds.get(me.name, []))
+    gaps = subtract(gaps, held)
 
     def empty(feed: str) -> list[tuple[int, int]]:
         """Where a feed was asked and has nothing: a better-ranked feed does not stand in the way there."""
         return subtract(nothing.get(feed, []), holds.get(feed, []))
     watch = {(w["source"], w["ticker"]): w for w in store.watchlist() if w["ticker"] == ticker.upper()}
     if gaps and timespan in ("minute", "second"):
-        # Bars are built here from ticks: the window a feed collects ticks for is not downloaded
-        # as bars (by it or anyone), even before the ticks arrive.
+        # Bars are built here from ticks: the window another feed collects ticks for is left to it
+        # (even before the ticks arrive). The tick feed itself still downloads its own bars there,
+        # which replace the ones built from its ticks.
         held_ticks = [s for src, spans in store.coverage(ticker, "trades").items()
-                      if same_market(feeds, src, me.name, asset) for s in spans]
+                      if src != me.name and same_market(feeds, src, me.name, asset) for s in spans]
         gaps = subtract(gaps, held_ticks)
         for f in feeds.values():
             row = watch.get((f.name, ticker.upper()))
-            if row and row.get("resolution") == "trades" and asset in f.assets and same_market(feeds, f.name, me.name, asset):
+            if f.name != me.name and row and row.get("resolution") == "trades" and asset in f.assets \
+                    and same_market(feeds, f.name, me.name, asset):
                 f_floor = history_floor(f.tier, today)
                 if listed_from:
                     f_floor = max(f_floor, listed_from)

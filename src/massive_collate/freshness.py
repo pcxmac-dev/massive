@@ -56,6 +56,10 @@ PLAN_DELAYS: dict[str, dict[str, Delay]] = {
 }
 
 
+# The crypto exchanges' public candles: each minute once it closes (no delay, no key).
+for _venue in ("coinbase-public", "bitstamp-public", "bitfinex-public"):
+    PLAN_DELAYS[_venue] = {"crypto": Delay("delay")}
+
 # Alpaca: Basic serves everything but the latest 15 minutes; crypto is never held back.
 PLAN_DELAYS["alpaca-basic"] = {"stock": Delay("delay", timedelta(minutes=15)), "crypto": Delay("delay")}
 PLAN_DELAYS["alpaca-plus"] = {"stock": Delay("delay"), "crypto": Delay("delay")}

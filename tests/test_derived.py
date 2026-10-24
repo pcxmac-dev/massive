@@ -116,3 +116,34 @@ def test_the_chart_marks_what_was_built(store):
     assert [b["derived"] for b in one["bars"]] == [False, False, False, True, True] and one["derivedFrom"] is None
     five = eng.bars("alpaca", "BTCUSD", "minute", 5, "extended")
     assert all(b["derived"] for b in five["bars"]) and five["derivedFrom"] == "1-minute bars"
+
+
+# -- the feed's own candles are fetched where only built ones exist --------------------------------
+
+def test_exchange_candles_are_published_as_each_minute_closes():
+    from datetime import datetime as dt
+
+    from massive_collate import freshness
+    from massive_collate.config import PUBLIC_FEEDS
+
+    now = dt(2026, 10, 24, 7, 30, 20, tzinfo=pd.Timestamp("2026-10-24", tz="UTC").tzinfo)
+    exp = freshness.expected("crypto", PUBLIC_FEEDS["coinbase"][0], now)
+    assert exp.latest == dt(2026, 10, 24, 7, 29, tzinfo=now.tzinfo)  # the newest closed minute, not yesterday
+
+
+def test_a_feed_fetches_its_own_minutes_where_it_only_has_built_ones(store):
+    from datetime import date, datetime as dt, timezone
+
+    from massive_collate.config import PUBLIC_FEEDS
+    from massive_collate.coverage import FeedProfile, plan
+
+    cb = FeedProfile("coinbase", PUBLIC_FEEDS["coinbase"][0], frozenset({"crypto"}), 0, venues={"crypto": "coinbase"})
+    feeds = {"coinbase": cb}
+    store.watch("coinbase", ["BTCUSD"], "minute")
+    now = dt(2026, 10, 24, 8, 0, tzinfo=timezone.utc)
+    t = lambda h: int(dt(2026, 10, 24, h, tzinfo=timezone.utc).timestamp() * 1000)
+    store.add_coverage("coinbase", "BTCUSD", "minute", t(0), t(7))  # its own minutes to 07:00
+    store.add_coverage("coinbase", "BTCUSD", "minute", t(7), t(8), origin="ticks")  # built live since
+    store.add_coverage("coinbase", "BTCUSD", "trades", t(7), t(8))  # from its own stream
+    gaps = plan(store, cb, feeds, "BTCUSD", "crypto", "minute", date(2026, 10, 24), now)
+    assert (t(7), t(8)) in gaps or any(a <= t(7) and b >= t(8) for a, b in gaps)

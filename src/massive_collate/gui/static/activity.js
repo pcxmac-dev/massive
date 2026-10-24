@@ -230,7 +230,9 @@
     const { plan, today, backfill } = data;
     el('actStatus').innerHTML = statusLine();
     el('actFeeds').innerHTML = (data.feeds || []).map((f) => `<button type="button" data-feed="${esc(f.name)}"
-        class="${f.name === feed ? 'active' : ''}" title="${esc(f.plan)}${f.archive ? ' · public archive: fills history once per symbol, then closed' : ''}${f.keys === false ? ' · key not set' : ''}${f.configured ? '' : ' · not configured here'}">${esc(f.name)}${f.closed ? ' <span class="chip">closed</span>' : f.keys === false ? ` <span class="chip">${f.name === 'alpaca' ? 'crypto' : 'no key'}</span>` : ''}</button>`).join('');
+        class="${f.name === feed ? 'active' : ''}" title="${esc(f.plan)}${f.archive ? ' · public archive: fills history once per symbol, then closed' : ''}${f.keys === false ? (f.name === 'alpaca'
+          ? ' · keys not set: US stocks (SIP from 2016, IEX live), options and news wait for ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY; crypto needs no key and is collected'
+          : ' · key not set') : ''}${f.configured ? '' : ' · not configured here'}">${esc(f.name)}${f.closed ? ' <span class="chip">closed</span>' : f.keys === false ? ` <span class="chip">${f.name === 'alpaca' ? 'stocks need keys' : 'no key'}</span>` : ''}</button>`).join('');
     loadAudits();
     el('actLimits').innerHTML = limitsHtml(data.limits || []);
     el('scanBtn').disabled = !!data.running;
