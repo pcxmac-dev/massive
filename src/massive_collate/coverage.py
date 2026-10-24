@@ -22,7 +22,18 @@ from . import freshness
 from .config import Tier
 from .sessions import ET
 
-STEP_MS = {"minute": 60_000, "hour": 3_600_000, "day": 86_400_000}
+STEP_MS = {"minute": 60_000, "minute:5": 300_000, "hour": 3_600_000, "day": 86_400_000}
+
+
+def frame_key(timespan: str, multiplier: int = 1) -> str:
+    """The ledger's name for a time frame: 'minute', 'hour', 'day', or 'minute:5' (5-minute bars)."""
+    return timespan if multiplier == 1 else f"{timespan}:{multiplier}"
+
+
+def frame_parts(key: str) -> tuple[str, int]:
+    """'minute:5' -> ('minute', 5); 'hour' -> ('hour', 1)."""
+    span, _, mult = key.partition(":")
+    return span, int(mult or 1)
 RES_RANK = {"trades": 0, "second": 1, "minute": 2, "auto": 2, "hour": 3, "day": 4}
 UTC_DAY_ASSETS = ("fx", "crypto")  # their day bars are UTC days
 
@@ -66,7 +77,10 @@ def frontier_ms(asset: str, tier: Tier, now: datetime, timespan: str) -> int:
         start = datetime.combine(t.date(), time(0), tz)
         complete = not freshness.CALENDAR.is_open(asset, exp.latest + timedelta(minutes=1))
         return ms(start + timedelta(days=1)) if complete else ms(start)
-    return ms(exp.latest) + STEP_MS.get(timespan, 60_000)
+    step = STEP_MS.get(timespan, 60_000)
+    if step > 60_000:  # a coarser frame (5 minutes, an hour): only its bars that are complete
+        return (ms(exp.latest) + 60_000) // step * step
+    return ms(exp.latest) + step
 
 
 def subtract(gaps: list[tuple[int, int]], spans: list[tuple[int, int]]) -> list[tuple[int, int]]:

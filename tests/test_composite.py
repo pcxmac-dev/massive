@@ -84,7 +84,7 @@ def test_chart_engine_serves_the_composite_with_its_band(store):
                               "kraken": _bars([84008.0, 84012.0, 84030.0])}, {"coinbase": 1, "kraken": 1})
     store.save_composite("BTCUSD", "minute", comp)
     engine = BarEngine(store)
-    page = engine.bars("composite", "BTCUSD", "minute", 3, session="extended")
+    page = engine.bars("composite", "BTCUSD", "minute", 5, session="extended")
     bar = page["bars"][0]
     assert bar["env_high"] == pytest.approx(84030.2) and bar["env_low"] == pytest.approx(83999.8)
     assert bar["venues_n"] == 2 and bar["dev_sd"] > 0

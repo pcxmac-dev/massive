@@ -20,7 +20,7 @@ from .config import UNLIMITED_BACKFILL_YEARS, Tier
 from .errors import BudgetExhausted, NotEntitled, RateLimited, SourceError
 from . import freshness
 from .futures import candidate_contracts, roll_schedule
-from .coverage import STEP_MS, FeedProfile, frontier_ms, has_open_time, ms, plan
+from .coverage import STEP_MS, FeedProfile, frame_key, frame_parts, frontier_ms, has_open_time, ms, plan
 from .sources.base import DataSource
 from .symbols import ASSETS
 from .storage import Store
@@ -250,7 +250,8 @@ def invert_bars(bars: list[dict]) -> list[dict]:
 
 
 def _store_bars(store: Store, source: DataSource, ticker: str, timespan: str, page: list[dict], invert: bool) -> int:
-    return store.upsert_bars(source.name, ticker, timespan, 1, invert_bars(page) if invert else page)
+    span, mult = frame_parts(timespan)
+    return store.upsert_bars(source.name, ticker, span, mult, invert_bars(page) if invert else page)
 
 
 def _fill(source: DataSource, store: Store, ticker: str, timespan: str, a: int, b: int, fetch: str,
@@ -278,7 +279,8 @@ def _fill(source: DataSource, store: Store, ticker: str, timespan: str, a: int, 
         return newest + step if newest is not None else a
 
     lo, hi = datetime.fromtimestamp(a / 1000, ET), datetime.fromtimestamp(b / 1000, ET)
-    for page in _guard(source.bar_pages(fetch, lo, hi, timespan, descending=True, asset=asset)):
+    span, mult = frame_parts(timespan)
+    for page in _guard(source.bar_pages(fetch, lo, hi, span, mult, descending=True, asset=asset)):
         page = [x for x in page if a <= int(x["t"]) < b]
         if not page:
             continue
@@ -783,7 +785,17 @@ def sync(
                 except NotEntitled:
                     n_day = 0
                 result.rows += n_day
-                log(f"{ticker} {resolution}: {n} rows, daily: {n_day} rows ({source.requests_made - spent} requests)")
+                # the source's own candles above a minute (5 min, 1 h), which replace the ones built here
+                n_frames = 0
+                for key in (frame_key(t, m) for t, m in source.native_frames(asset)):
+                    try:
+                        n_frames += sync_bars(source, store, ticker, key, item_floor, until, **span)
+                    except NotEntitled:
+                        pass
+                result.rows += n_frames
+                log(f"{ticker} {resolution}: {n} rows, daily: {n_day} rows"
+                    + (f", 5 min and hourly: {n_frames} rows" if n_frames else "")
+                    + f" ({source.requests_made - spent} requests)")
             else:
                 log(f"{ticker} {resolution}: {n} rows ({source.requests_made - spent} requests)")
             store.set_synced(source.name, ticker, now)

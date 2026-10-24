@@ -95,8 +95,14 @@ class FakeSource(DataSource):
         self.bar_calls = getattr(self, "bar_calls", []) + [(ticker, start, end, timespan, asset)]
         if timespan not in self.entitled and timespan not in ("day", "hour"):
             raise NotEntitled(403, "no " + timespan)
-        src = self.bars.get((ticker, timespan), self.bars.get(timespan, []))
+        key = timespan if multiplier == 1 else f"{timespan}:{multiplier}"
+        src = self.bars.get((ticker, key), self.bars.get(key, []))
         yield list(src)
+
+    frames: tuple = ()  # the time frames above a minute it sends (native_frames)
+
+    def native_frames(self, asset):
+        return self.frames
 
     def exchanges(self):
         self._spend()

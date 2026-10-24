@@ -100,7 +100,8 @@ class _Archive(DataSource):
 
 BITSTAMP_PAIRS = {"BTCUSD", "BTCEUR", "ETHUSD", "ETHEUR", "ETHBTC", "LTCUSD", "XRPUSD", "BCHUSD", "LINKUSD",
                   "SOLUSD", "ADAUSD", "DOGEUSD", "AVAXUSD", "DOTUSD", "XLMUSD", "UNIUSD", "USDCUSD", "USDTUSD"}
-BITSTAMP_STEPS = {"minute": 60, "hour": 3600, "day": 86400}
+BITSTAMP_STEPS = {("minute", 1): 60, ("minute", 5): 300, ("hour", 1): 3600, ("day", 1): 86400}
+EXCHANGE_FRAMES = (("minute", 5), ("hour", 1))  # the crypto exchanges' own candles above a minute
 
 
 class BitstampSource(_Archive):
@@ -112,15 +113,18 @@ class BitstampSource(_Archive):
     def resolutions(self, asset: str) -> tuple[str, ...]:
         return ("minute",) if asset == "crypto" else ()
 
+    def native_frames(self, asset: str) -> tuple[tuple[str, int], ...]:
+        return EXCHANGE_FRAMES if asset == "crypto" else ()
+
     def covers(self, ticker: str) -> bool:
         return ticker.upper().removeprefix("X:") in BITSTAMP_PAIRS
 
     def bar_pages(self, ticker, start, end, timespan, multiplier=1, descending=False, asset="crypto",
                   limit: int | None = None) -> Iterator[list[dict]]:
-        if timespan not in BITSTAMP_STEPS or multiplier != 1:
+        if (timespan, multiplier) not in BITSTAMP_STEPS:
             raise ValueError(f"Bitstamp steps: {tuple(BITSTAMP_STEPS)}")
         pair = ticker.upper().removeprefix("X:").lower()
-        step = BITSTAMP_STEPS[timespan]
+        step = BITSTAMP_STEPS[(timespan, multiplier)]
         a, b = _bounds(start, end)
         a_s, b_s = -(-a // 1000), b // 1000
         cursor = b_s - step if descending else a_s
@@ -167,20 +171,24 @@ class CoinbaseSource(_Archive):
     assets = ("crypto",)
     archival = False
     PAGE = 300
-    STEPS = {"minute": 60, "hour": 3600, "day": 86400}
+    STEPS = {("minute", 1): 60, ("minute", 5): 300, ("minute", 15): 900, ("hour", 1): 3600, ("hour", 6): 21600,
+             ("day", 1): 86400}
 
     def resolutions(self, asset: str) -> tuple[str, ...]:
         return ("minute",) if asset == "crypto" else ()
+
+    def native_frames(self, asset: str) -> tuple[tuple[str, int], ...]:
+        return EXCHANGE_FRAMES if asset == "crypto" else ()
 
     def covers(self, ticker: str) -> bool:
         return ticker.upper().removeprefix("X:") in CRYPTO_PAIRS
 
     def bar_pages(self, ticker, start, end, timespan, multiplier=1, descending=False, asset="crypto",
                   limit: int | None = None) -> Iterator[list[dict]]:
-        if timespan not in self.STEPS or multiplier != 1:
+        if (timespan, multiplier) not in self.STEPS:
             raise ValueError(f"Coinbase granularities: {tuple(self.STEPS)}")
         base, quote = _pair(ticker)
-        step = self.STEPS[timespan]
+        step = self.STEPS[(timespan, multiplier)]
         a, b = _bounds(start, end)
         a_s, b_s = -(-a // 1000) // step * step, b // 1000
         windows = []
@@ -212,20 +220,24 @@ class BitfinexSource(_Archive):
     assets = ("crypto",)
     archival = False
     PAGE = 10000
-    FRAMES = {"minute": ("1m", 60_000), "hour": ("1h", 3_600_000), "day": ("1D", 86_400_000)}
+    FRAMES = {("minute", 1): ("1m", 60_000), ("minute", 5): ("5m", 300_000), ("hour", 1): ("1h", 3_600_000),
+              ("day", 1): ("1D", 86_400_000)}
 
     def resolutions(self, asset: str) -> tuple[str, ...]:
         return ("minute",) if asset == "crypto" else ()
+
+    def native_frames(self, asset: str) -> tuple[tuple[str, int], ...]:
+        return EXCHANGE_FRAMES if asset == "crypto" else ()
 
     def covers(self, ticker: str) -> bool:
         return ticker.upper().removeprefix("X:") in CRYPTO_PAIRS
 
     def bar_pages(self, ticker, start, end, timespan, multiplier=1, descending=False, asset="crypto",
                   limit: int | None = None) -> Iterator[list[dict]]:
-        if timespan not in self.FRAMES or multiplier != 1:
+        if (timespan, multiplier) not in self.FRAMES:
             raise ValueError(f"Bitfinex frames: {tuple(self.FRAMES)}")
         base, quote = _pair(ticker)
-        frame, step = self.FRAMES[timespan]
+        frame, step = self.FRAMES[(timespan, multiplier)]
         a, b = _bounds(start, end)
         hi = b - 1
         lo = a

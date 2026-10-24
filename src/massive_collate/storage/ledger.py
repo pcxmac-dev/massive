@@ -96,7 +96,7 @@ class LedgerStore:
             "SELECT source FROM watchlist WHERE ticker=?", (ticker,))} | {
             s for s, t, k in self.stored_series() if t == ticker and k == timespan}
         for src in sources - have:
-            r = self.bar_edges(src, ticker, timespan)  # two index seeks
+            r = self.bar_edges(src, ticker, timespan, received_only=True)  # two index seeks; bars built here are not held
             if not r:
                 continue
             start = r[0]

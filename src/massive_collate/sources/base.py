@@ -30,6 +30,11 @@ class DataSource(ABC):
         """Whether this feed collects an asset class on this machine (e.g. keys present)."""
         return True
 
+    def native_frames(self, asset: str) -> tuple[tuple[str, int], ...]:
+        """Time frames above the base resolution that the source sends itself (daily bars aside):
+        (timespan, multiplier). Collected so its own candles replace the ones built here."""
+        return ()
+
     def resolutions(self, asset: str) -> tuple[str, ...]:
         """Resolutions to try for an asset class, finest first (the first the plan allows is kept)."""
         return RESOLUTIONS_BY_ASSET.get(asset, RESOLUTIONS)

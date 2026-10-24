@@ -143,6 +143,10 @@ class AlpacaSource(DataSource):
     def serves(self, asset: str) -> bool:
         return asset == "crypto" or (asset == "stock" and self.client.has_keys)
 
+    def native_frames(self, asset: str) -> tuple[tuple[str, int], ...]:
+        """Alpaca's own 5-minute and hourly bars (stocks with keys, crypto without)."""
+        return (("minute", 5), ("hour", 1)) if asset in ("stock", "crypto") else ()
+
     def resolutions(self, asset: str) -> tuple[str, ...]:
         """Finest first: ticks (kept for a recent window, see TICK_HISTORY_DAYS), with minute bars
         for the history before it. Alpaca has no second bars."""

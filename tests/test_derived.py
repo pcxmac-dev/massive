@@ -147,3 +147,43 @@ def test_a_feed_fetches_its_own_minutes_where_it_only_has_built_ones(store):
     store.add_coverage("coinbase", "BTCUSD", "trades", t(7), t(8))  # from its own stream
     gaps = plan(store, cb, feeds, "BTCUSD", "crypto", "minute", date(2026, 10, 24), now)
     assert (t(7), t(8)) in gaps or any(a <= t(7) and b >= t(8) for a, b in gaps)
+
+
+def test_a_coarser_frame_is_fetched_only_as_far_as_its_bars_are_complete():
+    from datetime import datetime as dt, timezone
+
+    from massive_collate.config import PUBLIC_FEEDS
+    from massive_collate.coverage import frontier_ms
+
+    now = dt(2026, 10, 24, 7, 32, 20, tzinfo=timezone.utc)
+    tier = PUBLIC_FEEDS["coinbase"][0]
+    t = lambda h, m: int(dt(2026, 10, 24, h, m, tzinfo=timezone.utc).timestamp() * 1000)
+    assert frontier_ms("crypto", tier, now, "minute") == t(7, 32)
+    assert frontier_ms("crypto", tier, now, "minute:5") == t(7, 30)
+    assert frontier_ms("crypto", tier, now, "hour") == t(7, 0)
+
+
+def test_a_feeds_own_frames_are_collected_and_replace_the_built_ones(store):
+    from datetime import datetime as dt, timedelta
+
+    from massive_collate.collector import ET, sync
+    from massive_collate.config import TIERS
+
+    from .conftest import FakeSource
+
+    now = dt(2026, 10, 21, 12, 0, tzinfo=ET)
+    day = (now - timedelta(days=1)).replace(hour=10, minute=0)
+    t = lambda m: int((day + timedelta(minutes=m)).timestamp() * 1000)
+    minutes = [{"t": t(i), "o": 10.0, "h": 11.0, "l": 9.0, "c": 10.5, "v": 1.0} for i in range(10)]
+    src = FakeSource(entitled=("minute",), bars={"minute": minutes, "day": [],
+                                                 "minute:5": [{"t": t(0), "o": 10.0, "h": 11.0, "l": 9.0, "c": 10.5, "v": 5.0}],
+                                                 "hour": [{"t": t(0), "o": 10.0, "h": 11.0, "l": 9.0, "c": 10.5, "v": 10.0}]})
+    src.frames = (("minute", 5), ("hour", 1))
+    store.watch("fake", ["SPCX"], "minute")
+    store.upsert_built_bars("fake", "SPCX", "minute", 5, [{"t": t(0), "o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0, "v": 1.0}], 7)
+    sync(src, store, TIERS["free"], now, log=lambda m: None)
+    conn = store._bars("fake")
+    got = dict(conn.execute("SELECT timespan || multiplier, COUNT(*) FROM bars GROUP BY 1").fetchall())
+    assert got["minute5"] == 1 and got["hour1"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM built_bars WHERE multiplier=5").fetchone()[0] == 0  # replaced
+    assert store.coverage("SPCX", "minute:5", received_only=True).get("fake")

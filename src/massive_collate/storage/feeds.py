@@ -787,14 +787,16 @@ class FeedStore:
             return out
         return self._cached(("daily_snapshot", source, sessions), compute)
 
-    def bar_edges(self, source: str, ticker: str, timespan: str = "minute", multiplier: int = 1) -> tuple | None:
-        """(first, last) bar start in ms for one series. Two index lookups, however much is stored."""
+    def bar_edges(self, source: str, ticker: str, timespan: str = "minute", multiplier: int = 1,
+                  received_only: bool = False) -> tuple | None:
+        """(first, last) bar start in ms for one series (with `received_only`, of what the feed sent,
+        not bars built here). Two index lookups, however much is stored."""
         conn = self._bars(source)
         if conn is None:
             return None
         key = (ticker.upper(), timespan, multiplier)
         edges = []
-        for table in _BAR_TABLES:
+        for table in ("bars",) if received_only else _BAR_TABLES:
             where = f"FROM {table} WHERE ticker=? AND timespan=? AND multiplier=?"
             first = conn.execute(f"SELECT MIN(ts) {where}", key).fetchone()[0]
             if first is not None:
