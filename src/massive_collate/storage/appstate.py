@@ -123,6 +123,14 @@ class AppStateStore:
         cols = [c[0] for c in cur.description]
         return [dict(zip(cols, row)) for row in cur]
 
+    def last_runs(self) -> dict[str, dict]:
+        """Each source's latest finished run (any age): {source: run}."""
+        cur = self.conn.execute(
+            "SELECT id, source, command, started_at, finished_at, requests, rows, status, message, current FROM runs "
+            "WHERE id IN (SELECT MAX(id) FROM runs WHERE status != 'running' GROUP BY source)")
+        cols = [c[0] for c in cur.description]
+        return {row[1]: dict(zip(cols, row)) for row in cur}
+
     def recent_runs(self, limit: int = 10) -> list[tuple]:
         return self.conn.execute(
             "SELECT id, source, command, started_at, finished_at, requests, rows, status, message "

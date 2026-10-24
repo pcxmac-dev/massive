@@ -109,3 +109,33 @@ def test_activity_sees_a_live_run(tmp_path, monkeypatch):
         out = act.activity(s, settings, db, now=datetime.now(timezone.utc))
     assert out["running"] and out["live"]["current"] == "AAPL"
     assert out["symbols"][0]["state"] == "fetching"
+
+
+def test_every_source_has_a_state_and_the_status_bar_knows_when_none_can_fetch(tmp_path):
+    from datetime import datetime, timezone
+
+    from massive_collate.config import load_settings
+    from massive_collate.gui.activity import can_fetch, health, limits
+    from massive_collate.storage import Store
+
+    now = datetime(2026, 10, 24, 18, tzinfo=timezone.utc)
+    settings = load_settings(env={"MASSIVE_API_KEY": "k", "MASSIVE_MAX_REQUESTS_PER_DAY": "100"}, env_file=None)
+    with Store(tmp_path / "m.db") as store:
+        rid = store.start_run("coinbase", "sync")
+        store.finish_run(rid, 3000, 9000, "stopped", "request cap reached (request cap of 3000 reached)")
+        rid = store.start_run("bitstamp", "sync")
+        store.finish_run(rid, 2, 0, "error", "HTTPSConnectionPool: Max retries exceeded (network down)")
+        rid = store.start_run("bitfinex", "sync")
+        store.finish_run(rid, 40, 0, "stopped", "rate limited (HTTP 429: slow down); stopping until the next run")
+        rid = store.start_run("massive", "sync")
+        store.finish_run(rid, 100, 5, "ok", "")
+        store.set_run_requests(rid, 100)
+        rows = {h["source"]: h for h in health(store, settings, now, limits(store, settings, now), None)}
+    assert rows["coinbase"]["state"] == "ok" and "continues next run" in rows["coinbase"]["why"]
+    assert rows["bitstamp"]["state"] == "down" and "network down" in rows["bitstamp"]["why"]
+    assert rows["bitfinex"]["state"] == "limited"
+    assert rows["tiingo"]["state"] == "off" and "TIINGO_API_KEY" in rows["tiingo"]["why"]
+    assert rows["cboe"]["state"] == "idle"
+    assert can_fetch(list(rows.values()))
+    assert not can_fetch([{"state": "down"}, {"state": "limited"}, {"state": "off"}])
+    assert not can_fetch([{"state": "off"}])

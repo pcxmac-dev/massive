@@ -26,6 +26,7 @@
   // The status bar's job: { ticker, phase: 'checking' | 'waiting' | 'downloading' | 'done' | 'current' | 'error', ... }
   let job = null;
   let openTicker = null;  // the symbol open on the chart (sent with each poll for the live recorder)
+  let pollFailed = false;  // the last poll got no answer
 
   function dur(s) {
     if (s == null) return '–';
@@ -75,8 +76,10 @@
       wasRunning = data.running;
       advanceJob();
       render();
+      pollFailed = false;
     } catch {
       data = null;
+      pollFailed = true;
       render();
     }
     const fast = (data && data.running) || job?.phase === 'waiting' || viewOpen('fetcher') || viewOpen('live');
@@ -181,6 +184,16 @@
       msg = `Fetcher${data.live.current ? `: ${esc(data.live.current)}` : ''} · ${num(data.live.requests)} req`;
       busy = true;
     }
+    // No source able to fetch (every one down, limited out or not set up): said plainly.
+    if (data && data.canFetch === false && !busy) {
+      msg = 'Unable to fetch data currently';
+      cls = 'bad';
+      text.title = (data.health || []).filter((h) => h.state !== 'off').map((h) => `${h.source}: ${h.state} — ${h.why}`).join('\n')
+        || 'No source is set up here';
+    } else if (!data && pollFailed) {
+      msg = 'Unable to reach the chart app';
+      cls = 'bad';
+    } else text.title = '';
     // Frames built from finer bars (derive.py): what, from what, for which series, how far along.
     const d = data?.derive;
     if (d && (!msg || !busy)) {
@@ -208,10 +221,15 @@
 
   window.addEventListener('massive:symbol', (e) => { openTicker = e.detail; checkSymbol(e.detail); });
 
-  // Every server's limits beside what this machine keeps to and has used.
+  // Every server's state and limits beside what this machine keeps to and has used.
+  const HEALTH_CLASS = { ok: 'run-ok', fetching: 'fetching', idle: '', done: 'run-ok', limited: 'backfilling',
+                         down: 'run-error', off: '' };
   function limitsHtml(rows) {
     const t = Date.now() / 1000;
+    const health = Object.fromEntries((data.health || []).map((h) => [h.source, h]));
     return rows.map((l) => {
+      const h = health[l.source];
+      const status = h ? `<span class="state ${HEALTH_CLASS[h.state] ?? ''}">${esc(h.state)}</span><div class="sub">${esc(h.why)}</div>` : '';
       const w = l.window;
       const full = w.allowed && w.used >= w.allowed;
       const wait = l.wait ? Math.max(0, Math.round(l.wait.until - t)) : 0;
@@ -219,7 +237,7 @@
         : full ? `<span class="warn">in ${Math.ceil(w.freeIn)} s</span> <div class="sub">window full</div>` : 'now';
       const live = data.running && data.live.source === l.source;
       return `<tr class="${live ? 'live' : ''}"><td><b>${esc(l.source)}</b><div class="sub">${esc(l.plan)}</div></td>
-        <td>${esc(l.published)}</td><td>${esc(l.keptTo)}</td>
+        <td>${status}</td><td>${esc(l.published)}</td><td>${esc(l.keptTo)}</td>
         <td>${w.allowed ? `${meter(w.used / w.allowed, full ? 'warn' : '')}<div class="sub">${num(w.used)} of ${num(w.allowed)} in the last ${w.periodSeconds >= 3600 ? 'hour' : 'minute'}</div>` : '<span class="sub">no limit</span>'}</td>
         <td>${next}</td>
         <td class="num">${num(l.today)} <span class="sub">/ ${num(l.perDay)}</span></td><td class="num">${num(l.perRun)}</td></tr>`;

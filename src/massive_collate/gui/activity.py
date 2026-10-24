@@ -305,6 +305,65 @@ def limits(store: Store, settings: Settings, now: datetime) -> list[dict]:
     return rows
 
 
+KEY_NAMES = {"massive": "MASSIVE_API_KEY", "tiingo": "TIINGO_API_KEY",
+             "alpaca": "ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY"}
+
+
+def health(store: Store, settings: Settings, now: datetime, limit_rows: list[dict], running: dict | None) -> list[dict]:
+    """Each source's state, for the Fetcher view and the status bar, with why:
+    - fetching: a run of it is going now;
+    - limited: today's requests are used up, the server rate-limited its last run, or it is
+      waiting out a full request window now;
+    - down: its last run failed (the server or the network);
+    - off: not set up here (no key, or this copy of the app is offline);
+    - done: a public archive with every symbol filled (not asked again);
+    - ok: its last run went through (stopping at its per-run cap is how backfills go);
+    - idle: it has not run yet."""
+    from ..sources import ARCHIVAL, BUILDERS, feed_profiles
+
+    profiles = feed_profiles(settings)
+    limits_by = {r["source"]: r for r in limit_rows}
+    last = store.last_runs()
+    t = now.timestamp()
+    out = []
+    for name in BUILDERS:
+        p, lim, run = profiles.get(name), limits_by.get(name, {}), last.get(name)
+        msg = (run or {}).get("message") or ""
+        if settings.offline:
+            state, why = "off", "this copy of the app is offline (MASSIVE_OFFLINE): it fetches nothing"
+        elif p is None or not p.assets:
+            state, why = "off", f"key not set ({KEY_NAMES.get(name, 'key')})"
+        elif running and running.get("source") == name:
+            state, why = "fetching", f"running now: {running.get('requests') or 0:,} requests"
+        elif lim.get("leftToday") == 0:
+            state, why = "limited", f"today's {lim.get('perDay', 0):,} requests are used; resets at 00:00 UTC"
+        elif run and run["status"] == "error":
+            state, why = "down", f"last run failed: {msg[:160] or 'no message'}"
+        elif run and "rate limited" in msg:
+            state, why = "limited", f"the server rate-limited the last run: {msg[:160]}"
+        elif lim.get("wait") and lim["wait"].get("until", 0) - t > 30:
+            state, why = "limited", f"waiting {round(lim['wait']['until'] - t)} s: {lim['wait'].get('reason', '')}"
+        elif name in ARCHIVAL and all(w.get("closed_at") for w in store.watchlist(name)) and store.watchlist(name):
+            state, why = "done", "archive complete: every symbol filled, not asked again"
+        elif run is None:
+            state, why = "idle", "has not run yet"
+        else:
+            state = "ok"
+            why = f"last run: {run.get('rows') or 0:,} rows, {run.get('requests') or 0:,} requests" + (
+                " (stopped at its per-run cap: continues next run)" if "cap" in msg and "reached" in msg else "")
+        out.append({"source": name, "state": state, "why": why, "lastRun": run and {
+            k: run.get(k) for k in ("started_at", "finished_at", "status", "requests", "rows", "message")}})
+    return out
+
+
+ABLE_STATES = ("ok", "fetching", "idle", "done")
+
+
+def can_fetch(rows: list[dict]) -> bool:
+    """Whether any set-up source can fetch now (the status bar says so when none can)."""
+    return any(r["state"] in ABLE_STATES for r in rows if r["state"] != "off")
+
+
 DERIVE_FRESH_MS = 120_000  # a build not heard from for this long has ended (or died)
 
 
@@ -345,6 +404,8 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
     used = store.requests_today(source)
     left = sum(s["requestsLeft"] for s in symbols)
     per_day = settings.max_requests_per_day
+    limit_rows = limits(store, settings.origin or settings, now)
+    sources_health = health(store, settings.origin or settings, now, limit_rows, live)
     rpm = settings.tier.requests_per_minute
     return {
         "now": now.isoformat(), "source": source,
@@ -367,7 +428,9 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
         "ticks": _ticks(store, settings),
         "liveFeeds": live_feeds(store, settings, source, now),
         "derive": derive_progress(store, now),
-        "limits": limits(store, settings, now),
+        "limits": limit_rows,
+        "health": sources_health,
+        "canFetch": can_fetch(sources_health),
         "priority": {t: {"at": v["at"].isoformat(), "runs": v["runs"]}
                      for t, v in collector.priority_requests(store, now).items()},
         "runs": runs,
