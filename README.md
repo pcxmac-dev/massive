@@ -119,7 +119,11 @@ python -m massive_collate gui                  # chart app in your browser (loca
   indexed to 100, Shiller CAPE, COT positioning per market (net long - short per trader group, in
   contracts or as a share of open interest); ranges 1Y to All, hover or arrow keys to read every
   series at a date, and a table of the latest values. Click a legend entry to hide or show it (for
-  COT a trader group: speculators, hedgers, small traders, in every view and market).
+  COT a trader group: speculators, hedgers, small traders, in every view and market). Zoom with the
+  wheel or + / −, drag to pan, double-click or Reset (0) for the whole range. Markup: trend lines,
+  levels, date lines, date zones and notes, kept in the browser per dataset (per market for COT);
+  date lines and zones show in every view, lines, levels and notes in the view they were drawn in.
+  Click a mark to select it, Delete removes it.
 
 ## Layout
 

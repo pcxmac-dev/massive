@@ -9,7 +9,16 @@
    while others are added or removed. The legend's entries show or hide what they name (a series;
    for the COT report a trader group, in every view and market); the axes fit what is shown.
    Hover (or the arrow keys) reads every series at a date; the table view lists the values of the
-   latest dates. */
+   latest dates.
+
+   Zoom: the wheel (or + and −) zooms about the cursor, dragging pans, double-click or Reset (0)
+   shows the whole range again; the y axes fit what is in the window. Zoom only magnifies: growth
+   and indexed lines stay based at the start of the range buttons' range.
+   Markup: trend lines, levels, date lines, date zones and notes, kept in the browser per dataset
+   (per market for the COT report). Date lines and zones are dates only and show in every view and
+   chart; lines, levels and notes are values of the view they were drawn in (its transform, and the
+   range a rebased transform starts from) and show on the chart of their unit. Click a mark to
+   select it, Delete removes it. */
 (() => {
   const $ = (id) => document.getElementById(id);
   const MAX = 8;
@@ -41,6 +50,8 @@
     picked: saved.picked || {}, market: saved.market || COT_DEFAULT, range: saved.range || 'All',
     transform: saved.transform || {}, logs: saved.logs || {}, hidden: saved.hidden || {}, table: false,
     slots: {}, cache: new Map(), lines: [], hoverT: null, built: false, loading: 0,
+    view: null,  // zoom window {lo, hi} in ms inside the range; null: all of it
+    tool: 'pan', marks: prefs.get('datasets-marks', {}), selected: null, drag: null, drawing: null, clearArmed: false,
   };
   const save = () => prefs.set('datasets', { name: st.name, picked: st.picked, market: st.market, range: st.range,
     transform: st.transform, logs: st.logs, hidden: st.hidden });
@@ -244,6 +255,183 @@
     return a > 0 && Math.abs(t[a - 1] - x) <= Math.abs(t[a] - x) ? a - 1 : a;
   }
 
+  // -- zoom: a window of time inside the range ---------------------------------------------
+  const MIN_SPAN = 30 * DAY;
+  function lower(t, x) {  // first index with t[i] >= x
+    let a = 0, b = t.length;
+    while (a < b) { const m = (a + b) >> 1; if (t[m] < x) a = m + 1; else b = m; }
+    return a;
+  }
+  function windowed(l, lo, hi) {  // the points in [lo, hi] and one either side, so lines run on to the edges
+    const a = Math.max(0, lower(l.t, lo) - 1), b = Math.min(l.t.length, lower(l.t, hi) + 1);
+    return a === 0 && b === l.t.length ? l : { ...l, t: l.t.slice(a, b), v: l.v.slice(a, b) };
+  }
+  function lastInside(l, lo, hi) {  // index of the last point in [lo, hi], or -1
+    const j = lower(l.t, hi + 1) - 1;
+    return j >= 0 && l.t[j] >= lo ? j : -1;
+  }
+  const extent = (lines) => [Math.min(...lines.map((l) => l.t[0])), Math.max(...lines.map((l) => l.t[l.t.length - 1]))];
+  function setView(lo, hi) {
+    if (!geom) return;
+    const [a, b] = geom.full;
+    const span = Math.max(Math.min(MIN_SPAN, b - a), hi - lo);
+    if (span >= b - a) st.view = null;
+    else {
+      const start = Math.max(a, Math.min(lo, b - span));
+      st.view = { lo: start, hi: start + span };
+    }
+    hideHover();
+    draw();
+  }
+  function zoomAt(t, factor) {
+    if (geom) setView(t - (t - geom.lo) * factor, t + (geom.hi - t) * factor);
+  }
+  const centre = () => (st.hoverT != null ? st.hoverT : (geom.lo + geom.hi) / 2);
+  function resetZoom() {
+    st.view = null;
+    hideHover();
+    draw();
+  }
+  let frame = 0;  // pans at most once a frame
+  function panTo(lo, hi) {
+    cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(() => setView(lo, hi));
+  }
+
+  // -- markup ----------------------------------------------------------------------------
+  const ICON = (path) => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
+  const TOOLS = [
+    ['pan', 'Pan and zoom: drag to pan, wheel to zoom, double-click for the whole range',
+      '<path d="M12 3v18M3 12h18M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3"/>'],
+    ['line', 'Trend line: drag from one point to another', '<path d="M5 19 19 5"/><circle cx="5" cy="19" r="1.6"/><circle cx="19" cy="5" r="1.6"/>'],
+    ['hline', 'Level: a horizontal line at a value (click)', '<path d="M3 12h18"/><path d="M3 8v8" opacity=".45"/>'],
+    ['vline', 'Date line: a vertical line at a date (click); shows in every view and chart', '<path d="M12 3v18"/><path d="M8 3h8" opacity=".45"/>'],
+    ['zone', 'Date zone: drag across a span of dates; shows in every view and chart',
+      '<rect x="7" y="4" width="10" height="16" fill="currentColor" opacity=".25" stroke="none"/><path d="M7 4v16M17 4v16"/>'],
+    ['note', 'Note: click where it goes, type, Enter', '<path d="M6 5h12M12 5v14"/>'],
+  ];
+  const ctx = () => (isCot() ? `${st.name}|${st.market}` : st.name);
+  const valueView = () => `${transform()}|${['growth', 'index'].includes(transform()) ? st.range : ''}`;
+  const markList = () => (st.marks[ctx()] ||= []);
+  const timeOnly = (m) => m.type === 'vline' || m.type === 'zone';
+  const visibleMarks = () => { const vv = valueView(); return markList().filter((m) => timeOnly(m) || m.view === vv); };
+  function saveMarks() {
+    for (const k of Object.keys(st.marks)) if (!st.marks[k].length) delete st.marks[k];
+    prefs.set('datasets-marks', st.marks);
+  }
+  function addMark(m) {
+    m.id = `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    markList().push(m);
+    saveMarks();
+    st.tool = 'pan';
+    st.selected = m.id;
+    draw();
+  }
+  function removeMark(id) {
+    st.marks[ctx()] = markList().filter((m) => m.id !== id);
+    if (st.selected === id) st.selected = null;
+    saveMarks();
+    draw();
+  }
+
+  function renderMarks(g, marks, c) {
+    const L = geom.left, R = geom.W - geom.right;
+    for (const m of marks) {
+      if (!timeOnly(m) && m.unit !== c.unit) continue;
+      const grp = el('g', { class: `ds-mark${m.id === st.selected ? ' sel' : ''}`, 'data-mark': m.id }, g);
+      const seg = (x1, y1, x2, y2) => {
+        el('line', { x1, y1, x2, y2, class: 'mk' }, grp);
+        el('line', { x1, y1, x2, y2, class: 'hit' }, grp);  // a wider, invisible target to click
+      };
+      if (m.type === 'zone') {
+        const a = geom.x(Math.min(m.t1, m.t2)), b = geom.x(Math.max(m.t1, m.t2));
+        el('rect', { x: a, y: c.y0, width: Math.max(1, b - a), height: c.y1 - c.y0, class: 'zone' }, grp);
+        el('rect', { x: a, y: c.y0, width: Math.max(4, b - a), height: 14, class: 'handle' }, grp);
+        if (c.first) {
+          const tx = el('text', { x: Math.max(L, a) + 4, y: c.y0 + 11, class: 'mk-label' }, grp);
+          tx.textContent = `${day(Math.min(m.t1, m.t2))} → ${day(Math.max(m.t1, m.t2))}`;
+          const bb = tx.getBBox();
+          if (bb.x + bb.width + 4 > R) {  // near the right edge: the label ends at the zone's end instead
+            tx.setAttribute('x', Math.min(R, b) - 4);
+            tx.setAttribute('text-anchor', 'end');
+          }
+        }
+      } else if (m.type === 'vline') {
+        const xx = geom.x(m.t);
+        seg(xx, c.y0, xx, c.y1);
+        if (c.first) el('text', { x: xx + 4, y: c.y0 + 25, class: 'mk-label' }, grp).textContent = day(m.t);  // below zone labels
+      } else if (m.type === 'hline') {
+        const yy = c.y(m.v);
+        if (!Number.isFinite(yy)) continue;
+        seg(L, yy, R, yy);
+        el('text', { x: R - 4, y: yy - 4, 'text-anchor': 'end', class: 'mk-label' }, grp).textContent = fmt(m.v, c.unit);
+      } else if (m.type === 'line') {
+        const pts = [geom.x(m.t1), c.y(m.v1), geom.x(m.t2), c.y(m.v2)];
+        if (!pts.every(Number.isFinite)) continue;
+        seg(...pts);
+        el('circle', { cx: pts[0], cy: pts[1], r: 3, class: 'end' }, grp);
+        el('circle', { cx: pts[2], cy: pts[3], r: 3, class: 'end' }, grp);
+      } else if (m.type === 'note') {
+        const xx = geom.x(m.t), yy = c.y(m.v);
+        if (!Number.isFinite(yy)) continue;
+        el('circle', { cx: xx, cy: yy, r: 3.5, class: 'pin' }, grp);
+        const tx = el('text', { x: xx + 9, y: yy - 9, class: 'note' }, grp);
+        tx.textContent = m.text;
+        let bb = tx.getBBox();
+        if (bb.x + bb.width + 4 > R) {  // no room on the right of the pin: the note goes on its left
+          tx.setAttribute('x', xx - 9);
+          tx.setAttribute('text-anchor', 'end');
+          bb = tx.getBBox();
+        }
+        grp.insertBefore(el('rect', { x: bb.x - 4, y: bb.y - 2, width: bb.width + 8, height: bb.height + 4, rx: 3,
+          class: 'note-bg' }), tx);
+      }
+    }
+  }
+
+  function renderTools() {
+    const box = $('dsTools');
+    if (!box) return;
+    box.innerHTML = TOOLS.map(([k, title, path]) => `<button type="button" data-tool="${k}" class="${st.tool === k ? 'active' : ''}"
+        aria-pressed="${st.tool === k}" title="${esc(title)}">${ICON(path)}</button>`).join('')
+      + `<button type="button" data-act="remove" title="Remove the selected mark (Delete)" ${st.selected ? '' : 'disabled'}>${ICON('<path d="M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13"/>')}</button>`
+      + `<button type="button" data-act="clear" title="Remove every mark of this ${isCot() ? 'market' : 'dataset'}" ${markList().length ? '' : 'disabled'}>${st.clearArmed ? 'Clear all?' : 'Clear'}</button>`;
+    $('dsCharts').classList.toggle('tool-draw', st.tool !== 'pan');
+  }
+  function renderZoom() {
+    if (!$('dsZoomInfo')) return;
+    $('dsZoomInfo').textContent = st.view && geom ? `${day(geom.lo)} → ${day(geom.hi)}` : '';
+    $('dsZoomReset').disabled = !st.view;
+  }
+
+  function openNote(e, c, t, v) {  // an inline field (the embedded browser has no prompt())
+    const main = $('dsMain').getBoundingClientRect();
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'ds-note-input';
+    input.placeholder = 'Note, then Enter';
+    input.maxLength = 200;
+    input.style.left = `${Math.min(e.clientX - main.left + 8, main.width - 230)}px`;
+    input.style.top = `${e.clientY - main.top - 14}px`;
+    $('dsMain').append(input);
+    let done = false;
+    const finish = (keep) => {
+      if (done) return;
+      done = true;
+      const text = input.value.trim();
+      input.remove();
+      if (keep && text) addMark({ type: 'note', unit: c.unit, view: valueView(), t, v, text });
+      else { st.tool = 'pan'; draw(); }
+    };
+    input.addEventListener('keydown', (k) => {
+      k.stopPropagation();  // typing here is not a shortcut of the app
+      if (k.key === 'Enter') finish(true);
+      if (k.key === 'Escape') finish(false);
+    });
+    input.addEventListener('blur', () => finish(true));
+    setTimeout(() => input.focus(), 0);
+  }
+
   const hiddenKeys = () => new Set(st.hidden[st.name] || []);
   const present = () => st.lines.filter((l) => l.t.length);
   const shown = () => { const off = hiddenKeys(); return present().filter((l) => !off.has(l.group)); };
@@ -256,45 +444,59 @@
     draw();
   }
 
-  let geom = null;  // what the hover layer needs: the x scale and each chart's lines, scales and marks
+  let geom = null;  // what the hover and pointer layers need: the scales, the window and each chart
   function draw() {
     const host = $('dsCharts');
     host.replaceChildren();
     const all = present();
-    const lines = shown();
+    const full = shown();
     renderLegend(all);
-    $('dsEmpty').hidden = !!lines.length;
+    renderTools();
+    $('dsEmpty').hidden = !!full.length;
     $('dsEmpty').textContent = all.length ? 'Everything is hidden: click a name above to show it.' : 'Pick series on the left.';
-    if (!lines.length) { geom = null; renderTable([]); return; }
-    const units = [...new Set(lines.map((l) => l.unit))];
+    if (!full.length) { geom = null; renderTable([]); renderZoom(); return; }
+    const [fa, fb] = extent(full);
+    const lo = st.view ? Math.max(fa, st.view.lo) : fa;
+    const hi = st.view ? Math.min(fb, st.view.hi) : fb;
+    const lines = full.map((l) => windowed(l, lo, hi)).filter((l) => l.t.length);
+    const units = [...new Set(full.map((l) => l.unit))];
     const W = Math.max(320, host.clientWidth);
     const H = Math.max(260, host.clientHeight);
     const axisH = 24;
     const h = Math.max(150, (H - axisH) / units.length);
     // direct end labels when every chart has four lines or fewer (the legend always carries identity)
-    const ends = units.every((u) => lines.filter((l) => l.unit === u).length <= 4);
+    const ends = units.every((u) => full.filter((l) => l.unit === u).length <= 4);
     const left = 64, right = ends && W > 640 ? 170 : 16, top = 20, bottom = 8;
-    const lo = Math.min(...lines.map((l) => l.t[0])), hi = Math.max(...lines.map((l) => l.t[l.t.length - 1]));
-    const x = (t) => left + (t - lo) / Math.max(1, hi - lo) * (W - left - right);
-    geom = { x, lo, hi, left, right, W, charts: [] };
+    const pw = W - left - right;
+    const x = (t) => left + (t - lo) / Math.max(1, hi - lo) * pw;
+    const invX = (px) => lo + (px - left) / pw * (hi - lo);
+    geom = { x, invX, lo, hi, full: [fa, fb], left, right, W, charts: [] };
+    const marks = visibleMarks();
     units.forEach((unit, gi) => {
       const ls = lines.filter((l) => l.unit === unit);
       const last = gi === units.length - 1;
       const ch = h + (last ? axisH : 0);
       const svg = el('svg', { width: W, height: ch, class: 'ds-chart', role: 'img',
         'aria-label': `${ls.map((l) => l.label).join(', ')} (${unit}), ${day(lo)} to ${day(hi)}` }, host);
-      const vs = ls.flatMap((l) => l.v).filter(Number.isFinite);
+      const y0 = top, y1 = h - bottom;
+      const clip = `dsClip${gi}`;
+      el('rect', { x: left, y: y0 - 3, width: pw, height: y1 - y0 + 6 }, el('clipPath', { id: clip }, el('defs', {}, svg)));
+      // the y axis fits the points inside the window
+      const inside = ls.flatMap((l) => l.v.filter((v, i) => l.t[i] >= lo && l.t[i] <= hi && Number.isFinite(v)));
+      let vs = inside.length ? inside : ls.flatMap((l) => l.v).filter(Number.isFinite);
+      if (!vs.length) vs = [0, 1];
       let vlo = Math.min(...vs), vhi = Math.max(...vs);
       const log = logOn() && vlo > 0;
-      let y;
-      const y0 = top, y1 = h - bottom;
+      let y, invY;
       if (log) {
-        const a = Math.log10(vlo), b = Math.log10(vhi), pad = (b - a || 1) * 0.04;
-        y = (v) => y1 - (Math.log10(v) - (a - pad)) / ((b + pad) - (a - pad)) * (y1 - y0);
+        const a = Math.log10(vlo), b = Math.log10(vhi), pad = (b - a || 1) * 0.04, A = a - pad, B = b + pad;
+        y = (v) => y1 - (Math.log10(v) - A) / (B - A) * (y1 - y0);
+        invY = (py) => 10 ** (A + (y1 - py) / (y1 - y0) * (B - A));
       } else {
         const pad = (vhi - vlo || Math.abs(vhi) || 1) * 0.05;
         vlo -= pad; vhi += pad;
         y = (v) => y1 - (v - vlo) / (vhi - vlo) * (y1 - y0);
+        invY = (py) => vlo + (y1 - py) / (y1 - y0) * (vhi - vlo);
       }
       const ticks = log ? logTicks(Math.min(...vs), Math.max(...vs)) : niceTicks(vlo, vhi);
       const step = ticks.length > 1 ? Math.min(...ticks.slice(1).map((t, i) => Math.abs(t - ticks[i]))) : 1;
@@ -313,31 +515,37 @@
           el('text', { x: xx, y: y1 + 17, 'text-anchor': 'middle' }, grid).textContent = tk.label;
         }
       }
+      const plot = el('g', { 'clip-path': `url(#${clip})` }, svg);
       for (const l of ls) {
-        el('path', { d: pathOf(l, x, y), class: `ds-line s${l.slot}${l.dash ? ' dash' : ''}` }, svg);
+        el('path', { d: pathOf(l, x, y), class: `ds-line s${l.slot}${l.dash ? ' dash' : ''}` }, plot);
       }
-      if (ends && right > 16) {  // direct labels at the line ends, nudged apart
-        const labs = ls.map((l) => ({ l, y: y(l.v[l.v.length - 1]) })).sort((a, b) => a.y - b.y);
+      const c = { svg, ls, y, invY, y0, y1, unit, first: gi === 0 };
+      renderMarks(el('g', { class: 'ds-marks' }, plot), marks, c);
+      if (ends && right > 16) {  // direct labels at the last point in the window, nudged apart
+        const labs = ls.map((l) => ({ l, j: lastInside(l, lo, hi) })).filter((a) => a.j >= 0)
+          .map((a) => ({ ...a, y: y(a.l.v[a.j]) })).sort((a, b) => a.y - b.y);
         for (let i = 1; i < labs.length; i++) labs[i].y = Math.max(labs[i].y, labs[i - 1].y + 14);
         for (let i = labs.length - 1; i >= 0; i--) labs[i].y = Math.min(labs[i].y, y1 - (labs.length - 1 - i) * 14);
-        for (const { l, y: yy } of labs) {
-          const ex = x(l.t[l.t.length - 1]);
+        for (const { l, j, y: yy } of labs) {
+          const ex = x(l.t[j]);
           el('line', { x1: ex + 3, x2: ex + 13, y1: yy, y2: yy, class: `ds-key s${l.slot}${l.dash ? ' dash' : ''}` }, svg);
           const tx = el('text', { x: ex + 17, y: yy + 4, class: 'ds-end' }, svg);
           const label = l.short || l.label;
           const name = label.length > 18 ? `${label.slice(0, 17)}…` : label;
-          tx.textContent = `${fmt(l.v[l.v.length - 1], unit)} `;
+          tx.textContent = `${fmt(l.v[j], unit)} `;
           el('tspan', { class: 'muted' }, tx).textContent = name;
         }
       }
       const hover = el('g', { class: 'ds-hover', visibility: 'hidden' }, svg);
       const cross = el('line', { y1: y0, y2: y1, class: 'cross' }, hover);
       const dots = ls.map((l) => el('circle', { r: 4, class: `ds-dot s${l.slot}` }, hover));
-      geom.charts.push({ svg, ls, y, hover, cross, dots, unit });
+      geom.charts.push({ ...c, hover, cross, dots });
     });
-    geom.allT = [...new Set(lines.flatMap((l) => l.t))].sort((a, b) => a - b);
-    renderTable(lines);
-    if (st.hoverT != null) showHover(st.hoverT);
+    geom.allT = [...new Set(lines.flatMap((l) => l.t.filter((t) => t >= lo && t <= hi)))].sort((a, b) => a - b);
+    if (!geom.allT.length) geom.allT = [lo];
+    renderTable(full);
+    renderZoom();
+    if (st.hoverT != null && st.hoverT >= lo && st.hoverT <= hi) showHover(st.hoverT);
   }
 
   // One entry per identity (a series; a COT trader group with its net, long and short lines), each a
@@ -503,6 +711,9 @@
 
   async function selectDataset(name) {
     st.name = name;
+    st.view = null;
+    st.selected = null;
+    st.tool = 'pan';
     st.query = '';
     $('dsSearch').value = '';
     st.hoverT = null;
@@ -539,6 +750,13 @@
         <select id="dsTransform" aria-label="Transform"></select>
         <button type="button" id="dsLog" class="toggle" title="Logarithmic scale (positive values only)">Log scale</button>
         <button type="button" id="dsTable" class="toggle" title="The values of the latest dates as a table">Table</button>
+        <div id="dsTools" class="group ds-tools" role="group" aria-label="Markup"></div>
+        <div class="group" role="group" aria-label="Zoom">
+          <button type="button" id="dsZoomOut" title="Zoom out (−)">−</button>
+          <button type="button" id="dsZoomIn" title="Zoom in (+)">+</button>
+          <button type="button" id="dsZoomReset" title="The whole range (0, or double-click the chart)">Reset</button>
+        </div>
+        <span id="dsZoomInfo" class="p-muted small"></span>
         <span id="dsError" class="down small" role="alert"></span>
       </div>
       <div class="ds-body">
@@ -546,7 +764,8 @@
           <div id="dsList" class="ds-list" role="listbox" aria-label="Series"></div></div>
         <div id="dsMain" class="ds-main">
           <div id="dsLegend" class="ds-legend"></div>
-          <div id="dsCharts" class="ds-charts" tabindex="0" aria-label="Chart: arrow keys move along the dates"></div>
+          <div id="dsCharts" class="ds-charts" tabindex="0"
+            aria-label="Chart: arrow keys move along the dates, + and − zoom, 0 shows the whole range, Delete removes the selected mark"></div>
           <div id="dsEmpty" class="p-muted ds-empty" hidden>Pick series on the left.</div>
           <div id="dsTip" class="ds-tip" hidden></div>
           <div id="dsNote" class="p-muted small ds-note"></div>
@@ -558,6 +777,7 @@
       const b = e.target.closest('button[data-range]');
       if (!b) return;
       st.range = b.dataset.range;
+      st.view = null;
       save(); renderControls(); refresh();
     });
     $('dsTransform').addEventListener('change', (e) => { st.transform[st.name] = e.target.value; save(); renderControls(); refresh(); });
@@ -584,27 +804,149 @@
       const b = e.target.closest('button[data-market]');
       if (!b) return;
       st.market = b.dataset.market;
+      st.view = null;
+      st.selected = null;
       save(); renderPicker(); refresh();
     });
+    $('dsTools').addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      if (b.dataset.tool) {
+        st.tool = st.tool === b.dataset.tool ? 'pan' : b.dataset.tool;  // a second click puts the tool down
+        st.selected = null;
+        draw();
+      } else if (b.dataset.act === 'remove' && st.selected) {
+        removeMark(st.selected);
+      } else if (b.dataset.act === 'clear') {
+        clearTimeout(st.clearTimer);
+        if (!st.clearArmed) {  // a second click within 3 s confirms (no confirm(): the embedded browser has none)
+          st.clearArmed = true;
+          st.clearTimer = setTimeout(() => { st.clearArmed = false; renderTools(); }, 3000);
+          renderTools();
+          return;
+        }
+        st.clearArmed = false;
+        st.marks[ctx()] = [];
+        st.selected = null;
+        saveMarks();
+        draw();
+      }
+    });
+    $('dsZoomIn').addEventListener('click', () => zoomAt(centre(), 1 / 1.5));
+    $('dsZoomOut').addEventListener('click', () => zoomAt(centre(), 1.5));
+    $('dsZoomReset').addEventListener('click', resetZoom);
+
     const charts = $('dsCharts');
+    const chartOf = (e) => geom?.charts.find((c) => c.svg.contains(e.target)) || null;
+    const at = (e, c) => { const r = c.svg.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+    const clampX = (px) => Math.max(geom.left, Math.min(geom.W - geom.right, px));
+    const capture = (e) => { try { charts.setPointerCapture(e.pointerId); } catch { /* no live pointer: drag without capture */ } };
+    charts.addEventListener('pointerdown', (e) => {
+      if (!geom || e.button !== 0) return;
+      if (st.tool === 'pan') {
+        const hit = e.target.closest('[data-mark]');
+        if (hit) { st.selected = hit.dataset.mark; draw(); return; }
+        if (st.selected) { st.selected = null; draw(); }
+        st.drag = { x: e.clientX, lo: geom.lo, hi: geom.hi, moved: false };
+        capture(e);
+        return;
+      }
+      const c = chartOf(e);
+      if (!c) return;
+      const p = at(e, c);
+      if (p.x < geom.left || p.x > geom.W - geom.right || p.y < c.y0 || p.y > c.y1) return;
+      const t = geom.invX(p.x), v = c.invY(p.y);
+      if (st.tool === 'hline') addMark({ type: 'hline', unit: c.unit, view: valueView(), v });
+      else if (st.tool === 'vline') addMark({ type: 'vline', t });
+      else if (st.tool === 'note') openNote(e, c, t, v);
+      else {
+        st.drawing = { type: st.tool, c, t, v, x: p.x, y: p.y, preview: null };
+        capture(e);
+      }
+    });
     charts.addEventListener('pointermove', (e) => {
       if (!geom) return;
+      if (st.drag) {  // pan: the window follows the pointer
+        const dx = e.clientX - st.drag.x;
+        if (!st.drag.moved && Math.abs(dx) < 3) return;
+        st.drag.moved = true;
+        charts.classList.add('panning');
+        const dt = -dx / (geom.W - geom.left - geom.right) * (st.drag.hi - st.drag.lo);
+        panTo(st.drag.lo + dt, st.drag.hi + dt);
+        return;
+      }
+      if (st.drawing) {  // a live preview of the line or zone
+        const d = st.drawing, p = at(e, d.c);
+        const px = clampX(p.x), py = Math.max(d.c.y0, Math.min(d.c.y1, p.y));
+        if (!d.preview) d.preview = el(d.type === 'zone' ? 'rect' : 'line', { class: 'ds-preview' }, d.c.svg);
+        const attrs = d.type === 'zone'
+          ? { x: Math.min(d.x, px), y: d.c.y0, width: Math.abs(px - d.x), height: d.c.y1 - d.c.y0 }
+          : { x1: d.x, y1: d.y, x2: px, y2: py };
+        for (const [k, v] of Object.entries(attrs)) d.preview.setAttribute(k, v);
+        return;
+      }
       const r = charts.getBoundingClientRect();
       const px = e.clientX - r.left;
       if (px < geom.left || px > geom.W - geom.right) { hideHover(); return; }
-      const t = geom.lo + (px - geom.left) / (geom.W - geom.left - geom.right) * (geom.hi - geom.lo);
-      showHover(geom.allT[nearest(geom.allT, t)]);
+      showHover(geom.allT[nearest(geom.allT, geom.invX(px))]);
     });
-    charts.addEventListener('pointerleave', hideHover);
+    const release = (e) => {
+      if (st.drag) {
+        st.drag = null;
+        charts.classList.remove('panning');
+        return;
+      }
+      const d = st.drawing;
+      if (!d) return;
+      st.drawing = null;
+      d.preview?.remove();
+      if (e.type === 'pointercancel') return;
+      const p = at(e, d.c);
+      const px = clampX(p.x), py = Math.max(d.c.y0, Math.min(d.c.y1, p.y));
+      if (d.type === 'zone' ? Math.abs(px - d.x) <= 4 : Math.hypot(px - d.x, py - d.y) <= 4) return;  // a click, not a drag
+      if (d.type === 'zone') addMark({ type: 'zone', t1: d.t, t2: geom.invX(px) });
+      else addMark({ type: 'line', unit: d.c.unit, view: valueView(), t1: d.t, v1: d.v, t2: geom.invX(px), v2: d.c.invY(py) });
+    };
+    charts.addEventListener('pointerup', release);
+    charts.addEventListener('pointercancel', release);
+    charts.addEventListener('pointerleave', () => { if (!st.drag && !st.drawing) hideHover(); });
+    charts.addEventListener('wheel', (e) => {
+      if (!geom) return;
+      e.preventDefault();
+      const r = charts.getBoundingClientRect();
+      zoomAt(geom.invX(clampX(e.clientX - r.left)), e.deltaY > 0 ? 1.2 : 1 / 1.2);
+    }, { passive: false });
+    charts.addEventListener('dblclick', (e) => { if (st.tool === 'pan' && !e.target.closest('[data-mark]')) resetZoom(); });
     charts.addEventListener('keydown', (e) => {
-      if (!geom || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+      if (!geom) return;
+      const zoom = { '+': 1 / 1.5, '=': 1 / 1.5, '-': 1.5, '_': 1.5 }[e.key];
+      if (zoom || e.key === '0') {
+        e.preventDefault();
+        e.stopPropagation();  // the chart's keys here, not the price chart's
+        if (zoom) zoomAt(centre(), zoom); else resetZoom();
+        return;
+      }
+      if (e.key === 'Escape' && (st.tool !== 'pan' || st.selected)) {
+        e.stopPropagation();  // put the tool down first; a second Escape leaves the view as before
+        st.tool = 'pan';
+        st.selected = null;
+        draw();
+        return;
+      }
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
       e.preventDefault();
       const i = st.hoverT == null ? geom.allT.length - 1 : nearest(geom.allT, st.hoverT);
       const j = e.key === 'Home' ? 0 : e.key === 'End' ? geom.allT.length - 1
         : Math.max(0, Math.min(geom.allT.length - 1, i + (e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 20 : 1)));
       showHover(geom.allT[j]);
     });
-    charts.addEventListener('blur', hideHover);
+    charts.addEventListener('blur', () => { if (!st.drag) hideHover(); });
+    document.addEventListener('keydown', (e) => {  // Delete removes the selected mark, wherever the focus is
+      if (document.body.dataset.view !== 'datasets' || !st.selected || !['Delete', 'Backspace'].includes(e.key)) return;
+      if (e.target.closest?.('input, select, textarea')) return;
+      e.preventDefault();
+      removeMark(st.selected);
+    });
     new ResizeObserver(() => { if (document.body.dataset.view === 'datasets') draw(); }).observe(charts);
   }
 

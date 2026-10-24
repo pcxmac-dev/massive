@@ -464,6 +464,30 @@ button.ds-item.on { box-shadow: inset 3px 0 0 var(--accent); }
 .ds-note { margin-top: 6px; flex: none; }
 .ds-table { max-height: 240px; overflow: auto; margin-top: 8px; flex: none; }
 .ds-empty { padding: 40px; text-align: center; }
+/* zoom and markup. Marks are drawn in the text ink, not the accent: the accent blue is close to the
+   first series colour, and a mark must never read as data. */
+.ds-bar .group button:disabled { opacity: .4; cursor: default; background: none; }
+.ds-tools button { display: inline-flex; align-items: center; padding: 3px 7px; }
+.ds-tools svg { display: block; }
+.ds-charts { cursor: grab; }
+.ds-charts.panning { cursor: grabbing; }
+.ds-charts.tool-draw { cursor: crosshair; }
+.ds-chart .ds-mark .mk { stroke: var(--text); stroke-width: 1.5; }
+.ds-chart .ds-mark.sel .mk { stroke-width: 2.75; }
+.ds-chart .ds-mark .hit { stroke: transparent; stroke-width: 12; pointer-events: stroke; cursor: pointer; }
+.ds-chart .ds-mark .zone { fill: var(--text); opacity: .08; pointer-events: none; }
+.ds-chart .ds-mark.sel .zone { opacity: .14; }
+.ds-chart .ds-mark .handle { fill: var(--text); opacity: .22; cursor: pointer; }
+.ds-chart .ds-mark.sel .handle { opacity: .45; }
+.ds-chart .ds-mark .end, .ds-chart .ds-mark .pin { fill: var(--text); }
+.ds-chart text.mk-label { fill: var(--text); font-size: 11px; pointer-events: none; }
+.ds-chart .ds-mark .note-bg { fill: var(--panel); stroke: var(--text); stroke-width: 1; cursor: pointer; }
+.ds-chart .ds-mark.sel .note-bg { stroke-width: 2; }
+.ds-chart text.note { fill: var(--text); font-size: 12px; cursor: pointer; }
+.ds-chart .ds-preview { stroke: var(--text); stroke-width: 1.5; stroke-dasharray: 4 3; fill: var(--text); fill-opacity: .08;
+  pointer-events: none; }
+.ds-note-input { position: absolute; z-index: 6; width: 220px; padding: 3px 6px; border: 1px solid var(--accent);
+  border-radius: 4px; background: var(--panel); color: var(--text); cursor: text; }
 @media (max-width: 760px) {
   .ds-body { flex-direction: column; }
   .ds-pick { width: auto; max-height: 200px; }
