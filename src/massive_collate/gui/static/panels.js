@@ -2,7 +2,9 @@
 /* The right-hand icon rail, like TradingView's. Each icon switches the main window:
 
      Stock     the chart, with the symbol (its own logo), key statistics and business beside it
-     Analysis  the chart, with the highlight's measurements and the bar under the cursor beside it
+     Analysis  the same symbol's chart with content of its own (interval, chart type, model,
+               indicators and their panes, zoom, drawings), the highlight's measurements and the
+               bar under the cursor beside it
      Markets   the world's exchanges on a globe turned to where it is noon now (globe.js)
      News      every announcement the globe's ticker shows (news.js)
      Datasets  research series drawn on one time axis: factors, CAPE, COT positioning (datasets.js)
@@ -29,6 +31,7 @@
     document.body.dataset.pane = name;
     document.body.dataset.view = view;
     prefs.set('pane', name);
+    if (view === 'chart') window.switchWorkspace?.(name);  // each chart view keeps its own content
     for (const v of document.querySelectorAll('main > .view')) v.hidden = v.dataset.view !== view;
     if (view === 'chart') {
       for (const p of document.querySelectorAll('#sidePanel .pane')) p.hidden = p.dataset.pane !== name;

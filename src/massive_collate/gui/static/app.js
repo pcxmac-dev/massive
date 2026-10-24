@@ -311,6 +311,14 @@ function typeQuery() {
 // -- models: price, 1st / 2nd derivative, integral (computed by the server) ------------
 const MODEL_DEFAULTS = { kind: 'price', basis: 'price', per: 'hour', detail: 80, gaps: true };
 state.model = { ...MODEL_DEFAULTS, ...prefs.get('model', {}) };
+
+// The Stock and Analysis views show the same symbol (and feed, session and futures adjustment) but
+// each has its own chart content: interval, chart type and settings, model, indicators and their
+// pane heights, zoom and position, and drawings. The active one lives in `state`; the other waits
+// in state.workspaces until its view is shown (see switchWorkspace).
+const WORKSPACES = ['stock', 'analysis'];
+state.workspace = WORKSPACES.includes(prefs.get('workspace')) ? prefs.get('workspace') : 'stock';
+state.workspaces = prefs.get('workspaces', {});
 // Chart types that only make sense for prices (bricks, Heikin Ashi, Kagi, P&F).
 const PRICE_ONLY_TYPES = new Set([...TRANSFORMED]);
 const CANDLE_LIKE = new Set(['candles', 'bars', 'hollow', 'volume_candles']);
@@ -327,10 +335,11 @@ function modelQuery() {
   return { model: m.kind, basis: m.basis, per: m.per, window: windowForDetail(m.detail), gaps: m.gaps ? 1 : 0 };
 }
 
-// Drawings are kept per model (a trend line on prices means nothing on a slope chart).
+// Drawings are kept per model (a trend line on prices means nothing on a slope chart) and per view.
 function drawingsKey() {
   const m = state.model;
-  return m.kind === 'price' ? state.ticker : `${state.ticker}|${m.kind}|${m.basis}|${m.per}`;
+  const key = m.kind === 'price' ? state.ticker : `${state.ticker}|${m.kind}|${m.basis}|${m.per}`;
+  return state.workspace === 'stock' ? key : `${state.workspace}:${key}`;
 }
 
 function windowSpan() {
@@ -1449,7 +1458,7 @@ async function apiWrite(method, path, body) {
 
 function snapshot() {
   return {
-    version: 1,
+    version: 2,  // 2: each chart view's own content in `workspaces` (the top-level fields: the active one)
     symbol: state.ticker ? { ticker: state.ticker, source: state.source } : null,
     period: state.period,
     session: state.session,
@@ -1459,8 +1468,84 @@ function snapshot() {
     model: { ...state.model },
     indicators: [...state.indicators],
     drawings: layout.current?.data.drawings || {},
+    workspace: state.workspace,
+    workspaces: { ...state.workspaces, [state.workspace]: captureWorkspace() },
   };
 }
+
+// -- workspaces: the chart views' own content ---------------------------------------------
+const samePeriod = (a, b) => !!a && !!b && a.type === b.type && a.span === b.span;
+
+function captureWorkspace() {
+  const data = chart.getDataList();
+  const { to } = chart.getVisibleRange();
+  const edge = data[Math.min(data.length - 1, Math.max(0, to - 1))];  // right-most visible bar
+  const paneHeight = Object.fromEntries((chart.getPaneOptions() || []).map((p) => [p.id, p.height]));
+  const heights = {};
+  for (const ind of chart.getIndicators() || []) {
+    if (state.indicators.includes(ind.name) && ind.paneId !== 'candle_pane' && paneHeight[ind.paneId]) {
+      heights[ind.name] = paneHeight[ind.paneId];
+    }
+  }
+  const x = edge ? chart.convertToPixel({ timestamp: edge.timestamp }, { paneId: 'candle_pane' }).x : null;
+  return {
+    period: state.period, chartType: state.chartType, typeParams: { ...state.typeParams }, model: { ...state.model },
+    indicators: [...state.indicators], heights, lod: state.lod,
+    view: data.length ? { barSpace: chart.getBarSpace().bar, anchor: edge ? edge.timestamp : null,
+                          anchorX: Number.isFinite(x) ? x : null, atLatest: to >= data.length } : null,
+  };
+}
+
+// A view shown for the first time: the same interval and chart type, plain prices, no indicators.
+function defaultWorkspace() {
+  return { period: state.period, chartType: state.chartType, typeParams: { ...state.typeParams },
+           model: { ...MODEL_DEFAULTS }, indicators: [], heights: {}, lod: 1, view: null };
+}
+
+function applyWorkspace(ws) {
+  const before = { period: state.period, model: JSON.stringify(state.model) };
+  for (const name of state.indicators) chart.removeIndicator({ name });
+  state.indicators = [...(ws.indicators || [])];
+  state.indicators.forEach(addIndicator);
+  for (const [name, height] of Object.entries(ws.heights || {})) {
+    const ind = (chart.getIndicators() || []).find((i) => i.name === name && i.paneId !== 'candle_pane');
+    if (ind) chart.setPaneOptions({ id: ind.paneId, height });
+  }
+  if (ws.period && (!state.meta || state.meta.periods.some((p) => samePeriod(p, ws.period)))) state.period = ws.period;
+  if (ws.chartType) state.chartType = ws.chartType;
+  state.typeParams = { ...(ws.typeParams || {}) };
+  state.model = { ...MODEL_DEFAULTS, ...(ws.model || {}) };
+  prefs.set('period', state.period); prefs.set('chartType', state.chartType); prefs.set('typeParams', state.typeParams);
+  prefs.set('model', state.model); prefs.set('indicators', state.indicators);
+  $('typeSelect').value = state.chartType;
+  state.styleUsed = null;
+  renderPeriods();
+  renderModelControls();
+  applyChartType();
+  renderTypeParams();
+  renderIndicatorMenu();
+  state.restoredFor = null;
+  chart.removeOverlay({ groupId: 'user' });  // the view's own drawings come back after the reload
+  state.lod = ws.lod || 1;
+  state.lodSwitch = ws.view ? { ...ws.view } : null;  // its zoom and position, restored once loaded
+  if (!state.ticker) return;
+  if (!samePeriod(before.period, state.period)) chart.setPeriod(state.period);
+  else if (before.model !== JSON.stringify(state.model)) reloadWithModelPrecision();
+  else chart.resetData();
+}
+
+function switchWorkspace(to) {
+  if (!WORKSPACES.includes(to) || to === state.workspace) return;
+  saveDrawings();  // under the outgoing view's key
+  state.workspaces[state.workspace] = captureWorkspace();
+  const ws = state.workspaces[to] || defaultWorkspace();
+  state.workspace = to;
+  prefs.set('workspace', to);
+  applyWorkspace(ws);
+  prefs.set('workspaces', state.workspaces);
+  markDirty();
+}
+window.switchWorkspace = switchWorkspace;
 
 function markDirty() {
   if (!layout.current || state.applyingLayout) return;
@@ -1497,8 +1582,11 @@ function renderLayoutButton() {
 async function applyLayout(l) {
   state.applyingLayout = true;
   try {
-    const d = l.data || {};
-    layout.current = { ...l, data: { drawings: {}, ...d } };
+    const saved = l.data || {};
+    state.workspaces = { ...(saved.workspaces || {}) };  // every chart view's content, this one's applied below
+    prefs.set('workspaces', state.workspaces);
+    const d = { ...saved, ...(saved.workspaces?.[state.workspace] || {}) };
+    layout.current = { ...l, data: { drawings: {}, ...saved } };
     layout.dirty = false;
     prefs.set('layoutId', l.id);
     if (d.period) state.period = d.period;
