@@ -156,6 +156,16 @@ class MassiveSource(DataSource):
             out["quotes"] = False
         return out
 
+    def oldest_day(self, ticker: str = "AAPL", today: date | None = None) -> date | None:
+        """The first day of a ticker's daily bars the plan serves (one request): where the
+        source's history begins, for a symbol listed long before it."""
+        today = today or datetime.now(timezone.utc).date()
+        try:
+            page = next(iter(self._bar_pages(ticker, date(1970, 1, 2), today, "day", 1, False, limit=1)), [])
+        except NotEntitled:
+            return None
+        return datetime.fromtimestamp(page[0]["t"] / 1000, _ET).date() if page else None
+
     def trade_pages(self, ticker, gte_ns=None, lt_ns=None, descending=False):
         return self._trade_pages(ticker, gte_ns, lt_ns, descending)
 

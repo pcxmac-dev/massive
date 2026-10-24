@@ -123,3 +123,21 @@ def test_a_new_plan_has_its_refusals_asked_again(store):
     cli._note_tier(store, load_settings(env={"MASSIVE_TIER": "developer"}, env_file=None), log.append)
     assert store.conn.execute("SELECT COUNT(*) FROM entitlements").fetchone()[0] == 0
     assert store.grouped_days("massive") == {} and "free -> developer" in log[0]
+
+
+def test_an_unlimited_plan_reaches_back_to_where_its_history_begins():
+    from massive_collate.collector import history_floor
+    from massive_collate.config import PUBLIC_FEEDS
+
+    assert history_floor(TIERS["advanced"], TODAY) == date(2003, 9, 10)  # all of Massive's stock history
+    assert history_floor(TIERS["developer"], TODAY) == date(2016, 10, 25)  # ten years, a day inside
+    assert history_floor(PUBLIC_FEEDS["tiingo"][0], TODAY) == date(1962, 1, 1)
+
+
+def test_the_oldest_daily_bar_dates_the_start_of_a_sources_history():
+    class Client:
+        def pages(self, path, params, **kw):
+            assert "/range/1/day/1970-01-02/" in path and params["sort"] == "asc" and params["limit"] == 1
+            yield [{"t": int(datetime(2003, 9, 10, tzinfo=ET).timestamp() * 1000)}]
+
+    assert MassiveSource(Client()).oldest_day("AAPL", today=TODAY) == date(2003, 9, 10)

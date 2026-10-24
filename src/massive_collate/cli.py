@@ -222,7 +222,7 @@ def _note_tier(store: Store, settings: Settings, log) -> None:
 
 
 def cmd_plan(args, settings: Settings) -> int:
-    """Which Massive stocks plan the key has, from what it may ask for (seven small requests),
+    """Which Massive stocks plan the key has, from what it may ask for (eight small requests),
     next to MASSIVE_TIER, which sets how far back the collector reaches."""
     import json
 
@@ -234,9 +234,11 @@ def cmd_plan(args, settings: Settings) -> int:
             return 0
         reach = source.plan_reach(args.ticker)
         found = tier_for(reach)
+        oldest = source.oldest_day(args.ticker)
         log("plan: " + ", ".join(f"{k} {'yes' if v else 'no'}" for k, v in reach.items()) + f" -> {found}")
         store.kv_set("plan:massive", json.dumps({"at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                                                 "reach": reach, "tier": found}))
+                                                 "reach": reach, "tier": found, "oldest": str(oldest)}))
+        print(f"{args.ticker}'s daily bars begin {oldest or 'nowhere on this plan'}")
         years = TIERS[found].history_years
         print(f"Massive plan found: {found} ({f'{years} years' if years else 'all'} of history); "
               f"MASSIVE_TIER is {settings.tier.name}")
@@ -891,7 +893,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-browser", action="store_true")
     s.set_defaults(func=cmd_gui)
 
-    s = sub.add_parser("plan", help="find which Massive plan your key has (seven small requests)")
+    s = sub.add_parser("plan", help="find which Massive plan your key has (eight small requests)")
     s.add_argument("--ticker", default="AAPL", help="a symbol with long history (default AAPL)")
     s.set_defaults(func=cmd_plan)
 

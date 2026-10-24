@@ -50,13 +50,18 @@ def now_et() -> datetime:
 
 
 def history_floor(tier: Tier, today: date) -> date:
-    """Oldest date we may request on this plan (one day of margin inside the limit)."""
-    years = tier.history_years or UNLIMITED_BACKFILL_YEARS
-    try:
-        floor = today.replace(year=today.year - years)
-    except ValueError:  # 29 February
-        floor = today.replace(year=today.year - years, day=28)
-    floor += timedelta(days=1)
+    """Oldest date we may request on this plan (one day of margin inside a plan's years). A plan
+    without a limit reaches back to where its source's history begins (`history_start`), or
+    UNLIMITED_BACKFILL_YEARS when that is not known."""
+    if tier.history_years is None and tier.history_start:
+        floor = tier.history_start
+    else:
+        years = tier.history_years or UNLIMITED_BACKFILL_YEARS
+        try:
+            floor = today.replace(year=today.year - years)
+        except ValueError:  # 29 February
+            floor = today.replace(year=today.year - years, day=28)
+        floor += timedelta(days=1)
     if tier.history_days:
         floor = max(floor, today - timedelta(days=tier.history_days))
     return max(floor, tier.history_start) if tier.history_start else floor

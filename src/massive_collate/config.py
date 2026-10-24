@@ -64,7 +64,7 @@ class Tier:
     history_days: int | None = None  # collect only this far back (a case-study venue feed)
 
 
-# Backfill depth used when a plan has no history limit.
+# Backfill depth used when a plan has no history limit and its source no known start.
 UNLIMITED_BACKFILL_YEARS = 20
 
 # Stocks plan limits. Check your plan on massive.com and override with
@@ -73,7 +73,8 @@ TIERS: dict[str, Tier] = {
     "free": Tier("free", requests_per_minute=5, history_years=2),
     "starter": Tier("starter", requests_per_minute=None, history_years=5),
     "developer": Tier("developer", requests_per_minute=None, history_years=10),
-    "advanced": Tier("advanced", requests_per_minute=None, history_years=None),
+    # Advanced: all of Massive's stock history, which begins 2003-09-10 (`plan`, 2026-10-24).
+    "advanced": Tier("advanced", requests_per_minute=None, history_years=None, history_start=date(2003, 9, 10)),
 }
 
 
