@@ -71,11 +71,13 @@
       ? `Fetcher: running${activity.live?.current ? `, fetching ${activity.live.current}` : ''}`
       : 'Fetcher: historical data (sessions before the current one)';
     const live = activity?.liveFeeds;
-    $('railLive').innerHTML = icon('record', 20);
+    if (!$('railLive').querySelector('svg')) $('railLive').insertAdjacentHTML('afterbegin', icon('record', 20));
+    window.LiveIcon?.update(isLive());  // the open symbol streaming: the icon's effect runs
     $('railLive').classList.toggle('recording', !!live?.recording);
     $('railLive').classList.toggle('available', !!live?.available && !live?.recording);
-    $('railLive').title = live?.recording ? 'Live feeds: recording the current session'
-      : live?.available ? 'Live feeds: delayed data available, not recording' : 'Live feeds: none on your plan';
+    $('railLive').title = isLive() ? `Live feeds: ${state.ticker} is streaming now`
+      : live?.recording ? 'Live feeds: recording the current session'
+        : live?.available ? 'Live feeds: delayed data available, not recording' : 'Live feeds: none on your plan';
   }
 
   document.getElementById('rail').addEventListener('click', (e) => {

@@ -567,3 +567,10 @@ table.l2 .l2-bar { position: absolute; left: 0; top: 2px; bottom: 2px; backgroun
 table.l2 .l2-vol span:last-child { position: relative; }
 table.l2 tr.at td { background: color-mix(in srgb, var(--accent, #2962ff) 18%, transparent); font-weight: 600; }
 .l2-note { margin-top: 4px; }
+/* The Live rail icon's effect: a canvas over the icon, inside its own box. */
+#railLive canvas.live-fx { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); pointer-events: none; }
+#railLive.fx { opacity: 1; color: var(--down); }
+.live-effect { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.live-effect button { font-size: 12px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px; background: none; color: var(--text); cursor: pointer; }
+.live-effect button.active { border-color: var(--accent); color: var(--accent); }
+#railLive.fx[data-effect="heartbeat"] svg { opacity: .3; }

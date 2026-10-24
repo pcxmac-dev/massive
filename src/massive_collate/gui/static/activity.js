@@ -393,7 +393,11 @@
     const names = { stock: 'Stocks', index: 'Indices', fx: 'Forex', future: 'Futures' };
     box.innerHTML = `
       <div class="view-head"><div><h2>Live feeds</h2>
-        <div class="p-muted small">The current session, as it happens. The fetcher handles everything before it.</div></div></div>
+        <div class="p-muted small">The current session, as it happens. The fetcher handles everything before it.</div></div>
+        ${window.LiveIcon ? `<div class="live-effect" role="group" aria-label="Rail icon effect while the open symbol streams">
+          <span class="p-muted small">Icon while streaming</span>
+          ${Object.entries(window.LiveIcon.EFFECTS).map(([k, label]) => `<button type="button" data-effect="${k}"
+            class="${window.LiveIcon.effect === k ? 'active' : ''}">${esc(label)}</button>`).join('')}</div>` : ''}</div>
       <div class="act-status"><span class="rec ${live.recording ? 'on' : ''}"></span>
         <b>${live.recording ? 'Recording' : 'Not recording'}</b>
         <span class="p-muted">${live.recording ? 'current-session data is captured as it arrives'
@@ -468,6 +472,12 @@
 
   document.addEventListener('click', (e) => {
     if (e.target.closest('#scanBtn')) { startScan(); return; }
+    const fx = e.target.closest('#viewLive .live-effect button[data-effect]');
+    if (fx) {
+      window.LiveIcon.set(fx.dataset.effect);
+      for (const b of fx.parentElement.querySelectorAll('button')) b.classList.toggle('active', b === fx);
+      return;
+    }
     const item = e.target.closest('#actSymbols tr.has-data, #viewLive tr.has-data');
     if (item) window.dispatchEvent(new CustomEvent('massive:open-symbol', { detail: item.dataset.ticker }));
   });
