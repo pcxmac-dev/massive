@@ -85,6 +85,12 @@ as it stood at any moment (`as_of`), for backtests that see only what was known 
 computed here (bars built from ticks, the composite model, quality scores, audits) are kept apart
 from what the sources published and record how they were made: inputs, code version (git commit)
 and settings (`python -m massive_collate provenance`).
+Every standard frame (1 s to 1 year) is kept for every series: the ones a feed sends as it sent
+them, the others built here, upward only, from that feed's finer bars and marked derived (a gap
+in the finer data stays a gap). The sync builds a symbol's frames as soon as its fetch is stored.
+`python -m massive_collate inventory TICKER` (and "Data by feed" in the chart's side panel) shows,
+feed by feed and frame by frame, what was sent, what was derived and from what, and what is not
+built yet.
 A database from before this layout is moved once with `admin split-feeds` (it backs up first,
 checks every copy against its original, and only then removes the old copies); until then the
 app refuses to open it.

@@ -185,7 +185,8 @@ def test_a_feeds_own_frames_are_collected_and_replace_the_built_ones(store):
     conn = store._bars("fake")
     got = dict(conn.execute("SELECT timespan || multiplier, COUNT(*) FROM bars GROUP BY 1").fetchall())
     assert got["minute5"] == 1 and got["hour1"] == 1
-    assert conn.execute("SELECT COUNT(*) FROM built_bars WHERE multiplier=5").fetchone()[0] == 0  # replaced
+    built = conn.execute("SELECT ts FROM built_bars WHERE timespan='minute' AND multiplier=5").fetchall()
+    assert built == [(t(5),)]  # the feed's 10:00 replaced the built one; 10:05, which it did not send, is built
     assert store.coverage("SPCX", "minute:5", received_only=True).get("fake")
 
 
