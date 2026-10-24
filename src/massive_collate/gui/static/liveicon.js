@@ -1,5 +1,5 @@
 // The Live rail icon comes alive while the open symbol is streaming, in one of two effects
-// (chosen in the Live view, kept per viewer):
+// (chosen in the Live view, kept per viewer; the heartbeat unless another is chosen):
 //  - ROYGBIV pulse: a red dot beating at the centre; rings spread out from it through red,
 //    orange, yellow, green, blue, indigo and violet, brighter where they cross the icon's
 //    disc and ring, darker elsewhere, fading to the background just past the outer ring.
@@ -10,13 +10,13 @@
 (() => {
   'use strict';
 
-  const EFFECTS = { pulse: 'ROYGBIV pulse', heartbeat: 'Heartbeat', off: 'Off' };
+  const EFFECTS = { heartbeat: 'Heartbeat', pulse: 'ROYGBIV pulse', off: 'Off' };
   const ROYGBIV = ['#ff2a2a', '#ff8c1a', '#ffe11a', '#2bd451', '#2f7bff', '#4b33d6', '#9b3cff'];
   const SIZE = 20;  // the icon is drawn 20 px wide from a 24-unit box
   const OUTER = 9, DISC = 4, BAND = 1, EDGE = 10.8;  // the icon's ring and disc (units); fades end at EDGE
   const RED = '#ff3b3b';
   const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)');
-  let effect = EFFECTS[prefs.get('liveEffect', 'pulse')] ? prefs.get('liveEffect', 'pulse') : 'pulse';
+  let effect = EFFECTS[prefs.get('liveEffect', 'heartbeat')] ? prefs.get('liveEffect', 'heartbeat') : 'heartbeat';
   let active = false, frame = 0, canvas = null, ctx = null, dpr = 1;
   const t0 = performance.now();
 
