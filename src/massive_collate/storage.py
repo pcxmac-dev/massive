@@ -232,7 +232,7 @@ CREATE TABLE IF NOT EXISTS coverage (
     timespan  TEXT    NOT NULL,   -- trades | second | minute | day
     start_ms  INTEGER NOT NULL,
     end_ms    INTEGER NOT NULL,
-    origin    TEXT    NOT NULL DEFAULT 'download',  -- download | ticks (bars built here from stored ticks)
+    origin    TEXT    NOT NULL DEFAULT 'download',  -- download | ticks (built here from its ticks) | none (asked: this feed has nothing there)
     PRIMARY KEY (source, ticker, timespan, start_ms)
 );
 CREATE INDEX IF NOT EXISTS coverage_series ON coverage (ticker, timespan);
@@ -282,6 +282,8 @@ CREATE TABLE IF NOT EXISTS runs (
 # Columns added after the first release: (table, column, type). Applied to older databases on open.
 MIGRATIONS = [
     ("coverage", "origin", "TEXT NOT NULL DEFAULT 'download'"),
+    # A closed feed's symbol: everything it should hold is in; it is not asked again.
+    ("watchlist", "closed_at", "TEXT"),
     ("watchlist", "exchange", "TEXT"),
     ("watchlist", "listed_from", "TEXT"),
     ("watchlist", "figi", "TEXT"),
@@ -689,7 +691,7 @@ class Store:
     def watchlist(self, source: str | None = None) -> list[dict]:
         sql = (
             "SELECT source, ticker, resolution, backfilled_to, exchange, listed_from, figi, checked_at, "
-            "name, kind, asset, source_ticker, invert, rank, synced_at FROM watchlist"
+            "name, kind, asset, source_ticker, invert, rank, synced_at, closed_at FROM watchlist"
         )
         params: list = []
         if source:
@@ -703,8 +705,9 @@ class Store:
             {"source": s, "ticker": t, "resolution": r, "backfilled_to": d(b), "exchange": e,
              "listed_from": d(lf), "figi": f, "checked_at": d(c), "name": n, "kind": k,
              "asset": a or "stock", "source_ticker": st or t, "invert": bool(inv), "rank": rk or 1,
-             "synced_at": datetime.fromisoformat(sy) if sy else None}
-            for s, t, r, b, e, lf, f, c, n, k, a, st, inv, rk, sy
+             "synced_at": datetime.fromisoformat(sy) if sy else None,
+             "closed_at": datetime.fromisoformat(cl) if cl else None}
+            for s, t, r, b, e, lf, f, c, n, k, a, st, inv, rk, sy, cl
             in self.conn.execute(sql + " ORDER BY source, ticker", params)
         ]
 
@@ -753,6 +756,16 @@ class Store:
     def set_resolution(self, source: str, ticker: str, resolution: str) -> None:
         self.watch(source, [ticker], resolution)
 
+    def set_closed(self, source: str, ticker: str | None, when: datetime | None) -> int:
+        """Close a feed's symbol (or, with ticker None, reopen/close all of the feed's symbols)."""
+        sql = "UPDATE watchlist SET closed_at=? WHERE source=?"
+        args = [when.isoformat() if when else None, source]
+        if ticker:
+            sql += " AND ticker=?"
+            args.append(ticker.upper())
+        with self.conn:
+            return self.conn.execute(sql, args).rowcount
+
     def reset_backfill(self, source: str, ticker: str) -> None:
         self.set_backfilled(source, ticker, None)
 
@@ -786,19 +799,47 @@ class Store:
             self.conn.execute("INSERT OR REPLACE INTO coverage (source, ticker, timespan, start_ms, end_ms, origin) "
                               "VALUES (?, ?, ?, ?, ?, ?)", (*key, lo, hi, origin))
 
+    def mark_empty_heads(self, min_ms: int = 7 * 86_400_000) -> int:
+        """Downloaded spans whose first stored bar comes long after the span starts (the feed's
+        history begins later than it was asked for): the empty head becomes 'none' for that feed,
+        so another feed may fill it. Returns spans changed."""
+        rows = self.conn.execute("SELECT source, ticker, timespan, start_ms, end_ms FROM coverage "
+                                 "WHERE origin='download' AND timespan IN ('minute', 'day', 'second')").fetchall()
+        changed = 0
+        for src, ticker, ts, a, b in rows:
+            first = self.conn.execute("SELECT MIN(ts) FROM bars WHERE source=? AND ticker=? AND timespan=? AND multiplier=1 "
+                                      "AND ts >= ? AND ts < ?", (src, ticker, ts, a, b)).fetchone()[0]
+            head_end = first if first is not None else b
+            if head_end - a < min_ms:
+                continue
+            with self.conn:
+                self.conn.execute("DELETE FROM coverage WHERE source=? AND ticker=? AND timespan=? AND start_ms=?",
+                                  (src, ticker, ts, a))
+            self.add_coverage(src, ticker, ts, a, head_end, origin="none")
+            if first is not None:
+                self.add_coverage(src, ticker, ts, first, b)
+            changed += 1
+        return changed
+
     def coverage_detail(self, ticker: str, timespan: str) -> list[tuple[str, str, int, int]]:
         """(feed, origin, start, end) for every span of a series, oldest first (for attribution)."""
         self._seed_coverage(ticker.upper(), timespan)
         return [tuple(r) for r in self.conn.execute(
-            "SELECT source, origin, start_ms, end_ms FROM coverage WHERE ticker=? AND timespan=? ORDER BY start_ms",
+            "SELECT source, origin, start_ms, end_ms FROM coverage WHERE ticker=? AND timespan=? AND origin != 'none' "
+            "ORDER BY start_ms",
             (ticker.upper(), timespan))]
 
-    def coverage(self, ticker: str, timespan: str, source: str | None = None) -> dict[str, list[tuple[int, int]]]:
-        """{feed: [(start, end), ...]} for a series, oldest first. Series stored before the ledger
-        existed are entered from their stored range first (`_seed_coverage`)."""
+    def coverage(self, ticker: str, timespan: str, source: str | None = None,
+                 include_none: bool = False) -> dict[str, list[tuple[int, int]]]:
+        """{feed: [(start, end), ...]} for a series, oldest first: the spans each feed holds. With
+        `include_none`, also the spans a feed was asked for and has nothing in (its history starts
+        later): done for that feed, still open for others. Series stored before the ledger existed
+        are entered from their stored range first (`_seed_coverage`)."""
         ticker = ticker.upper()
         self._seed_coverage(ticker, timespan)
         sql = "SELECT source, start_ms, end_ms FROM coverage WHERE ticker=? AND timespan=?"
+        if not include_none:
+            sql += " AND origin != 'none'"
         args: list = [ticker, timespan]
         if source:
             sql += " AND source=?"

@@ -21,6 +21,10 @@ Settings come from environment variables, optionally loaded from a `.env` file
     TICK_MIN_FREE_GB  tick backfill pauses when the disk has less free space (default: 250); below
                       a fifth of it no ticks are downloaded at all
 
+Public historical sources (closed feeds: they fill history nobody else holds, then are not asked
+again): Bitstamp (crypto minute bars from 2011) and Cboe (index daily history) need nothing;
+    TIINGO_API_KEY    a free tiingo.com account key: US stock daily bars from 1962 (environment only)
+
 Alpaca (second feed; stocks and crypto). Keys are only ever read from the environment:
     ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY   (Alpaca's own APCA_API_KEY_ID / APCA_API_SECRET_KEY
                       also work). Without them only crypto is collected (it needs no key).
@@ -75,6 +79,15 @@ ALPACA_TIERS: dict[str, Tier] = {
                              history_start=date(2016, 1, 1)),
 }
 ALPACA_FEEDS = ("sip", "iex")
+
+# Public historical sources: (plan, max requests per run, per day). Bitstamp allows 8,000 requests
+# per 10 minutes, Tiingo's free plan 50 an hour and 1,000 a day; well inside both.
+PUBLIC_FEEDS: dict[str, tuple[Tier, int, int]] = {
+    "bitstamp": (Tier("bitstamp-public", requests_per_minute=300, history_years=None,
+                      history_start=date(2011, 8, 1)), 8000, 20000),
+    "cboe": (Tier("cboe-public", requests_per_minute=30, history_years=None, history_start=date(1990, 1, 1)), 50, 200),
+    "tiingo": (Tier("tiingo-free", requests_per_minute=None, history_years=None, history_start=date(1962, 1, 1)), 45, 900),
+}
 ALPACA_CRYPTO_LOCS = ("us-1", "eu-1", "us")
 
 
@@ -99,6 +112,7 @@ class Settings:
     audits_random_per_run: int = 1
     tick_history_days: int = 365
     tick_min_free_gb: int = 250
+    tiingo_api_key: str | None = field(default=None, repr=False)
 
     # The settings a feed view was made from, so any view can switch to another feed.
     origin: "Settings | None" = field(default=None, compare=False, repr=False)
@@ -106,6 +120,9 @@ class Settings:
     def for_source(self, name: str) -> "Settings":
         """These settings as seen by one feed: its plan, rate and request caps."""
         base = self.origin or self
+        if name in PUBLIC_FEEDS:
+            tier, per_run, per_day = PUBLIC_FEEDS[name]
+            return replace(base, tier=tier, max_requests_per_run=per_run, max_requests_per_day=per_day, origin=base)
         if name == "alpaca" and base.alpaca:
             a = base.alpaca
             return replace(base, tier=a.tier, max_requests_per_run=a.max_requests_per_run,
@@ -222,6 +239,7 @@ def load_settings(
         audits_random_per_run=_default(_int_setting(merged, "AUDITS_RANDOM_PER_RUN"), 1),
         tick_history_days=_default(_int_setting(merged, "TICK_HISTORY_DAYS"), 365),
         tick_min_free_gb=_default(_int_setting(merged, "TICK_MIN_FREE_GB"), 250),
+        tiingo_api_key=merged.get("TIINGO_API_KEY") or None,
     )
 
 

@@ -17,7 +17,7 @@ from .config import ConfigError, Settings, load_settings
 from .errors import SourceError
 from .sessions import ET
 from .symbols import resolve
-from .sources import BUILDERS, SUPPORTED_ASSETS, DataSource, build_source, feed_profiles
+from .sources import ARCHIVAL, BUILDERS, DataSource, build_source, feed_profiles, supports
 from .storage import Store, ticks_backup_path
 
 TASK_NAME = "MassiveCollateSync"
@@ -159,8 +159,8 @@ def cmd_watch(args, settings: Settings) -> int:
             if args.action == "add":
                 store.watch_spec(args.source, spec, args.resolution)
                 if getattr(args, "every_feed", False):  # also on every other feed that can collect it
-                    for feed, assets in SUPPORTED_ASSETS.items():
-                        if feed != args.source and spec.asset in assets:
+                    for feed in BUILDERS:
+                        if feed != args.source and supports(feed, spec):
                             store.watch_spec(feed, spec, "auto")
             elif args.action == "remove":
                 store.unwatch(args.source, [spec.ticker])
@@ -174,6 +174,8 @@ def cmd_sync(args, settings: Settings) -> int:
     names = list(BUILDERS) if args.all_sources else [args.source]
     ran, errors = 0, []
     for name in names:
+        if args.all_sources and _feed_closed(settings, name):
+            continue  # a closed feed: every symbol's archive is complete; not contacted
         args.source = name
         try:
             with api_run(args, settings, "sync") as (source, store, log):
@@ -204,6 +206,37 @@ def cmd_sync(args, settings: Settings) -> int:
     return 0
 
 
+def _feed_closed(settings: Settings, name: str) -> bool:
+    """A closed feed (public archive) whose symbols are all closed, or that has none: nothing to ask."""
+    if name not in ARCHIVAL:
+        return False
+    with Store(settings.db_path) as store:
+        rows = store.watchlist(name)
+    return all(w.get("closed_at") for w in rows)
+
+
+def cmd_feeds(args, settings: Settings) -> int:
+    """Every feed, its state and plan; `reopen` lets a closed feed (or one of its symbols) fill again."""
+    with Store(settings.db_path) as store:
+        if args.action == "reopen":
+            if args.name not in BUILDERS:
+                print(f"unknown feed {args.name}")
+                return 1
+            n = store.set_closed(args.name, resolve(args.ticker).ticker if args.ticker else None, None)
+            print(f"{args.name}: {n} symbols reopened; the next sync fills what they still lack")
+            return 0
+        profiles = feed_profiles(settings)
+        for name in BUILDERS:
+            rows = store.watchlist(name)
+            shut = sum(1 for w in rows if w.get("closed_at"))
+            kind = "closed feed (public archive)" if name in ARCHIVAL else "live feed"
+            state = ("closed: archive complete" if rows and shut == len(rows) else "nothing watched" if not rows
+                     else f"{shut} of {len(rows)} symbols closed" if name in ARCHIVAL else "open")
+            served = ", ".join(sorted(profiles[name].assets)) if name in profiles and profiles[name].assets else "-"
+            print(f"{name:9} {kind:29} {settings.for_source(name).tier.name:16} serves: {served:28} {state}")
+    return 0
+
+
 def _scan_table(result: collector.ScanResult) -> None:
     order = {"behind": 0, "empty": 1, "current": 2}
     print()
@@ -225,6 +258,8 @@ def cmd_scan(args, settings: Settings) -> int:
     With --all-sources every configured feed is scanned in turn (each only for its own spans)."""
     if getattr(args, "all_sources", False):
         for name in feed_profiles(settings):
+            if name in ARCHIVAL:
+                continue  # closed feeds are not rechecked
             args.source = name
             _scan_one(args, settings)
         return 0
@@ -570,6 +605,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--auditor", choices=sorted(BUILDERS), help="feed asked for the second copy (default: --source)")
     s.add_argument("--list", action="store_true", help="show recent audits instead of running one")
     s.set_defaults(func=cmd_audit)
+
+    s = sub.add_parser("feeds", help="list the feeds and their state; reopen a closed one")
+    s.add_argument("action", nargs="?", default="list", choices=["list", "reopen"])
+    s.add_argument("name", nargs="?", help="reopen: the feed")
+    s.add_argument("ticker", nargs="?", help="reopen: only this symbol")
+    s.set_defaults(func=cmd_feeds)
 
     s = sub.add_parser("deps", help="check every external dependency (data feeds, calendars, icons, files)")
     s.set_defaults(func=cmd_deps)

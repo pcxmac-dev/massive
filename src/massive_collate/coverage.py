@@ -111,7 +111,15 @@ def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, ass
     lo, hi = day_start_ms(floor), frontier_ms(asset, me.tier, now, timespan)
     gaps = [(lo, hi)] if lo < hi else []
     held = [s for spans in store.coverage(ticker, timespan).values() for s in spans]
+    # what this feed already asked for and found empty is done for it (not for others)
+    held += store.coverage(ticker, timespan, source=me.name, include_none=True).get(me.name, [])
     gaps = subtract(gaps, held)
+    nothing = store.coverage(ticker, timespan, include_none=True)  # feeds' spans incl. their empty ones
+    holds = store.coverage(ticker, timespan)
+
+    def empty(feed: str) -> list[tuple[int, int]]:
+        """Where a feed was asked and has nothing: a better-ranked feed does not stand in the way there."""
+        return subtract(nothing.get(feed, []), holds.get(feed, []))
     watch = {(w["source"], w["ticker"]): w for w in store.watchlist() if w["ticker"] == ticker.upper()}
     if gaps and timespan in ("minute", "second"):
         # Bars are built here from ticks: the window a feed collects ticks for is not downloaded
@@ -125,7 +133,10 @@ def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, ass
                 if listed_from:
                     f_floor = max(f_floor, listed_from)
                 t_lo = tick_floor(store, f, ticker, today, f_floor)
-                gaps = subtract(gaps, [(day_start_ms(t_lo), frontier_ms(asset, f.tier, now, "minute"))])
+                window = [(day_start_ms(t_lo), frontier_ms(asset, f.tier, now, "minute"))]
+                ticks_none = store.coverage(ticker, "trades", source=f.name, include_none=True).get(f.name, [])
+                ticks_held = store.coverage(ticker, "trades").get(f.name, [])
+                gaps = subtract(gaps, subtract(window, subtract(ticks_none, ticks_held)))
     if gaps:
         scores = store.audit_scores()
         mine = rank(me, (watch.get((me.name, ticker.upper())) or {}).get("resolution", "auto"), scores)
@@ -138,6 +149,7 @@ def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, ass
             p_floor = history_floor(peer.tier, today)
             if listed_from:
                 p_floor = max(p_floor, listed_from)
-            gaps = subtract(gaps, [(day_start_ms(p_floor), frontier_ms(asset, peer.tier, now, timespan))])
+            window = [(day_start_ms(p_floor), frontier_ms(asset, peer.tier, now, timespan))]
+            gaps = subtract(gaps, subtract(window, empty(peer.name)))
     step = STEP_MS.get(timespan, 60_000)
     return [(a, b) for a, b in gaps if b - a >= step]

@@ -9,6 +9,7 @@ from ..symbols import ASSETS
 from ..ratelimit import RateLimiter
 from .base import RESOLUTIONS, DataSource
 from .alpaca import TRADING_URLS, AlpacaClient, AlpacaSource
+from .public import BitstampSource, CboeSource, PublicClient, TiingoSource
 from .massive import MassiveClient, MassiveSource
 
 
@@ -32,15 +33,54 @@ def _build_alpaca(settings: Settings, request_budget: int | None) -> DataSource:
     return AlpacaSource(client, feed=a.feed, crypto_loc=a.crypto_loc, realtime=a.tier.name == "alpaca-plus")
 
 
+def _build_bitstamp(settings: Settings, request_budget: int | None) -> DataSource:
+    tier = settings.for_source("bitstamp").tier
+    return BitstampSource(PublicClient("https://www.bitstamp.net/api/v2", rate_limiter=RateLimiter(tier.requests_per_minute),
+                                       request_budget=request_budget))
+
+
+def _build_cboe(settings: Settings, request_budget: int | None) -> DataSource:
+    tier = settings.for_source("cboe").tier
+    return CboeSource(PublicClient("https://cdn-api.cboe.com/api/global/us_indices/daily_prices",
+                                   rate_limiter=RateLimiter(tier.requests_per_minute), request_budget=request_budget))
+
+
+def _build_tiingo(settings: Settings, request_budget: int | None) -> DataSource:
+    key = settings.tiingo_api_key
+    headers = {"Authorization": f"Token {key}"} if key else {}
+    return TiingoSource(PublicClient("https://api.tiingo.com", headers=headers, request_budget=request_budget,
+                                     rate_limiter=RateLimiter(45, period=3600.0)), has_key=bool(key))
+
+
 BUILDERS: dict[str, Callable[[Settings, int | None], DataSource]] = {
     "massive": _build_massive,
     "alpaca": _build_alpaca,
+    "bitstamp": _build_bitstamp,
+    "cboe": _build_cboe,
+    "tiingo": _build_tiingo,
 }
+# Closed feeds (public archives): each symbol is filled once, then never asked again.
+ARCHIVAL = frozenset({"bitstamp", "cboe", "tiingo"})
 
 
 # Asset classes each feed can collect at all (with keys / on some plan). Watching a symbol puts it
 # on every feed that can; the coverage ledger then keeps them from downloading the same span.
-SUPPORTED_ASSETS: dict[str, frozenset] = {"massive": frozenset(ASSETS), "alpaca": frozenset({"stock", "crypto"})}
+SUPPORTED_ASSETS: dict[str, frozenset] = {"massive": frozenset(ASSETS), "alpaca": frozenset({"stock", "crypto"}),
+                                          "bitstamp": frozenset({"crypto"}), "cboe": frozenset({"index"}),
+                                          "tiingo": frozenset({"stock"})}
+
+
+def supports(feed: str, spec) -> bool:
+    """Whether a feed can hold a symbol at all (its asset class, and for the archives, its list)."""
+    from .public import BITSTAMP_PAIRS, CBOE_INDICES
+
+    if spec.asset not in SUPPORTED_ASSETS.get(feed, frozenset()):
+        return False
+    if feed == "bitstamp":
+        return spec.ticker.upper() in BITSTAMP_PAIRS
+    if feed == "cboe":
+        return spec.source_ticker.upper().removeprefix("I:") in CBOE_INDICES
+    return True
 
 
 def feed_profiles(settings: Settings) -> dict[str, FeedProfile]:
@@ -56,6 +96,10 @@ def feed_profiles(settings: Settings) -> dict[str, FeedProfile]:
         elif name == "alpaca":
             a = settings.alpaca
             assets = frozenset({"crypto"} | ({"stock"} if a and a.has_keys else set()))
+        elif name == "tiingo":
+            assets = frozenset({"stock"}) if settings.tiingo_api_key else frozenset()
+        elif name in ("bitstamp", "cboe"):
+            assets = SUPPORTED_ASSETS[name]
         else:
             assets = frozenset(ASSETS)
         out[name] = FeedProfile(name, tier, assets, i, tick_days=settings.tick_history_days)
@@ -70,4 +114,4 @@ def build_source(name: str, settings: Settings, request_budget: int | None = Non
 
 
 __all__ = ["RESOLUTIONS", "DataSource", "MassiveClient", "MassiveSource", "AlpacaClient", "AlpacaSource",
-           "build_source", "feed_profiles", "BUILDERS", "SUPPORTED_ASSETS"]
+           "build_source", "feed_profiles", "supports", "BUILDERS", "SUPPORTED_ASSETS", "ARCHIVAL"]

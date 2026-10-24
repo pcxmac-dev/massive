@@ -11,7 +11,7 @@
   const { dataIcon, symbolIcon, DATA_LABEL } = window.MassiveIcons;
   const POLL_FAST_MS = 1500;   // while a run is going or the Fetcher / Live view is open
   const POLL_SLOW_MS = 10000;
-  const STATE_ORDER = { fetching: 0, new: 1, backfilling: 2, queued: 3, current: 4, blocked: 5 };
+  const STATE_ORDER = { fetching: 0, new: 1, backfilling: 2, queued: 3, current: 4, closed: 5, blocked: 6 };
   const UPDATE_REQUESTS = 4;  // a one-symbol update: newest-bar check, new bars, daily bars, listing
   const el = (id) => document.getElementById(id);
   const esc = window.MassiveIcons.esc;
@@ -190,7 +190,7 @@
     const { plan, today, backfill } = data;
     el('actStatus').innerHTML = statusLine();
     el('actFeeds').innerHTML = (data.feeds || []).map((f) => `<button type="button" data-feed="${esc(f.name)}"
-        class="${f.name === feed ? 'active' : ''}" title="${esc(f.plan)}${f.keys === false ? ' · keys not set: crypto only' : ''}${f.configured ? '' : ' · not configured here'}">${esc(f.name)}${f.keys === false ? ' <span class="chip">crypto</span>' : ''}</button>`).join('');
+        class="${f.name === feed ? 'active' : ''}" title="${esc(f.plan)}${f.archive ? ' · public archive: fills history once per symbol, then closed' : ''}${f.keys === false ? ' · key not set' : ''}${f.configured ? '' : ' · not configured here'}">${esc(f.name)}${f.closed ? ' <span class="chip">closed</span>' : f.keys === false ? ` <span class="chip">${f.name === 'alpaca' ? 'crypto' : 'no key'}</span>` : ''}</button>`).join('');
     loadAudits();
     el('scanBtn').disabled = !!data.running;
     el('scanNote').innerHTML = scanNote ? esc(scanNote) : '';
@@ -217,7 +217,7 @@
 
     const counts = { all: data.symbols.length };
     for (const s of data.symbols) counts[s.state] = (counts[s.state] || 0) + 1;
-    el('actFilters').innerHTML = ['all', 'fetching', 'new', 'backfilling', 'queued', 'current', 'blocked']
+    el('actFilters').innerHTML = ['all', 'fetching', 'new', 'backfilling', 'queued', 'current', 'closed', 'blocked']
       .filter((k) => k === 'all' || counts[k])
       .map((k) => `<button data-filter="${k}" class="${k === filter ? 'active' : ''}">${k === 'all' ? 'All' : DATA_LABEL[k]} <span class="chip">${counts[k] || 0}</span></button>`)
       .join('');

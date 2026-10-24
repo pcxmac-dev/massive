@@ -108,6 +108,18 @@ def checks(store: Store, settings, source: str = "massive", now: datetime | None
                      f"{len(rules)} tape condition codes with bar rules" if rules else "none stored yet",
                      "" if rules or not have_ticks else
                      "fetched weekly with the Massive sync; until then bars from ticks count every trade"))
+    from .sources import ARCHIVAL
+
+    for name in sorted(ARCHIVAL):
+        rows = store.watchlist(name)
+        shut = sum(1 for w in rows if w.get("closed_at"))
+        keyless = name == "tiingo" and not getattr(settings, "tiingo_api_key", None)
+        status = "WARN" if keyless and rows else "OK"
+        found = ("nothing watched" if not rows else "closed: archive complete" if shut == len(rows)
+                 else f"{shut} of {len(rows)} symbols complete")
+        out.append(Check("Public archives", name, status, found + ("; TIINGO_API_KEY not set" if keyless else ""),
+                         "a free tiingo.com account key (TIINGO_API_KEY) adds stock daily history from 1962"
+                         if keyless and rows else ""))
     overlaps = coverage_overlaps(store)
     out.append(Check("Feeds", "One feed per span", "OK" if not overlaps else "FAIL",
                      "no span is held by two feeds" if not overlaps else

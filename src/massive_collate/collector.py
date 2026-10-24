@@ -20,7 +20,7 @@ from .config import UNLIMITED_BACKFILL_YEARS, Tier
 from .errors import BudgetExhausted, NotEntitled, RateLimited, SourceError
 from . import freshness
 from .futures import candidate_contracts, roll_schedule
-from .coverage import STEP_MS, FeedProfile, has_open_time, ms, plan
+from .coverage import STEP_MS, FeedProfile, frontier_ms, has_open_time, ms, plan
 from .sources.base import DataSource
 from .symbols import ASSETS
 from .storage import Store
@@ -138,9 +138,10 @@ def sync_trades(source: DataSource, store: Store, ticker: str, floor: date, now:
     today = now.astimezone(ET).date()
     lo = tick_floor(store, me, ticker, today, floor)
     gaps = plan(store, me, feeds, ticker, asset, "trades", lo, now, listed_from)
+    edge = frontier_ms(asset, me.tier, now, "minute")  # the feed's publication edge
     saved = 0
     for i, (a, b) in enumerate(reversed(gaps)):
-        n, span = _fill_ticks(source, store, ticker, a, b, fetch or ticker, asset, frontier=i == 0, rules=rules, log=log)
+        n, span = _fill_ticks(source, store, ticker, a, b, fetch or ticker, asset, frontier=b >= edge, rules=rules, log=log)
         saved += n
         if i == 0 and n:
             _queue_audit(store, me, feeds, ticker, asset, "minute", span[1] - 60_000 if span else None)
@@ -174,7 +175,7 @@ def _fill_ticks(source: DataSource, store: Store, ticker: str, a: int, b: int, f
             oldest = o if oldest is None else min(oldest, o)
             newest = n if newest is None else max(newest, n)
             store.add_coverage(source.name, ticker, "trades", oldest, top())
-        store.add_coverage(source.name, ticker, "trades", a, top())
+        _close_head(store, source.name, ticker, "trades", a, top(), oldest, frontier)
         span = (a, top())
     finally:  # also when a cap stops the run: build what is complete
         if oldest is not None:
@@ -271,8 +272,27 @@ def _fill(source: DataSource, store: Store, ticker: str, timespan: str, a: int, 
         oldest = min(times) if oldest is None else min(oldest, min(times))
         newest = max(times) if newest is None else max(newest, max(times))
         store.add_coverage(source.name, ticker, timespan, oldest, top())
-    store.add_coverage(source.name, ticker, timespan, a, top())
+    _close_head(store, source.name, ticker, timespan, a, top(), oldest, frontier)
     return saved, newest
+
+
+EMPTY_HEAD_MS = 7 * 86_400_000  # a feed's history starting this much after a span's start: it has none there
+
+
+def _close_head(store: Store, source: str, ticker: str, timespan: str, a: int, b: int, oldest: int | None,
+                frontier: bool) -> None:
+    """Record a finished span: held from `a`, or, when the feed's data starts well after `a` (its
+    history begins later), held from its first bar and 'none' before it, so another feed may fill
+    that head."""
+    if frontier:
+        store.add_coverage(source, ticker, timespan, a, b)
+    elif oldest is None:
+        store.add_coverage(source, ticker, timespan, a, b, origin="none")
+    elif oldest - a >= EMPTY_HEAD_MS:
+        store.add_coverage(source, ticker, timespan, a, oldest, origin="none")
+        store.add_coverage(source, ticker, timespan, oldest, b)
+    else:
+        store.add_coverage(source, ticker, timespan, a, b)
 
 
 def sync_bars(
@@ -285,10 +305,13 @@ def sync_bars(
     source's ticker when it differs from the stored one; `invert` stores an fx pair inverted."""
     fetch = fetch or ticker
     gaps = plan(store, me, feeds, ticker, asset, timespan, floor, now, listed_from)
+    # Only a gap reaching the feed's publication edge is its frontier (held only as far as published);
+    # an older gap ending where another feed's data begins is history like any other.
+    edge = frontier_ms(asset, me.tier, now, timespan)
     saved = 0
     for i, (a, b) in enumerate(reversed(gaps)):
         try:
-            n, newest = _fill(source, store, ticker, timespan, a, b, fetch, asset, invert, frontier=i == 0)
+            n, newest = _fill(source, store, ticker, timespan, a, b, fetch, asset, invert, frontier=b >= edge)
         except NotEntitled as e:
             if i == 0:
                 raise
@@ -575,17 +598,32 @@ def sync(
         log(f"ticks: {'paused' if tick_state == 'stop' else 'backfill paused, new ticks only'} "
             f"({store.kv_get('ticks:backfill-paused')}, TICK_MIN_FREE_GB={tick_min_free_gb})")
     rules = store.condition_rules()
+    archival = getattr(source, "archival", False)  # a closed feed: fills history once per symbol
+    closed = 0
+    if not store.kv_get("ledger:empty-heads:v1"):  # one-off: feeds' empty history heads become 'none'
+        n = store.mark_empty_heads()
+        store.kv_set("ledger:empty-heads:v1", now.isoformat())
+        if n:
+            log(f"ledger: {n} spans where a feed's history starts later marked as theirs to leave")
     try:
-        sync_exchanges(source, store, log)
-        refresh_calendars(source, store, today, log)
-        fetch_news(source, store, now, log)
-        from .gui.world import PROXIES
-        fetch_market_moves(source, store, now, PROXIES, log)
+        if not archival:
+            sync_exchanges(source, store, log)
+            refresh_calendars(source, store, today, log)
+            fetch_news(source, store, now, log)
+            from .gui.world import PROXIES
+            fetch_market_moves(source, store, now, PROXIES, log)
         # Keep complete symbols current first; backfills take what budget is left.
         for item in sorted(store.watchlist(source.name), key=lambda w: (_backfilling(w, floor), w["ticker"])):
             ticker, asset = item["ticker"], item["asset"]
             synced = item.get("synced_at")
             if only is not None and ticker not in only:
+                continue
+            if archival and item.get("closed_at"):  # archive complete: never asked again
+                closed += 1
+                continue
+            if archival and not source.covers(item["source_ticker"]):
+                store.set_closed(source.name, ticker, now)
+                log(f"{ticker}: {source.name} has no history for it; closed")
                 continue
             if not source.serves(asset):  # e.g. Alpaca stocks without keys: nothing is sent
                 waiting[asset] = waiting.get(asset, 0) + 1
@@ -606,7 +644,10 @@ def sync(
                 log(f"{ticker}: {n} rows ({source.requests_made - spent} requests)")
                 store.set_synced(source.name, ticker, now)
                 continue
-            if asset == "stock":  # listing/identity checks only apply to listed securities
+            if asset == "stock" and archival:  # an archive has no reference data: use the other feeds'
+                listing = Listing(True, item["listed_from"] or next(
+                    (w["listed_from"] for w in store.watchlist() if w["ticker"] == ticker and w["listed_from"]), None))
+            elif asset == "stock":  # listing/identity checks only apply to listed securities
                 listing = check_listing(source, store, item, today, log)
                 if not listing.ok:
                     continue
@@ -652,15 +693,22 @@ def sync(
             else:
                 log(f"{ticker} {resolution}: {n} rows ({source.requests_made - spent} requests)")
             store.set_synced(source.name, ticker, now)
-            if asset == "stock":
+            if archival:
+                spans = [resolution] if resolution == "day" else [resolution, "day"]
+                if not any(plan(store, me, feeds, ticker, asset, ts, item_floor, now, listing.listed_from) for ts in spans):
+                    store.set_closed(source.name, ticker, now)
+                    log(f"{ticker}: {source.name} archive complete; closed (not asked again)")
+            elif asset == "stock":
                 fetch_icon(source, store, ticker, log)
+        if closed:
+            log(f"{source.name}: {closed} symbols closed (archive complete), not asked")
         if waiting:
             log(f"{source.name}: " + ", ".join(f"{n} {a} symbols" for a, n in sorted(waiting.items()))
                 + " not collected by this feed here (see `deps`: keys or plan)")
-        if only is None and any(audits):
+        if only is None and any(audits) and not archival:
             from .audit import run_audits
             run_audits(source, store, me, feeds, now, queued=audits[0], random_count=audits[1], log=log)
-        if only is None and directory_allowance > 0:  # placeholders and icons: leftover budget only
+        if only is None and directory_allowance > 0 and not archival:  # placeholders and icons: leftover budget only
             spent = source.requests_made
             refresh_directory(source, store, today, log)
             fill_directory_icons(source, store, directory_allowance - (source.requests_made - spent), today, log)

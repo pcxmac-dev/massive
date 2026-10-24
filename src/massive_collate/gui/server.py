@@ -205,10 +205,10 @@ class ChartApp:
             if row is None:
                 raise LookupError(f"{ticker} is not in the directory")
             spec = resolve(f"{row['ticker']}::{row['exchange']}" if row["kind"] == "stock" and row["exchange"] else row["ticker"])
-            from ..sources import SUPPORTED_ASSETS
+            from ..sources import BUILDERS, supports
 
-            for feed, assets in SUPPORTED_ASSETS.items():  # each span is still downloaded by one feed only
-                if spec.asset in assets:
+            for feed in BUILDERS:  # each span is still downloaded by one feed only
+                if supports(feed, spec):
                     self.store.watch_spec(feed, spec)
         return {"watched": spec.ticker}
 
@@ -298,15 +298,20 @@ class ChartApp:
             return {"audits": rows, "scores": self.store.audit_scores(), "queued": len(self.store.audit_queue())}
 
     def feeds(self) -> list[dict]:
-        from ..sources import BUILDERS, feed_profiles
+        from ..sources import ARCHIVAL, BUILDERS, feed_profiles
 
         profiles = feed_profiles(self.settings)
+        with self._lock:
+            watch = self.store.watchlist()
         out = []
         for name in BUILDERS:
             p, s = profiles.get(name), self.settings.for_source(name)
-            keys = None if name != "alpaca" or not self.settings.alpaca else self.settings.alpaca.has_keys
+            keys = (self.settings.alpaca.has_keys if name == "alpaca" and self.settings.alpaca
+                    else bool(self.settings.tiingo_api_key) if name == "tiingo" else None)
+            rows = [w for w in watch if w["source"] == name]
+            closed = name in ARCHIVAL and all(w.get("closed_at") for w in rows)
             out.append({"name": name, "configured": p is not None, "assets": sorted(p.assets) if p else [],
-                        "plan": s.tier.name, "keys": keys})
+                        "plan": s.tier.name, "keys": keys, "archive": name in ARCHIVAL, "closed": closed})
         return out
 
     def icon(self, ticker: str) -> tuple[str, bytes] | None:

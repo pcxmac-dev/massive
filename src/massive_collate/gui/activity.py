@@ -136,7 +136,9 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
         row = symbol_status(item, edges, floor, today, now, settings.tier, current,
                             store.probe(source, item["ticker"]), newest[1] if newest else None,
                             10_000 if source == "alpaca" else None)
-        if me is not None and item["asset"] != "future" and item["resolution"] != "trades":
+        if item.get("closed_at"):
+            row.update(state="closed", requestsLeft=0, progress=1.0, note="archive complete: not asked again")
+        elif me is not None and item["asset"] != "future" and item["resolution"] != "trades":
             if item["asset"] not in me.assets:
                 row.update(state="blocked", requestsLeft=0,
                            note="keys not set" if source == "alpaca" else f"{source} has no {item['asset']} data here")
