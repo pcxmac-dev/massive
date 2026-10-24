@@ -42,6 +42,13 @@ CREATE TABLE IF NOT EXISTS watchlist (
     PRIMARY KEY (source, ticker)
 );
 
+CREATE TABLE IF NOT EXISTS request_days (   -- requests made per feed per UTC day (the daily cap)
+    source TEXT NOT NULL,
+    day    TEXT NOT NULL,                       -- YYYY-MM-DD, UTC
+    n      INTEGER NOT NULL,
+    PRIMARY KEY (source, day)
+);
+
 CREATE TABLE IF NOT EXISTS grouped_days (
     source     TEXT NOT NULL,
     day        TEXT NOT NULL,        -- YYYY-MM-DD

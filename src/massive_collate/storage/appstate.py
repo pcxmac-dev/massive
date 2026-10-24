@@ -107,14 +107,24 @@ class AppStateStore:
                 "message=COALESCE(message, '') || ' (run did not finish)' WHERE status='running'", (_now(),)
             ).rowcount
 
-    def requests_today(self, source: str) -> int:
-        """API requests recorded today (UTC) for a source, across all runs."""
-        today = datetime.now(timezone.utc).date().isoformat()
-        row = self.conn.execute(
+    def count_request(self, source: str, n: int = 1, now: datetime | None = None) -> None:
+        """Count requests on the day (UTC) they are made, not the day their run began."""
+        day = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).date().isoformat()
+        with self.conn:
+            self.conn.execute("INSERT INTO request_days (source, day, n) VALUES (?, ?, ?) "
+                              "ON CONFLICT (source, day) DO UPDATE SET n = n + excluded.n", (source, day, n))
+
+    def requests_today(self, source: str, now: datetime | None = None) -> int:
+        """API requests made today (UTC) for a source: counted as each is made (a run that began
+        before midnight books what it asks after midnight to the new day), and never less than
+        what runs that began today recorded."""
+        today = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).date().isoformat()
+        by_run = self.conn.execute(
             "SELECT COALESCE(SUM(requests), 0) FROM runs WHERE source=? AND substr(started_at, 1, 10)=?",
             (source, today),
-        ).fetchone()
-        return int(row[0])
+        ).fetchone()[0]
+        made = self.conn.execute("SELECT n FROM request_days WHERE source=? AND day=?", (source, today)).fetchone()
+        return max(int(by_run), int(made[0]) if made else 0)
 
     def runs(self, limit: int = 25) -> list[dict]:
         cur = self.conn.execute(

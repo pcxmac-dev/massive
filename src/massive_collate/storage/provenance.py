@@ -13,12 +13,27 @@ class ProvenanceStore:
 
     def record_derivation(self, kind: str, product: str, code: str, settings: dict, inputs: dict,
                           span: tuple[int, int] | None = None, rows: int | None = None) -> int:
+        """The record of a derivation: the same kind, product, code, settings and inputs reuse the
+        newest record, its span widened (the live recorder and derive.py rebuild every minute: a row
+        each time grew the table by tens of thousands a day)."""
+        settings_json = json.dumps(settings, sort_keys=True, default=str)
+        inputs_json = json.dumps(inputs, sort_keys=True, default=str)
+        same = self.conn.execute(
+            "SELECT id, span_lo, span_hi FROM derivations WHERE product=? AND kind=? AND code=? AND settings=? "
+            "AND inputs=? ORDER BY id DESC LIMIT 1", (product, kind, code, settings_json, inputs_json)).fetchone()
+        if same is not None:
+            did, lo, hi = same
+            if span and (lo is None or span[0] < lo or span[1] > (hi or span[1])):
+                with self.conn:
+                    self.conn.execute("UPDATE derivations SET span_lo=?, span_hi=? WHERE id=?",
+                                      (min(span[0], lo) if lo is not None else span[0],
+                                       max(span[1], hi) if hi is not None else span[1], did))
+            return did
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO derivations (kind, product, created_at, code, settings, inputs, span_lo, span_hi, rows) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (kind, product, _now(), code, json.dumps(settings, sort_keys=True, default=str),
-                 json.dumps(inputs, sort_keys=True, default=str), span[0] if span else None,
+                (kind, product, _now(), code, settings_json, inputs_json, span[0] if span else None,
                  span[1] if span else None, rows))
             return cur.lastrowid
 

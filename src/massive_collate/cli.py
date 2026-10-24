@@ -99,7 +99,10 @@ def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource
         args._run_id = run_id
         client = getattr(source, "client", None)
         if client is not None:  # record usage as it happens, not only at the end
-            client.on_request = lambda n: store.set_run_requests(run_id, n)
+            def on_request(n: int) -> None:
+                store.set_run_requests(run_id, n)
+                store.count_request(args.source)  # on the day it is made (the daily cap)
+            client.on_request = on_request
             _share_limits(client, store, args.source, log)
             if command == "sync" and not getattr(args, "tickers", None):  # background: stops when paused
                 client.should_stop = _pause_check(store)

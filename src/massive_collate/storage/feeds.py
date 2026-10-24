@@ -277,6 +277,7 @@ class FeedStore:
         for f in self.feeds_dir.glob("*.db"):
             name = f.stem.removesuffix("-ticks")
             if _feed_name(name):
+                self._missing.pop(name, None)  # it has files now, whatever a look a moment ago found
                 self._feed(name)
 
     def _feed(self, name: str, create: bool = False) -> _Feed | None:
@@ -368,8 +369,11 @@ class FeedStore:
         conn = self._ticks(source)
         if conn is None:
             return None
-        row = conn.execute("SELECT MIN(ts_ns), MAX(ts_ns) FROM ticks.trades WHERE ticker=?", (ticker.upper(),)).fetchone()
-        return None if row[0] is None else (row[0], row[1])
+        # two statements: SQLite answers a lone MIN or MAX from the index, both together by a scan
+        lo = conn.execute("SELECT MIN(ts_ns) FROM ticks.trades WHERE ticker=?", (ticker.upper(),)).fetchone()[0]
+        if lo is None:
+            return None
+        return lo, conn.execute("SELECT MAX(ts_ns) FROM ticks.trades WHERE ticker=?", (ticker.upper(),)).fetchone()[0]
 
     def load_trades(
         self,
@@ -440,6 +444,32 @@ class FeedStore:
                 [(*r, *r[:4]) for r in rows])
         self._wrote()
         return conn.total_changes - before
+
+    def close_before(self, source: str, ticker: str, timespan: str, before_ms: int) -> float | None:
+        """The close of a series' last bar before `before_ms` (the feed's own or built): what a
+        window of bars built from ticks starts from (ticks.build_bars' prior_close)."""
+        conn = self._bars(source)
+        if conn is None:
+            return None
+        best = None
+        for table in _BAR_TABLES:
+            row = conn.execute(f"SELECT ts, close FROM {table} WHERE ticker=? AND timespan=? AND multiplier=1 AND ts<? "
+                               "ORDER BY ts DESC LIMIT 1", (ticker.upper(), timespan, before_ms)).fetchone()
+            if row and (best is None or row[0] > best[0]):
+                best = row
+        return best[1] if best else None
+
+    def drop_built_frame(self, source: str, ticker: str, timespan: str, multiplier: int, lo_ms: int, hi_ms: int) -> int:
+        """Remove a frame's built bars in [lo, hi) ms (before building them again: a bin whose base
+        bars are gone must go too). Returns bars removed."""
+        conn = self._bars(source)
+        if conn is None:
+            return 0
+        with conn:
+            n = conn.execute("DELETE FROM built_bars WHERE ticker=? AND timespan=? AND multiplier=? AND ts>=? AND ts<?",
+                             (ticker.upper(), timespan, multiplier, lo_ms, hi_ms)).rowcount
+        self._wrote()
+        return n
 
     def drop_built_between(self, source: str, ticker: str, timespans: Sequence[str], lo_ms: int, hi_ms: int) -> int:
         """Remove a series' built bars in [lo, hi) ms, before they are built again from ticks some of
@@ -688,9 +718,12 @@ class FeedStore:
         t = feed.conn.execute(
             "SELECT COUNT(*), MAX(ts_ns) FROM ticks.trades WHERE ticker=?", (ticker.upper(),)
         ).fetchone() if feed.has_ticks() else (0, None)
-        b = [feed.conn.execute(f"SELECT COUNT(*), MAX(ts) FROM {table} WHERE ticker=?", (ticker.upper(),)).fetchone()
-             for table in _BAR_TABLES]
-        return tuple(t) + (sum(n for n, _ in b), max((m for _, m in b if m is not None), default=None))
+        # the newest stored_at too: a bar corrected in place, or a feed's own bar taking a built one's
+        # place, changes neither the count nor the newest time
+        b = [feed.conn.execute(f"SELECT COUNT(*), MAX(ts), MAX(stored_at) FROM {table} WHERE ticker=?",
+                               (ticker.upper(),)).fetchone() for table in _BAR_TABLES]
+        return tuple(t) + (sum(n for n, _, _ in b), max((m for _, m, _ in b if m is not None), default=None),
+                           max((s for _, _, s in b if s is not None), default=None))
 
     def stored_series(self) -> list[tuple]:
         """(source, ticker, kind) for every series with data, kind = trades | second | minute | ...

@@ -233,8 +233,9 @@ def build_from_ticks(store: Store, source: str, ticker: str, a: int, b: int, rul
             "first_ns": int(ticks["ts_ns"].iloc[0]) if len(ticks) else None,
             "last_ns": int(ticks["ts_ns"].iloc[-1]) if len(ticks) else None}, (start, end))
         made = 0
+        prior = store.close_before(source, ticker, "minute", start)  # the window's first bars keep it
         for step, timespan in ((1_000_000_000, "second"), (60_000_000_000, "minute")):
-            bars, unk = build_bars(ticks, step, rules)
+            bars, unk = build_bars(ticks, step, rules, prior_close=prior)
             unknown |= unk
             made += store.upsert_built_bars(source, ticker, timespan, 1, bars, derivation)
             store.add_coverage(source, ticker, timespan, start, end, origin="ticks")

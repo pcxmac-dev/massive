@@ -12,10 +12,13 @@ bars, so a gap in the finer data stays a gap.
 - 1 s and 1 min from ticks: ticks.py (with the trade-condition rules), as the ticks arrive.
 - 30 s from the 1-second bars.
 - 5 and 30 min, 1, 2 and 4 h and 1 day from the 1-minute bars (the feed's own first, built ones
-  where it sent none). Minutes are clock bins; hours are bins from midnight in the series' day
-  zone (New York, UTC for crypto and forex), the same for 1 h on both. Days are New York dates
-  (regular session for stocks and indices, the whole date for futures) and UTC dates for crypto
-  and forex, stamped as those feeds stamp their own.
+  where it sent none). Minutes are clock bins; hours are wall-clock bins from midnight in the
+  series' day zone (New York, UTC for crypto and forex; the same on days the clocks change). Days
+  are New York dates (regular session for stocks and indices), CME sessions for futures (18:00 to
+  17:00 New York, dated by the day they end), and UTC dates for crypto and forex, stamped as those
+  feeds stamp their own. A series takes the asset class of its symbol on any feed (a futures
+  contract that of its product), so Coinbase's coins and NQZ6 are not built as New York stocks.
+- A rebuilt window loses the bins left without base bars (a trade withdrawn, a bar deleted).
 - 1 week (from Monday), 1 month and 1 year from the daily bars (the feed's official ones first).
 - Incremental: whatever a feed's base bars have had stored since the last build (stored_at) is
   rebuilt, from the start of the day before the earliest change (weeks, months and years: all of
@@ -44,7 +47,7 @@ CHAINS = (
 )
 FROM_MINUTES = dict(CHAINS)["minute"]
 STANDARD = (("second", 1), ("minute", 1), *(f for _, frames in CHAINS for f in frames))
-KEY = "derive:v2:{}:{}:{}"  # source, ticker, base -> base bars stored after this (ms) are not built from yet
+KEY = "derive:v3:{}:{}:{}"  # source, ticker, base -> base bars stored after this (ms) are not built from yet
 PROGRESS_KEY = "derive:progress"
 CHUNK_DAYS = {"second": 5, "minute": 60}
 SLACK_MS = 60_000  # writers' stored_at can commit out of order: look back a minute
@@ -109,14 +112,18 @@ def aggregate(bars: pd.DataFrame, timespan: str, multiplier: int, asset: str) ->
         key = ts // (multiplier * 1000) * (multiplier * 1000)
     elif timespan == "minute":
         key = ts // (multiplier * 60_000) * (multiplier * 60_000)
-    elif timespan == "hour":
-        step = multiplier * 3_600_000
-        midnight = _local_midnights(m["time"], zone)
-        key = midnight + (ts - midnight) // step * step
+    elif timespan == "hour" and multiplier == 1:
+        key = ts // 3_600_000 * 3_600_000  # whole-hour offsets: an hour is an hour in every zone
+    elif timespan == "hour":  # by the wall clock from midnight: the same bins on a 23 or 25-hour day
+        wall = m["time"].dt.tz_convert(zone).dt.tz_localize(None).dt.floor(f"{multiplier}h")
+        key = pd.DatetimeIndex(wall).tz_localize(zone, ambiguous=np.ones(len(wall), dtype=bool),
+                                                 nonexistent="shift_forward").as_unit("ms").asi8
     elif timespan in ("week", "month", "year"):
         key = _period_starts(m["time"], timespan, zone)
     elif asset in UTC_DAYS:
         key = ts // 86_400_000 * 86_400_000
+    elif asset == "future":  # the CME session: from 18:00 New York, dated by the day it ends
+        key = pd.DatetimeIndex((m["time"].dt.tz_convert(ET) + pd.Timedelta(hours=6)).dt.normalize()).as_unit("ms").asi8
     else:  # the New York date, stamped at its midnight
         key = pd.DatetimeIndex(m["time"].dt.tz_convert(ET).dt.normalize()).as_unit("ms").asi8
     vol = m["volume"].fillna(0).to_numpy(dtype=float)
@@ -159,12 +166,18 @@ def build_chain(store, source: str, ticker: str, base: str, asset: str = "stock"
                   "average price; the feed's own bars first, built ones where it sent none; only upward"},
         {"bars": f"{source}:{ticker}:{base}"}, (_midnight_ms(first, zone), _midnight_ms(last, zone)))
     stored = 0
+    if base == "day":  # weeks, months, years: rebuilt whole, so a bin left without days goes
+        for timespan, multiplier in frames:
+            store.drop_built_frame(source, ticker, timespan, multiplier, 0, 2**62)
     day = first
     while day < last:
         end = min(last, day + timedelta(days=CHUNK_DAYS.get(base, 100_000)))
-        window = store.bars_window([source], ticker, base, _midnight_ms(day, zone), _midnight_ms(end, zone))
-        if len(window):
-            for timespan, multiplier in frames:
+        lo_ms, hi_ms = _midnight_ms(day, zone), _midnight_ms(end, zone)
+        window = store.bars_window([source], ticker, base, lo_ms, hi_ms)
+        for timespan, multiplier in frames:
+            if base != "day":  # bins left without base bars go (weeks to years: all rebuilt below)
+                store.drop_built_frame(source, ticker, timespan, multiplier, lo_ms, hi_ms)
+            if len(window):
                 stored += store.upsert_built_bars(source, ticker, timespan, multiplier,
                                                   aggregate(window, timespan, multiplier, asset), did)
         day = end
@@ -185,7 +198,11 @@ def run(store, sources=None, tickers=None, log=print) -> int:
     default), or for the given tickers only: seconds, then minutes, then days (days built from
     minutes feed the weeks). Returns bars stored."""
     wanted = {t.upper() for t in tickers} if tickers else None
-    assets = {(w["source"], w["ticker"]): w["asset"] for w in store.watchlist()}
+    watch = store.watchlist()
+    assets = {(w["source"], w["ticker"]): w["asset"] for w in watch}
+    any_feed = {w["ticker"]: w["asset"] for w in watch}  # a symbol's class on whichever feed watches it
+    contracts = {c["ticker"] for w in watch if w["asset"] == "future"
+                 for c in store.contracts(w["source"], w["source_ticker"])}  # stored under contract tickers
     bases = dict.fromkeys(base for base, _ in CHAINS)
     series: dict[tuple[str, str], set] = {}
     for source, ticker, kind in store.stored_series():
@@ -196,7 +213,7 @@ def run(store, sources=None, tickers=None, log=print) -> int:
         series.setdefault((source, ticker), set()).add(kind)
     total = 0
     for i, ((source, ticker), kinds) in enumerate(sorted(series.items())):
-        asset = assets.get((source, ticker), "stock")
+        asset = assets.get((source, ticker)) or any_feed.get(ticker) or ("future" if ticker in contracts else "stock")
         for base in (b for b in bases if b in kinds or (b == "day" and "minute" in kinds)):
             frames = dict(CHAINS)[base]
             store.kv_set(PROGRESS_KEY, json.dumps({

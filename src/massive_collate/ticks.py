@@ -57,10 +57,13 @@ def eligibility(trades: pd.DataFrame, rules: dict) -> tuple[np.ndarray, np.ndarr
     return hl, oc, vol, unknown
 
 
-def build_bars(trades: pd.DataFrame, step_ns: int, rules: dict | None = None) -> tuple[list[dict], set]:
+def build_bars(trades: pd.DataFrame, step_ns: int, rules: dict | None = None,
+               prior_close: float | None = None) -> tuple[list[dict], set]:
     """Bars of `step_ns` from ticks (columns ts_ns, price, size, conditions, tape; in time order).
     A bar whose trades set no open/close (e.g. odd lots only) carries the previous close as its
-    open and close, with the high and low its eligible trades set. Returns (bars, unknown codes)."""
+    open and close, with the high and low its eligible trades set; `prior_close` is that close for
+    the window's first bars (the bar before the window), which would otherwise be dropped.
+    Returns (bars, unknown codes)."""
     if trades.empty:
         return [], set()
     hl, oc, vol, unknown = eligibility(trades, rules or {})
@@ -74,6 +77,8 @@ def build_bars(trades: pd.DataFrame, step_ns: int, rules: dict | None = None) ->
     v = frame[vol].assign(ps=lambda d: d.p * d.s).groupby("b").agg(v=("s", "sum"), ps=("ps", "sum"), n=("s", "size"))
     out = pd.concat([o, h, v], axis=1).sort_index()
     out["last"] = out["last"].ffill()  # bars with no open/close trade carry the previous close
+    if prior_close is not None:
+        out["last"] = out["last"].fillna(prior_close)  # ... before the window's first such trade too
     out["first"] = out["first"].fillna(out["last"].shift(1).where(out["first"].isna()))
     out["first"] = out["first"].fillna(out["last"])
     out = out[out["first"].notna()]

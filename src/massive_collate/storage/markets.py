@@ -45,13 +45,21 @@ class MarketsStore:
         return len(rows)
 
     def condition_rules(self) -> dict[tuple[str, str], tuple[bool, bool, bool]]:
-        """{(tape family 'cta'|'utp', letter): (updates high/low, open/close, volume)} from any source."""
+        """{(tape family 'cta'|'utp', code): (updates high/low, open/close, volume)}. A code is a
+        condition's letter on that tape (Alpaca's trades carry letters) or, for Massive's trades,
+        its numeric id: those take the rule of the letter they stand for, overrides included
+        (ticks.BAR_RULES), so a Massive odd lot sets no high or low either."""
+        from ..ticks import BAR_RULES
+
         out = {}
-        for cta, utp, hl, oc, vol in self.conn.execute(
-                "SELECT cta, utp, high_low, open_close, volume FROM conditions"):
+        for source, cid, cta, utp, hl, oc, vol in self.conn.execute(
+                "SELECT source, id, cta, utp, high_low, open_close, volume FROM conditions"):
+            flags = (bool(hl), bool(oc), bool(vol))
             for fam, letter in (("cta", cta), ("utp", utp)):
                 if letter:
-                    out[(fam, letter)] = (bool(hl), bool(oc), bool(vol))
+                    out[(fam, letter)] = flags
+                if source == "massive":
+                    out[(fam, str(cid))] = BAR_RULES.get((fam, letter), flags) if letter else flags
         return out
 
     # -- official calendars --------------------------------------------------

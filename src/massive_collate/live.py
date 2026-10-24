@@ -431,8 +431,9 @@ class Recorder:
             ticks = store.trades_between(source, ticker, lo * 1_000_000, hi_ns)
             rules = self._tape_rules(store) if getattr(stream, "tape_rules", False) else {}
             did = self._derivation(store, stream, ticker, now_ms // DAY_MS, rules)
+            prior = store.close_before(source, ticker, "minute", lo)  # an odd-lot-only first minute keeps it
             for step, timespan in ((1_000_000_000, "second"), (60_000_000_000, "minute")):
-                bars, _ = build_bars(ticks, step, rules)
+                bars, _ = build_bars(ticks, step, rules, prior_close=prior)
                 self._built[did] += store.upsert_built_bars(source, ticker, timespan, 1, bars, did)
                 store.add_coverage(source, ticker, timespan, lo, now_ms, origin="ticks")
             store.set_derivation_rows(did, self._built[did])
