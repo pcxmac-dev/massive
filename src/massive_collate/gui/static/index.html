@@ -79,7 +79,13 @@
     <button id="latestBtn" title="Jump to latest bar (End)">Latest</button>
     <button id="gpuBtn" class="toggle" title="GPU rendering (WebGL2 / OpenGL ES 3)">GPU</button>
     <button id="shotBtn" title="Save a PNG of the chart">PNG</button>
-    <button id="themeBtn" title="Light / dark">Theme</button>
+    <select id="themeSelect" title="Theme" aria-label="Theme">
+      <option value="dark">Dark</option>
+      <option value="midnight">Midnight</option>
+      <option value="graphite">Graphite</option>
+      <option value="light">Light</option>
+      <option value="paper">Paper</option>
+    </select>
   </header>
   <main>
     <div class="view" id="viewChart" data-view="chart">

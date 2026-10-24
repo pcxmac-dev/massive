@@ -160,13 +160,56 @@ kc.registerOverlay({
   },
 });
 
+// -- themes ----------------------------------------------------------------------
+// Each theme is the page's colours (style.css, body[data-theme]) and the chart's: one of the chart
+// library's two built-in styles, with grid, axis, crosshair and tooltip colours on top. Light-based
+// themes also get body.light (the light page rules and the light steps of the series palette).
+// Text contrast on each page colour: body text 12:1 or more, secondary text 4.5:1 or more.
+const THEMES = {
+  dark: { base: 'dark', label: 'Dark' },
+  midnight: { base: 'dark', label: 'Midnight', chart: {
+    grid: { horizontal: { color: '#18213a' }, vertical: { color: '#18213a' } },
+    xAxis: { axisLine: { color: '#2a3656' }, tickLine: { color: '#2a3656' }, tickText: { color: '#8f9bb8' } },
+    yAxis: { axisLine: { color: '#2a3656' }, tickLine: { color: '#2a3656' }, tickText: { color: '#8f9bb8' } },
+    separator: { color: '#1f2a44' },
+  } },
+  graphite: { base: 'dark', label: 'Graphite', chart: {
+    grid: { horizontal: { color: '#2a2d32' }, vertical: { color: '#2a2d32' } },
+    xAxis: { axisLine: { color: '#3d4148' }, tickLine: { color: '#3d4148' }, tickText: { color: '#959aa3' } },
+    yAxis: { axisLine: { color: '#3d4148' }, tickLine: { color: '#3d4148' }, tickText: { color: '#959aa3' } },
+    separator: { color: '#353940' },
+  } },
+  light: { base: 'light', label: 'Light' },
+  paper: { base: 'light', label: 'Paper', chart: {
+    grid: { horizontal: { color: '#ddd3c1' }, vertical: { color: '#ddd3c1' } },
+    xAxis: { axisLine: { color: '#a99b82' }, tickLine: { color: '#a99b82' }, tickText: { color: '#3a3226' } },
+    yAxis: { axisLine: { color: '#a99b82' }, tickLine: { color: '#a99b82' }, tickText: { color: '#3a3226' } },
+    separator: { color: '#c8bba3' },
+    crosshair: {
+      horizontal: { line: { color: '#6b5d47' }, text: { backgroundColor: '#3a3226', borderColor: '#3a3226' } },
+      vertical: { line: { color: '#6b5d47' }, text: { backgroundColor: '#3a3226', borderColor: '#3a3226' } },
+    },
+    candle: { tooltip: { text: { color: '#241e14' } } },
+    indicator: { tooltip: { text: { color: '#241e14' } } },
+  } },
+};
+if (!THEMES[state.theme]) state.theme = 'dark';
+const themeBase = () => THEMES[state.theme].base;
+
+function setTheme(name) {
+  state.theme = THEMES[name] ? name : 'dark';
+  document.body.dataset.theme = state.theme;
+  document.body.classList.toggle('light', themeBase() === 'light');
+  $('themeSelect').value = state.theme;
+}
+setTheme(state.theme);
+
 // -- chart ---------------------------------------------------------------------
-document.body.classList.toggle('light', state.theme === 'light');
 // Bars may shrink far below a pixel each, so any interval can be zoomed out to months or years
 // of data (KLineChart's default stops at 1 px per bar, ~700 bars on screen).
 const MIN_BAR_SPACE = 0.002;  // ~350k bars across a 700 px chart: two years of 1-minute futures
 const chart = kc.init('chart', {
-  timezone: TZ, styles: state.theme, locale: 'en-US',
+  timezone: TZ, styles: themeBase(), locale: 'en-US',
   layout: { barSpaceLimit: { min: MIN_BAR_SPACE, max: 80 } },
 });
 
@@ -581,8 +624,9 @@ const LIGHT_CHART = {
 
 function applyChartType() {
   const custom = !NATIVE[state.chartType];
-  chart.setStyles(state.theme);
-  if (state.theme === 'light') chart.setStyles(LIGHT_CHART);
+  chart.setStyles(themeBase());
+  if (themeBase() === 'light') chart.setStyles(LIGHT_CHART);
+  if (THEMES[state.theme].chart) chart.setStyles(THEMES[state.theme].chart);
   chart.setStyles({ yAxis: { size: Y_AXIS_WIDTH } });
   chart.setStyles({ candle: { type: NATIVE[state.chartType] || 'candle_solid', ...DEFAULT_CANDLE } });
   chart.removeIndicator({ name: 'GPU_BARS' });
@@ -1777,11 +1821,11 @@ $('shotBtn').addEventListener('click', () => {
   a.download = `${state.ticker || 'chart'}-${state.period.span}${state.period.type}.png`;
   a.click();
 });
-$('themeBtn').addEventListener('click', () => {
-  state.theme = state.theme === 'dark' ? 'light' : 'dark';
+$('themeSelect').addEventListener('change', (e) => {
+  setTheme(e.target.value);
   prefs.set('theme', state.theme);
-  document.body.classList.toggle('light', state.theme === 'light');
   applyChartType();
+  window.dispatchEvent(new CustomEvent('massive:theme', { detail: state.theme }));
 });
 
 document.addEventListener('keydown', (e) => {

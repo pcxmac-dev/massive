@@ -24,6 +24,42 @@ body.light {
   --up: #086a60;
   --down: #c62828;
 }
+/* More themes (app.js THEMES): Midnight and Graphite are dark-based, Paper is light-based (it also
+   gets body.light, whose rules it overrides colour by colour). */
+body[data-theme="midnight"] {
+  --bg: #0b1020;
+  --panel: #131b31;
+  --border: #1f2a44;
+  --text: #e1e7f5;
+  --muted: #8f9bb8;
+  --accent: #5b8cff;
+  --hover: #1a2440;
+  --up: #2fbfa7;
+  --down: #f46a67;
+}
+body[data-theme="graphite"] {
+  --bg: #1c1e22;
+  --panel: #25282d;
+  --border: #353940;
+  --text: #dcdee2;
+  --muted: #959aa3;
+  --accent: #6b9bf2;
+  --hover: #30343a;
+  --up: #45b393;
+  --down: #ea726a;
+}
+body.light[data-theme="paper"] {
+  --bg: #efe8da;
+  --panel: #f7f2e7;
+  --field: #fbf8f1;
+  --border: #cbbfa8;
+  --text: #241e14;
+  --muted: #564a37;
+  --accent: #8a4a12;
+  --hover: #e5dccb;
+  --up: #11695a;
+  --down: #b03328;
+}
 body.light .act-log, body.light .params input, body.light input[type="text"], body.light input[type="search"],
 body.light textarea, body.light select, body.light select option { background: var(--field); }
 body.light .kv dd, body.light .act-table td { color: var(--text); }

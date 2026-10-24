@@ -120,6 +120,8 @@ python -m massive_collate gui                  # chart app in your browser (loca
   Drawings are saved per ticker in the browser.
 - Keys: type to search symbols, `+`/`-` zoom, `End` latest bar, `Esc` cancel, `Delete` removes the
   selected drawing.
+- Themes (top right): Dark, Midnight, Graphite, Light and Paper; the chart's grid, axes and crosshair
+  follow each one.
 - Stock and Analysis views (right rail) show the same symbol, each with its own chart content:
   interval, chart type, model, indicators and their pane heights, zoom and position, drawings.
   Switching between them keeps both; saved layouts keep both.
