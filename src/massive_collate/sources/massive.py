@@ -10,7 +10,7 @@ from urllib.parse import unquote, urlparse
 
 import requests
 
-from ..errors import BudgetExhausted, NotEntitled, RateLimited, SourceError
+from ..errors import BudgetExhausted, NotEntitled, Paused, RateLimited, SourceError
 from ..models import Exchange, Instrument, country, instrument_class
 from ..ratelimit import RateLimiter
 from .base import DataSource
@@ -51,6 +51,8 @@ class MassiveClient:
         self.on_request: Callable[[int], None] | None = None
         # Called with (seconds, HTTP status) before waiting to retry a refused or failed request.
         self.on_retry: Callable[[float, int], None] | None = None
+        # Asked before every request: a reason to stop (the user paused background fetching), or None.
+        self.should_stop: Callable[[], str | None] | None = None
 
     def get(self, path_or_url: str, params: dict[str, Any] | None = None) -> dict:
         return self._request(path_or_url, params).json()
@@ -70,6 +72,9 @@ class MassiveClient:
             url = self.base_url + path_or_url
 
         for attempt in range(self._max_retries + 1):
+            reason = self.should_stop() if self.should_stop else None
+            if reason:
+                raise Paused(reason)
             if self.request_budget is not None and self.requests_made >= self.request_budget:
                 raise BudgetExhausted(f"request cap of {self.request_budget} reached")
             self.class_limiters.get(asset_class(url), self._limiter).acquire()

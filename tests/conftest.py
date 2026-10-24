@@ -21,11 +21,12 @@ def no_saved_keys(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def no_recorders(monkeypatch):
+def no_recorders(monkeypatch, tmp_path):
     """Tests never start the live recorder: `sync` would start a real detached process (with real
     exchange connections) pointed at the test's temporary folder."""
     monkeypatch.setenv("LIVE_CRYPTO", "off")
     monkeypatch.setenv("LIVE_STOCKS", "off")
+    monkeypatch.setenv("MASSIVE_LIVE_LOCK", str(tmp_path / "machine-live.lock"))  # never the real machine's
     monkeypatch.setattr(live, "start_detached", lambda db_path: False)
 
 

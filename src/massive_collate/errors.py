@@ -19,3 +19,7 @@ class RateLimited(SourceError):
 
 class BudgetExhausted(Exception):
     """The request cap for this run or day has been reached; nothing more is sent."""
+
+
+class Paused(BudgetExhausted):
+    """Background fetching is paused (the chart's pause button): nothing more is sent this run."""

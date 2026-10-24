@@ -184,6 +184,14 @@
       msg = `Fetcher${data.live.current ? `: ${esc(data.live.current)}` : ''} · ${num(data.live.requests)} req`;
       busy = true;
     }
+    // Background fetching paused by the button: the open symbol's own fetches still go.
+    const pausedUntil = data?.paused?.until;
+    el('netPause').textContent = pausedUntil ? 'Resume fetching' : 'Pause fetching';
+    el('netPause').classList.toggle('on', !!pausedUntil);
+    if (pausedUntil && !busy && !msg) {
+      msg = `Background fetching paused until ${new Date(pausedUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+        + ' · the open symbol still updates';
+    }
     // No source able to fetch (every one down, limited out or not set up): said plainly.
     if (data && data.canFetch === false && !busy) {
       msg = 'Unable to fetch data currently';
@@ -220,6 +228,17 @@
   }
 
   window.addEventListener('massive:symbol', (e) => { openTicker = e.detail; checkSymbol(e.detail); });
+
+  // Pause: the running background fetch stops before its next request, the hourly one does not
+  // start; the open symbol is then fetched at once (priority), with the feeds to itself.
+  el('netPause').addEventListener('click', async () => {
+    const pause = !data?.paused;
+    try {
+      await apiWrite('POST', '/api/fetching', { paused: pause });
+      await poll();
+      if (pause && openTicker) checkSymbol(openTicker);
+    } catch (err) { showError(err); }
+  });
 
   // Every server's state and limits beside what this machine keeps to and has used.
   const HEALTH_CLASS = { ok: 'run-ok', fetching: 'fetching', idle: '', done: 'run-ok', limited: 'backfilling',

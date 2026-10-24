@@ -367,6 +367,12 @@ def can_fetch(rows: list[dict]) -> bool:
 DERIVE_FRESH_MS = 120_000  # a build not heard from for this long has ended (or died)
 
 
+def _pause(store: Store, now: datetime) -> dict | None:
+    from ..collector import pause_state
+
+    return pause_state(store, now)
+
+
 def derive_progress(store: Store, now: datetime) -> dict | None:
     """What derive.py is building now (frames from finer bars, for the status bar), or None."""
     import json
@@ -428,6 +434,7 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
         "ticks": _ticks(store, settings),
         "liveFeeds": live_feeds(store, settings, source, now),
         "derive": derive_progress(store, now),
+        "paused": _pause(store, now),
         "limits": limit_rows,
         "health": sources_health,
         "canFetch": can_fetch(sources_health),

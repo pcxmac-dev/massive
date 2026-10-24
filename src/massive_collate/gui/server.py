@@ -518,6 +518,15 @@ class ChartApp:
         self._scan = proc  # keep a reference so it is reaped
         return {"started": True, "pid": proc.pid}
 
+    def set_fetching(self, body: dict) -> dict:
+        """Pause background fetching ({"paused": true, "minutes": n}: at most two hours) or resume it.
+        The open symbol's own fetches go on (priority), so the chart gets the feeds to itself."""
+        from .. import collector
+
+        with self._lock:
+            p = collector.set_pause(self.store, bool(body.get("paused")), minutes=body.get("minutes"))
+        return {"paused": p}
+
     PRIORITY_COOLDOWN = 300  # seconds: a symbol opened again sooner is not asked for again
 
     def priority(self, ticker: str) -> dict:
@@ -689,6 +698,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     if not ticker:
                         return self._json({"error": "ticker is required"}, HTTPStatus.BAD_REQUEST)
                     return self._json(app.priority(ticker), HTTPStatus.ACCEPTED)
+                if method == "POST" and parts == ["", "api", "fetching"]:
+                    return self._json(app.set_fetching(body))
                 if method == "POST" and parts in (["", "api", "scan"], ["", "api", "fetch"]):
                     ticker = parse_qs(urlparse(self.path).query).get("ticker", [None])[-1] if parts[2] == "fetch" else None
                     if parts[2] == "fetch" and not ticker:

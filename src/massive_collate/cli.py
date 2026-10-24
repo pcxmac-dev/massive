@@ -138,6 +138,8 @@ def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource
         if client is not None:  # record usage as it happens, not only at the end
             client.on_request = lambda n: store.set_run_requests(run_id, n)
             _share_limits(client, store, args.source, log)
+            if command == "sync" and not getattr(args, "tickers", None):  # background: stops when paused
+                client.should_stop = _pause_check(store)
         log(f"{command}: source={args.source} tier={settings.tier.name} "
             f"rate={settings.tier.requests_per_minute or 'unlimited'}/min cap={budget} requests")
         status, message = "ok", ""
@@ -155,6 +157,19 @@ def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource
         finally:
             store.finish_run(run_id, source.requests_made, getattr(args, "_rows", 0), status, message)
             log(f"{command}: {source.requests_made} requests used")
+
+
+def _pause_check(store: Store, every: float = 2.0):
+    """A client's should_stop: the user's pause (collector.pause_state), read at most every `every` s."""
+    seen = [0.0, None]
+
+    def check() -> str | None:
+        if time.monotonic() - seen[0] >= every:
+            seen[0] = time.monotonic()
+            p = collector.pause_state(store)
+            seen[1] = f"fetching paused by you until {p['until'][11:16]} UTC" if p else None
+        return seen[1]
+    return check
 
 
 def _share_limits(client, store: Store, name: str, log) -> None:
@@ -301,12 +316,17 @@ def _sync(args, settings: Settings) -> int:
     with Store(settings.db_path) as store:
         separated = store.kv_get("built-bars:separated:v1")
         _note_tier(store, settings, Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
+        paused = None if tickers else collector.pause_state(store)
     from . import live
 
     if args.all_sources and (settings.live_coins or live.stock_keys(settings)) and not settings.offline:
         # keep the live recorder running (crypto, and stocks with Alpaca keys)
         if live.start_detached(settings.db_path):
             Logger(settings.db_path.parent / "logs" / "massive-collate.log")("live: recorder started")
+    if paused:
+        Logger(settings.db_path.parent / "logs" / "massive-collate.log")(
+            f"sync: background fetching paused by you until {paused['until'][11:16]} UTC; not run")
+        return 0
     if not separated:  # one-off: bars built from ticks before they were kept apart from the feeds' own
         with run_lock(settings.db_path), Store(settings.db_path) as store:
             store.separate_built_bars(log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
@@ -425,10 +445,10 @@ def cmd_live(args, settings: Settings) -> int:
               else "a recorder is already running")
         return 0
     if live.running(settings.db_path):
-        print("a recorder is already running")
+        print("a recorder is already running (one per database, and one per machine: the exchanges "
+              "count every connection from this address)")
         return 0
-    lock = live.lock_path(settings.db_path)
-    lock.write_text(str(os.getpid()))
+    locks = live.take_locks(settings.db_path)
     recorder = live.Recorder(settings.db_path, coins=settings.live_coins, stock_keys=live.stock_keys(settings),
                              log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
     try:
@@ -436,7 +456,7 @@ def cmd_live(args, settings: Settings) -> int:
     except KeyboardInterrupt:
         recorder.stop.set()
     finally:
-        lock.unlink(missing_ok=True)
+        live.release_locks(locks)
     return 0
 
 

@@ -17,7 +17,7 @@ from typing import Callable, Iterator
 from zoneinfo import ZoneInfo
 
 from .config import UNLIMITED_BACKFILL_YEARS, Tier, asset_tier
-from .errors import BudgetExhausted, NotEntitled, RateLimited, SourceError
+from .errors import BudgetExhausted, NotEntitled, Paused, RateLimited, SourceError
 from . import freshness
 from .futures import candidate_contracts, roll_schedule
 from .coverage import STEP_MS, FeedProfile, frame_key, frame_parts, frontier_ms, has_open_time, ms, plan
@@ -80,6 +80,8 @@ def _guard(pages: Iterator[list[dict]]) -> Iterator[list[dict]]:
     """Turn 'stop everything' conditions into StopRun while iterating pages."""
     try:
         yield from pages
+    except Paused as e:
+        raise StopRun(str(e)) from e
     except BudgetExhausted as e:
         raise StopRun(f"request cap reached ({e})") from e
     except RateLimited as e:
@@ -101,6 +103,8 @@ def resolve_resolution(
         if ok is None:
             try:
                 ok = source.is_entitled(resolution, fetch or ticker, asset)
+            except Paused as e:
+                raise StopRun(str(e)) from e
             except BudgetExhausted as e:
                 raise StopRun(f"request cap reached ({e})") from e
             except RateLimited as e:
@@ -579,6 +583,8 @@ def sync_exchanges(source: DataSource, store: Store, log: Log = print) -> int:
 def _guard_call(fn: Callable, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
+    except Paused as e:
+        raise StopRun(str(e)) from e
     except BudgetExhausted as e:
         raise StopRun(f"request cap reached ({e})") from e
     except RateLimited as e:
@@ -624,6 +630,40 @@ class Refusals:
     def clear(self, ticker: str) -> None:
         if self.rows.pop(ticker, None) is not None:
             self._save()
+
+
+PAUSE_KEY = "fetch:pause"
+PAUSE_HOURS = 2  # a pause ends on its own: background fetching is never left off by mistake
+
+
+def pause_state(store: Store, now: datetime | None = None) -> dict | None:
+    """Background fetching paused by the user (the chart's button), if it is: {at, until}. The
+    hourly sync does not start, a running one stops before its next request; fetches for the
+    symbol open in the chart (`sync --tickers`) and the live recorder go on."""
+    import json
+
+    try:
+        p = json.loads(store.kv_get(PAUSE_KEY) or "null")
+    except ValueError:
+        return None
+    now = now or datetime.now(timezone.utc)
+    if not isinstance(p, dict) or datetime.fromisoformat(p["until"]) <= now:
+        return None
+    return p
+
+
+def set_pause(store: Store, paused: bool, now: datetime | None = None, minutes: float | None = None) -> dict | None:
+    """Pause background fetching (for `minutes`, at most PAUSE_HOURS), or resume it."""
+    import json
+
+    now = now or datetime.now(timezone.utc)
+    if not paused:
+        store.kv_set(PAUSE_KEY, "")
+        return None
+    minutes = min(minutes or PAUSE_HOURS * 60, PAUSE_HOURS * 60)
+    p = {"at": now.isoformat(timespec="seconds"), "until": (now + timedelta(minutes=minutes)).isoformat(timespec="seconds")}
+    store.kv_set(PAUSE_KEY, json.dumps(p))
+    return p
 
 
 def _backfilling(item: dict, floor: date) -> bool:

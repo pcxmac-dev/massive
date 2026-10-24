@@ -156,3 +156,19 @@ def test_a_stream_that_held_starts_its_backoff_over(tmp_path, monkeypatch):
     rec.stop.wait = lambda timeout=None: waits.append(timeout) or rec.stop.is_set()
     rec._run_stream(rec.streams[0])
     assert waits == [1.0, 2.0, 1.0, 2.0]  # after the connection that held: from a second again
+
+
+def test_only_one_recorder_runs_on_a_machine_whatever_database_it_uses(tmp_path):
+    import os
+
+    first, second = tmp_path / "a" / "m.db", tmp_path / "b" / "m.db"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    assert not live.running(first) and not live.running(second)
+    locks = live.take_locks(first)
+    assert live.running(first) and live.running(second)  # another database's recorder must not start
+    assert live.machine_lock().read_text() == str(os.getpid())
+    live.release_locks(locks)
+    assert not live.running(second) and not live.machine_lock().exists()
+    live.machine_lock().write_text("999999999")  # a recorder that died without cleaning up
+    assert not live.running(second)

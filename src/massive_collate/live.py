@@ -454,21 +454,53 @@ class Recorder:
             self.flush(store)
 
 
-# -- one recorder at a time ---------------------------------------------------------------
+# -- one recorder at a time, on the database and on the machine --------------------------------
+# Every recorder opens the same exchange streams from this machine's IP address: a second one,
+# even on another database (a test copy), doubles the connections, which the exchanges refuse
+# ("subscription limit reached") and can answer by banning the address. So besides its database's
+# lock, a recorder holds a machine-wide one (MASSIVE_LIVE_LOCK to move it, as the tests do).
 
 def lock_path(db_path: Path) -> Path:
     return db_path.with_name("massive-live.lock")
 
 
-def running(db_path: Path) -> bool:
-    """Whether a recorder holds the lock (its process alive)."""
+def machine_lock() -> Path:
+    return Path(os.environ.get("MASSIVE_LIVE_LOCK") or Path.home() / ".massive-collate" / "live.lock")
+
+
+def _holder(path: Path) -> int | None:
+    """The live process holding a lock file, if any."""
     from .cli import pid_alive
 
     try:
-        pid = int(lock_path(db_path).read_text().strip())
+        pid = int(path.read_text().strip())
     except (OSError, ValueError):
-        return False
-    return pid_alive(pid)
+        return None
+    return pid if pid_alive(pid) else None
+
+
+def running(db_path: Path) -> bool:
+    """Whether a recorder runs for this database, or any recorder on this machine."""
+    return any(_holder(p) for p in (lock_path(db_path), machine_lock()))
+
+
+def take_locks(db_path: Path) -> list[Path]:
+    """Hold both locks for this process (the caller checked `running` first). Returns them."""
+    locks = [lock_path(db_path), machine_lock()]
+    for path in locks:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(os.getpid()))
+    return locks
+
+
+def release_locks(locks: list[Path]) -> None:
+    """Remove the locks this process holds (not one another recorder took since)."""
+    for path in locks:
+        try:
+            if int(path.read_text().strip()) == os.getpid():
+                path.unlink()
+        except (OSError, ValueError):
+            pass
 
 
 def start_detached(db_path: Path) -> bool:

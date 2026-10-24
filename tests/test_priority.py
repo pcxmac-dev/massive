@@ -170,3 +170,41 @@ def test_an_offline_copy_of_the_app_starts_no_runs(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         app.start_scan("SPCX")
     store.close()
+
+
+def test_pausing_stops_background_fetching_before_its_next_request_and_resumes(tmp_path):
+    from massive_collate.errors import Paused
+
+    now = datetime(2026, 10, 24, 18, tzinfo=timezone.utc)
+    with Store(tmp_path / "m.db") as store:
+        assert collector.pause_state(store, now) is None
+        p = collector.set_pause(store, True, now, minutes=600)  # asked for 10 h: two at most
+        assert p["until"] == "2026-10-24T20:00:00+00:00" and collector.pause_state(store, now)["until"] == p["until"]
+        assert collector.pause_state(store, now + timedelta(hours=2, seconds=1)) is None  # it ends on its own
+        check = cli._pause_check(store, every=0)
+        assert check().startswith("fetching paused by you until 20:00")
+
+        session = FakeSession([FakeResponse(body={"results": []})])
+        client = MassiveClient("k", session=session, request_budget=10)
+        client.should_stop = check
+        with pytest.raises(Paused):
+            client.get("/v2/aggs/ticker/AAPL/range/1/minute/2026-10-01/2026-10-02")
+        assert session.calls == [] and client.requests_made == 0  # stopped before sending anything
+
+        def pages():
+            raise Paused("fetching paused by you until 20:00 UTC")
+            yield []
+        with pytest.raises(collector.StopRun, match="paused by you"):
+            list(collector._guard(pages()))
+
+        collector.set_pause(store, False, now)
+        assert collector.pause_state(store, now) is None and check() is None
+
+
+def test_the_chart_pauses_and_resumes_fetching(tmp_path):
+    store = Store(tmp_path / "m.db", check_same_thread=False)
+    app = ChartApp(store)
+    assert app.set_fetching({"paused": True})["paused"]["until"]
+    assert collector.pause_state(store) is not None
+    assert app.set_fetching({"paused": False}) == {"paused": None}
+    store.close()
