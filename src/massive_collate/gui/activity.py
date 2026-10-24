@@ -189,6 +189,7 @@ def live_feeds(store: Store, settings: Settings, source: str, now: datetime) -> 
     recorded live right now."""
     beat = store.kv_get(RECORDER_KEY)
     recording = bool(beat and (now - datetime.fromisoformat(beat)).total_seconds() < 120)
+    streams, live_tickers = _streams(store, now) if recording else ({}, [])
     settings = settings.for_source(source)
     by_asset: dict[str, list[str]] = {}
     for w in store.watchlist(source):
@@ -204,9 +205,28 @@ def live_feeds(store: Store, settings: Settings, source: str, now: datetime) -> 
             "recording": recording and live,
             "note": None if live else "your plan has end-of-day data only: no current-session feed",
         })
-    return {"recording": recording and any(f["recording"] for f in feeds),
-            "available": any(f["available"] for f in feeds), "feeds": feeds,
+    return {"recording": recording and (any(f["recording"] for f in feeds) or bool(live_tickers)),
+            "available": any(f["available"] for f in feeds) or bool(streams), "feeds": feeds,
+            "streams": streams, "liveTickers": live_tickers, "recorder": recording,
             "checks": exchange_checks(store, source, now)}
+
+
+LIVE_FRESH_SECONDS = 300  # a pair whose last trade is older than this is not shown as live
+
+
+def _streams(store: Store, now: datetime) -> tuple[dict, list[str]]:
+    """The live recorder's streams (live.py): per exchange whether it is connected and, per pair,
+    trades recorded, the last price and when; and the tickers trading live right now."""
+    import json
+
+    raw = store.kv_get("live:status")
+    if not raw:
+        return {}, []
+    streams = json.loads(raw).get("streams", {})
+    now_ms = now.timestamp() * 1000
+    live = sorted({t for s in streams.values() if s.get("connected")
+                   for t, p in s.get("pairs", {}).items() if p.get("last") and now_ms - p["last"] < LIVE_FRESH_SECONDS * 1000})
+    return streams, live
 
 
 def exchange_checks(store: Store, source: str, now: datetime) -> list[dict]:

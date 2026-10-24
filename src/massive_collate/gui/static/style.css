@@ -531,3 +531,16 @@ button.ds-item.on { box-shadow: inset 3px 0 0 var(--accent); }
 
 /* An interval no source of the symbol can build (seconds without ticks or second bars). */
 #periods button:disabled { opacity: .35; cursor: not-allowed; background: none; }
+
+/* Interval menu */
+#periods select { min-width: 88px; }
+
+/* The newest bar's handle on the time axis: drag to place the current time on screen. */
+.now-handle { position: absolute; bottom: 4px; transform: translateX(-50%); z-index: 4; padding: 0 5px; border-radius: 3px;
+  font-size: 10px; line-height: 15px; color: var(--text); background: var(--panel); border: 1px solid var(--border);
+  cursor: ew-resize; user-select: none; touch-action: none; }
+.now-handle::before { content: ""; position: absolute; left: 50%; top: -5px; width: 1px; height: 5px; background: var(--muted); }
+.now-handle.live { border-color: var(--down); color: var(--down); }
+.now-handle[hidden] { display: none; }
+#modelWindow.warn { color: var(--warn, #d9a441); cursor: help; }
+.now-handle { font-variant-numeric: tabular-nums; }

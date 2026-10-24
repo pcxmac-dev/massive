@@ -368,6 +368,7 @@
             <td>${badge(f)}</td>
             <td>${f.recording ? '<span class="rec on"></span> recording' : '<span class="p-muted">idle</span>'}</td></tr>`).join('')}
         </tbody></table></div>
+      ${liveStreamsHtml(live)}
       <h4>Exchange checks</h4>
       <div class="table-wrap"><table class="act-table">
         <thead><tr><th>Check</th><th>Found</th><th>Last</th><th>Next</th><th>Cost</th></tr></thead>
@@ -380,6 +381,30 @@
       <h4>News</h4>
       <div id="liveNews" class="news-list">${liveNewsHtml()}</div>`;
     loadLiveNews();
+  }
+
+  // The live recorder's exchange streams (python -m massive_collate live): connection, and per
+  // coin the trades recorded, the last price and how long ago it traded.
+  function liveStreamsHtml(live) {
+    const streams = Object.entries(live.streams || {});
+    if (!streams.length) {
+      return `<h4>Live streams</h4><div class="empty">No live recorder running. It starts with the hourly sync, or now with
+        <code>python -m massive_collate live start</code>.</div>`;
+    }
+    const rows = streams.flatMap(([src, s]) => {
+      const pairs = Object.entries(s.pairs || {}).sort(([a], [b]) => a.localeCompare(b));
+      const head = `<tr><td><b>${esc(src)}</b></td><td colspan="4">${s.connected
+        ? `<span class="rec on"></span> connected${s.since ? ` · since ${when(s.since)}` : ''}`
+        : `<span class="state run-error">down</span> <span class="sub">${esc(s.error || '')}</span>`}</td></tr>`;
+      return [head, ...pairs.map(([t, p]) => `
+        <tr class="has-data" data-ticker="${esc(t)}"><td></td><td><b>${esc(t)}</b>${live.liveTickers?.includes(t) ? ' <span class="state fresh">live</span>' : ''}</td>
+          <td class="num">${p.price == null ? '–' : esc(String(p.price))}</td><td class="num">${num(p.trades)}</td>
+          <td>${p.last ? ago(new Date(p.last).toISOString()) : '–'}</td></tr>`)];
+    });
+    return `<h4>Live streams <span class="p-muted small">public exchange feeds, no key · each exchange's trades in its own tick file</span></h4>
+      <div class="table-wrap"><table class="act-table">
+        <thead><tr><th>Exchange</th><th>Coin</th><th class="num">Last price</th><th class="num">Trades recorded</th><th>Last trade</th></tr></thead>
+        <tbody>${rows.join('')}</tbody></table></div>`;
   }
 
   // The newest newsworthy items (headlines, unscheduled closures, early closes, big moves).
@@ -403,7 +428,7 @@
 
   document.addEventListener('click', (e) => {
     if (e.target.closest('#scanBtn')) { startScan(); return; }
-    const item = e.target.closest('#actSymbols tr.has-data');
+    const item = e.target.closest('#actSymbols tr.has-data, #viewLive tr.has-data');
     if (item) window.dispatchEvent(new CustomEvent('massive:open-symbol', { detail: item.dataset.ticker }));
   });
   el('actFilters').addEventListener('click', (e) => {

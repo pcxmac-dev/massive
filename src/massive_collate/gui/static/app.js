@@ -6,6 +6,7 @@ const TZ = 'America/New_York';
 const MERGED = '*';
 const PAGE = 20000;  // bars per request; zooming/scrolling out loads older pages as needed
 const POLL_MS = 60_000;
+const LIVE_POLL_MS = 2_000;  // a symbol streaming live (live.py) is polled this often
 
 // -- per-viewer preferences (localStorage; the app works without it) --------
 const prefs = {
@@ -242,6 +243,7 @@ chart.setDataLoader({
         else requestAnimationFrame(checkLod);  // new symbol/interval/type at a far zoom: pick the right detail
         // After the first render: overlays created in the same tick as the data skew the price scale.
         requestAnimationFrame(() => requestAnimationFrame(restoreDrawings));
+        requestAnimationFrame(applyNowPosition);
         updateStatus(res.bars.length);
       }
     } catch (err) {
@@ -251,26 +253,111 @@ chart.setDataLoader({
   },
   subscribeBar: ({ symbol, period, callback }) => {
     clearInterval(state.poll);
+    // Each subscription is one load of the chart: a poll still in flight when the symbol, interval,
+    // model or chart type changes belongs to the old one and must not add its bars to the new data.
+    const sub = state.subscription = (state.subscription || 0) + 1;
     // Also run at once when a fetch run finishes (panels.js), not only every POLL_MS.
     state.pollNow = async () => {
       const list = chart.getDataList();
-      if (!list.length) return;
+      if (!list.length || state.polling) return;  // one poll at a time
+      state.polling = true;
       try {
         if (PRICE_BASED.has(state.chartType)) return; // path-dependent: refreshed by reloading
+        const kind = state.model.kind;
         const res = await api('/api/bars', {
           source: symbol.source, ticker: symbol.ticker, period: period.type, span: period.span,
           session: state.session, since: list[list.length - 1].timestamp, adjust: state.adjust, lod: lodFor(),
           ...typeQuery(), ...modelQuery(),
         });
+        if (sub !== state.subscription || kind !== state.model.kind) return;
         res.bars.forEach((bar) => callback(bar));
-      } catch { /* the next poll will retry */ }
+        // A forming bar changes in place (no scroll): refresh the side panel's last bar and the time handle.
+        if (res.bars.length) requestAnimationFrame(() => { window.renderCursor?.(); placeNowHandle(); });
+      } catch { /* the next poll will retry */ } finally { state.polling = false; }
     };
-    state.poll = setInterval(state.pollNow, POLL_MS);
+    // Live symbols every 2 s (the forming bar grows, new ones arrive and the chart follows), the rest every minute.
+    state.lastPoll = Date.now();
+    state.poll = setInterval(() => {
+      if (isLive() || Date.now() - state.lastPoll >= POLL_MS) { state.lastPoll = Date.now(); state.pollNow(); }
+    }, LIVE_POLL_MS);
   },
   unsubscribeBar: () => clearInterval(state.poll),
 });
 
-window.addEventListener('resize', () => chart.resize());
+window.addEventListener('resize', () => { chart.resize(); applyNowPosition(); });
+
+// Whether the open symbol is streaming live right now (the activity poll's live tickers).
+function isLive() {
+  return !!state.ticker && (window.Activity?.data?.liveFeeds?.liveTickers || []).includes(state.ticker);
+}
+
+// -- the current time's place on screen -----------------------------------------------------
+// The newest bar can be kept anywhere across the chart (half way, 80 % to the right ...): drag the
+// "now" handle on the time axis; double-click it to put the newest bar back at the right edge. While
+// the chart is at the newest bar it follows it, so history moves left as time goes on.
+const DEFAULT_RIGHT_OFFSET = 80;  // the chart library's own default
+state.nowAt = prefs.get('nowAt', null);  // fraction of the plot width, or null: the right edge
+
+function plotWidth() {
+  return chart.getSize('candle_pane', 'main')?.width || 0;
+}
+
+function applyNowPosition() {
+  const w = plotWidth();
+  if (!w) return;
+  chart.setOffsetRightDistance(state.nowAt == null ? DEFAULT_RIGHT_OFFSET : Math.max(8, w * (1 - state.nowAt)));
+  placeNowHandle();
+}
+
+const nowHandle = document.createElement('div');
+nowHandle.id = 'nowHandle';
+nowHandle.className = 'now-handle';
+nowHandle.title = 'The current time, at the newest bar: drag to place it on screen; double-click to put it back at the right edge';
+// The clock in the time axis's zone, with the zone's name (EDT, EST ...).
+const NOW_CLOCK = new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: '2-digit', minute: '2-digit', second: '2-digit',
+                                                       hourCycle: 'h23', timeZoneName: 'short' });
+const tickNowClock = () => { nowHandle.textContent = NOW_CLOCK.format(new Date()); };
+tickNowClock();
+setInterval(tickNowClock, 1000);
+$('chart').append(nowHandle);
+
+function placeNowHandle() {
+  const data = chart.getDataList();
+  const last = data[data.length - 1];
+  const x = last ? chart.convertToPixel({ timestamp: last.timestamp }, { paneId: 'candle_pane' }).x : NaN;
+  const w = plotWidth();
+  const show = Number.isFinite(x) && x >= 0 && x <= w;
+  nowHandle.hidden = !show;
+  if (show) nowHandle.style.left = `${x}px`;
+  nowHandle.classList.toggle('live', isLive());
+}
+
+nowHandle.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  nowHandle.setPointerCapture(e.pointerId);
+  chart.scrollToRealTime(0);
+  const box = $('chart').getBoundingClientRect();
+  const move = (ev) => {
+    const w = plotWidth();
+    const x = Math.min(w - 8, Math.max(w * 0.1, ev.clientX - box.left));
+    state.nowAt = x / w;
+    chart.setOffsetRightDistance(w - x);
+    placeNowHandle();
+  };
+  const up = () => {
+    nowHandle.removeEventListener('pointermove', move);
+    prefs.set('nowAt', state.nowAt);
+  };
+  nowHandle.addEventListener('pointermove', move);
+  nowHandle.addEventListener('pointerup', up, { once: true });
+});
+nowHandle.addEventListener('dblclick', () => {
+  state.nowAt = null;
+  prefs.set('nowAt', null);
+  applyNowPosition();
+  chart.scrollToRealTime(200);
+});
+chart.subscribeAction('onVisibleRangeChange', () => requestAnimationFrame(placeNowHandle));
 
 // -- level of detail -------------------------------------------------------------------
 // Zoomed out past half a pixel per bar, the chart is fed exact aggregates of k consecutive
@@ -400,7 +487,13 @@ function renderModelControls() {
   $('modelDetail').value = m.detail;
   $('modelGaps').checked = m.gaps;
   $('modelDetail').disabled = m.kind === 'integral';
-  $('modelWindow').textContent = m.kind === 'integral' ? '' : `${windowForDetail(m.detail)} bars ≈ ${windowSpan()}`;
+  const note = $('modelWindow');
+  const hidden = m.kind === 'd1' || m.kind === 'd2' ? state.modelHidden || 0 : 0;
+  note.textContent = m.kind === 'integral' ? '' : `${windowForDetail(m.detail)} bars ≈ ${windowSpan()}`
+    + (hidden ? ` · ${compact(hidden)} bars not drawn` : '');
+  note.classList.toggle('warn', hidden > 0);
+  note.title = hidden ? 'Stretches of data shorter than the smoothing window are not drawn: fitted to a whole short '
+    + 'stretch, the slope would be a single polynomial, not the price\'s. Slide Detail right for a shorter window.' : '';
   for (const opt of $('typeSelect').options) opt.disabled = m.kind !== 'price' && PRICE_ONLY_TYPES.has(opt.value);
 }
 
@@ -448,6 +541,8 @@ async function reloadWithModelPrecision() {
                                            session: state.session, limit: 1, adjust: state.adjust, ...modelQuery() });
       want = res.model?.precision ?? want;
       state.modelUnit = res.model?.unit ?? null;
+      state.modelHidden = res.model?.hidden ?? 0;
+      renderModelControls();
     } catch (err) { showError(err); }
   }
   if (sym && want != null && sym.pricePrecision !== want) chart.setSymbol({ ...sym, pricePrecision: want });  // reloads
@@ -460,6 +555,10 @@ function applyModelPrecision(res) {
   if (!sym || !state.meta) return false;
   const want = res.model ? res.model.precision : state.meta.pricePrecision;
   state.modelUnit = res.model ? res.model.unit : null;
+  if (res.model && (state.modelHidden || 0) !== (res.model.hidden || 0)) {
+    state.modelHidden = res.model.hidden || 0;
+    renderModelControls();
+  }
   if (sym.pricePrecision === want) return false;
   chart.setSymbol({ ...sym, pricePrecision: want });  // reloads once
   return true;
@@ -1259,30 +1358,43 @@ $('symbolDialog').addEventListener('keydown', (e) => {
 // -- intervals and session -----------------------------------------------------
 const PERIOD_LABEL = { second: 's', minute: 'm', hour: 'h', day: 'D', week: 'W', month: 'M' };
 
+// The interval menu: every interval is offered; one no source of this symbol can build is greyed out.
+const periodLabel = (p) => (p.type === 'day' || p.type === 'week' || p.type === 'month' ? PERIOD_LABEL[p.type]
+  : `${p.span}${PERIOD_LABEL[p.type]}`);
+const PERIOD_NAMES = { second: 'second', minute: 'minute', hour: 'hour', day: 'day', week: 'week', month: 'month' };
+
 function renderPeriods() {
   const box = $('periods');
-  box.innerHTML = '';
-  // Every interval is offered; one no source of this symbol can build is greyed out.
-  for (const p of state.meta?.allPeriods || state.meta?.periods || []) {
-    const b = document.createElement('button');
-    b.textContent = p.type === 'day' || p.type === 'week' || p.type === 'month' ? PERIOD_LABEL[p.type] : `${p.span}${PERIOD_LABEL[p.type]}`;
-    b.title = `${p.span} ${p.type}${p.span > 1 ? 's' : ''}`;
-    b.classList.toggle('active', p.type === state.period.type && p.span === state.period.span);
-    if (p.available === false) {
-      b.disabled = true;
-      b.title += ': no source of this symbol has data this fine (seconds need ticks or second bars)';
-      box.append(b);
-      continue;
-    }
-    b.addEventListener('click', () => {
-      state.period = { type: p.type, span: p.span };
+  let sel = $('periodSelect');
+  if (!sel) {
+    sel = document.createElement('select');
+    sel.id = 'periodSelect';
+    sel.title = 'Interval';
+    sel.setAttribute('aria-label', 'Interval');
+    sel.addEventListener('change', () => {
+      const [type, span] = sel.value.split(':');
+      const p = { type, span: Number(span) };
+      state.period = p;
       resetLod();
       prefs.set('period', p); markDirty();
       renderPeriods();
       chart.setPeriod(p);
     });
-    box.append(b);
+    box.replaceChildren(sel);
   }
+  sel.innerHTML = '';
+  for (const p of state.meta?.allPeriods || state.meta?.periods || []) {
+    const o = document.createElement('option');
+    o.value = `${p.type}:${p.span}`;
+    o.textContent = `${p.span} ${PERIOD_NAMES[p.type]}${p.span > 1 ? 's' : ''}`;
+    o.title = periodLabel(p);
+    if (p.available === false) {
+      o.disabled = true;
+      o.textContent += ' (no source this fine)';
+    }
+    sel.append(o);
+  }
+  sel.value = `${state.period.type}:${state.period.span}`;
 }
 
 function renderSession() {
