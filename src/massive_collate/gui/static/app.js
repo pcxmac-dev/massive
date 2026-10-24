@@ -847,10 +847,13 @@ function renderDerivedChip(some, total) {
   const label = periodLabel(state.period);
   chip.hidden = !some;
   chip.textContent = some === total ? 'derived*' : '◦ derived*';
-  chip.title = some === total
-    ? `* Derived data: no feed sends ${label} candles for this symbol; these are built here from ${state.derivedFrom || 'finer data'}.`
-    : `* Candles marked ◦ (${some} of ${total} on screen) are derived: built here from finer data where the feed sent none `
-      + 'at this interval. The feed\'s own replace them when they arrive.';
+  chip.title = some === total && state.derivedFrom
+    ? `* Derived data: no feed sends ${label} candles for this symbol; these are built here from ${state.derivedFrom}.`
+    : some === total
+      ? '* Derived data: every candle on screen was built here (from the feed\'s trades as they stream, or its finer '
+        + `bars); the feed's own ${label} candles replace them when they arrive.`
+      : `* Candles marked ◦ (${some} of ${total} on screen) are derived: built here from finer data where the feed sent `
+        + 'none at this interval. The feed\'s own replace them when they arrive.';
 }
 
 kc.registerIndicator({

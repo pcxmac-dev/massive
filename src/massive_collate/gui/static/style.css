@@ -579,3 +579,4 @@ table.l2 tr.at td { background: color-mix(in srgb, var(--accent, #2962ff) 18%, t
   padding: 0 5px; cursor: help; white-space: nowrap; }
 .derived-chip[hidden] { display: none; }
 .derived-tag { font-size: 10px; color: var(--muted); border: 1px dashed var(--border); border-radius: 3px; padding: 0 3px; }
+#railMarkets canvas.globe-icon { display: block; border-radius: 50%; }
