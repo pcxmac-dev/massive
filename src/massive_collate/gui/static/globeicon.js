@@ -9,7 +9,7 @@
 (() => {
   'use strict';
 
-  const SIZE = 22;           // css px
+  const SIZE = 44;           // css px (the rail's icons are 40)
   const FRAMES = 24;         // one per hour of UTC
   const MARKETS_MS = 300_000;
   const SKIP = new Set(['fx', 'crypto']);  // not markets for this icon (yet)
@@ -92,7 +92,7 @@
         const i = (sy * map.width + sx) * 4, o = (py * n + px) * 4;
         const z = Math.sqrt(Math.max(0, 1 - rho * rho));  // facing the viewer (and, by day, the Sun)
         // By day the Sun lights the disc from the centre; by night the cities shine over a faint
-        // deep blue, so the globe still reads against a dark rail at 22 px.
+        // deep blue, so the globe still reads against a dark rail.
         const light = mode === 'day' ? 0.6 + 0.55 * z : 1.3 + 0.5 * z;
         const base = mode === 'day' ? [0, 0, 0] : [10, 18, 42];
         out.data[o] = Math.min(255, base[0] + map.data[i] * light);

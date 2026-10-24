@@ -12,7 +12,7 @@
 
   const EFFECTS = { heartbeat: 'Heartbeat', pulse: 'ROYGBIV pulse', off: 'Off' };
   const ROYGBIV = ['#ff2a2a', '#ff8c1a', '#ffe11a', '#2bd451', '#2f7bff', '#4b33d6', '#9b3cff'];
-  const SIZE = 20;  // the icon is drawn 20 px wide from a 24-unit box
+  const SIZE = 40;  // the icon is drawn 40 px wide (the rail's icon size) from a 24-unit box
   const OUTER = 9, DISC = 4, BAND = 1, EDGE = 10.8;  // the icon's ring and disc (units); fades end at EDGE
   const RED = '#ff3b3b';
   const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)');

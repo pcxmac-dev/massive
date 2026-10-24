@@ -56,22 +56,24 @@
     }
   }
 
+  const RAIL_ICON = 40;  // px; the buttons (style.css #rail) leave room around it
+
   function renderRailIcons(activity) {
-    $('railStock').innerHTML = state.ticker ? symbolIcon(symbolInfo(state.ticker), 22) : icon('analysis', 20);
-    $('railAnalysis').innerHTML = icon('analysis', 20);
-    if (!window.GlobeIcon?.update()) $('railMarkets').innerHTML = icon('globe', 20);  // the Earth, once its images are here
-    $('railNews').innerHTML = icon('news', 20);
-    $('railDatasets').innerHTML = icon('dataset', 20);
+    $('railStock').innerHTML = state.ticker ? symbolIcon(symbolInfo(state.ticker), RAIL_ICON + 4) : icon('analysis', RAIL_ICON);
+    $('railAnalysis').innerHTML = icon('analysis', RAIL_ICON);
+    if (!window.GlobeIcon?.update()) $('railMarkets').innerHTML = icon('globe', RAIL_ICON);  // the Earth, once its images are here
+    $('railNews').innerHTML = icon('news', RAIL_ICON);
+    $('railDatasets').innerHTML = icon('dataset', RAIL_ICON);
     const running = !!activity?.running;
     const fresh = activity?.newData || 0;
-    $('railFetcher').innerHTML = `${icon('database', 20)}${running ? `<span class="rail-badge spin">${icon('sync', 11)}</span>` : ''}`
+    $('railFetcher').innerHTML = `${icon('database', RAIL_ICON)}${running ? `<span class="rail-badge spin">${icon('sync', RAIL_ICON / 2)}</span>` : ''}`
       + (!running && fresh ? `<span class="rail-count" title="${fresh} symbols should have new data">${fresh}</span>` : '');
     $('railFetcher').classList.toggle('busy', running);
     $('railFetcher').title = running
       ? `Fetcher: running${activity.live?.current ? `, fetching ${activity.live.current}` : ''}`
       : 'Fetcher: historical data (sessions before the current one)';
     const live = activity?.liveFeeds;
-    if (!$('railLive').querySelector('svg')) $('railLive').insertAdjacentHTML('afterbegin', icon('record', 20));
+    if (!$('railLive').querySelector('svg')) $('railLive').insertAdjacentHTML('afterbegin', icon('record', RAIL_ICON));
     window.LiveIcon?.update(isLive());  // the open symbol streaming: the icon's effect runs
     $('railLive').classList.toggle('recording', !!live?.recording);
     $('railLive').classList.toggle('available', !!live?.available && !live?.recording);
