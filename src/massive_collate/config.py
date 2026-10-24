@@ -137,6 +137,9 @@ class Settings:
     crypto_venue_days: int = 90
     # Coins recorded live from the exchanges' public streams (live.py); LIVE_CRYPTO=off for none.
     live_coins: tuple[str, ...] = ("BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LTC", "LINK")
+    # MASSIVE_OFFLINE=1: nothing is fetched and no recorder starts (a test copy of the app on a
+    # scratch database must never spend the real plan's requests: its own ledger would not know them).
+    offline: bool = False
 
     # The settings a feed view was made from, so any view can switch to another feed.
     origin: "Settings | None" = field(default=None, compare=False, repr=False)
@@ -268,6 +271,7 @@ def load_settings(
         tiingo_api_key=merged.get("TIINGO_API_KEY") or None,
         crypto_venue_days=_default(_int_setting(merged, "CRYPTO_VENUE_DAYS"), 90),
         live_coins=_live_coins(merged.get("LIVE_CRYPTO")),
+        offline=str(merged.get("MASSIVE_OFFLINE", "")).strip().lower() in ("1", "true", "yes", "on"),
     )
 
 

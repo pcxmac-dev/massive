@@ -119,6 +119,11 @@ def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource
     """Open the store, take the lock, build a source with a hard request cap, and audit the run."""
     settings = settings.for_source(args.source)  # each feed has its own plan, rate and caps
     log = Logger(settings.db_path.parent / "logs" / "massive-collate.log")
+    if settings.offline:
+        with Store(settings.db_path) as store:
+            print(f"offline (MASSIVE_OFFLINE): nothing sent to {args.source}")
+            yield None, store, log  # type: ignore[misc]
+        return
     with Store(settings.db_path) as store, run_lock(settings.db_path):
         store.close_abandoned_runs()  # we hold the lock, so anything still "running" died
         budget = _budget(settings, store, args.source)
@@ -213,7 +218,7 @@ def _sync(args, settings: Settings) -> int:
     names = list(BUILDERS) if args.all_sources else [args.source]
     with Store(settings.db_path) as store:
         separated = store.kv_get("built-bars:separated:v1")
-    if args.all_sources and settings.live_coins:  # keep the live crypto recorder running (no-op if it is)
+    if args.all_sources and settings.live_coins and not settings.offline:  # keep the live crypto recorder running
         from . import live
 
         if live.start_detached(settings.db_path):
@@ -327,8 +332,8 @@ def cmd_live(args, settings: Settings) -> int:
             pairs = ", ".join(f"{t} {p['trades']:,}" for t, p in sorted(st.get("pairs", {}).items()))
             print(f"  {source:9} {'connected' if st.get('connected') else 'down: ' + str(st.get('error'))}  {pairs}")
         return 0
-    if not settings.live_coins:
-        print("live recording is off (LIVE_CRYPTO=off)")
+    if not settings.live_coins or settings.offline:
+        print("live recording is off (LIVE_CRYPTO=off or MASSIVE_OFFLINE)")
         return 0
     if args.action == "start":
         print("recorder started in the background" if live.start_detached(settings.db_path)

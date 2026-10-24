@@ -319,6 +319,39 @@ class ChartApp:
             model=_model(q),
         )
 
+    # -- watchlists (the rail's lists of symbols) --------------------------------
+    WATCHLISTS_KEY = "ui:watchlists"
+    MAX_LISTS, MAX_LIST_TICKERS = 50, 1000
+
+    def watchlists(self) -> dict:
+        with self._lock:
+            raw = self.store.kv_get(self.WATCHLISTS_KEY)
+        try:
+            lists = json.loads(raw) if raw else []
+        except ValueError:
+            lists = []
+        return {"lists": lists if isinstance(lists, list) else []}
+
+    def save_watchlists(self, body: dict) -> dict:
+        """Replace the lists: [{name, tickers}], names unique (1-40 characters), tickers in order."""
+        lists = body.get("lists")
+        if not isinstance(lists, list) or len(lists) > self.MAX_LISTS:
+            raise ValueError(f"lists must be a list of at most {self.MAX_LISTS}")
+        out, names = [], set()
+        for item in lists:
+            name = str((item or {}).get("name", "")).strip() if isinstance(item, dict) else ""
+            tickers = item.get("tickers") if isinstance(item, dict) else None
+            if not 1 <= len(name) <= 40 or name in names:
+                raise ValueError("each list needs a name of 1-40 characters, not used by another list")
+            if not isinstance(tickers, list) or len(tickers) > self.MAX_LIST_TICKERS \
+                    or not all(isinstance(t, str) and 0 < len(t) <= 32 for t in tickers):
+                raise ValueError(f"tickers must be at most {self.MAX_LIST_TICKERS} symbols")
+            names.add(name)
+            out.append({"name": name, "tickers": list(dict.fromkeys(t.strip().upper() for t in tickers))})
+        with self._lock:
+            self.store.kv_set(self.WATCHLISTS_KEY, json.dumps(out))
+        return {"lists": out}
+
     # -- layouts (saved markups) ----------------------------------------------
 
     def layouts(self) -> dict:
@@ -424,6 +457,8 @@ class ChartApp:
             return self.store.icon(ticker)
 
     def start_scan(self, ticker: str | None = None) -> dict:
+        if self.settings.offline:
+            raise RuntimeError("offline (MASSIVE_OFFLINE): this copy of the app fetches nothing")
         """Run `scan --probe --fetch` (for one ticker, or every watched symbol) in its own
         process: it takes the run lock and the plan caps like a scheduled sync, and shows up in
         the activity view and the status bar while it runs."""
@@ -464,6 +499,8 @@ class ChartApp:
                 collector.request_priority(self.store, ticker, now)
                 asked = {"at": now, "runs": 0}
         out = {"ticker": ticker, "feeds": feeds, "asked": asked["at"].isoformat()}
+        if self.settings.offline:
+            return {**out, "state": "offline"}  # a test copy of the app: nothing is fetched
         if activity.lock_owner(self.store.path):
             return {**out, "state": "queued"}  # the running sync takes it next
         if asked["runs"]:
@@ -600,6 +637,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     if not ticker:
                         return self._json({"error": "ticker is required"}, HTTPStatus.BAD_REQUEST)
                     return self._json(app.watch(ticker), HTTPStatus.CREATED)
+                if method == "PUT" and parts == ["", "api", "watchlists"]:
+                    return self._json(app.save_watchlists(body))
                 if method == "POST" and parts == ["", "api", "priority"]:
                     ticker = parse_qs(urlparse(self.path).query).get("ticker", [None])[-1]
                     if not ticker:
@@ -648,6 +687,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
             try:
                 if url.path == "/api/layouts":
                     return self._json(app.layouts())
+                if url.path == "/api/watchlists":
+                    return self._json(app.watchlists())
                 if url.path.startswith("/api/layouts/"):
                     return self._json(app.layout(int(url.path.rsplit("/", 1)[1])))
                 if url.path == "/api/symbols":

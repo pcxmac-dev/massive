@@ -112,3 +112,12 @@ def test_export_writes_csv(env):
     out = env / "out.csv"
     assert cli.main(["export", "SPCX", "--out", str(out)]) == 0
     assert out.read_text().count("\n") == 2
+
+
+def test_offline_copies_of_the_app_fetch_nothing(env, monkeypatch, capsys):
+    monkeypatch.setenv("MASSIVE_OFFLINE", "1")
+    cli.main(["watch", "add", "SPCX"])
+    assert cli.main(["sync"]) == 0  # requests.Session.get would fail the test if anything were sent
+    assert "offline (MASSIVE_OFFLINE)" in capsys.readouterr().out
+    assert cli.main(["live", "start"]) == 0
+    assert "live recording is off" in capsys.readouterr().out

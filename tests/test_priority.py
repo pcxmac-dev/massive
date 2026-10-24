@@ -159,3 +159,14 @@ def test_limits_list_every_server_with_its_window_and_wait(store):
     assert m["wait"]["reason"].startswith("limit") and rows["coinbase"]["wait"] is None  # a past wait is over
     assert rows["tiingo"]["keptTo"] == "45 requests per hour" and "10 requests per second" in rows["coinbase"]["published"]
     assert m["perDay"] == 2000 and m["leftToday"] == 2000
+
+
+def test_an_offline_copy_of_the_app_starts_no_runs(tmp_path, monkeypatch):
+    store = Store(tmp_path / "m.db", check_same_thread=False)
+    store.watch("massive", ["SPCX"], "minute", exchange="XNAS")
+    monkeypatch.setattr(server.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("started")))
+    app = ChartApp(store, settings=load_settings(env={"MASSIVE_OFFLINE": "1"}, env_file=None))
+    assert app.priority("SPCX")["state"] == "offline"
+    with pytest.raises(RuntimeError):
+        app.start_scan("SPCX")
+    store.close()

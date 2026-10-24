@@ -16,7 +16,9 @@
    cursor). */
 (() => {
   const { symbolIcon, icon } = window.MassiveIcons;
-  const VIEWS = { stock: 'chart', analysis: 'chart', markets: 'markets', news: 'news', datasets: 'datasets', fetcher: 'fetcher', live: 'live' };
+  // The watchlist sits beside whichever chart was showing (it has no chart content of its own).
+  const VIEWS = { stock: 'chart', analysis: 'chart', watchlist: 'chart', markets: 'markets', news: 'news', datasets: 'datasets',
+                  fetcher: 'fetcher', live: 'live' };
 
   // -- rail --------------------------------------------------------------------------------
   function showPane(name, { toggle = true } = {}) {
@@ -31,7 +33,7 @@
     document.body.dataset.pane = name;
     document.body.dataset.view = view;
     prefs.set('pane', name);
-    if (view === 'chart') window.switchWorkspace?.(name);  // each chart view keeps its own content
+    if (view === 'chart' && name !== 'watchlist') window.switchWorkspace?.(name);  // each chart view keeps its own content
     for (const v of document.querySelectorAll('main > .view')) v.hidden = v.dataset.view !== view;
     if (view === 'chart') {
       for (const p of document.querySelectorAll('#sidePanel .pane')) p.hidden = p.dataset.pane !== name;
@@ -61,6 +63,7 @@
   function renderRailIcons(activity) {
     $('railStock').innerHTML = state.ticker ? symbolIcon(symbolInfo(state.ticker), RAIL_ICON + 4) : icon('analysis', RAIL_ICON);
     $('railAnalysis').innerHTML = icon('analysis', RAIL_ICON);
+    $('railWatch').innerHTML = icon('watchlist', RAIL_ICON);
     if (!window.GlobeIcon?.update()) $('railMarkets').innerHTML = icon('globe', RAIL_ICON);  // the Earth, once its images are here
     $('railNews').innerHTML = icon('news', RAIL_ICON);
     $('railDatasets').innerHTML = icon('dataset', RAIL_ICON);

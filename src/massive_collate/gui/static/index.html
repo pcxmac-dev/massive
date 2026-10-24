@@ -100,6 +100,9 @@
           <section id="pBusiness"></section>
           <section id="pData"></section>
         </div>
+        <div class="pane" id="paneWatch" data-pane="watchlist" hidden>
+          <section id="pWatch"></section>
+        </div>
         <div class="pane" id="paneAnalysis" data-pane="analysis" hidden>
           <section id="pLevel2"></section>
           <section id="pHighlight"></section>
@@ -174,6 +177,7 @@
     <nav id="rail" aria-label="Views">
       <button data-pane="stock" id="railStock" title="Stock: chart with the symbol, key statistics and business"></button>
       <button data-pane="analysis" id="railAnalysis" title="Analysis: chart with the highlight and cursor statistics"></button>
+      <button data-pane="watchlist" id="railWatch" title="Watchlist: every collected symbol and your own lists, beside the chart"></button>
       <button data-pane="markets" id="railMarkets" title="Markets: the world's exchanges on a globe, what is open now"></button>
       <button data-pane="news" id="railNews" title="News: exchange events and headlines"></button>
       <button data-pane="datasets" id="railDatasets" title="Datasets: research series (Fama/French factors, Shiller CAPE, COT positioning, commodities)"></button>
@@ -218,5 +222,6 @@
   <script src="news.js"></script>
   <script src="datasets.js"></script>
   <script src="level2.js"></script>
+  <script src="watchlist.js"></script>
 </body>
 </html>

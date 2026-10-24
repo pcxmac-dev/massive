@@ -580,3 +580,28 @@ table.l2 tr.at td { background: color-mix(in srgb, var(--accent, #2962ff) 18%, t
 .derived-chip[hidden] { display: none; }
 .derived-tag { font-size: 10px; color: var(--muted); border: 1px dashed var(--border); border-radius: 3px; padding: 0 3px; }
 #railMarkets canvas.globe-icon { display: block; border-radius: 50%; }
+/* Watchlist (side panel) */
+#pWatch .w-head { display: flex; align-items: center; gap: 6px; }
+#pWatch .w-head select { margin-left: auto; max-width: 60%; }
+#pWatch .w-head button { border: 1px solid var(--border); border-radius: 4px; background: none; color: var(--text);
+  min-width: 24px; height: 22px; cursor: pointer; }
+#pWatch .w-head button:disabled { opacity: .35; cursor: default; }
+#watchFilter { width: 100%; box-sizing: border-box; margin: 4px 0 6px; padding: 4px 6px; border: 1px solid var(--border);
+  border-radius: 4px; background: var(--bg); color: var(--text); }
+.w-wrap { max-height: calc(100vh - 200px); overflow: auto; }
+.w-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12px; }
+.w-table th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 500; text-align: left;
+  cursor: pointer; user-select: none; padding: 2px 4px; }
+.w-table th.num, .w-table td.num { text-align: right; }
+.w-table td { padding: 3px 4px; border-top: 1px solid var(--border); white-space: nowrap; }
+.w-table tr[data-ticker] { cursor: pointer; }
+.w-table tr[data-ticker]:hover td { background: var(--hover); }
+.w-table tr.on td { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.w-table .w-sym { display: flex; align-items: center; gap: 6px; }
+.w-table .w-ex { color: var(--muted); font-size: 10px; margin-left: 4px; }
+.w-table .w-live { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--down); margin-left: 4px;
+  vertical-align: middle; }
+.w-table .w-group td { color: var(--muted); font-weight: 600; cursor: pointer; background: var(--panel); }
+.w-table .w-x button { border: 0; background: none; color: var(--muted); cursor: pointer; visibility: hidden; }
+.w-table tr:hover .w-x button { visibility: visible; }
+.w-empty { padding: 8px 4px; white-space: normal; }
