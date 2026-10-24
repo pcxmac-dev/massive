@@ -2407,6 +2407,73 @@ async function loadInfo() {
 }
 setInterval(() => { if (!document.body.classList.contains('panel-hidden')) loadInfo(); }, POLL_MS);
 
+// -- what the symbol holds, feed by feed and frame by frame (inventory.py) ------------------------
+// ● sent by the feed (prime data); * built here from that feed's finer bars (derived); ○ a frame
+// it should have built from them but has not yet. Columns in the order a merged chart takes the
+// feeds. Read when a symbol opens and every minute while the panel shows.
+const INVENTORY_MS = 60_000;
+async function loadInventory() {
+  if (!state.ticker || document.body.classList.contains('panel-hidden')) return;
+  const ticker = state.ticker;
+  let inv = null;
+  try { inv = await api('/api/inventory', { ticker }); } catch { /* the panel shows nothing for it */ }
+  if (ticker !== state.ticker) return;  // another symbol meanwhile: its own load fills the panel
+  state.inventory = inv;
+  renderInventory();
+}
+setInterval(loadInventory, INVENTORY_MS);
+window.addEventListener('massive:symbol', () => { state.inventory = null; renderInventory(); loadInventory(); });
+
+function renderInventory() {
+  const box = $('pInventory');
+  const inv = state.inventory;
+  if (!inv?.feeds?.length) { box.innerHTML = ''; return; }
+  const when = (iso) => iso.slice(0, 16).replace('T', ' ');
+  const span = (p) => `${when(p.first)} → ${when(p.last)} UTC · ${p.rows.toLocaleString()} bars`;
+  const cols = inv.feeds.map((f) => ({ f, frames: Object.fromEntries(f.frames.map((x) => [x.frame, x])), missing: new Set(f.notBuilt) }));
+  const rows = inv.frames.filter((label) => cols.some((c) => c.frames[label] || c.missing.has(label)));
+  const cell = ({ f, frames, missing }, label) => {
+    const x = frames[label];
+    const sent = x?.sent ? `Sent by ${f.feed}: ${span(x.sent)}` : '';
+    const built = x?.derived ? `*Derived here from ${f.feed}'s ${x.derived.how?.from || 'finer'} bars`
+      + `${x.derived.how?.built ? ` (built ${when(x.derived.how.built)} UTC)` : ''}: ${span(x.derived)}` : '';
+    if (x?.sent) return `<td class="inv-sent" title="${esc([sent, built && `${built}, where it sent none`].filter(Boolean).join('\n'))}">●${x.derived ? '<span class="inv-star">*</span>' : ''}</td>`;
+    if (x?.derived) return `<td class="inv-derived" title="${esc(built)}">*</td>`;
+    if (missing.has(label)) return `<td class="inv-missing" title="Not built yet: derived from the finer bars ${esc(f.feed)} holds">○</td>`;
+    return '<td></td>';
+  };
+  const head = ({ f }) => {
+    const w = f.watch || {};
+    const about = [f.model ? `${f.feed}: a model built from several exchanges (derived)` : f.feed,
+      w.resolution ? `collects ${w.resolution}${w.backfilled_to ? `, history from ${w.backfilled_to}` : ''}` : 'not collected here by this feed',
+      f.ticks ? `trades ${when(f.ticks.first)} → ${when(f.ticks.last)} UTC` : ''].filter(Boolean).join('\n');
+    return `<th title="${esc(about)}">${esc(f.feed)}${f.model ? '*' : ''}</th>`;
+  };
+  const pending = inv.feeds.some((f) => f.notBuilt.length);
+  box.innerHTML = `
+    <h3>Data by feed${pending ? ` <button type="button" id="invBuild" title="Build ${esc(inv.ticker)}'s missing derived frames now, from what is stored (no requests to any feed)">Build missing</button>` : ''}</h3>
+    <div class="table-wrap"><table class="inv-table">
+      <thead><tr><th></th>${cols.map(head).join('')}</tr></thead>
+      <tbody>${rows.map((label) => `<tr><th>${esc(label)}</th>${cols.map((c) => cell(c, label)).join('')}</tr>`).join('')}</tbody>
+    </table></div>
+    <div class="p-muted small">● sent by the feed · * derived here from finer data · ○ not built yet</div>`;
+}
+
+$('pInventory').addEventListener('click', async (e) => {
+  const btn = e.target.closest('#invBuild');
+  if (!btn || !state.ticker) return;
+  btn.disabled = true;
+  btn.textContent = 'Building…';
+  try {
+    await apiWrite('POST', `/api/derive?ticker=${encodeURIComponent(state.ticker)}`);
+    setTimeout(loadInventory, 3_000);  // a few seconds for most symbols; the minute's refresh catches the rest
+  } catch (err) {
+    btn.textContent = 'Build missing';
+    btn.disabled = false;
+    btn.title = String(err.message || err);
+  }
+});
+
 function renderPanel() {
   const info = state.info;
   if (!info) { ['pSymbol', 'pStats', 'pBusiness', 'pData'].forEach((id) => { $(id).innerHTML = ''; }); return; }

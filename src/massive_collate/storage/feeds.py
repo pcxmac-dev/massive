@@ -689,6 +689,44 @@ class FeedStore:
         self._cache[key] = (version, value)
         return value
 
+    def changed_span(self, source: str, ticker: str, timespan: str, stored_after: int) -> tuple[int, int] | None:
+        """(first, last) start in ms of a series' bars, its own or built, stored after
+        `stored_after` (ms): the span a build from them has to redo. None if nothing changed."""
+        conn = self._bars(source)
+        if conn is None:
+            return None
+        spans = [conn.execute(f"SELECT MIN(ts), MAX(ts) FROM {table} WHERE ticker=? AND timespan=? AND multiplier=1 "
+                              "AND stored_at > ?", (ticker.upper(), timespan, stored_after)).fetchone()
+                 for table in _BAR_TABLES]
+        spans = [s for s in spans if s[0] is not None]
+        return (min(s[0] for s in spans), max(s[1] for s in spans)) if spans else None
+
+    def frame_inventory(self, source: str, ticker: str) -> list[dict]:
+        """Every frame one feed holds for a symbol, as stored: {table (bars: the feed's own,
+        built_bars: built here), timespan, multiplier, first, last (bar starts, ms), rows,
+        derivation (of the newest built bar)}. Index seeks and range counts only."""
+        conn = self._bars(source)
+        if conn is None:
+            return []
+        t = ticker.upper()
+        out = []
+        for table in _BAR_TABLES:
+            frame = conn.execute(f"SELECT timespan, multiplier FROM {table} WHERE ticker=? "
+                                 "ORDER BY timespan, multiplier LIMIT 1", (t,)).fetchone()
+            while frame is not None:  # one seek per frame (a loose index scan within the ticker)
+                key = (t, *frame)
+                where = f"FROM {table} WHERE ticker=? AND timespan=? AND multiplier=?"
+                first, last, rows = conn.execute(f"SELECT MIN(ts), MAX(ts), COUNT(*) {where}", key).fetchone()
+                derivation = None
+                if table == "built_bars":
+                    derivation = conn.execute(f"SELECT derivation {where} ORDER BY ts DESC LIMIT 1", key).fetchone()[0]
+                out.append({"table": table, "timespan": frame[0], "multiplier": frame[1], "first": first,
+                            "last": last, "rows": rows, "derivation": derivation})
+                frame = conn.execute(f"SELECT timespan, multiplier FROM {table} WHERE ticker=? "
+                                     "AND (ticker, timespan, multiplier, ts) > (?, ?, ?, ?) ORDER BY timespan, multiplier, ts LIMIT 1",
+                                     (t, t, *frame, 2**63 - 1)).fetchone()
+        return out
+
     def bars_changed_since(self, source: str, ticker: str, timespans: Sequence[str], stored_after: int) -> dict:
         """Per timespan, (earliest bar time, newest stored_at) of the ticker's bars, its own or
         built, stored after `stored_after` (ms): what a cached series has to load again."""

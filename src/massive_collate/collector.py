@@ -657,6 +657,22 @@ def _monthly_symbol(store: Store, feed: str, ticker: str, now: datetime) -> bool
     return allowed
 
 
+def _derive_symbol(store: Store, feed: str, ticker: str, asset: str, log) -> int:
+    """The frames `feed` does not send for one symbol, built from what its fetch just stored
+    (derive.py), so in a long backfill each symbol's derived frames are ready as it is done, not
+    when the whole run ends. A failure is logged and never fails the fetch: the pass after the
+    run builds it again."""
+    from . import derive
+
+    try:
+        return derive.build_symbol(store, feed, ticker, asset, log=log)
+    except Exception as e:  # noqa: BLE001 - derived frames are rebuilt by the end-of-run pass
+        log(f"{ticker}: derived frames not built ({type(e).__name__}: {e}); the end of the run tries again")
+        return 0
+    finally:
+        store.kv_set(derive.PROGRESS_KEY, "")
+
+
 PAUSE_KEY = "fetch:pause"
 PAUSE_HOURS = 2  # a pause ends on its own: background fetching is never left off by mistake
 
@@ -934,6 +950,7 @@ def sync(
                 else:
                     log(f"{ticker} {resolution}: {n} rows ({source.requests_made - spent} requests)")
                 store.set_synced(source.name, ticker, now)
+                _derive_symbol(store, source.name, ticker, asset, log)
                 if archival:
                     spans = [resolution] if resolution == "day" else [resolution, "day"]
                     if not any(plan(store, me, feeds, ticker, asset, ts, item_floor, now, listing.listed_from) for ts in spans):

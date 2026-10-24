@@ -192,6 +192,13 @@ body.panel-hidden #sidePanel, body.panel-hidden #panelResizer { display: none; }
 .p-desc { color: var(--text); margin: 0 0 8px; }
 .p-desc.clamp { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .p-muted { color: var(--muted); }
+.inv-table { border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12px; }
+.inv-table th { color: var(--muted); font-weight: 500; text-align: left; padding: 1px 6px 1px 0; white-space: nowrap; }
+.inv-table thead th { text-align: center; padding: 1px 6px; }
+.inv-table td { text-align: center; padding: 1px 6px; min-width: 3ch; cursor: default; }
+.inv-sent { color: var(--text); }
+.inv-derived, .inv-star { color: var(--muted); }
+.inv-missing { color: #f0b90b; }
 #sidePanel a { color: var(--accent); }
 
 #status {

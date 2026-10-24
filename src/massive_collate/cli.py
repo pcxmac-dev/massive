@@ -465,6 +465,45 @@ def cmd_derive(args, settings: Settings) -> int:
     return 0
 
 
+def cmd_inventory(args, settings: Settings) -> int:
+    """What a symbol holds on every feed, frame by frame: sent by the feed, built here (*derived)
+    or not built yet; with --json, everything inventory.py reports."""
+    import json
+
+    from . import inventory
+
+    with Store(settings.db_path) as store:
+        inv = inventory.symbol_inventory(store, args.ticker)
+    if args.json:
+        print(json.dumps(inv, indent=2))
+        return 0
+    if not inv["feeds"]:
+        print(f"{inv['ticker']}: no feed holds or watches it")
+        return 1
+    feeds = inv["feeds"]
+    cell = {}
+    for f in feeds:
+        for fr in f["frames"]:
+            cell[(fr["frame"], f["feed"])] = ("sent" if "sent" in fr else "") + ("+*" if "sent" in fr and "derived" in fr
+                                                                                else "*derived" if "derived" in fr else "")
+        for label in f["notBuilt"]:
+            cell[(label, f["feed"])] = "not built"
+    width = max(9, *(len(f["feed"]) for f in feeds))
+    print(f"{inv['ticker']}  (sent: the feed's own; *derived: built here from finer data)")
+    print("frame  " + "".join(f"{f['feed']:<{width + 2}}" for f in feeds))
+    for label in inv["frames"]:
+        if any((label, f["feed"]) in cell for f in feeds):
+            print(f"{label:<7}" + "".join(f"{cell.get((label, f['feed']), '-'):<{width + 2}}" for f in feeds))
+    for f in feeds:
+        w, ticks = f["watch"] or {}, f["ticks"]
+        print(f"{f['feed']}: " + ", ".join(filter(None, [
+            f"resolution {w['resolution']}" if w.get("resolution") else "not watched",
+            f"backfilled to {w['backfilled_to']}" if w.get("backfilled_to") else None,
+            f"ticks {ticks['first'][:10]} -> {ticks['last'][:16]}" if ticks else None,
+            "model" if f["model"] else None])))
+    return 0
+
+
 def cmd_provenance(args, settings: Settings) -> int:
     """How derived results were made: kind, product, code version, settings, inputs, span, rows."""
     import json
@@ -963,9 +1002,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("action", nargs="?", choices=["run", "start", "status"], default="run")
     s.set_defaults(func=cmd_live)
 
+    s = sub.add_parser("inventory", help="what a symbol holds on every feed, frame by frame (sent, *derived, not built)")
+    s.add_argument("ticker")
+    s.add_argument("--json", action="store_true", help="everything, as JSON")
+    s.set_defaults(func=cmd_inventory)
+
     s = sub.add_parser("provenance", help="how derived results were made (bars from ticks, composites, quality, audits)")
     s.add_argument("product", nargs="?", help="product prefix, e.g. composite:BTCUSD or alpaca:BTCUSD")
-    s.add_argument("--kind", choices=["bars-from-ticks", "composite", "quality", "quality-prior", "audit"])
+    s.add_argument("--kind", choices=["bars-from-ticks", "bars-from-bars", "composite", "quality", "quality-prior",
+                                       "audit"])
     s.add_argument("--limit", type=int, default=20)
     s.add_argument("-v", "--verbose", action="store_true", help="also the settings and inputs")
     s.set_defaults(func=cmd_provenance)

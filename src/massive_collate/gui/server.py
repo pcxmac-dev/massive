@@ -51,6 +51,7 @@ class ChartApp:
         self.engine = BarEngine(store, priority=priority, quality=self._feed_quality)
         self._lock = self.engine.lock
         self._open_noted: dict[str, int] = {}  # ticker -> ms it was last noted open (note_open)
+        self._derive_proc: subprocess.Popen | None = None  # a build started by start_derive
 
     def _feed_quality(self, feed: str) -> float:
         """A feed's best quality over asset classes (display priority between feeds)."""
@@ -551,6 +552,30 @@ class ChartApp:
         self._scan = proc  # keep a reference so it is reaped
         return {"started": True, "pid": proc.pid}
 
+    def inventory(self, ticker: str) -> dict:
+        """The symbol's data feed by feed and frame by frame (inventory.py): what each feed sent,
+        what was built here from its finer data (*derived) and what is not built yet."""
+        from .. import inventory
+
+        rank = self.engine.sources_for(ticker.upper())
+        with self._lock:
+            return inventory.symbol_inventory(self.store, ticker, rank)
+
+    def start_derive(self, ticker: str) -> dict:
+        """Build a symbol's derived frames now (`derive --tickers`) in its own process: from what
+        is stored only, no request to any feed. One build at a time from this app."""
+        with self._lock:
+            watched = {w["ticker"] for w in self.store.watchlist(ticker=ticker)}
+        if ticker.upper() not in watched:
+            raise LookupError(f"{ticker} is not on the watchlist")
+        if self._derive_proc is not None and self._derive_proc.poll() is None:
+            raise RuntimeError("a build of derived frames is already running")
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        self._derive_proc = subprocess.Popen([sys.executable, "-m", "massive_collate", "derive", "--tickers", ticker.upper()],
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                             stdin=subprocess.DEVNULL, creationflags=flags)
+        return {"started": True, "pid": self._derive_proc.pid}
+
     def set_fetching(self, body: dict) -> dict:
         """Pause background fetching ({"paused": true, "minutes": n}: at most two hours) or resume it.
         The open symbol's own fetches go on (priority), so the chart gets the feeds to itself."""
@@ -733,6 +758,14 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.priority(ticker), HTTPStatus.ACCEPTED)
                 if method == "POST" and parts == ["", "api", "fetching"]:
                     return self._json(app.set_fetching(body))
+                if method == "POST" and parts == ["", "api", "derive"]:
+                    ticker = parse_qs(urlparse(self.path).query).get("ticker", [None])[-1]
+                    if not ticker:
+                        return self._json({"error": "ticker is required"}, HTTPStatus.BAD_REQUEST)
+                    try:
+                        return self._json(app.start_derive(ticker), HTTPStatus.ACCEPTED)
+                    except RuntimeError as e:
+                        return self._json({"error": str(e)}, HTTPStatus.CONFLICT)
                 if method == "POST" and parts in (["", "api", "scan"], ["", "api", "fetch"]):
                     ticker = parse_qs(urlparse(self.path).query).get("ticker", [None])[-1] if parts[2] == "fetch" else None
                     if parts[2] == "fetch" and not ticker:
@@ -802,6 +835,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.markets())
                 if url.path == "/api/calendar":
                     return self._json(app.calendar(q))
+                if url.path == "/api/inventory":
+                    return self._json(app.inventory(q["ticker"]))
                 if url.path == "/api/future":
                     return self._json(app.future(q))
                 if url.path == "/api/range":
