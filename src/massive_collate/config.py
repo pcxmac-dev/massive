@@ -124,6 +124,8 @@ class Settings:
     tick_min_free_gb: int = 250
     tiingo_api_key: str | None = field(default=None, repr=False)
     crypto_venue_days: int = 90
+    # Coins recorded live from the exchanges' public streams (live.py); LIVE_CRYPTO=off for none.
+    live_coins: tuple[str, ...] = ("BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LTC", "LINK")
 
     # The settings a feed view was made from, so any view can switch to another feed.
     origin: "Settings | None" = field(default=None, compare=False, repr=False)
@@ -254,7 +256,18 @@ def load_settings(
         tick_min_free_gb=_default(_int_setting(merged, "TICK_MIN_FREE_GB"), 250),
         tiingo_api_key=merged.get("TIINGO_API_KEY") or None,
         crypto_venue_days=_default(_int_setting(merged, "CRYPTO_VENUE_DAYS"), 90),
+        live_coins=_live_coins(merged.get("LIVE_CRYPTO")),
     )
+
+
+def _live_coins(value: str | None) -> tuple[str, ...]:
+    from .live import LIVE_COINS
+
+    if value is None or not value.strip():
+        return LIVE_COINS
+    if value.strip().lower() in ("off", "none", "0", "false"):
+        return ()
+    return tuple(c.strip().upper() for c in value.split(",") if c.strip())
 
 
 def _default(value: int | None, default: int) -> int:

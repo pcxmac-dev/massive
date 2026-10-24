@@ -174,6 +174,11 @@ def cmd_sync(args, settings: Settings) -> int:
     names = list(BUILDERS) if args.all_sources else [args.source]
     with Store(settings.db_path) as store:
         separated = store.kv_get("built-bars:separated:v1")
+    if args.all_sources and settings.live_coins:  # keep the live crypto recorder running (no-op if it is)
+        from . import live
+
+        if live.start_detached(settings.db_path):
+            Logger(settings.db_path.parent / "logs" / "massive-collate.log")("live: recorder started")
     if not separated:  # one-off: bars built from ticks before they were kept apart from the feeds' own
         with run_lock(settings.db_path), Store(settings.db_path) as store:
             store.separate_built_bars(log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
@@ -264,6 +269,44 @@ def cmd_datasets(args, settings: Settings) -> int:
                          + f", fetched {d['fetched']:%Y-%m-%d}, quality {d['quality']:.2f}"
                          + (f", {d['due']} due" if d["due"] else ""))
             print(f"{d['name']:31} {d['provider']:9} {state}")
+    return 0
+
+
+def cmd_live(args, settings: Settings) -> int:
+    """Live crypto from the exchanges' public streams: run the recorder here, start it in the
+    background, or show what it is recording."""
+    import json
+
+    from . import live
+
+    if args.action == "status":
+        with Store(settings.db_path) as store:
+            beat, raw = store.kv_get(live.RECORDER_KEY), store.kv_get(live.STATUS_KEY)
+        print(f"recorder: {'running' if live.running(settings.db_path) else 'not running'}, last beat {beat or 'never'}")
+        for source, st in (json.loads(raw)["streams"] if raw else {}).items():
+            pairs = ", ".join(f"{t} {p['trades']:,}" for t, p in sorted(st.get("pairs", {}).items()))
+            print(f"  {source:9} {'connected' if st.get('connected') else 'down: ' + str(st.get('error'))}  {pairs}")
+        return 0
+    if not settings.live_coins:
+        print("live recording is off (LIVE_CRYPTO=off)")
+        return 0
+    if args.action == "start":
+        print("recorder started in the background" if live.start_detached(settings.db_path)
+              else "a recorder is already running")
+        return 0
+    if live.running(settings.db_path):
+        print("a recorder is already running")
+        return 0
+    lock = live.lock_path(settings.db_path)
+    lock.write_text(str(os.getpid()))
+    recorder = live.Recorder(settings.db_path, coins=settings.live_coins,
+                             log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
+    try:
+        recorder.run()
+    except KeyboardInterrupt:
+        recorder.stop.set()
+    finally:
+        lock.unlink(missing_ok=True)
     return 0
 
 
@@ -741,6 +784,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--tail", type=int, default=12, help="show: how many of the newest values")
     s.add_argument("--as-of", type=_date, help="show: the values as public on that date (YYYY-MM-DD)")
     s.set_defaults(func=cmd_datasets)
+
+    s = sub.add_parser("live", help="live crypto from the exchanges' public streams: run, start (background) or status")
+    s.add_argument("action", nargs="?", choices=["run", "start", "status"], default="run")
+    s.set_defaults(func=cmd_live)
 
     s = sub.add_parser("provenance", help="how derived results were made (bars from ticks, composites, quality, audits)")
     s.add_argument("product", nargs="?", help="product prefix, e.g. composite:BTCUSD or alpaca:BTCUSD")

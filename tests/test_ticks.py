@@ -145,11 +145,11 @@ def test_charts_read_seconds_by_window_on_a_minute_base(store):
     s = engine.series(MERGED, "SPCX")
     assert s.kind == "minute" and len(s.frame) == 15 and s.fine_sources == ["alpaca"]
     assert {"type": "second", "span": 1} in engine.periods(s)
-    page = engine.bars(MERGED, "SPCX", "second", 5, session="extended", limit=50)
+    page = engine.bars(MERGED, "SPCX", "second", 10, session="extended", limit=50)
     assert len(page["bars"]) == 50 and page["more"] is True and page["fine"]
-    older_page = engine.bars(MERGED, "SPCX", "second", 5, session="extended", limit=500,
+    older_page = engine.bars(MERGED, "SPCX", "second", 10, session="extended", limit=500,
                              to_ms=page["bars"][0]["timestamp"])
-    assert len(older_page["bars"]) == 70 and older_page["more"] is False  # 600 s / 5 = 120 bars in all
+    assert len(older_page["bars"]) == 10 and older_page["more"] is False  # 600 s / 10 = 60 bars in all
     minutes = engine.bars(MERGED, "SPCX", "minute", 1, session="extended", limit=100)
     assert len(minutes["bars"]) == 15
 
