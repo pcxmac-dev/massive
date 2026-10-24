@@ -14,9 +14,10 @@ from __future__ import annotations
 
 from .appstate import LayoutLimit
 from .datasets import DATASET_SCHEMA, datasets_backup_dir
-from .store import (
-    BAR_COLUMNS, COMPOSITE, COMPOSITE_SCHEMA, FEED_SCHEMA, OldLayout, Store, TICKS_SCHEMA, feeds_backup_dir,
+from .feeds import (
+    BAR_COLUMNS, COMPOSITE, COMPOSITE_SCHEMA, FEED_SCHEMA, OldLayout, TICKS_SCHEMA, feeds_backup_dir,
     old_layout)
+from .store import Store
 
 __all__ = [
     'BAR_COLUMNS',
