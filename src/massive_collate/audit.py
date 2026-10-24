@@ -171,10 +171,16 @@ def audit_span(auditor, store, ticker: str, timespan: str, a: int, b: int, owner
     origins = {o for src, o, x, y in store.coverage_detail(ticker, timespan) if src == owner and x < b and y > a}
     if "ticks" in origins:  # the stored bars were built here from the owner's ticks
         report["ownerOrigin"] = f"built here from {owner}'s ticks (condition rules applied)"
+    from . import provenance
+
+    derivation = provenance.record(store, "audit", f"audit:{ticker}:{timespan}", {
+        "tolerance": TOLERANCE, "pass": PASS, "warn": WARN, "judge_volume": row["asset"] != "crypto"},
+        {"owner": owner, "auditor": auditor.name, "owner_origins": sorted(origins), "auditor_bars": len(theirs),
+         "reason": reason}, (a, b), 1)
     result = {"ticker": ticker, "asset": row["asset"], "timespan": timespan, "start_ms": a, "end_ms": b,
               "owner": owner, "auditor": auditor.name, "reason": reason, "verdict": report["verdict"],
               "matched": report["matched"], "only_owner": report["onlyOwner"],
-              "only_auditor": report["onlyAuditor"], "report": report}
+              "only_auditor": report["onlyAuditor"], "report": report, "derivation": derivation}
     result["id"] = store.save_audit(result)
     close = (report.get("box") or {}).get("c") or {}
     log(f"audit {ticker} {lo:%Y-%m-%d %H:%M} to {hi:%Y-%m-%d %H:%M} ET: {owner} vs {auditor.name}: {report['verdict']}, "

@@ -519,8 +519,15 @@ class BarEngine:
         page["style"] = used
         page["total"] = int(len(all_bars))
         if not model.is_price:
+            from dataclasses import asdict
+
+            from ..provenance import code_version
+
             page["model"] = {"kind": model.kind, "unit": model.unit_label(),
-                             "precision": model_precision(all_bars["close"].to_numpy())}
+                             "precision": model_precision(all_bars["close"].to_numpy()),
+                             # an indicator is derived on request: how, with what code, and whether it looks ahead
+                             "derivation": {"kind": "indicator", "code": code_version(), "settings": asdict(model),
+                                            "lookAhead": not model.causal}}
         if style.type == "range" and s.kind != "trades":
             page["approximate"] = "range bars built from bars, not ticks: intra-bar order of high and low is assumed"
         return page

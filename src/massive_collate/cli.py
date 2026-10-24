@@ -172,6 +172,12 @@ def cmd_watch(args, settings: Settings) -> int:
 def cmd_sync(args, settings: Settings) -> int:
     """Sync every configured feed (or just --source), each within its own limits."""
     names = list(BUILDERS) if args.all_sources else [args.source]
+    with Store(settings.db_path) as store:
+        separated = store.kv_get("built-bars:separated:v1")
+    if not separated:  # one-off: bars built from ticks before they were kept apart from the feeds' own
+        with run_lock(settings.db_path), Store(settings.db_path) as store:
+            store.separate_built_bars(log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
+            store.kv_set("built-bars:separated:v1", datetime.now().isoformat(timespec="seconds"))
     ran, errors = 0, []
     for name in names:
         if args.all_sources and _feed_closed(settings, name):
@@ -258,6 +264,24 @@ def cmd_datasets(args, settings: Settings) -> int:
                          + f", fetched {d['fetched']:%Y-%m-%d}, quality {d['quality']:.2f}"
                          + (f", {d['due']} due" if d["due"] else ""))
             print(f"{d['name']:31} {d['provider']:9} {state}")
+    return 0
+
+
+def cmd_provenance(args, settings: Settings) -> int:
+    """How derived results were made: kind, product, code version, settings, inputs, span, rows."""
+    import json
+
+    with Store(settings.db_path) as store:
+        rows = store.derivations(kind=args.kind, product=args.product, limit=args.limit)
+        for d in rows:
+            span = f"{_day(d['span_lo'])} -> {_day(d['span_hi'])}" if d["span_lo"] is not None else "-"
+            print(f"#{d['id']} {d['created_at']} {d['kind']:16} {d['product']:28} code {d['code']:18} "
+                  f"{d['rows'] if d['rows'] is not None else '?':>8} rows  {span}")
+            if args.verbose:
+                print(f"    settings {json.dumps(d['settings'], sort_keys=True)}")
+                print(f"    inputs   {json.dumps(d['inputs'], sort_keys=True)}")
+        if not rows:
+            print("no derivations recorded" + (f" for {args.product}" if args.product else ""))
     return 0
 
 
@@ -717,6 +741,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--tail", type=int, default=12, help="show: how many of the newest values")
     s.add_argument("--as-of", type=_date, help="show: the values as public on that date (YYYY-MM-DD)")
     s.set_defaults(func=cmd_datasets)
+
+    s = sub.add_parser("provenance", help="how derived results were made (bars from ticks, composites, quality, audits)")
+    s.add_argument("product", nargs="?", help="product prefix, e.g. composite:BTCUSD or alpaca:BTCUSD")
+    s.add_argument("--kind", choices=["bars-from-ticks", "composite", "quality", "quality-prior", "audit"])
+    s.add_argument("--limit", type=int, default=20)
+    s.add_argument("-v", "--verbose", action="store_true", help="also the settings and inputs")
+    s.set_defaults(func=cmd_provenance)
 
     s = sub.add_parser("status", help="what is stored, limits, and recent runs")
     s.add_argument("--runs", type=int, default=10)

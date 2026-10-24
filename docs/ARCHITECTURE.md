@@ -59,9 +59,14 @@ refresh, so the French library's revisions are lost.
    derived composite); `bars_window(as_of=, published=)` gives the series as it stood, gated by the
    plan's publication rule (`freshness.published_at`). Bars stored before tracking have no
    `stored_at` (taken as known since before tracking). Ticks: not versioned yet.
-4. **Derived results with provenance.** A `derivations` record (inputs and their versions, code
-   version, settings) for bars built from ticks, composites, quality scores, audits and indicators;
-   derived values stored apart from raw ones.
+4. **Derived results with provenance.** Done: a `derivations` record (kind, product, code version as
+   the git commit with "+dirty" for uncommitted changes, settings, inputs read, span, rows) for bars
+   built from ticks (one per day built, with the tick count and a digest of the condition rules),
+   composite builds, quality scores, audits and dataset quality priors; derived rows point to it.
+   Bars built from ticks live apart from the feed's own in `built_bars` (reads combine them, built
+   first); the composite has its own file; indicators (computed on request) return their settings,
+   code version and whether they look ahead. `python -m massive_collate provenance [product] -v`.
+   Bars built before provenance moved apart under "before-provenance" records.
 5. **Calculations out of the GUI.** Resampling, calendar grouping, chart-type construction and
    statistics move to `calc/`; `gui/bars.py` becomes a thin adapter; the projection uses public
    `calc/` functions only.

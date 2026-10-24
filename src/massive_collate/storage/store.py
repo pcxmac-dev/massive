@@ -15,11 +15,13 @@ from .directory import DirectoryStore
 from .feeds import FeedStore, OldLayout, _Feed, old_layout
 from .ledger import LedgerStore
 from .markets import MarketsStore
+from .provenance import ProvenanceStore
 from .schema import MIGRATIONS, SCHEMA
 from .watchlist import WatchlistStore
 
 
-class Store(AdminStore, FeedStore, DatasetStore, DirectoryStore, MarketsStore, WatchlistStore, LedgerStore, AuditStore, AppStateStore):
+class Store(ProvenanceStore, AdminStore, FeedStore, DatasetStore, DirectoryStore, MarketsStore, WatchlistStore,
+            LedgerStore, AuditStore, AppStateStore):
     def __init__(self, path: Path | str, check_same_thread: bool = True, feeds_dir: Path | str | None = None,
                  datasets_dir: Path | str | None = None):
         self.path = Path(path)

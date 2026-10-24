@@ -27,6 +27,8 @@ from datetime import date, datetime, timedelta, timezone
 import numpy as np
 import pandas as pd
 
+from . import provenance
+
 DAY_MS = 86_400_000
 OUTLIER_BPS = 10.0  # a bar this far from the other exchanges' composite (and > 3 sd) stands out
 QUALITY_SCALE_BPS = 10.0  # median distance at which quality falls to 1/e
@@ -195,23 +197,36 @@ def refresh(store, feeds: dict, now: datetime, log=print, rebuild_days: int = 2)
                 if f not in before or a < before[f][0]:
                     lo = min(lo, a)
             lo = max(first, lo) // DAY_MS * DAY_MS
+            derivation = provenance.record(store, "composite", f"composite:{ticker}:{timespan}", {
+                "method": "volume x quality weighted mean of the exchanges' bars", "min_venues": 2,
+                "outlier_bps": OUTLIER_BPS, "outlier_sd": 3, "rebuild_days": rebuild_days},
+                {"exchanges": feed_of, "weights": weights, "edges": edges}, (lo, last + 1))
+            made = 0
             while lo <= last:
                 hi = lo + (30 if timespan == "day" else 1) * DAY_MS
                 comp = combine(_venue_bars(store, feed_of, ticker, timespan, lo, hi), weights)
                 if not comp.empty:
                     comp = comp[comp["venues"] >= 2]  # one exchange alone is that exchange, not a composite
                 if not comp.empty:
-                    built += store.save_composite(ticker, timespan, comp)
+                    made += store.save_composite(ticker, timespan, comp, derivation)
                 lo = hi
+            store.set_derivation_rows(derivation, made)
+            built += made
             store.kv_set(key, json.dumps({f: list(e) for f, e in edges.items()}))
         key = f"quality:{ticker}"
         last_q = store.kv_get(key)
         if built or not last_q or (now - datetime.fromisoformat(last_q)).total_seconds() > 86_400:
             hi = int(now.timestamp() * 1000)
             stats = leave_one_out(_venue_bars(store, feed_of, ticker, "minute", hi - QUALITY_DAYS * DAY_MS, hi), weights)
+            derivation = provenance.record(store, "quality", f"quality:{ticker}", {
+                "basis": "leave-one-out: each exchange against the median of the others", "days": QUALITY_DAYS,
+                "scale_bps": QUALITY_SCALE_BPS, "outlier_bps": OUTLIER_BPS,
+                "score": "exp(-(0.5 close + 0.25 high + 0.25 low) / scale) x (1 - outlier share) x sqrt(completeness)"},
+                {"exchanges": feed_of, "ticker": ticker}, (hi - QUALITY_DAYS * DAY_MS, hi), len(stats))
             for f, v in feed_of.items():
                 if v in stats:
-                    store.set_quality(f, asset, score(stats[v]), {**stats[v], "ticker": ticker, "basis": "leave-one-out"})
+                    store.set_quality(f, asset, score(stats[v]), {**stats[v], "ticker": ticker, "basis": "leave-one-out"},
+                                      derivation)
             store.kv_set(key, now.isoformat())
             if stats:
                 log(f"{ticker}: exchange quality " + ", ".join(

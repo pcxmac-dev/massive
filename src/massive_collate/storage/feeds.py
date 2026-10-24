@@ -6,7 +6,12 @@ that brings different values (a correction) replaces it, and the replaced versio
 `bar_revisions` with the time it was replaced. `bars_window(..., as_of=...)` rebuilds a series as
 it stood at a moment: only bars the feed had published by then (by its plan's rule, see
 freshness.published_at), each in the version in effect then. The composite model's file keeps no
-revisions: its bars are derived, rebuilt from the exchanges' bars."""
+revisions: its bars are derived, rebuilt from the exchanges' bars.
+
+Raw apart from derived: `bars` holds what the feed published; bars built here from the feed's own
+ticks are derived and live apart in `built_bars`, each pointing to the derivation record that made
+it (provenance.py). Reads combine the two, built bars first (they replace the feed's own for the
+spans its ticks cover, as the coverage ledger records)."""
 
 from __future__ import annotations
 
@@ -36,7 +41,23 @@ CREATE TABLE IF NOT EXISTS bars (
     stored_at    INTEGER,            -- ms: when this version was stored (NULL: before tracking)
     PRIMARY KEY (ticker, timespan, multiplier, ts)
 ) WITHOUT ROWID;
+-- Bars built here from the feed's ticks: derived, apart from what the feed published. A rebuild
+-- replaces them; `derivation` is the record of how (derivations table, main file).
+CREATE TABLE IF NOT EXISTS built_bars (
+    ticker       TEXT    NOT NULL,
+    timespan     TEXT    NOT NULL,
+    multiplier   INTEGER NOT NULL,
+    ts           INTEGER NOT NULL,
+    open REAL, high REAL, low REAL, close REAL,
+    volume REAL, vwap REAL, transactions INTEGER,
+    derivation   INTEGER NOT NULL,
+    stored_at    INTEGER,
+    PRIMARY KEY (ticker, timespan, multiplier, ts)
+) WITHOUT ROWID;
 """
+
+# Raw first? No: built bars come first where both exist (they replace the feed's own for tick spans).
+_BAR_TABLES = ("built_bars", "bars")
 
 # Corrections: the version a re-download replaced, with when it was stored and when it was replaced.
 REVISIONS_SCHEMA = """
@@ -89,8 +110,19 @@ CREATE TABLE IF NOT EXISTS composite_stats (
     env_l     REAL,              -- lowest low of any exchange
     members   TEXT,              -- the exchanges, comma-separated
     outliers  TEXT,              -- exchanges far from the others' composite
+    derivation INTEGER,          -- the derivation record of the build (provenance.py)
     PRIMARY KEY (ticker, timespan, ts)
 ) WITHOUT ROWID;
+"""
+
+# The composite model's bars carry their derivation; every rebuild sets it.
+_UPSERT_COMPOSITE = """
+INSERT INTO bars (ticker, timespan, multiplier, ts, open, high, low, close, volume, vwap, transactions, stored_at,
+                  derivation)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT (ticker, timespan, multiplier, ts) DO UPDATE SET
+    open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close, volume=excluded.volume,
+    vwap=excluded.vwap, transactions=excluded.transactions, stored_at=excluded.stored_at, derivation=excluded.derivation
 """
 
 BAR_COLUMNS = ["open", "high", "low", "close", "volume", "vwap", "transactions"]
@@ -163,6 +195,11 @@ class _Feed:
             with self.conn:  # a file from before versioning: a column only, the bars are not rewritten
                 self.conn.execute("ALTER TABLE bars ADD COLUMN stored_at INTEGER")
         self.conn.executescript(FEED_SCHEMA + (COMPOSITE_SCHEMA if name == COMPOSITE else REVISIONS_SCHEMA))
+        if name == COMPOSITE:  # the derived model's rows point to their derivation (columns only)
+            with self.conn:
+                for table in ("bars", "composite_stats"):
+                    if "derivation" not in {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}:
+                        self.conn.execute(f"ALTER TABLE {table} ADD COLUMN derivation INTEGER")
         self.ticks = False
         self._lock = threading.Lock()
         self.has_ticks()
@@ -332,6 +369,19 @@ class FeedStore:
         self._wrote()
         return len(rows)
 
+    def upsert_built_bars(self, source: str, ticker: str, timespan: str, multiplier: int, bars: Iterable[dict],
+                          derivation: int) -> int:
+        """Bars built here from the feed's ticks (derived): kept apart from its own, replacing an
+        earlier build of the same bars, each pointing to `derivation`."""
+        ticker = ticker.upper()
+        stored = _stored_ms()
+        rows = [(*_bar_row(ticker, timespan, multiplier, b, stored)[:11], derivation, stored) for b in bars]
+        conn = self._feed(source, create=True).conn
+        with conn:
+            conn.executemany("INSERT OR REPLACE INTO built_bars VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+        self._wrote()
+        return len(rows)
+
     def bars_window(self, sources: Sequence[str], ticker: str, timespan: str, lo_ms: int, hi_ms: int,
                     as_of: int | None = None, published=None) -> pd.DataFrame:
         """Bars of a series in [lo, hi) ms from the given feeds (an index range scan per feed), with
@@ -343,10 +393,11 @@ class FeedStore:
             frames = [f for f in frames if f is not None]
         else:
             frames = [pd.read_sql_query(
-                "SELECT ts, open, high, low, close, volume, vwap, transactions FROM bars WHERE ticker=? "
+                f"SELECT ts, open, high, low, close, volume, vwap, transactions FROM {table} WHERE ticker=? "
                 "AND timespan=? AND multiplier=1 AND ts >= ? AND ts < ? ORDER BY ts", conn,
                 params=(ticker.upper(), timespan, int(lo_ms), int(hi_ms)))
-                for conn in (self._bars(src) for src in sources) if conn is not None]
+                for conn in (self._bars(src) for src in sources) if conn is not None for table in _BAR_TABLES]
+        frames = [f for f in frames if len(f)]  # an empty read has untyped columns: it would turn numbers to objects
         df = pd.concat(frames) if frames else pd.DataFrame(
             columns=["ts", "open", "high", "low", "close", "volume", "vwap", "transactions"])
         df = df.sort_values("ts", kind="stable").drop_duplicates("ts")  # one feed per span: no real duplicates
@@ -360,21 +411,24 @@ class FeedStore:
             return None
         cols = ["ts", *BAR_COLUMNS]
         args = (ticker.upper(), timespan, int(lo_ms), int(hi_ms))
-        cur = pd.read_sql_query(f"SELECT {', '.join(cols)}, stored_at FROM bars WHERE ticker=? AND timespan=? "
-                                "AND multiplier=1 AND ts >= ? AND ts < ?", feed.conn, params=args)
-        cur["until"] = float("inf")
+        built, cur = (pd.read_sql_query(f"SELECT {', '.join(cols)}, stored_at FROM {table} WHERE ticker=? AND "
+                                        "timespan=? AND multiplier=1 AND ts >= ? AND ts < ?", feed.conn, params=args)
+                      for table in _BAR_TABLES)
+        built["until"], built["prio"] = float("inf"), 0  # derived from ticks: first where both exist
+        cur["until"], cur["prio"] = float("inf"), 1
         has_revisions = feed.conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bar_revisions'").fetchone()
         rev = pd.read_sql_query(f"SELECT {', '.join(cols)}, stored_at, replaced_at AS until FROM bar_revisions "
                                 "WHERE ticker=? AND timespan=? AND multiplier=1 AND ts >= ? AND ts < ?",
                                 feed.conn, params=args) if has_revisions else cur.iloc[0:0]
-        versions = pd.concat([cur, rev], ignore_index=True)
+        rev["prio"] = 1
+        versions = pd.concat([f for f in (built, cur, rev) if len(f)] or [cur], ignore_index=True)
         if versions.empty:
             return versions[cols]
         since = versions["stored_at"].astype("float").fillna(float("-inf"))
         versions["effective"] = (since <= as_of) & (versions["until"] > as_of)
         versions["order"] = versions["until"]  # the earliest version: the one replaced first
-        versions = versions.sort_values(["ts", "effective", "order"], ascending=[True, False, True])
+        versions = versions.sort_values(["ts", "effective", "prio", "order"], ascending=[True, False, True, True])
         out = versions.drop_duplicates("ts")
         if published is not None:
             out = out[published(out["ts"].to_numpy()) <= as_of]
@@ -395,9 +449,13 @@ class FeedStore:
         conn = self._bars(source)
         if conn is None:
             return []
-        return conn.execute(
-            "SELECT ts, open, high, low, close, volume, vwap, transactions FROM bars WHERE ticker=? AND timespan=? "
-            "AND multiplier=1 AND ts >= ? AND ts < ? ORDER BY ts", (ticker.upper(), timespan, lo_ms, hi_ms)).fetchall()
+        rows: dict[int, tuple] = {}
+        for table in reversed(_BAR_TABLES):  # built bars last, so they replace the feed's own
+            for r in conn.execute(f"SELECT ts, open, high, low, close, volume, vwap, transactions FROM {table} "
+                                  "WHERE ticker=? AND timespan=? AND multiplier=1 AND ts >= ? AND ts < ?",
+                                  (ticker.upper(), timespan, lo_ms, hi_ms)):
+                rows[r[0]] = r
+        return [rows[t] for t in sorted(rows)]
 
     def bar_range(self, source: str, ticker: str, timespan: str, multiplier: int = 1) -> tuple[int, int] | None:
         """(oldest ts, newest ts) in ms stored for a series, or None if empty."""
@@ -413,7 +471,7 @@ class FeedStore:
         source: str | None = None,
     ) -> pd.DataFrame:
         """Bars with a `time` column in US/Eastern time."""
-        sql = "SELECT ticker, ts, " + ", ".join(BAR_COLUMNS) + " FROM bars WHERE timespan=? AND multiplier=?"
+        sql = "SELECT ticker, ts, " + ", ".join(BAR_COLUMNS) + " FROM {table} WHERE timespan=? AND multiplier=?"
         params: list = [timespan, multiplier]
         if tickers:
             sql += f" AND ticker IN ({','.join('?' * len(tickers))})"
@@ -427,11 +485,14 @@ class FeedStore:
         frames = []
         for feed in [self._feed(source)] if source else self._open_feeds():
             if feed is not None:
-                frames.append(pd.read_sql_query(sql + " ORDER BY ticker, ts", feed.conn, params=params))
-                frames[-1].insert(0, "source", feed.name)
+                for table in _BAR_TABLES:
+                    frames.append(pd.read_sql_query(sql.format(table=table) + " ORDER BY ticker, ts", feed.conn,
+                                                    params=params))
+                    frames[-1].insert(0, "source", feed.name)
+        frames = [f for f in frames if len(f)]  # an empty read has untyped columns
         if not frames:
             return pd.DataFrame(columns=["source", "ticker", "time", *BAR_COLUMNS])
-        df = pd.concat(frames, ignore_index=True)
+        df = pd.concat(frames, ignore_index=True).drop_duplicates(["source", "ticker", "ts"])  # built first
         if len(frames) > 1:
             df = df.sort_values(["ticker", "ts"], kind="stable", ignore_index=True)
         df["time"] = pd.to_datetime(df.pop("ts"), unit="ms", utc=True).dt.tz_convert("America/New_York")
@@ -485,7 +546,9 @@ class FeedStore:
             n = feed.conn.execute(
                 "DELETE FROM ticks.trades WHERE ticker=? AND ts_ns < ?", (ticker, cutoff_ns)
             ).rowcount if ticks else 0
-            n += feed.conn.execute("DELETE FROM bars WHERE ticker=? AND ts < ?", (ticker, cutoff_ns // 10**6)).rowcount
+            for table in _BAR_TABLES:
+                n += feed.conn.execute(f"DELETE FROM {table} WHERE ticker=? AND ts < ?",
+                                       (ticker, cutoff_ns // 10**6)).rowcount
         self._wrote()
         return n
 
@@ -501,8 +564,9 @@ class FeedStore:
         t = feed.conn.execute(
             "SELECT COUNT(*), MAX(ts_ns) FROM ticks.trades WHERE ticker=?", (ticker.upper(),)
         ).fetchone() if feed.has_ticks() else (0, None)
-        b = feed.conn.execute("SELECT COUNT(*), MAX(ts) FROM bars WHERE ticker=?", (ticker.upper(),)).fetchone()
-        return tuple(t) + tuple(b)
+        b = [feed.conn.execute(f"SELECT COUNT(*), MAX(ts) FROM {table} WHERE ticker=?", (ticker.upper(),)).fetchone()
+             for table in _BAR_TABLES]
+        return tuple(t) + (sum(n for n, _ in b), max((m for _, m in b if m is not None), default=None))
 
     def stored_series(self) -> list[tuple]:
         """(source, ticker, kind) for every series with data, kind = trades | second | minute | ...
@@ -516,9 +580,10 @@ class FeedStore:
             if feed.has_ticks():
                 trades += [(feed.name, t, "trades") for (t,) in _distinct(feed.conn, "ticks.trades", ("ticker",),
                                                                            ("ts_ns", "seq"))]
-            bars += [(feed.name, t, ts) for t, ts, m in _distinct(feed.conn, "bars", ("ticker", "timespan", "multiplier"),
-                                                                  ("ts",)) if m == 1]
-        return trades + bars
+            for table in _BAR_TABLES:
+                bars += [(feed.name, t, ts) for t, ts, m in _distinct(feed.conn, table, ("ticker", "timespan", "multiplier"),
+                                                                      ("ts",)) if m == 1]
+        return trades + list(dict.fromkeys(bars))  # a series both built and published: once
 
     def trade_edges(self, source: str, ticker: str) -> tuple[int, int] | None:
         """(oldest, newest) tick in ns: two index seeks."""
@@ -555,31 +620,33 @@ class FeedStore:
         ticker = ticker.upper()
         best = None
         for src in {s for s, t, k in self.stored_series() if t == ticker and k == timespan}:
-            newest = self._bars(src).execute(  # MAX alone is answered from the index's last entry
-                "SELECT MAX(ts) FROM bars WHERE ticker=? AND timespan=? AND multiplier=1",
-                (ticker, timespan)).fetchone()[0]
+            newest = max((m for m in (self._bars(src).execute(  # MAX alone is answered from the index's last entry
+                f"SELECT MAX(ts) FROM {table} WHERE ticker=? AND timespan=? AND multiplier=1",
+                (ticker, timespan)).fetchone()[0] for table in _BAR_TABLES) if m is not None), default=None)
             if newest is not None and (best is None or newest > best[1]):
                 best = (src, newest)
         return best
 
     # -- composite model and quality -----------------------------------------
 
-    def save_composite(self, ticker: str, timespan: str, comp: pd.DataFrame) -> int:
-        """Composite bars (the 'composite' feed) and their deviation across exchanges, together."""
+    def save_composite(self, ticker: str, timespan: str, comp: pd.DataFrame, derivation: int | None = None) -> int:
+        """Composite bars (the 'composite' feed) and their deviation across exchanges, together, both
+        pointing to the build's derivation record."""
         if comp.empty:
             return 0
         ticker = ticker.upper()
         stored = _stored_ms()
         bars = [_bar_row(ticker, timespan, 1, {
             "t": int(t), "o": r.o, "h": r.h, "l": r.l, "c": r.c, "v": r.v,
-            "vw": None if pd.isna(r.vw) else r.vw, "n": None if pd.isna(r.n) else int(r.n)}, stored)
+            "vw": None if pd.isna(r.vw) else r.vw, "n": None if pd.isna(r.n) else int(r.n)}, stored) + (derivation,)
             for t, r in zip(comp.index, comp.itertuples())]
         rows = [(ticker, timespan, int(t), int(r.venues), float(r.sd_bps), float(r.range_bps), float(r.env_h),
-                 float(r.env_l), r.members, r.outliers) for t, r in zip(comp.index, comp.itertuples())]
+                 float(r.env_l), r.members, r.outliers, derivation) for t, r in zip(comp.index, comp.itertuples())]
         conn = self._feed(COMPOSITE, create=True).conn
         with conn:
-            conn.executemany(_UPSERT_BAR, bars)
-            conn.executemany("INSERT OR REPLACE INTO composite_stats VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+            conn.executemany(_UPSERT_COMPOSITE, bars)
+            conn.executemany("INSERT OR REPLACE INTO composite_stats (ticker, timespan, ts, venues, sd_bps, range_bps, "
+                             "env_h, env_l, members, outliers, derivation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
         self._wrote()
         return len(rows)
 
@@ -648,8 +715,39 @@ class FeedStore:
         if conn is None:
             return None
         key = (ticker.upper(), timespan, multiplier)
-        where = "FROM bars WHERE ticker=? AND timespan=? AND multiplier=?"
-        first = conn.execute(f"SELECT MIN(ts) {where}", key).fetchone()[0]
-        if first is None:
-            return None
-        return first, conn.execute(f"SELECT MAX(ts) {where}", key).fetchone()[0]
+        edges = []
+        for table in _BAR_TABLES:
+            where = f"FROM {table} WHERE ticker=? AND timespan=? AND multiplier=?"
+            first = conn.execute(f"SELECT MIN(ts) {where}", key).fetchone()[0]
+            if first is not None:
+                edges.append((first, conn.execute(f"SELECT MAX(ts) {where}", key).fetchone()[0]))
+        return (min(e[0] for e in edges), max(e[1] for e in edges)) if edges else None
+
+    def separate_built_bars(self, log=print) -> int:
+        """One-off: bars built from ticks before they were kept apart (in the feed's own bars, over the
+        spans the coverage ledger marks as built from ticks) move to built_bars, under one derivation
+        record per series whose settings are unknown. Returns bars moved."""
+        moved = 0
+        spans = self.conn.execute("SELECT source, ticker, timespan, start_ms, end_ms FROM coverage "
+                                  "WHERE origin='ticks' ORDER BY source, ticker, timespan, start_ms").fetchall()
+        for src, ticker, timespan, a, b in spans:
+            conn = self._bars(src)
+            if conn is None:
+                continue
+            where = "WHERE ticker=? AND timespan=? AND multiplier=1 AND ts >= ? AND ts < ?"
+            args = (ticker, timespan, a, b)
+            n = conn.execute(f"SELECT COUNT(*) FROM bars {where}", args).fetchone()[0]
+            if not n:
+                continue
+            did = self.record_derivation(
+                "bars-from-ticks", f"{src}:{ticker}:{timespan}", "before-provenance",
+                {"note": "built before provenance was recorded; settings not known"},
+                {"ticks": f"{src}:{ticker}", "moved_from": "the feed's bars"}, (a, b), n)
+            with conn:
+                conn.execute(f"INSERT OR REPLACE INTO built_bars SELECT ticker, timespan, multiplier, ts, open, high, "
+                             f"low, close, volume, vwap, transactions, ?, stored_at FROM bars {where}", (did, *args))
+                conn.execute(f"DELETE FROM bars {where}", args)
+            moved += n
+            log(f"{src} {ticker} {timespan}: {n:,} bars built from ticks kept apart (derivation {did})")
+        self._wrote()
+        return moved

@@ -189,8 +189,11 @@ def build_from_ticks(store: Store, source: str, ticker: str, a: int, b: int, rul
                      log: Log = print) -> int:
     """Build one-second and minute bars from stored ticks for the whole minutes of [a, b) that the
     feed's tick spans fully hold (a minute cut by a stopped run is built once the rest arrives),
-    and record them in the ledger as built from ticks. Works a day at a time. Returns bars built."""
-    from .ticks import build_bars
+    and record them in the ledger as built from ticks. Works a day at a time; each day's bars are
+    kept apart from the feed's own (built_bars) under a derivation record of the ticks read and the
+    condition rules applied. Returns bars built."""
+    from . import provenance
+    from .ticks import BAR_RULES, REGULAR, build_bars
 
     minute = 60_000
     spans = store.coverage(ticker, "trades").get(source, [])
@@ -203,17 +206,27 @@ def build_from_ticks(store: Store, source: str, ticker: str, a: int, b: int, rul
     if hi <= lo:
         return 0
     rules = rules if rules is not None else store.condition_rules()
+    settings = {"steps": ["second", "minute"], "rules": provenance.digest(sorted(rules.items())), "rule_count": len(rules),
+                "overrides": sorted([f"{k[0]}:{k[1]}", v] for k, v in BAR_RULES.items()), "regular": list(REGULAR),
+                "method": "SIP consolidated update rules per trade condition (ticks.build_bars)"}
     built, unknown = 0, set()
     day = 86_400_000
     start = lo
     while start < hi:
         end = min(hi, (start // day + 1) * day)
         ticks = store.trades_between(source, ticker, start * 1_000_000, end * 1_000_000)
+        derivation = provenance.record(store, "bars-from-ticks", f"{source}:{ticker}", settings, {
+            "ticks": f"{source}:{ticker}", "count": len(ticks),
+            "first_ns": int(ticks["ts_ns"].iloc[0]) if len(ticks) else None,
+            "last_ns": int(ticks["ts_ns"].iloc[-1]) if len(ticks) else None}, (start, end))
+        made = 0
         for step, timespan in ((1_000_000_000, "second"), (60_000_000_000, "minute")):
             bars, unk = build_bars(ticks, step, rules)
             unknown |= unk
-            built += store.upsert_bars(source, ticker, timespan, 1, bars)
+            made += store.upsert_built_bars(source, ticker, timespan, 1, bars, derivation)
             store.add_coverage(source, ticker, timespan, start, end, origin="ticks")
+        store.set_derivation_rows(derivation, made)
+        built += made
         start = end
     if unknown:
         log(f"{ticker}: trade conditions without a rule ({', '.join(sorted(unknown))}): counted as regular")

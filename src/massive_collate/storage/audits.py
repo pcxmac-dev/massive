@@ -11,15 +11,18 @@ from .common import _now
 class AuditStore:
     """Store methods: audits (a second feed's copy of a stored span, compared) and quality scores."""
 
-    def set_quality(self, subject: str, asset: str, score: float, details: dict | None = None) -> None:
+    def set_quality(self, subject: str, asset: str, score: float, details: dict | None = None,
+                    derivation: int | None = None) -> None:
         with self.conn:
-            self.conn.execute("INSERT OR REPLACE INTO quality VALUES (?, ?, ?, ?, ?)",
-                              (subject, asset, float(score), json.dumps(details or {}), _now()))
+            self.conn.execute("INSERT OR REPLACE INTO quality (subject, asset, score, details, updated, derivation) "
+                              "VALUES (?, ?, ?, ?, ?, ?)",
+                              (subject, asset, float(score), json.dumps(details or {}), _now(), derivation))
 
     def quality(self, subject: str, asset: str) -> dict | None:
-        row = self.conn.execute("SELECT score, details, updated FROM quality WHERE subject=? AND asset=?",
+        row = self.conn.execute("SELECT score, details, updated, derivation FROM quality WHERE subject=? AND asset=?",
                                 (subject, asset)).fetchone()
-        return {"score": row[0], "details": json.loads(row[1] or "{}"), "updated": row[2]} if row else None
+        return {"score": row[0], "details": json.loads(row[1] or "{}"), "updated": row[2],
+                "derivation": row[3]} if row else None
 
     def qualities(self) -> list[dict]:
         return [{"subject": s, "asset": a, "score": sc, "details": json.loads(d or "{}"), "updated": u}
@@ -32,10 +35,11 @@ class AuditStore:
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO audits (at, ticker, asset, timespan, start_ms, end_ms, owner, auditor, reason, verdict, "
-                "matched, only_owner, only_auditor, report) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "matched, only_owner, only_auditor, report, derivation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (row.get("at") or _now(), row["ticker"].upper(), row.get("asset"), row["timespan"], row["start_ms"],
                  row["end_ms"], row["owner"], row["auditor"], row.get("reason"), row["verdict"], row.get("matched"),
-                 row.get("only_owner"), row.get("only_auditor"), json.dumps(row.get("report") or {})))
+                 row.get("only_owner"), row.get("only_auditor"), json.dumps(row.get("report") or {}),
+                 row.get("derivation")))
             return cur.lastrowid
 
     def audits(self, limit: int = 50, ticker: str | None = None) -> list[dict]:

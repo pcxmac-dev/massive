@@ -81,7 +81,10 @@ and `feeds/<feed>-ticks.db` its trades. The main file `massive.db` keeps what th
 watchlist, the coverage ledger, audits, quality scores, the directory and the chart app's layouts.
 Nothing is overwritten silently: a corrected bar keeps its replaced version (with when it was stored
 and replaced) and every dataset value is kept in every published version, so a series can be read
-as it stood at any moment (`as_of`), for backtests that see only what was known then.
+as it stood at any moment (`as_of`), for backtests that see only what was known then. Results
+computed here (bars built from ticks, the composite model, quality scores, audits) are kept apart
+from what the sources published and record how they were made: inputs, code version (git commit)
+and settings (`python -m massive_collate provenance`).
 A database from before this layout is moved once with `admin split-feeds` (it backs up first,
 checks every copy against its original, and only then removes the old copies); until then the
 app refuses to open it.

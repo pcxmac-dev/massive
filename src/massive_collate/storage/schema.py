@@ -232,6 +232,22 @@ CREATE TABLE IF NOT EXISTS quality (
     PRIMARY KEY (subject, asset)
 );
 
+-- How each derived result was made (provenance.py): bars built from ticks, composites, quality
+-- scores, audits. The results point here by id; raw observations have no derivation.
+CREATE TABLE IF NOT EXISTS derivations (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT    NOT NULL,   -- bars-from-ticks | composite | quality | quality-prior | audit
+    product    TEXT    NOT NULL,   -- what was made, e.g. alpaca:BTCUSD:minute
+    created_at TEXT    NOT NULL,
+    code       TEXT    NOT NULL,   -- code version: git commit (+dirty), or "before-provenance"
+    settings   TEXT    NOT NULL,   -- JSON: the parameters used
+    inputs     TEXT    NOT NULL,   -- JSON: what was read (sources, spans, counts, versions)
+    span_lo    INTEGER,            -- the period it covers, ms
+    span_hi    INTEGER,
+    rows       INTEGER             -- results it made
+);
+CREATE INDEX IF NOT EXISTS derivations_product ON derivations (product, id);
+
 -- Spans waiting to be audited by another feed (queued after a download, done in that feed's run).
 CREATE TABLE IF NOT EXISTS audit_queue (
     ticker    TEXT    NOT NULL,
@@ -306,4 +322,7 @@ MIGRATIONS = [
     ("dataset_files", "version_at", "TEXT"),
     ("dataset_files", "origin", "TEXT"),
     ("dataset_files", "local_path", "TEXT"),
+    # Derived results point to the derivation record that made them.
+    ("quality", "derivation", "INTEGER"),
+    ("audits", "derivation", "INTEGER"),
 ]

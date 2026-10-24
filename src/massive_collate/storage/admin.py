@@ -24,9 +24,10 @@ class AdminStore:
                 trades.append((src, ticker, None, e[0], e[1]))
         bars = []
         for feed in self._open_feeds():
-            bars += [(feed.name, *r) for r in feed.conn.execute(
-                "SELECT timespan, multiplier, COUNT(DISTINCT ticker), COUNT(*), MIN(ts), MAX(ts) "
-                "FROM bars GROUP BY timespan, multiplier")]
+            for table, label in (("bars", feed.name), ("built_bars", f"{feed.name} (built from ticks)")):
+                bars += [(label, *r) for r in feed.conn.execute(
+                    "SELECT timespan, multiplier, COUNT(DISTINCT ticker), COUNT(*), MIN(ts), MAX(ts) "
+                    f"FROM {table} GROUP BY timespan, multiplier")]
         size = self.path.stat().st_size if self.path.exists() else 0
         return {"db_path": str(self.path), "size_bytes": size, "feeds_dir": str(self.feeds_dir or ""),
                 "feed_bytes": self.feed_bytes(), "trades": trades, "bars": bars}

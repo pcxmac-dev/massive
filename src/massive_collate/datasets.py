@@ -352,9 +352,13 @@ def _describe(counts: dict) -> str:
 
 def _quality_prior(store, ds: Dataset) -> None:
     if store.quality(ds.name, "dataset") is None:  # a prior until something measures it
+        from . import provenance
         from .composite import PRIORS
 
-        store.set_quality(ds.name, "dataset", PRIORS[ds.kind], {"basis": "prior", "kind": ds.kind, "licence": ds.licence})
+        derivation = provenance.record(store, "quality-prior", f"quality:{ds.name}", {"kind": ds.kind, "priors": PRIORS},
+                                       {"dataset": ds.name, "licence": ds.licence}, rows=1)
+        store.set_quality(ds.name, "dataset", PRIORS[ds.kind], {"basis": "prior", "kind": ds.kind, "licence": ds.licence},
+                          derivation)
 
 
 def _ms_dt(t: datetime) -> int:
