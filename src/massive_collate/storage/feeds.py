@@ -1,4 +1,12 @@
-"""Market data in each feed's own files: bars (feeds/<feed>.db), ticks (feeds/<feed>-ticks.db), the composite model's bars and deviation, and the old single-file layout's detection."""
+"""Market data in each feed's own files: bars (feeds/<feed>.db), ticks (feeds/<feed>-ticks.db), the composite model's bars and deviation, and the old single-file layout's detection.
+
+What was known when: each bar records when this version was stored (`stored_at`; NULL for bars
+stored before tracking began). A download that brings the same values leaves the bar untouched; one
+that brings different values (a correction) replaces it, and the replaced version is kept in
+`bar_revisions` with the time it was replaced. `bars_window(..., as_of=...)` rebuilds a series as
+it stood at a moment: only bars the feed had published by then (by its plan's rule, see
+freshness.published_at), each in the version in effect then. The composite model's file keeps no
+revisions: its bars are derived, rebuilt from the exchanges' bars."""
 
 from __future__ import annotations
 
@@ -25,8 +33,29 @@ CREATE TABLE IF NOT EXISTS bars (
     ts           INTEGER NOT NULL,   -- bar start, ms since epoch (UTC)
     open REAL, high REAL, low REAL, close REAL,
     volume REAL, vwap REAL, transactions INTEGER,
+    stored_at    INTEGER,            -- ms: when this version was stored (NULL: before tracking)
     PRIMARY KEY (ticker, timespan, multiplier, ts)
 ) WITHOUT ROWID;
+"""
+
+# Corrections: the version a re-download replaced, with when it was stored and when it was replaced.
+REVISIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS bar_revisions (
+    ticker       TEXT    NOT NULL,
+    timespan     TEXT    NOT NULL,
+    multiplier   INTEGER NOT NULL,
+    ts           INTEGER NOT NULL,
+    open REAL, high REAL, low REAL, close REAL,
+    volume REAL, vwap REAL, transactions INTEGER,
+    stored_at    INTEGER,            -- ms: when the replaced version was stored (NULL: before tracking)
+    replaced_at  INTEGER NOT NULL,   -- ms: when the correction replaced it
+    PRIMARY KEY (ticker, timespan, multiplier, ts, replaced_at)
+) WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS bars_revised BEFORE UPDATE ON bars
+BEGIN
+    INSERT OR REPLACE INTO bar_revisions VALUES (old.ticker, old.timespan, old.multiplier, old.ts, old.open,
+        old.high, old.low, old.close, old.volume, old.vwap, old.transactions, old.stored_at, new.stored_at);
+END;
 """
 
 TICKS_SCHEMA = """
@@ -66,20 +95,28 @@ CREATE TABLE IF NOT EXISTS composite_stats (
 
 BAR_COLUMNS = ["open", "high", "low", "close", "volume", "vwap", "transactions"]
 
+# Only a bar whose values changed is rewritten (and so revised); the same values leave it as stored.
 _UPSERT_BAR = """
-INSERT INTO bars (ticker, timespan, multiplier, ts, open, high, low, close, volume, vwap, transactions)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO bars (ticker, timespan, multiplier, ts, open, high, low, close, volume, vwap, transactions, stored_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (ticker, timespan, multiplier, ts) DO UPDATE SET
     open=excluded.open, high=excluded.high, low=excluded.low, close=excluded.close,
-    volume=excluded.volume, vwap=excluded.vwap, transactions=excluded.transactions
+    volume=excluded.volume, vwap=excluded.vwap, transactions=excluded.transactions, stored_at=excluded.stored_at
+WHERE bars.open IS NOT excluded.open OR bars.high IS NOT excluded.high OR bars.low IS NOT excluded.low
+   OR bars.close IS NOT excluded.close OR bars.volume IS NOT excluded.volume OR bars.vwap IS NOT excluded.vwap
+   OR bars.transactions IS NOT excluded.transactions
 """
 
 
-def _bar_row(ticker: str, timespan: str, multiplier: int, bar: dict) -> tuple:
+def _stored_ms() -> int:
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
+def _bar_row(ticker: str, timespan: str, multiplier: int, bar: dict, stored_at: int) -> tuple:
     return (
         ticker, timespan, multiplier, int(bar["t"]),
         bar.get("o"), bar.get("h"), bar.get("l"), bar.get("c"),
-        bar.get("v"), bar.get("vw"), bar.get("n"),
+        bar.get("v"), bar.get("vw"), bar.get("n"), stored_at,
     )
 
 
@@ -121,7 +158,11 @@ class _Feed:
         self.ticks_path = folder / f"{name}-ticks.db" if folder else None
         self.conn = sqlite3.connect(str(self.path) if self.path else ":memory:", check_same_thread=check_same_thread)
         self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.executescript(FEED_SCHEMA + (COMPOSITE_SCHEMA if name == COMPOSITE else ""))
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(bars)")}
+        if cols and "stored_at" not in cols:
+            with self.conn:  # a file from before versioning: a column only, the bars are not rewritten
+                self.conn.execute("ALTER TABLE bars ADD COLUMN stored_at INTEGER")
+        self.conn.executescript(FEED_SCHEMA + (COMPOSITE_SCHEMA if name == COMPOSITE else REVISIONS_SCHEMA))
         self.ticks = False
         self._lock = threading.Lock()
         self.has_ticks()
@@ -283,26 +324,71 @@ class FeedStore:
 
     def upsert_bars(self, source: str, ticker: str, timespan: str, multiplier: int, bars: Iterable[dict]) -> int:
         ticker = ticker.upper()
-        rows = [_bar_row(ticker, timespan, multiplier, b) for b in bars]
+        stored = _stored_ms()
+        rows = [_bar_row(ticker, timespan, multiplier, b, stored) for b in bars]
         conn = self._feed(source, create=True).conn
         with conn:
             conn.executemany(_UPSERT_BAR, rows)
         self._wrote()
         return len(rows)
 
-    def bars_window(self, sources: Sequence[str], ticker: str, timespan: str, lo_ms: int, hi_ms: int) -> pd.DataFrame:
+    def bars_window(self, sources: Sequence[str], ticker: str, timespan: str, lo_ms: int, hi_ms: int,
+                    as_of: int | None = None, published=None) -> pd.DataFrame:
         """Bars of a series in [lo, hi) ms from the given feeds (an index range scan per feed), with
-        a `time` column in US/Eastern like load_bars."""
-        frames = [pd.read_sql_query(
-            "SELECT ts, open, high, low, close, volume, vwap, transactions FROM bars WHERE ticker=? "
-            "AND timespan=? AND multiplier=1 AND ts >= ? AND ts < ? ORDER BY ts", conn,
-            params=(ticker.upper(), timespan, int(lo_ms), int(hi_ms)))
-            for conn in (self._bars(src) for src in sources) if conn is not None]
+        a `time` column in US/Eastern like load_bars. With `as_of` (ms): the series as it stood
+        then: only bars published by then (`published(ts array) -> ms array`, the feed's rule; all
+        if None), each in the version in effect then (the earliest stored if none was stored yet)."""
+        if as_of is not None:
+            frames = [self._bars_as_of(src, ticker, timespan, lo_ms, hi_ms, as_of, published) for src in sources]
+            frames = [f for f in frames if f is not None]
+        else:
+            frames = [pd.read_sql_query(
+                "SELECT ts, open, high, low, close, volume, vwap, transactions FROM bars WHERE ticker=? "
+                "AND timespan=? AND multiplier=1 AND ts >= ? AND ts < ? ORDER BY ts", conn,
+                params=(ticker.upper(), timespan, int(lo_ms), int(hi_ms)))
+                for conn in (self._bars(src) for src in sources) if conn is not None]
         df = pd.concat(frames) if frames else pd.DataFrame(
             columns=["ts", "open", "high", "low", "close", "volume", "vwap", "transactions"])
         df = df.sort_values("ts", kind="stable").drop_duplicates("ts")  # one feed per span: no real duplicates
         df["time"] = pd.to_datetime(df["ts"], unit="ms", utc=True).dt.tz_convert("America/New_York")  # ts kept: ms
         return df.reset_index(drop=True)
+
+    def _bars_as_of(self, source: str, ticker: str, timespan: str, lo_ms: int, hi_ms: int, as_of: int,
+                    published) -> pd.DataFrame | None:
+        feed = self._feed(source)
+        if feed is None:
+            return None
+        cols = ["ts", *BAR_COLUMNS]
+        args = (ticker.upper(), timespan, int(lo_ms), int(hi_ms))
+        cur = pd.read_sql_query(f"SELECT {', '.join(cols)}, stored_at FROM bars WHERE ticker=? AND timespan=? "
+                                "AND multiplier=1 AND ts >= ? AND ts < ?", feed.conn, params=args)
+        cur["until"] = float("inf")
+        has_revisions = feed.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bar_revisions'").fetchone()
+        rev = pd.read_sql_query(f"SELECT {', '.join(cols)}, stored_at, replaced_at AS until FROM bar_revisions "
+                                "WHERE ticker=? AND timespan=? AND multiplier=1 AND ts >= ? AND ts < ?",
+                                feed.conn, params=args) if has_revisions else cur.iloc[0:0]
+        versions = pd.concat([cur, rev], ignore_index=True)
+        if versions.empty:
+            return versions[cols]
+        since = versions["stored_at"].astype("float").fillna(float("-inf"))
+        versions["effective"] = (since <= as_of) & (versions["until"] > as_of)
+        versions["order"] = versions["until"]  # the earliest version: the one replaced first
+        versions = versions.sort_values(["ts", "effective", "order"], ascending=[True, False, True])
+        out = versions.drop_duplicates("ts")
+        if published is not None:
+            out = out[published(out["ts"].to_numpy()) <= as_of]
+        return out[cols].sort_values("ts").reset_index(drop=True)
+
+    def bar_revisions(self, source: str, ticker: str, timespan: str = "minute") -> pd.DataFrame:
+        """Every replaced version of a series' bars, with when it was stored and replaced."""
+        conn = self._bars(source)
+        if conn is None or not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bar_revisions'").fetchone():
+            return pd.DataFrame(columns=["ts", *BAR_COLUMNS, "stored_at", "replaced_at"])
+        return pd.read_sql_query(
+            f"SELECT ts, {', '.join(BAR_COLUMNS)}, stored_at, replaced_at FROM bar_revisions WHERE ticker=? "
+            "AND timespan=? AND multiplier=1 ORDER BY ts, replaced_at", conn, params=(ticker.upper(), timespan))
 
     def bar_rows(self, source: str, ticker: str, timespan: str, lo_ms: int, hi_ms: int) -> list[tuple]:
         """(ts, open, high, low, close, volume, vwap, transactions) of one feed's series in [lo, hi) ms."""
@@ -356,7 +442,8 @@ class FeedStore:
     # -- grouped (whole-market daily) --------------------------------------
 
     def save_grouped_day(self, source: str, day: date, bars: list[dict]) -> int:
-        rows = [_bar_row(b["T"].upper(), "day", 1, b) for b in bars if b.get("T")]
+        stored = _stored_ms()
+        rows = [_bar_row(b["T"].upper(), "day", 1, b, stored) for b in bars if b.get("T")]
         if rows:
             conn = self._feed(source, create=True).conn
             with conn:
@@ -482,9 +569,10 @@ class FeedStore:
         if comp.empty:
             return 0
         ticker = ticker.upper()
+        stored = _stored_ms()
         bars = [_bar_row(ticker, timespan, 1, {
             "t": int(t), "o": r.o, "h": r.h, "l": r.l, "c": r.c, "v": r.v,
-            "vw": None if pd.isna(r.vw) else r.vw, "n": None if pd.isna(r.n) else int(r.n)})
+            "vw": None if pd.isna(r.vw) else r.vw, "n": None if pd.isna(r.n) else int(r.n)}, stored)
             for t, r in zip(comp.index, comp.itertuples())]
         rows = [(ticker, timespan, int(t), int(r.venues), float(r.sd_bps), float(r.range_bps), float(r.env_h),
                  float(r.env_l), r.members, r.outliers) for t, r in zip(comp.index, comp.itertuples())]

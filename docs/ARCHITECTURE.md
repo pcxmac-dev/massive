@@ -54,7 +54,11 @@ refresh, so the French library's revisions are lost.
 3. **Point-in-time storage.** Datasets done: every version of every value with `available_at`,
    `stored_at` and `origin`; revisions and withdrawals are versions; `as_of` reads; raw downloads
    kept locally by checksum; GitHub-hosted datasets are pinned git submodules whose commit history
-   is imported version by version. Feed bars next.
+   is imported version by version. Feed bars done: `stored_at` per bar; a re-download with the same
+   values changes nothing, a correction keeps the replaced version in `bar_revisions` (not for the
+   derived composite); `bars_window(as_of=, published=)` gives the series as it stood, gated by the
+   plan's publication rule (`freshness.published_at`). Bars stored before tracking have no
+   `stored_at` (taken as known since before tracking). Ticks: not versioned yet.
 4. **Derived results with provenance.** A `derivations` record (inputs and their versions, code
    version, settings) for bars built from ticks, composites, quality scores, audits and indicators;
    derived values stored apart from raw ones.

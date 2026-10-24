@@ -65,6 +65,28 @@ def plan_delay(tier: Tier, asset: str) -> Delay:
     return PLAN_DELAYS.get(tier.name, PLAN_DELAYS["free"]).get(asset, Delay("eod"))
 
 
+SPAN_MS = {"second": 1_000, "minute": 60_000, "hour": 3_600_000, "day": 86_400_000}
+
+
+def published_at(ts_ms, timespan: str, asset: str, tier: Tier):
+    """When bars starting at `ts_ms` (ms, array) became available on this plan (ms array): the
+    bar's end plus the plan's delay; on an end-of-day plan 04:00 ET after the session's day; on a
+    previous-UTC-day plan the UTC midnight after the bar. For point-in-time reads (as_of)."""
+    import numpy as np
+    import pandas as pd
+
+    ts = np.asarray(ts_ms, dtype="int64")
+    end = ts + SPAN_MS.get(timespan, 60_000)
+    delay = plan_delay(tier, asset)
+    if delay.kind == "delay":
+        return end + int(delay.lag.total_seconds() * 1000)
+    if delay.kind == "utc_day":
+        day = SPAN_MS["day"]
+        return (end - 1) // day * day + day
+    t = pd.to_datetime(ts, unit="ms", utc=True).tz_convert(ET).normalize() + pd.DateOffset(days=1)
+    return (t + pd.Timedelta(EOD_READY_AFTER_MIDNIGHT)).tz_convert("UTC").as_unit("ms").asi8
+
+
 # -- calendar (one source of truth: sessions.MarketCalendar) ---------------------------
 
 CALENDAR = MarketCalendar()

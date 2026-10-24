@@ -79,6 +79,9 @@ logs, charts and backups beside it. Nothing is stored in the repository. Each fe
 its own: `feeds/<feed>.db` holds its bars (the composite model's file also its deviation stats)
 and `feeds/<feed>-ticks.db` its trades. The main file `massive.db` keeps what the feeds share: the
 watchlist, the coverage ledger, audits, quality scores, the directory and the chart app's layouts.
+Nothing is overwritten silently: a corrected bar keeps its replaced version (with when it was stored
+and replaced) and every dataset value is kept in every published version, so a series can be read
+as it stood at any moment (`as_of`), for backtests that see only what was known then.
 A database from before this layout is moved once with `admin split-feeds` (it backs up first,
 checks every copy against its original, and only then removes the old copies); until then the
 app refuses to open it.
