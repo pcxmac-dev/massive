@@ -6,6 +6,12 @@ Market data is discrete, noisy and has gaps, so:
   sliding window of bars and differentiated exactly. It smooths without the lag of a
   moving average and is exact for polynomials up to the fit order. Edges use the fit
   of the first/last full window.
+- Two windows. Centred (the default, for viewing): the value at a bar is fitted from the
+  bars around it, so it uses later bars and a historical value is not what was knowable
+  then. Causal (`Model.causal`, for backtests and signals): the window ends at the bar,
+  so each value uses that bar and earlier ones only and never changes when later bars
+  arrive; it lags a little (half a window) in exchange. At the start of a segment the
+  causal window grows from the first bar and stays empty until it holds order + 1 bars.
 - The series is split into segments at gaps (overnight, weekends, halts) so a gap never
   appears as a spike. Within a segment, bars are taken as evenly spaced at the chart
   interval, and results are scaled to the chosen time unit.
@@ -34,6 +40,7 @@ class Model:
     window: int = 9  # Savitzky-Golay window (bars, odd)
     order: int = 3  # Savitzky-Golay polynomial order
     reset_gaps: bool = True  # treat gaps as breaks
+    causal: bool = False  # trailing window only (no look-ahead): for backtests and signals
 
     def validate(self) -> "Model":
         if self.kind not in MODELS:
@@ -92,6 +99,30 @@ def savgol_derivative(y: np.ndarray, window: int, order: int, deriv: int) -> np.
     return out
 
 
+def savgol_trailing_coefficients(window: int, order: int, deriv: int) -> np.ndarray:
+    """Weights giving the `deriv`-th derivative (per sample) at the newest sample of the window:
+    samples at x = -(window - 1) .. 0, evaluated at 0."""
+    x = np.arange(-(window - 1), 1, dtype=float)
+    pinv = np.linalg.pinv(np.vander(x, order + 1, increasing=True))
+    return pinv[deriv] * math.factorial(deriv)
+
+
+def savgol_derivative_causal(y: np.ndarray, window: int, order: int, deriv: int) -> np.ndarray:
+    """Derivative (per sample) of y from the window ending at each sample: value i depends on
+    y[:i + 1] only. Before a full window, the window grows from the first sample; with fewer
+    than order + 1 samples (or 3) the value is NaN."""
+    n = len(y)
+    out = np.full(n, np.nan)
+    if n >= window:
+        out[window - 1:] = np.convolve(y, savgol_trailing_coefficients(window, order, deriv)[::-1], mode="valid")
+    for i in range(min(n, window - 1)):
+        k = i + 1  # samples so far
+        if k < max(order + 1, 3):
+            continue
+        out[i] = savgol_trailing_coefficients(k, order, deriv) @ y[:k]
+    return out
+
+
 def segments(index: pd.DatetimeIndex, step_seconds: float, reset_gaps: bool) -> np.ndarray:
     """Segment number of each bar: a new segment starts after a gap much longer than the step."""
     if len(index) == 0 or not reset_gaps:
@@ -116,9 +147,10 @@ def apply_model(bars: pd.DataFrame, model: Model, step_seconds: float) -> pd.Dat
     value = np.full(len(y), np.nan)
     if model.kind in ("d1", "d2"):
         deriv = 1 if model.kind == "d1" else 2
+        derivative = savgol_derivative_causal if model.causal else savgol_derivative
         for s in np.unique(seg):
             m = seg == s
-            value[m] = savgol_derivative(y[m], model.window, model.order, deriv) * steps_per_unit ** deriv
+            value[m] = derivative(y[m], model.window, model.order, deriv) * steps_per_unit ** deriv
     else:  # integral: trapezoid area of (y - y0) in (basis x time unit), gaps contribute nothing
         base = y - y[0]
         dt = 1.0 / steps_per_unit  # time units per bar

@@ -446,10 +446,11 @@ def _market(snapshot: dict, ticker: str, watch: dict) -> dict | None:
 
 
 def _model(q: dict[str, str]) -> Model:
-    """Model from query parameters: model, basis, per, window, order, gaps."""
+    """Model from query parameters: model, basis, per, window, order, gaps, causal."""
     return Model(
         kind=q.get("model", "price"), basis=q.get("basis", "price"), per=q.get("per", "hour"),
         window=int(q.get("window", 9)), order=int(q.get("order", 3)), reset_gaps=q.get("gaps", "1") != "0",
+        causal=q.get("causal", "0") == "1",
     ).validate()
 
 

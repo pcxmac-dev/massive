@@ -2,7 +2,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from massive_collate.calc.derivatives import Model, apply_model, savgol_derivative, segments
+from massive_collate.calc.derivatives import (Model, apply_model, savgol_derivative, savgol_derivative_causal,
+                                              segments)
 
 ET = "America/New_York"
 
@@ -79,3 +80,32 @@ def test_unit_labels():
     assert Model("d1", basis="log", per="hour").unit_label() == "%/hour"
     assert Model("d2", per="minute").unit_label() == "price/minute²"
     assert Model("integral", per="day").unit_label() == "price·day"
+
+
+def test_causal_derivative_never_looks_ahead():
+    rng = np.random.default_rng(7)
+    y = np.cumsum(rng.normal(size=200))
+    full = savgol_derivative_causal(y, 9, 3, 1)
+    for k in (5, 30, 120, 199):  # what was computable with only the first k samples is unchanged
+        assert np.allclose(savgol_derivative_causal(y[:k], 9, 3, 1), full[:k], equal_nan=True)
+    centred = savgol_derivative(y, 9, 3, 1)
+    assert not np.allclose(savgol_derivative(y[:120], 9, 3, 1)[110:], centred[110:120])  # the viewing one does
+
+
+def test_causal_derivative_is_exact_for_polynomials_once_it_has_enough_samples():
+    x = np.arange(40, dtype=float)
+    y = 2 + 3 * x - 0.5 * x**2 + 0.01 * x**3
+    d1 = savgol_derivative_causal(y, 9, 3, 1)
+    d2 = savgol_derivative_causal(y, 9, 3, 2)
+    assert np.isnan(d1[:3]).all()  # fewer than order + 1 samples: nothing to fit
+    assert np.allclose(d1[3:], (3 - x + 0.03 * x**2)[3:])
+    assert np.allclose(d2[3:], (-1 + 0.06 * x)[3:])
+
+
+def test_causal_model_restarts_at_gaps_and_scales_like_the_centred_one():
+    day1 = _bars(100 + 0.1 * np.arange(20), start="2026-10-20 15:40")
+    day2 = _bars(120 + 0.1 * np.arange(20), start="2026-10-21 09:30")
+    b = pd.concat([day1, day2])
+    out = apply_model(b, Model("d1", per="hour", causal=True), 60)["close"]
+    assert len(out) == 40 - 2 * 3  # the first 3 bars of each segment have too few samples
+    assert np.allclose(out, 6.0)  # 0.1 per minute = 6 per hour, no overnight spike
