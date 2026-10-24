@@ -271,6 +271,23 @@
     return j >= 0 && l.t[j] >= lo ? j : -1;
   }
   const extent = (lines) => [Math.min(...lines.map((l) => l.t[0])), Math.max(...lines.map((l) => l.t[l.t.length - 1]))];
+  // Lowest and highest value inside [lo, hi] (else of all values): a loop, as eight daily series of
+  // a century are hundreds of thousands of values, far too many to spread into Math.min's arguments.
+  function valueRange(ls, lo, hi) {
+    for (const inWindow of [true, false]) {
+      let a = Infinity, b = -Infinity;
+      for (const l of ls) {
+        for (let i = 0; i < l.v.length; i++) {
+          const v = l.v[i];
+          if (!Number.isFinite(v) || (inWindow && (l.t[i] < lo || l.t[i] > hi))) continue;
+          if (v < a) a = v;
+          if (v > b) b = v;
+        }
+      }
+      if (a <= b) return [a, b];
+    }
+    return [0, 1];
+  }
   function setView(lo, hi) {
     if (!geom) return;
     const [a, b] = geom.full;
@@ -482,10 +499,8 @@
       const clip = `dsClip${gi}`;
       el('rect', { x: left, y: y0 - 3, width: pw, height: y1 - y0 + 6 }, el('clipPath', { id: clip }, el('defs', {}, svg)));
       // the y axis fits the points inside the window
-      const inside = ls.flatMap((l) => l.v.filter((v, i) => l.t[i] >= lo && l.t[i] <= hi && Number.isFinite(v)));
-      let vs = inside.length ? inside : ls.flatMap((l) => l.v).filter(Number.isFinite);
-      if (!vs.length) vs = [0, 1];
-      let vlo = Math.min(...vs), vhi = Math.max(...vs);
+      const [dlo, dhi] = valueRange(ls, lo, hi);
+      let vlo = dlo, vhi = dhi;
       const log = logOn() && vlo > 0;
       let y, invY;
       if (log) {
@@ -498,7 +513,7 @@
         y = (v) => y1 - (v - vlo) / (vhi - vlo) * (y1 - y0);
         invY = (py) => vlo + (y1 - py) / (y1 - y0) * (vhi - vlo);
       }
-      const ticks = log ? logTicks(Math.min(...vs), Math.max(...vs)) : niceTicks(vlo, vhi);
+      const ticks = log ? logTicks(dlo, dhi) : niceTicks(vlo, vhi);
       const step = ticks.length > 1 ? Math.min(...ticks.slice(1).map((t, i) => Math.abs(t - ticks[i]))) : 1;
       const grid = el('g', { class: 'ds-grid' }, svg);
       for (const v of ticks) {
@@ -947,7 +962,11 @@
       e.preventDefault();
       removeMark(st.selected);
     });
-    new ResizeObserver(() => { if (document.body.dataset.view === 'datasets') draw(); }).observe(charts);
+    let resizing = 0;  // redraw on the next frame, not inside the observer (that resizes again)
+    new ResizeObserver(() => {
+      cancelAnimationFrame(resizing);
+      resizing = requestAnimationFrame(() => { if (document.body.dataset.view === 'datasets') draw(); });
+    }).observe(charts);
   }
 
   async function open() {
