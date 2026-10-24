@@ -2,6 +2,28 @@
 
 Working notes so work can resume in a fresh session. Newest first.
 
+## State (2026-10-24)
+
+- **Live charts**: the live recorder (`python -m massive_collate live`, started by `sync`) streams
+  Coinbase and Bitstamp trades for 8 coins. The chart server pushes a live symbol's new bars over
+  `/api/stream` (server-sent events) and keeps cached series current by splicing in only what was
+  stored since (`BarEngine._refresh_tail`); fingerprints are per feed. The time axis has a handle
+  with the clock (drag to place the current time on screen) and a dashed line through every pane.
+- **Opening a symbol** asks every feed holding it to update it first (`/api/priority`: a
+  `sync --tickers` run, or the running sync takes it next). Limiters share each source's window
+  through the database (`ratelimit.KvLedger`); waits are recorded and the Fetcher view lists
+  every server's limits.
+- **Received over derived**: a feed's own bar replaces one built here for the same time (trigger
+  `bars_replace_built`, keeping the built version in `bar_revisions`). `derive.py` builds 5 min,
+  1 h and 1 day from each feed's minutes (after every sync; `derive` on demand); the chart marks
+  derived candles. Daily bars run to today (built from minutes after the last official day);
+  crypto and forex days are UTC days.
+- **Analysis view**: virtual level 2 (volume by price, derived prices starred); box plots chart
+  type; models fixed (short stretches, edges).
+- **Rail**: Live icon heartbeat (or ROYGBIV pulse) while the open symbol streams; Markets icon
+  is an Earth globe once `vendor/world/blue-marble.jpg` and `black-marble.jpg` are downloaded
+  (NASA, public domain; waiting for the user's approval).
+
 ## State (2026-10-22)
 
 - **Collector** (`python -m massive_collate ...`): runs hourly via Windows Task Scheduler
