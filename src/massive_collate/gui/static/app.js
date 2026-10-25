@@ -1097,25 +1097,19 @@ const LIGHT_CHART = {
   indicator: { tooltip: { text: { color: '#1b1f29' } } },
 };
 
-// Panes a little apart: a gap between the price pane and each indicator pane, and the time axis's
-// labels further from the last pane. The crosshair's vertical line is drawn here (crossLine) from
-// the top of the price pane to the time axis: the library draws it pane by pane, so it broke at
-// every gap.
-// The gaps are a darker band (a transparent one showed the same background as the panes: no gap to
-// see), and the same band runs above the time axis (axisGap, behind the chart: the axis's labels and
-// the crosshair's time stay on top).
+// Panes a little apart: a gap between the price pane and each indicator pane, and the same gap above
+// the time axis (axisGap, behind the chart: the axis's labels and the crosshair's time stay on top),
+// in the window's grey (the theme's --panel, as the toolbar and side panel), not the plot's colour:
+// the same colour as the panes showed no gap at all. The crosshair's dashed line stays in the panes
+// (the library draws it pane by pane): nothing is drawn in the gaps.
 const PANE_GAP = 14;
-const crossLine = Object.assign(document.createElement('div'), { className: 'cross-line', hidden: true });
 const axisGap = Object.assign(document.createElement('div'), { className: 'axis-gap' });
-$('chart').append(crossLine, axisGap);
+$('chart').append(axisGap);
 
-const gapColor = () => (themeBase() === 'light' ? 'rgba(0,0,0,0.08)' : 'rgba(0,0,0,0.45)');
+const gapColor = () => getComputedStyle(document.body).getPropertyValue('--panel').trim() || '#1e222d';
 
 function applyPaneSpacing() {
-  const line = chart.getStyles().crosshair.vertical.line;  // the theme's: worn by crossLine
-  crossLine.style.borderLeft = `${line.size || 1}px ${line.style === 'solid' ? 'solid' : 'dashed'} ${line.color}`;
-  chart.setStyles({ separator: { size: PANE_GAP, color: gapColor() }, xAxis: { tickText: { marginStart: PANE_GAP + 4 } },
-                    crosshair: { vertical: { line: { show: false } } } });
+  chart.setStyles({ separator: { size: PANE_GAP, color: gapColor() }, xAxis: { tickText: { marginStart: PANE_GAP + 4 } } });
   placeAxisGap();
 }
 
@@ -1183,20 +1177,7 @@ document.addEventListener('click', (e) => { if (!tzMenu.hidden && !tzMenu.contai
 window.addEventListener('resize', () => requestAnimationFrame(renderTimezone));
 requestAnimationFrame(renderTimezone);
 
-chart.subscribeAction('onCrosshairChange', (c) => {
-  if (!c || !Number.isFinite(c.x) || !c.paneId || c.paneId === 'x_axis_pane' || !chart.getDataList().length) {
-    crossLine.hidden = true;
-    return;
-  }
-  const at = chart.convertFromPixel({ x: c.x }, { paneId: 'candle_pane' });  // the bar under the pointer, as the library snaps
-  const x = Number.isFinite(at?.dataIndex) ? chart.convertToPixel({ dataIndex: at.dataIndex }, { paneId: 'candle_pane' }).x : c.x;
-  const axis = chart.getSize('x_axis_pane');
-  crossLine.hidden = !Number.isFinite(x) || x > chartWidth();
-  crossLine.style.left = `${Math.round(x)}px`;
-  crossLine.style.height = `${axis ? axis.top + PANE_GAP : 0}px`;  // through the band above the time axis too
-  placeAxisGap();  // follows a pane added or dragged (cheap)
-});
-$('chart').addEventListener('mouseleave', () => { crossLine.hidden = true; });
+chart.subscribeAction('onCrosshairChange', placeAxisGap);  // follows a pane added or dragged (cheap)
 
 function applyChartType() {
   const custom = !NATIVE[state.chartType];

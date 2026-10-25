@@ -297,9 +297,6 @@ button.primary[disabled] { opacity: .5; cursor: default; }
 .mini-sym.current { outline: 2px solid var(--accent); }
 .cur-session { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px; border-radius: 6px; background: var(--hover); }
 #chart { position: relative; }
-/* The crosshair's vertical line across every pane and the gaps between them (app.js crossLine). */
-.cross-line { position: absolute; top: 0; width: 0; pointer-events: none; z-index: 5; }
-.cross-line[hidden] { display: none; }
 /* The band between the last pane and the time axis's labels, behind the chart's canvases. */
 .axis-gap { position: absolute; left: 0; pointer-events: none; z-index: 0; }
 /* The time zone switch in the corner under the price axis, and its menu. */

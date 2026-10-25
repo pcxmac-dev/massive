@@ -125,9 +125,10 @@ def test_the_time_zone_wheel_shows_six_and_turns_round_and_round():
     assert "if (daily) return" in zone and "return pickedZone();" in zone  # days keep the market's own dates
 
 
-def test_the_crosshair_line_runs_through_the_gaps_between_panes():
+def test_the_gaps_between_panes_are_the_windows_grey_and_hold_no_crosshair_line():
     app = _js("app.js")
     spacing = _function(app, "applyPaneSpacing")
     assert "separator: { size: PANE_GAP, color: gapColor() }" in spacing and "placeAxisGap();" in spacing
-    assert "crosshair: { vertical: { line: { show: false } } }" in spacing  # drawn by crossLine instead
+    assert "crosshair" not in spacing  # the library's dashed line, drawn in the panes only
+    assert "getPropertyValue('--panel')" in app.split("const gapColor", 1)[1].splitlines()[0]  # the window's grey
     assert "applyPaneSpacing();" in _function(app, "applyChartType")  # after every theme
