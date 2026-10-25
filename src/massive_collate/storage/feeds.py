@@ -57,7 +57,45 @@ CREATE TABLE IF NOT EXISTS built_bars (
     stored_at    INTEGER,
     PRIMARY KEY (ticker, timespan, multiplier, ts)
 ) WITHOUT ROWID;
+-- Bad data (docs/ARCHITECTURE.md, "Bad data"): bars taken out of the filtered view, as they were,
+-- with the rule that caught them and what it compared. Source data is never deleted: a feed's own
+-- bar stays in `bars`, only left out of filtered reads (excludes=1); a bar built here that a
+-- rebuild replaced is kept here alone (excludes=0). Released: back in the filtered view, the record
+-- kept.
+CREATE TABLE IF NOT EXISTS pruned (
+    ticker       TEXT    NOT NULL,
+    timespan     TEXT    NOT NULL,
+    multiplier   INTEGER NOT NULL,
+    ts           INTEGER NOT NULL,
+    open REAL, high REAL, low REAL, close REAL,
+    volume REAL, vwap REAL, transactions INTEGER,
+    stored_at    INTEGER,            -- the pruned version's
+    derivation   INTEGER,            -- built here: its derivation record; NULL: the feed's own
+    rule         TEXT    NOT NULL,   -- malformed | spike | rebuilt | out_of_line
+    excludes     INTEGER NOT NULL,   -- 1: the stored bar at this time is left out of filtered reads
+    evidence     TEXT,               -- JSON: what the rule compared
+    pruned_at    INTEGER NOT NULL,   -- ms
+    code         TEXT,               -- the code version that pruned it
+    released_at  INTEGER,            -- ms: put back in the filtered view
+    PRIMARY KEY (ticker, timespan, multiplier, ts, rule, pruned_at)
+) WITHOUT ROWID;
 """
+
+
+def _excluded(conn: sqlite3.Connection, ticker: str, timespan: str, multiplier: int, lo_ms: int | None = None,
+              hi_ms: int | None = None) -> set:
+    """Times of a series' bars left out of the filtered view (bad data, pruned and not released)."""
+    sql = ("SELECT DISTINCT ts FROM pruned WHERE ticker=? AND timespan=? AND multiplier=? AND excludes=1 "
+           "AND released_at IS NULL")
+    args: list = [ticker.upper(), timespan, multiplier]
+    if lo_ms is not None:
+        sql += " AND ts >= ?"
+        args.append(int(lo_ms))
+    if hi_ms is not None:
+        sql += " AND ts < ?"
+        args.append(int(hi_ms))
+    return {ts for (ts,) in conn.execute(sql, args)}
+
 
 # What the feed sent first: a bar built here is used only where the feed sent none for that time.
 _BAR_TABLES = ("bars", "built_bars")
@@ -503,20 +541,28 @@ class FeedStore:
         return n
 
     def bars_window(self, sources: Sequence[str], ticker: str, timespan: str, lo_ms: int, hi_ms: int,
-                    as_of: int | None = None, published=None) -> pd.DataFrame:
+                    as_of: int | None = None, published=None, filtered: bool = True) -> pd.DataFrame:
         """Bars of a series in [lo, hi) ms from the given feeds (an index range scan per feed), with
-        a `time` column in US/Eastern like load_bars. With `as_of` (ms): the series as it stood
+        a `time` column in US/Eastern like load_bars: filtered (bad data left out, the pruned
+        list), or with `filtered=False` all of them. With `as_of` (ms): the series as it stood
         then: only bars published by then (`published(ts array) -> ms array`, the feed's rule; all
-        if None), each in the version in effect then (the earliest stored if none was stored yet)."""
+        if None), each in the version in effect then (the earliest stored if none was stored yet),
+        bad data included (it was there)."""
         if as_of is not None:
             frames = [self._bars_as_of(src, ticker, timespan, lo_ms, hi_ms, as_of, published) for src in sources]
             frames = [f for f in frames if f is not None]
         else:
-            frames = [pd.read_sql_query(
-                f"SELECT ts, open, high, low, close, volume, vwap, transactions, {int(table == 'built_bars')} AS derived "
-                f"FROM {table} WHERE ticker=? AND timespan=? AND multiplier=1 AND ts >= ? AND ts < ? ORDER BY ts", conn,
-                params=(ticker.upper(), timespan, int(lo_ms), int(hi_ms)))
-                for conn in (self._bars(src) for src in sources) if conn is not None for table in _BAR_TABLES]
+            frames = []
+            for conn in (self._bars(src) for src in sources):
+                if conn is None:
+                    continue
+                gone = _excluded(conn, ticker, timespan, 1, lo_ms, hi_ms) if filtered else ()
+                for table in _BAR_TABLES:
+                    f = pd.read_sql_query(
+                        f"SELECT ts, open, high, low, close, volume, vwap, transactions, {int(table == 'built_bars')} "
+                        f"AS derived FROM {table} WHERE ticker=? AND timespan=? AND multiplier=1 AND ts >= ? AND ts < ? "
+                        "ORDER BY ts", conn, params=(ticker.upper(), timespan, int(lo_ms), int(hi_ms)))
+                    frames.append(f[~f["ts"].isin(gone)] if gone else f)
         frames = [f for f in frames if len(f)]  # an empty read has untyped columns: it would turn numbers to objects
         df = pd.concat(frames) if frames else pd.DataFrame(
             columns=["ts", "open", "high", "low", "close", "volume", "vwap", "transactions", "derived"])
@@ -589,25 +635,33 @@ class FeedStore:
         start: date | None = None,
         end: date | None = None,
         source: str | None = None,
+        filtered: bool = True,
     ) -> pd.DataFrame:
-        """Bars with a `time` column in US/Eastern time."""
-        sql = "SELECT ticker, ts, " + ", ".join(BAR_COLUMNS) + " FROM {table} WHERE timespan=? AND multiplier=?"
+        """Bars with a `time` column in US/Eastern time: filtered (bad data left out, the pruned
+        list), or with `filtered=False` all of them."""
+        where = " WHERE timespan=? AND multiplier=?"
         params: list = [timespan, multiplier]
         if tickers:
-            sql += f" AND ticker IN ({','.join('?' * len(tickers))})"
+            where += f" AND ticker IN ({','.join('?' * len(tickers))})"
             params += [t.upper() for t in tickers]
         if start:
-            sql += " AND ts >= ?"
+            where += " AND ts >= ?"
             params.append(_date_ms(start))
         if end:
-            sql += " AND ts < ?"
+            where += " AND ts < ?"
             params.append(_date_ms(end) + 2 * 86_400_000)
+        sql = "SELECT ticker, ts, " + ", ".join(BAR_COLUMNS) + " FROM {table}" + where
         frames = []
         for feed in [self._feed(source)] if source else self._open_feeds():
             if feed is not None:
+                gone = pd.read_sql_query("SELECT DISTINCT ticker, ts FROM pruned" + where + " AND excludes=1 "
+                                         "AND released_at IS NULL", feed.conn, params=params) if filtered else None
                 for table in _BAR_TABLES:
-                    frames.append(pd.read_sql_query(sql.format(table=table) + " ORDER BY ticker, ts", feed.conn,
-                                                    params=params))
+                    f = pd.read_sql_query(sql.format(table=table) + " ORDER BY ticker, ts", feed.conn, params=params)
+                    if gone is not None and len(gone) and len(f):
+                        keys = pd.MultiIndex.from_frame(f[["ticker", "ts"]])
+                        f = f[~keys.isin(pd.MultiIndex.from_frame(gone))].copy()
+                    frames.append(f)
                     frames[-1].insert(0, "source", feed.name)
                     frames[-1]["derived"] = table == "built_bars"
         frames = [f for f in frames if len(f)]  # an empty read has untyped columns

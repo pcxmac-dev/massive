@@ -23,6 +23,7 @@ and paged. Box plots keep the series path.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import threading
 import time
@@ -60,6 +61,15 @@ MODEL_SKIP_PAGES = 10  # pages of bars all too short for a model's window passed
 HALF_HOUR_MS = 1_800_000  # the hour levels and 30 minutes are built from 30-minute bins (_half_hours)
 ROLLUP_TTL_S = 300.0  # a month of them is read again after this: a correction or backfill shows within it
 ROLLUP_CACHE_BYTES = 200_000_000  # twenty years of a stock's bins is about 15 MB
+
+
+# The view a request reads (server.ChartApp._view): filtered, bad data left out (the pruned list,
+# baddata.py), unless it asks for all of it (unfiltered). Per request thread; caches key on it.
+UNFILTERED = contextvars.ContextVar("unfiltered", default=False)
+
+
+def _filtered() -> bool:
+    return not UNFILTERED.get()
 
 
 def _empty() -> pd.DataFrame:
@@ -248,7 +258,8 @@ class WindowReader:
         """The feeds' base bars in [lo, hi), best feed first per bar."""
         with self.engine.lock:
             parts = [frame_from_bars(df) for df in
-                     (self.store.bars_window([f], s.ticker, base, int(lo), int(hi)) for f in feeds) if len(df)]
+                     (self.store.bars_window([f], s.ticker, base, int(lo), int(hi), filtered=_filtered()) for f in feeds)
+                     if len(df)]
         if not parts:
             return None
         return merge_frames(parts) if len(parts) > 1 else parts[0]
@@ -272,7 +283,7 @@ class WindowReader:
         bounds = [int(m.value // 1_000_000) for m in months]
         parts = []
         for m0, m1 in zip(bounds, bounds[1:]):
-            key = (tuple(feeds), s.ticker, m0)
+            key = (tuple(feeds), s.ticker, m0, _filtered())
             settled = m1 <= newest  # wholly before the newest minute: only a correction or backfill changes it
             with self._rollup_lock:
                 hit = self._rollup.get(key) if settled else None
@@ -320,7 +331,7 @@ class WindowReader:
         parts = []
         with self.engine.lock:
             for f in feeds:
-                df = self.store.load_bars([s.ticker], period, span, start=start, end=end, source=f)
+                df = self.store.load_bars([s.ticker], period, span, start=start, end=end, source=f, filtered=_filtered())
                 if len(df):
                     df = frame_from_bars(df)
                     df = df[~df["derived"]]
@@ -334,7 +345,8 @@ class WindowReader:
         none was sent (one feed per day, best first), dated as each market dates its days."""
         with self.engine.lock:
             parts = [frame_from_bars(df) for df in
-                     (self.store.load_bars([s.ticker], "day", 1, source=f) for f in feeds) if len(df)]
+                     (self.store.load_bars([s.ticker], "day", 1, source=f, filtered=_filtered()) for f in feeds)
+                     if len(df)]
         if not parts:
             return _empty()
         daily = merge_frames(parts) if len(parts) > 1 else parts[0]
@@ -523,7 +535,7 @@ class WindowReader:
         level's base bars reach further (each feed's first and last: two index seeks, not the
         series fingerprint, which counts every row and took over a second while a sync wrote);
         an older page keeps the build the chart is showing (a new bar moves the ATR box of all)."""
-        key = (source, s.ticker, lv["type"], lv["span"], session, style)
+        key = (source, s.ticker, lv["type"], lv["span"], session, style, _filtered())
         feeds = self.feeds(source, ticker)
         with self.engine.lock:
             stamp = tuple(self.store.bar_edges(f, s.ticker, BASE.get(lv["type"], "day")) for f in feeds)
@@ -607,7 +619,8 @@ class WindowReader:
             base = "second" if period == "second" else "minute"
             with self.engine.lock:
                 parts = [frame_from_bars(df) for df in
-                         (self.store.bars_window([f], s.ticker, base, lo, hi) for f in feeds) if len(df)]
+                         (self.store.bars_window([f], s.ticker, base, lo, hi, filtered=_filtered()) for f in feeds)
+                         if len(df)]
             sub = merge_frames(parts) if len(parts) > 1 else (parts[0] if parts else
                                                               pd.DataFrame(columns=[*COLUMNS, "derived"]))
             unit = f"1-{base} bars"

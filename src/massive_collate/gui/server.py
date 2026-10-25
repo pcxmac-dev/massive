@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+from contextlib import contextmanager
 import mimetypes
 import subprocess
 import sys
@@ -672,6 +673,25 @@ class ChartApp:
         with self._lock:
             return inventory.symbol_inventory(self.store, ticker, rank)
 
+    def pruned(self, ticker: str, source: str | None = None) -> dict:
+        """A symbol's bad data (baddata.py): each feed's pruned list, newest first, and its counts."""
+        from .. import baddata
+
+        with self._lock:
+            return {"counts": self.store.pruned_counts(ticker),
+                    "entries": baddata.entries(self.store, ticker, None if source in (None, "", "*") else source)}
+
+    @contextmanager
+    def _view(self, q: dict[str, str]):
+        """The request's view of the data: filtered (bad data left out) unless it asks unfiltered=1."""
+        from .window import UNFILTERED
+
+        token = UNFILTERED.set(q.get("unfiltered") == "1")
+        try:
+            yield
+        finally:
+            UNFILTERED.reset(token)
+
     def start_derive(self, ticker: str) -> dict:
         """Build a symbol's derived frames now (`derive --tickers`) in its own process: from what
         is stored only, no request to any feed. One build at a time from this app."""
@@ -963,11 +983,14 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 if url.path == "/api/meta":
                     return self._json(app.meta(q["source"], q["ticker"], q.get("adjust"), q.get("auto") == "1"))
                 if url.path == "/api/bars":
-                    return self._json(app.bars(q))
+                    with app._view(q):
+                        return self._json(app.bars(q))
                 if url.path == "/api/stream":
-                    return self._stream(q)
+                    with app._view(q):
+                        return self._stream(q)
                 if url.path == "/api/profile":
-                    return self._json(app.profile(q))
+                    with app._view(q):
+                        return self._json(app.profile(q))
                 if url.path == "/api/info":
                     return self._json(app.info(q["source"], q["ticker"], q.get("adjust")))
                 if url.path == "/api/deps":
@@ -982,10 +1005,14 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.calendar(q))
                 if url.path == "/api/inventory":
                     return self._json(app.inventory(q["ticker"]))
+                if url.path == "/api/pruned":
+                    return self._json(app.pruned(q["ticker"], q.get("source")))
                 if url.path == "/api/future":
-                    return self._json(app.future(q))
+                    with app._view(q):
+                        return self._json(app.future(q))
                 if url.path == "/api/range":
-                    return self._json(app.range_stats(q))
+                    with app._view(q):
+                        return self._json(app.range_stats(q))
                 if url.path == "/api/icon":
                     icon = app.icon(q["ticker"])
                     if icon is None:

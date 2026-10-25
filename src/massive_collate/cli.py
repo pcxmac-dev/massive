@@ -584,6 +584,54 @@ def cmd_kills(args, settings: Settings) -> int:
     return 0
 
 
+def cmd_pruned(args, settings: Settings) -> int:
+    """Bad data (baddata.py): the pruned list per feed and symbol (list), a check of stored bars by
+    the rules (scan), putting a bar back in the filtered view (release), or rebuilding a feed's bars
+    from its stored ticks with the condition rules as they are now, each changed bar kept on the
+    list (repair-ticks). Nothing is deleted; no feed is asked for anything."""
+    from datetime import datetime, timezone
+
+    from . import baddata, derive
+
+    log = Logger(settings.db_path.parent / "logs" / "massive-collate.log")
+    with Store(settings.db_path) as store:
+        if args.action == "repair-ticks":
+            if not args.feed:
+                raise SystemExit("repair-ticks needs --feed")
+            done = baddata.repair_from_ticks(store, args.feed, args.tickers, log=log)
+            log(f"repair-ticks {args.feed}: {len(done)} symbols, {sum(done.values()):,} bars kept on the pruned list")
+            return 0
+        if args.action == "scan":
+            if not args.feed:
+                raise SystemExit("scan needs --feed")
+            tickers = args.tickers or sorted({t for s, t, _ in store.stored_series() if s == args.feed})
+            total = 0
+            for ticker in tickers:
+                n = sum(baddata.scan_series(store, args.feed, ticker, timespan, derive.asset_of(store, args.feed, ticker))
+                        for timespan in baddata.BASES)
+                if n:
+                    log(f"bad data {args.feed}:{ticker}: {n:,} bars on the pruned list")
+                total += n
+            log(f"scan {args.feed}: {len(tickers)} symbols, {total:,} bars on the pruned list")
+            return 0
+        if args.action == "release":
+            if not (args.feed and args.tickers and args.ts is not None):
+                raise SystemExit("release needs --feed, --tickers (one) and --ts")
+            n = store.release_pruned(args.feed, args.tickers[0], args.timespan, 1, args.ts)
+            print(f"{n} entr{'y' if n == 1 else 'ies'} released")
+            return 0
+        tickers = args.tickers or sorted(set(store.pruned(args.feed)["ticker"]))
+        for ticker in tickers:
+            print(f"{ticker}: " + "; ".join(f"{feed} " + ", ".join(f"{n:,} {rule}" for rule, n in c.items())
+                                           for feed, c in store.pruned_counts(ticker).items()))
+            for e in baddata.entries(store, ticker, args.feed, limit=args.limit):
+                at = datetime.fromtimestamp(e["ts"] / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                print(f"  {at} UTC  {e['source']:9} {e['multiplier']} {e['timespan']:7} {e['rule']:10} "
+                      f"o {e['open']} h {e['high']} l {e['low']} c {e['close']} v {e['volume']}"
+                      + ("  (released)" if e["releasedAt"] else ""))
+    return 0
+
+
 def cmd_inventory(args, settings: Settings) -> int:
     """What a symbol holds on every feed, frame by frame: sent by the feed, built here (*derived)
     or not built yet; with --json, everything inventory.py reports."""
@@ -1131,6 +1179,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--hours", type=float, default=24.0, help="list: how far back; kill: for how long")
     s.add_argument("--why", default="no reason given", help="kill: the reason kept with it")
     s.set_defaults(func=cmd_kills)
+
+    s = sub.add_parser("pruned", help="bad data: each feed's pruned list (list, scan, release; repair-ticks rebuilds "
+                                      "a feed's bars from its ticks, keeping what changes)")
+    s.add_argument("action", choices=["list", "scan", "release", "repair-ticks"], nargs="?", default="list")
+    s.add_argument("--feed", help="the feed (scan and repair-ticks: required; list: all feeds without it)")
+    s.add_argument("--tickers", nargs="*", help="symbols (all of the feed's without it)")
+    s.add_argument("--timespan", default="minute", help="release: the bar's frame")
+    s.add_argument("--ts", type=int, help="release: the bar's start (ms)")
+    s.add_argument("--limit", type=int, default=30, help="list: entries shown per symbol")
+    s.set_defaults(func=cmd_pruned)
 
     s = sub.add_parser("inventory", help="what a symbol holds on every feed, frame by frame (sent, *derived, not built)")
     s.add_argument("ticker")

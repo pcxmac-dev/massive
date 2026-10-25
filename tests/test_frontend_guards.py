@@ -103,3 +103,10 @@ def test_the_next_hour_level_is_read_ahead_without_touching_the_chart_requests()
     assert "state.prefetched.has(key)" in ahead  # once a window
     assert "prefetchFiner(w, cur)" in _function(app, "checkLod")
     assert "Math.max(1000," in _function(app, "autoPage")  # two screens, not 3,000 bars of 4 hours
+
+
+def test_every_chart_request_says_which_view_it_reads():
+    app = _js("app.js")
+    assert "...(state.unfiltered ? { unfiltered: 1 } : {})" in _function(app, "typeQuery")  # bars, future, stream
+    assert "...typeQuery()" in _function(app, "prefetchFiner")
+    assert 'id="unfilteredBtn"' in _js("index.html") and 'id="pPruned"' in _js("index.html")

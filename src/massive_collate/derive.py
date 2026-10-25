@@ -155,10 +155,14 @@ def build_chain(store, source: str, ticker: str, base: str, asset: str = "stock"
     edges = store.bar_edges(source, ticker, base)
     if edges is None:
         return 0
+    dirty = take_dirty(store, source, ticker, base)  # bad data pruned there: what was built over it goes
     if built_to < 0:  # a first build covers everything held (bars from before stored_at have none)
         lo, hi = edges
     else:
         changed = store.changed_span(source, ticker, base, built_to)
+        if dirty:
+            changed = (min([dirty[0]] + ([changed[0]] if changed else [])),
+                       max([dirty[1]] + ([changed[1]] if changed else [])))
         if changed is None:
             return 0
         lo, hi = edges if base == "day" else changed  # weeks, months, years: all again
@@ -195,6 +199,27 @@ def build_chain(store, source: str, ticker: str, base: str, asset: str = "stock"
     # carry an earlier stored_at: the next build looks again from a minute before.
     store.kv_set(key, str(started - SLACK_MS))
     return stored
+
+
+DIRTY_KEY = "derive:dirty:{}:{}:{}"  # source, ticker, base -> [lo, hi] ms built again whatever its stored_at
+
+
+def mark_dirty(store, source: str, ticker: str, base: str, lo_ms: int, hi_ms: int) -> None:
+    """Have the next build redo the frames above [lo, hi) of a base frame: bars there were pruned
+    (baddata.py) without being stored again, so stored_at alone would not say so."""
+    store.kv_update(DIRTY_KEY.format(source, ticker.upper(), base),
+                    lambda held: [min(held[0], lo_ms), max(held[1], hi_ms)] if held else [lo_ms, hi_ms], None)
+
+
+def take_dirty(store, source: str, ticker: str, base: str) -> tuple[int, int] | None:
+    """The span marked dirty for a build (cleared as it is taken)."""
+    taken: list = [None]
+
+    def clear(held):
+        taken[0] = held
+        return None
+    store.kv_update(DIRTY_KEY.format(source, ticker.upper(), base), clear, None)
+    return (int(taken[0][0]), int(taken[0][1])) if taken[0] else None
 
 
 def build_series(store, source: str, ticker: str, asset: str = "stock", log=print) -> int:
@@ -249,6 +274,14 @@ def build_symbol(store, source: str, ticker: str, asset: str = "stock", log=prin
 
 
 def _build_symbol(store, source: str, ticker: str, asset: str, log, progress: tuple[int, int]) -> int:
+    from . import baddata
+
+    try:  # bad data first (baddata.py): the frames above are then built without it
+        pruned = baddata.scan_symbol(store, source, ticker, asset)
+        if pruned:
+            log(f"bad data {source}:{ticker}: {pruned:,} bars on the pruned list (left out of the filtered view)")
+    except Exception as e:  # a failing check must not stop the build; it is tried again next time
+        log(f"bad data {source}:{ticker}: check failed ({type(e).__name__}: {e})")
     total = 0
     for base, frames in CHAINS:
         if store.bar_edges(source, ticker, base) is None:

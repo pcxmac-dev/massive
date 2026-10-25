@@ -128,7 +128,14 @@ def regular_session(frame: pd.DataFrame) -> pd.DataFrame:
     (stray prints a feed sometimes has then are not part of any session)."""
     if frame.empty:
         return frame
-    local = frame.index.tz_convert(ET)
+    return frame[regular_mask(frame.index)]
+
+
+def regular_mask(index: pd.DatetimeIndex) -> np.ndarray:
+    """Which times are inside US regular trading hours (see regular_session)."""
+    if len(index) == 0:
+        return np.zeros(0, dtype=bool)
+    local = index.tz_convert(ET)
     # wall-clock time of day in microseconds (as datetime.time compares; elapsed time from midnight
     # differs on the days the clocks change), against each day's close: one look-up a day, not a bar
     hour, minute, second, micro = (np.asarray(f, dtype=np.int64) for f in
@@ -140,7 +147,7 @@ def regular_session(frame: pd.DataFrame) -> pd.DataFrame:
                        for c in (_regular_close(d.date()) for d in unique)], dtype=np.int64)
     close = closes[unique.get_indexer(days)]
     opens = (REGULAR_OPEN.hour * 60 + REGULAR_OPEN.minute) * 60_000_000
-    return frame[(tod >= opens) & (tod < close)]  # closed days: close -1
+    return (tod >= opens) & (tod < close)  # closed days: close -1
 
 
 def _regular_close(d) -> time | None:

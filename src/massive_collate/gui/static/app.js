@@ -22,6 +22,7 @@ const state = {
   source: MERGED,
   period: prefs.get('period', { type: 'minute', span: 1 }),
   session: prefs.get('session', 'regular'),
+  unfiltered: prefs.get('unfiltered', false) === true,  // all data, bad data included (the "All data" switch)
   theme: prefs.get('theme', 'dark'),
   indicators: prefs.get('indicators', ['VOL']),
   chartType: prefs.get('chartType', 'candles'),
@@ -691,7 +692,7 @@ function prefetchFiner(w, cur) {
   if (state.prefetched.has(key)) return;
   state.prefetched.add(key);
   const q = { source: state.source, ticker: state.ticker, period: next.type, span: next.span, session: state.session,
-              limit: autoPage(), adjust: state.adjust, lod: 1, auto: 1, ...(to == null ? {} : { to }) };
+              limit: autoPage(), adjust: state.adjust, lod: 1, ...typeQuery(), ...(to == null ? {} : { to }) };
   fetch(`/api/bars?${new URLSearchParams(q)}`).catch(() => {});
 }
 
@@ -752,7 +753,8 @@ const LINE = '#2962ff';
 const CLEAR = 'rgba(0,0,0,0)';
 
 function typeQuery() {
-  const auto = { auto: 1 };  // the auto-ranging chart: the server reads only the window asked for (gui/window.py)
+  // the auto-ranging chart: the server reads only the window asked for (gui/window.py); all data or the filtered
+  const auto = { auto: 1, ...(state.unfiltered ? { unfiltered: 1 } : {}) };
   if (!SERVER_TYPES.has(state.chartType)) return auto;
   const p = state.typeParams[state.chartType] || {};
   return { ...auto, type: state.chartType, box: p.box || undefined, reversal: p.reversal || undefined,
@@ -1862,7 +1864,17 @@ function renderPeriods() {
 
 function renderSession() {
   $('ethBtn').classList.toggle('on', state.session === 'extended');
+  $('unfilteredBtn').classList.toggle('on', state.unfiltered);
 }
+
+// Filtered (the target data: bad data left out, docs/ARCHITECTURE.md "Bad data") or unfiltered (all
+// of it, what each feed's pruned list holds included).
+$('unfilteredBtn').addEventListener('click', () => {
+  state.unfiltered = !state.unfiltered;
+  prefs.set('unfiltered', state.unfiltered);
+  renderSession();
+  chart.resetData();
+});
 
 $('ethBtn').addEventListener('click', () => {
   state.session = state.session === 'extended' ? 'regular' : 'extended';
@@ -2672,6 +2684,59 @@ function renderInventory() {
       <tbody>${rows.map((label) => `<tr><th>${esc(label)}</th>${cols.map((c) => cell(c, label)).join('')}</tr>`).join('')}</tbody>
     </table></div>
     <div class="p-muted small">● sent by the feed · * derived here from finer data · ○ not built yet</div>`;
+}
+
+// -- bad data: each feed's pruned list (baddata.py; docs/ARCHITECTURE.md "Bad data") --------------
+// What the rules took out of the filtered view, newest first; kept, never deleted ("All data" shows
+// it on the chart). Read with the inventory.
+const PRUNED_RULES = { malformed: 'malformed', spike: 'spike without volume', rebuilt: 'rebuilt (wrong rules)',
+                       out_of_line: 'out of line with other feeds' };
+async function loadPruned() {
+  if (!state.ticker || document.body.classList.contains('panel-hidden')) return;
+  const ticker = state.ticker;
+  let pruned = null;
+  try { pruned = await api('/api/pruned', { ticker }); } catch { /* nothing shown for it */ }
+  if (ticker !== state.ticker) return;
+  state.pruned = pruned;
+  renderPruned();
+}
+setInterval(loadPruned, INVENTORY_MS);
+window.addEventListener('massive:symbol', () => { state.pruned = null; renderPruned(); loadPruned(); });
+
+function prunedWhy(e) {
+  const ev = e.evidence || {};
+  const n = (v) => (v == null ? '?' : Number(v).toLocaleString('en-US', { maximumFractionDigits: 4 }));
+  if (e.rule === 'spike') {
+    return `range ${n(ev.range)} = ${ev.range_x ?? '∞'}× its ${ev.neighbours} neighbours' (${ev.part}), volume `
+      + `${n(ev.volume)} = ${ev.volume_x ?? '∞'}× theirs` + (ev.trades?.length ? `; ${ev.trades.length} prints outside their range` : '');
+  }
+  if (e.rule === 'malformed') return (ev.failed || []).join(', ');
+  if (e.rule === 'rebuilt') {
+    const now = ev.now;
+    return now ? `now high ${n(now.high)}, low ${n(now.low)} (was ${n(e.high)}, ${n(e.low)})` : 'no longer built';
+  }
+  return '';
+}
+
+function renderPruned() {
+  const box = $('pPruned');
+  const p = state.pruned;
+  const feeds = Object.entries(p?.counts || {});
+  if (!feeds.length) { box.innerHTML = ''; return; }
+  const fmt = (ms) => new Date(ms).toLocaleString('en-US', { timeZone: TZ, month: 'short', day: '2-digit', year: 'numeric',
+                                                              hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
+  const counts = feeds.map(([feed, c]) => `${esc(feed)}: ${Object.entries(c).map(([rule, k]) =>
+    `${k.toLocaleString()} ${esc(PRUNED_RULES[rule] || rule)}`).join(', ')}`).join('<br>');
+  const rows = (p.entries || []).slice(0, 50).map((e) => `
+    <tr class="${e.releasedAt ? 'pr-released' : ''}" title="${esc(JSON.stringify(e.evidence, null, 1))}">
+      <td>${esc(fmt(e.ts))}</td><td>${esc(e.source)}</td><td>${esc(`${e.multiplier} ${e.timespan}`)}</td>
+      <td>${esc(PRUNED_RULES[e.rule] || e.rule)}${e.releasedAt ? ' (released)' : ''}</td>
+      <td>${esc(prunedWhy(e))}</td></tr>`).join('');
+  box.innerHTML = `
+    <h3>Bad data (pruned)</h3>
+    <div class="p-muted small">${counts}</div>
+    <div class="table-wrap"><table class="pr-table"><tbody>${rows}</tbody></table></div>
+    <div class="p-muted small">Left out of the filtered view, never deleted: "All data" shows them on the chart.</div>`;
 }
 
 $('pInventory').addEventListener('click', async (e) => {

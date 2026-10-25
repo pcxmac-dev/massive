@@ -65,6 +65,7 @@
       <option value="ratio">Back-adjusted (ratio)</option>
     </select>
     <button id="ethBtn" class="toggle" title="Extended hours: pre-market, after-hours and overnight">ETH</button>
+    <button id="unfilteredBtn" class="toggle" title="Unfiltered: all data, bad data included. Off: filtered, the target data (bad data is on each feed's pruned list, in the Data panel)">All data</button>
     <div class="menu">
       <button id="indBtn" aria-haspopup="true">Indicators</button>
       <div id="indMenu" class="dropdown" hidden></div>
@@ -101,6 +102,7 @@
           <section id="pBusiness"></section>
           <section id="pData"></section>
           <section id="pInventory"></section>
+          <section id="pPruned"></section>
         </div>
         <div class="pane" id="paneWatch" data-pane="watchlist" hidden>
           <section id="pWatch"></section>
