@@ -290,8 +290,8 @@ def run(store, sources=None, tickers=None, log=print) -> int:
     for source, ticker, kind in store.stored_series():
         if kind not in bases or (sources and source not in sources) or (wanted and ticker not in wanted):
             continue
-        if source == "composite":  # the composite model is derived through and through: it has its own build
-            continue
+        # The composite model (composite.py builds its minutes and days) gets the frames above them
+        # like any feed: every level of every series, built upward from what it holds.
         series.setdefault((source, ticker), set()).add(kind)
     total = 0
     for i, ((source, ticker), kinds) in enumerate(sorted(series.items())):

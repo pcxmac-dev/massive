@@ -130,3 +130,13 @@ def test_the_inventory_command_prints_the_frames(tmp_path, monkeypatch, capsys):
     assert cli.main(["inventory", "SPCX"]) == 0
     assert "5m     *derived" in capsys.readouterr().out
     assert cli.main(["inventory", "NONE"]) == 1
+
+
+def test_the_composite_model_gets_every_level_above_its_minutes(store):
+    store.upsert_bars("composite", "BTCUSD", "minute", 1, [_bar(f"2026-10-20 {h:02d}:{m:02d}", 1.0, tz="UTC")
+                                                          for h in range(3) for m in range(0, 60, 10)])
+    store.watch("coinbase", ["BTCUSD"], "minute", asset="crypto")
+    derive.run(store, sources={"composite"}, log=lambda *_: None)
+    inv = inventory.symbol_inventory(store, "BTCUSD")
+    composite = next(f for f in inv["feeds"] if f["feed"] == "composite")
+    assert composite["notBuilt"] == [] and {"5m", "1h", "4h", "1D", "1W", "1M", "1Y"} <= {f["frame"] for f in composite["frames"]}
