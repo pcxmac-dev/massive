@@ -222,3 +222,17 @@ def test_a_symbol_still_backfilling_is_never_skipped_for_want_of_new_data(store)
     assert sync(src, store, FREE, later, log=lambda m: None).skipped == 1  # complete: left alone
     store.reset_backfill("fake", "AAA")  # as a plan with more history leaves it
     assert sync(src, store, FREE, later, log=lambda m: None).skipped == 0
+
+
+def test_a_symbol_asked_for_after_the_run_passed_it_is_taken_next(tmp_path):
+    now = datetime(2026, 10, 24, 18, tzinfo=timezone.utc)
+    with Store(tmp_path / "m.db") as store:
+        store.watch("massive", ["AMD", "NVDA", "MU"], "minute")
+        store.set_synced("massive", "AMD", now - timedelta(hours=1))  # skipped as up to date: no longer in the line
+        pending = [w for w in store.watchlist("massive") if w["ticker"] != "AMD"]
+        collector.request_priority(store, "AMD", now)  # the chart opens it while the run goes on
+        served = {}
+        item, urgent = collector._next_item(pending, store, now, "massive", served)
+        assert item["ticker"] == "AMD" and urgent and len(pending) == 2  # fetched from the watchlist again
+        item, urgent = collector._next_item(pending, store, now, "massive", served)
+        assert item["ticker"] != "AMD" and not urgent  # taken once

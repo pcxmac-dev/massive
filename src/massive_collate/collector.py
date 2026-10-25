@@ -775,16 +775,26 @@ def priority_requests(store: Store, now: datetime | None = None) -> dict[str, di
     return out
 
 
-def _next_item(pending: list[dict], store: Store, now: datetime) -> tuple[dict, bool]:
+def _next_item(pending: list[dict], store: Store, now: datetime, source: str = "",
+               served: dict | None = None) -> tuple[dict, bool]:
     """The next symbol to work on, and whether it was asked for: a symbol opened in the chart
-    since this feed last synced it goes first, wherever it is in the line. Read before every
-    symbol, so a request made while the run is going is taken at the next one."""
+    since this feed last synced it goes first, wherever it is in the line, and also when the run
+    has already passed it (skipped as up to date before the request came: AMD waited hours for
+    the next run). Read before every symbol, so a request made while the run is going is taken at
+    the next one; `served` (ticker -> request time) takes each request once."""
     asked = priority_requests(store, now)
-    if asked:
-        for i, w in enumerate(pending):
-            at = asked.get(w["ticker"], {}).get("at")
-            if at and (w.get("synced_at") is None or w["synced_at"] < at):
-                return pending.pop(i), True
+    served = served if served is not None else {}
+    for ticker, req in asked.items():
+        at = req.get("at")
+        if not at or served.get(ticker) == at:
+            continue
+        i = next((i for i, w in enumerate(pending) if w["ticker"] == ticker), None)
+        row = pending[i] if i is not None else next(iter(store.watchlist(source, ticker)), None) if source else None
+        if row is not None and (row.get("synced_at") is None or row["synced_at"] < at):
+            served[ticker] = at
+            if i is not None:
+                pending.pop(i)
+            return row, True
     return pending.pop(0), False
 
 
@@ -843,8 +853,9 @@ def sync(
                                         w["ticker"]))
         refusals = Refusals(store, source.name)
         server_fails = 0  # symbols in a row whose server failed (5xx, no answer): FETCH_FAILURES kill the feed
+        served: dict = {}  # priority requests taken this run (each once)
         while pending:
-            item, urgent = _next_item(pending, store, now)
+            item, urgent = _next_item(pending, store, now, source.name, served)
             try:
                 ticker, asset = item["ticker"], item["asset"]
                 synced = item.get("synced_at")
