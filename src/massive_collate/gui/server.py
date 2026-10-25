@@ -43,6 +43,7 @@ def finite(data):
 MAX_LIMIT = 20000
 CALENDAR_MAX_DAYS = 3700  # the widest /api/calendar range (timeaxis.js asks for at most CALENDAR_DAYS)
 ROW_COUNTS_TTL_S = 600  # a symbol's bar counts (the Data panel) are counted again after this
+PRUNED_COUNTS_TTL_S = 300  # a symbol's pruned-list counts by rule (an index scan of up to millions)
 MAX_BODY = 5 * 1024 * 1024
 WRITE_HEADER = "X-Massive-Charts"
 
@@ -69,6 +70,7 @@ class ChartApp:
         self._panel_store, self._panel_lock = store.reader(), threading.Lock()
         self._row_counts: dict[str, tuple[float, dict]] = {}  # ticker -> (counted at, row_counts)
         self._counting: set[str] = set()
+        self._pruned_counts: dict[str, tuple[float, dict]] = {}  # ticker -> (counted at, by feed and rule)
         self._open_noted: dict[str, int] = {}  # ticker -> ms it was last noted open (note_open)
         self._derive_proc: subprocess.Popen | None = None  # a build started by start_derive
 
@@ -719,9 +721,13 @@ class ChartApp:
         """A symbol's bad data (baddata.py): each feed's pruned list, newest first, and its counts."""
         from .. import baddata
 
-        with self._lock:
-            return {"counts": self.store.pruned_counts(ticker),
-                    "entries": baddata.entries(self.store, ticker, None if source in (None, "", "*") else source)}
+        t = ticker.upper()
+        with self._panel_lock:  # its own connections: a symbol's list can hold millions of kept bars
+            counted = self._pruned_counts.get(t)
+            if counted is None or time.monotonic() - counted[0] > PRUNED_COUNTS_TTL_S:
+                counted = self._pruned_counts[t] = (time.monotonic(), self._panel_store.pruned_counts(t))
+            entries = baddata.entries(self._panel_store, t, None if source in (None, "", "*") else source)
+        return {"counts": counted[1], "entries": entries}
 
     @contextmanager
     def _view(self, q: dict[str, str]):

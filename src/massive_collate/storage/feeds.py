@@ -79,6 +79,10 @@ CREATE TABLE IF NOT EXISTS pruned (
     released_at  INTEGER,            -- ms: put back in the filtered view
     PRIMARY KEY (ticker, timespan, multiplier, ts, rule, pruned_at)
 ) WITHOUT ROWID;
+-- A symbol's newest entries, and its counts by rule, without sorting or reading millions of entries
+-- (a rebuild keeps every bar it replaces: 3.8 million for one stock's year of seconds).
+CREATE INDEX IF NOT EXISTS pruned_by_time ON pruned (ticker, ts);
+CREATE INDEX IF NOT EXISTS pruned_by_rule ON pruned (ticker, rule, released_at);
 """
 
 
