@@ -308,8 +308,10 @@ button.primary[disabled] { opacity: .5; cursor: default; }
   background: var(--panel, var(--bg)); border: 1px solid var(--border); border-radius: 6px; padding: 4px;
   box-shadow: 0 6px 18px rgba(0,0,0,0.35); }
 .tz-menu[hidden] { display: none; }
-.tz-menu button { display: flex; justify-content: space-between; gap: 12px; text-align: left; font: inherit; font-size: 12px;
+.tz-menu { min-width: 280px; }
+.tz-menu button { display: grid; grid-template-columns: 9ch 1fr auto; gap: 10px; text-align: left; font: inherit; font-size: 12px;
   color: var(--text); background: transparent; border: 0; border-radius: 4px; padding: 5px 8px; cursor: pointer; }
+.tz-menu .tz-city { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tz-menu button:hover { background: rgba(120,123,134,0.15); }
 .tz-menu button.on { color: #2962ff; }
 .cursor-box { position: absolute; z-index: 3; pointer-events: none; font-size: 11px; line-height: 1.5;

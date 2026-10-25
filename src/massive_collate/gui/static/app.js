@@ -118,25 +118,33 @@ function change(from, to, precision) {
 // York; UTC for crypto and forex, whose days are stamped 00:00 UTC, the previous evening in New
 // York), whatever zone is picked, or a day would read as the evening before. Within a day: the zone
 // picked with the switch under the price axis (state.timezone), the exchange's (New York) by default.
-// The exchange's zone (New York, with its daylight saving), then every UTC offset in use, as
-// '+05:30' (both Intl and the chart take an offset for a zone).
-const TIMEZONES = ['exchange', ...[-12, -11, -10, -9.5, -9, -8, -7, -6, -5, -4, -3.5, -3, -2, -1, 0, 1, 2, 3, 3.5, 4, 4.5, 5,
-  5.5, 5.75, 6, 6.5, 7, 8, 8.75, 9, 9.5, 10, 10.5, 11, 12, 12.75, 13, 13.75, 14].map((h) => {
-  const m = Math.round(Math.abs(h) * 60);
-  return `${h < 0 ? '-' : '+'}${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
-})];
+// The exchange's zone (New York, with its daylight saving), then every whole-hour UTC offset, as
+// '-05:00' (both Intl and the chart take an offset for a zone), with cities on it in standard time.
+const ZONE_CITIES = {
+  '-12': 'Baker Island', '-11': 'Pago Pago', '-10': 'Honolulu', '-9': 'Anchorage', '-8': 'Los Angeles, Vancouver',
+  '-7': 'Denver, Phoenix', '-6': 'Chicago, Mexico City', '-5': 'New York, Toronto', '-4': 'Halifax, Caracas',
+  '-3': 'São Paulo, Buenos Aires', '-2': 'South Georgia', '-1': 'Azores, Cape Verde', 0: 'London, Lisbon',
+  1: 'Paris, Frankfurt', 2: 'Athens, Johannesburg', 3: 'Moscow, Istanbul', 4: 'Dubai', 5: 'Karachi, Tashkent',
+  6: 'Dhaka, Almaty', 7: 'Bangkok, Jakarta', 8: 'Singapore, Hong Kong', 9: 'Tokyo, Seoul', 10: 'Sydney, Brisbane',
+  11: 'Nouméa, Solomon Islands', 12: 'Auckland, Fiji', 13: 'Tonga, Samoa', 14: 'Kiritimati' };
+const TIMEZONES = ['exchange', ...Array.from({ length: 27 }, (_, i) => i - 12).map(
+  (h) => `${h < 0 ? '-' : '+'}${String(Math.abs(h)).padStart(2, '0')}:00`)];
 state.timezone = TIMEZONES.includes(prefs.get('timezone')) ? prefs.get('timezone') : 'exchange';
 
 function pickedZone() {
   return state.timezone === 'exchange' ? TZ : state.timezone;
 }
 
-// "GMT+5:30", "GMT-12", "GMT" for an offset zone.
+// "GMT+9", "GMT−5", "GMT" for an offset zone.
 function gmtLabel(zone) {
-  const [, sign, hh, mm] = zone.match(/^([+-])(\d\d):(\d\d)$/) || [];
+  const [, sign, hh] = zone.match(/^([+-])(\d\d):00$/) || [];
   if (!sign) return zone;
-  if (hh === '00' && mm === '00') return 'GMT';
-  return `GMT${sign === '-' ? '−' : '+'}${Number(hh)}${mm !== '00' ? `:${mm}` : ''}`;
+  return Number(hh) ? `GMT${sign === '-' ? '−' : '+'}${Number(hh)}` : 'GMT';
+}
+
+function zoneCities(zone) {
+  const [, sign, hh] = zone.match(/^([+-])(\d\d):00$/) || [];
+  return sign ? ZONE_CITIES[(sign === '-' ? -1 : 1) * Number(hh)] || '' : '';
 }
 
 function labelZone(period) {
@@ -1115,7 +1123,7 @@ $('chart').append(tzBtn, tzMenu);
 let tzTop = 0;  // the zone at the top of the wheel's window (an index into TIMEZONES)
 
 function zoneName(z) {
-  return z === 'exchange' ? `Exchange (${zoneShort(TZ)})` : gmtLabel(z);
+  return z === 'exchange' ? 'Exchange' : gmtLabel(z);
 }
 
 function renderTimezone() {
@@ -1129,8 +1137,10 @@ function renderTimezone() {
   const clock = (z) => new Intl.DateTimeFormat('en-US', { timeZone: z === 'exchange' ? TZ : z, hour: '2-digit',
                                                             minute: '2-digit', hourCycle: 'h23' }).format(new Date());
   tzMenu.innerHTML = Array.from({ length: TZ_ROWS }, (_, i) => TIMEZONES[(((tzTop + i) % n) + n) % n]).map((z) =>
-    `<button type="button" data-tz="${esc(z)}" class="${z === state.timezone ? 'on' : ''}">${esc(zoneName(z))}`
-    + ` <span class="p-muted">${esc(clock(z))}</span></button>`).join('');
+    `<button type="button" data-tz="${esc(z)}" class="${z === state.timezone ? 'on' : ''}"`
+    + ` title="${z === 'exchange' ? 'New York, with its daylight saving' : 'A fixed offset: cities in standard time'}">`
+    + `<span class="tz-name">${esc(zoneName(z))}</span><span class="tz-city p-muted">${esc(z === 'exchange' ? 'New York' : zoneCities(z))}</span>`
+    + `<span class="tz-clock p-muted">${esc(clock(z))}</span></button>`).join('');
 }
 
 tzBtn.addEventListener('click', (e) => {

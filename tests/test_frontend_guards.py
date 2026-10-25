@@ -115,9 +115,9 @@ def test_every_chart_request_says_which_view_it_reads():
 def test_the_time_zone_wheel_shows_six_and_turns_round_and_round():
     app = _js("app.js")
     assert "const TZ_ROWS = 6;" in app
-    zones = re.search(r"const TIMEZONES = \['exchange', \.\.\.\[([^\]]+)\]", app).group(1)
-    hours = [float(h) for h in zones.split(",")]
-    assert hours == sorted(hours) and hours[0] == -12 and hours[-1] == 14 and 5.5 in hours and 5.75 in hours
+    assert "Array.from({ length: 27 }, (_, i) => i - 12)" in app  # whole hours, GMT-12 to GMT+14
+    cities = re.search(r"const ZONE_CITIES = \{(.+?)\};", app, re.S).group(1)
+    assert all(f"'{h}':" in cities or f" {h}:" in cities for h in range(-12, 15))  # every offset has its cities
     turn = app.split("tzMenu.addEventListener('wheel'", 1)[1].split("});", 1)[0]
     assert "% TIMEZONES.length + TIMEZONES.length) % TIMEZONES.length" in turn  # wraps both ways
     assert "e.preventDefault()" in turn
