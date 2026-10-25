@@ -54,6 +54,15 @@ class Store(ProvenanceStore, AdminStore, FeedStore, DatasetStore, DirectoryStore
         self._cache: dict = {}
         self._scan_feeds()
 
+    def reader(self) -> "Store":
+        """Another store on the same files, with connections of its own: SQLite's WAL lets it read
+        while this one is busy (the chart engine loading a long history does not hold up the
+        rest of the chart app). An in-memory store has no files to share: itself."""
+        if str(self.path) == ":memory:":
+            return self
+        return Store(self.path, check_same_thread=self._check_same_thread, feeds_dir=self.feeds_dir,
+                     datasets_dir=self.datasets_dir)
+
     def _version(self) -> tuple:
         self._scan_feeds()
         return (self.conn.execute("PRAGMA data_version").fetchone()[0],

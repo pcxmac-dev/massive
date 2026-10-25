@@ -48,16 +48,22 @@ class ChartApp:
     def __init__(self, store: Store, priority: list[str] | None = None, settings: Settings | None = None):
         self.store = store
         self.settings = settings or load_settings(env={}, env_file=None)
-        self.engine = BarEngine(store, priority=priority, quality=self._feed_quality)
-        self._lock = self.engine.lock
+        # The engine reads bars through connections of its own, under its own lock: loading a
+        # long history (twenty years of minutes) held the one shared lock for over a minute, and
+        # the symbol list, the Fetcher's poll and the search dialog all waited behind it.
+        reader = store.reader()
+        self.engine = BarEngine(reader, priority=priority, quality=lambda feed: self._feed_quality(feed, reader))
+        self._lock = threading.RLock()  # the app's own reads and writes through `store`
         self._open_noted: dict[str, int] = {}  # ticker -> ms it was last noted open (note_open)
         self._derive_proc: subprocess.Popen | None = None  # a build started by start_derive
 
-    def _feed_quality(self, feed: str) -> float:
-        """A feed's best quality over asset classes (display priority between feeds)."""
+    def _feed_quality(self, feed: str, store: Store | None = None) -> float:
+        """A feed's best quality over asset classes (display priority between feeds). Read through
+        the connection of whoever asks, under its own lock: the engine its reader, the app `store`."""
         from ..composite import quality_of
 
-        return max((quality_of(self.store, feed, a) for a in ("stock", "crypto", "index", "fx", "future")), default=1.0)
+        store = store or self.store
+        return max((quality_of(store, feed, a) for a in ("stock", "crypto", "index", "fx", "future")), default=1.0)
 
     def models(self, ticker: str, asset: str, sources: list[str], feeds: dict | None = None) -> dict | None:
         """The models of an asset traded on several exchanges: the gold-standard reference (one
@@ -346,9 +352,9 @@ class ChartApp:
         """Sessions of a symbol between two times (ms), for annotating the chart."""
         from .markets import symbol_sessions
 
+        s = self.engine.series(q.get("source", "*"), q["ticker"])  # under the engine's own lock
         with self._lock:
             item = next(iter(self.store.watchlist(ticker=q["ticker"])), None)
-            s = self.engine.series(q.get("source", "*"), q["ticker"])
         asset = s.asset if s else (item or {}).get("asset", "stock")
         product = item["source_ticker"] if item and item["asset"] == "future" else None
         start = datetime.fromtimestamp(int(q["from"]) / 1000, timezone.utc)

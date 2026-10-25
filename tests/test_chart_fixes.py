@@ -187,3 +187,15 @@ def test_open_symbol_goes_to_the_symbol_page_without_waiting_for_the_whole_list(
     opener = app.split("function openSymbol(", 1)[1].split("\n}\n", 1)[0]
     assert "showPane?.('stock'" in opener and "known ?" in opener
     assert "selectSymbol(t).catch" not in app and "selectSymbol(t.dataset.ticker).catch" not in app  # every pick opens the page
+
+
+def test_a_long_history_load_does_not_hold_up_the_rest_of_the_app(store):
+    store.watch("massive", ["SPCX"], "minute")
+    app = ChartApp(store)
+    assert app.engine.store is not app.store and app._lock is not app.engine.lock  # connections and locks of its own
+    answered = []
+    with app.engine.lock:  # the engine busy loading twenty years of minutes
+        t = threading.Thread(target=lambda: answered.append((app.watchlists(), len(app.symbols()))))
+        t.start()
+        t.join(timeout=20)
+    assert answered and answered[0][1] == 1  # the lists answered meanwhile
