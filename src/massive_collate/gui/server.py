@@ -14,11 +14,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import pandas as pd
+
 from .. import live
 from ..config import Settings, load_settings
 from ..storage import LayoutLimit, Store
 from . import activity, astro
-from .bars import BarEngine, Style, resample
+from .bars import TIME_TYPES, BarEngine, Style, resample
 from ..calc.derivatives import Model
 from .stats import details_subset, key_stats
 
@@ -54,6 +56,9 @@ class ChartApp:
         reader = store.reader()
         self.engine = BarEngine(reader, priority=priority, quality=lambda feed: self._feed_quality(feed, reader))
         self._lock = threading.RLock()  # the app's own reads and writes through `store`
+        from .window import WindowReader
+
+        self.window = WindowReader(self.engine)  # the auto-ranging chart: any level, by window
         self._open_noted: dict[str, int] = {}  # ticker -> ms it was last noted open (note_open)
         self._derive_proc: subprocess.Popen | None = None  # a build started by start_derive
 
@@ -154,7 +159,17 @@ class ChartApp:
             })
         return out
 
-    def meta(self, source: str, ticker: str, adjust: str = "none") -> dict:
+    def _auto(self, q: dict[str, str], style_type: str = "candles") -> bool:
+        """Whether a request takes the auto-ranging path (window.py): asked for, a time-based chart
+        of the price, and a series it serves (not continuous futures or the composite model)."""
+        return q.get("auto") == "1" and style_type in TIME_TYPES and q.get("model", "price") == "price" \
+            and self.window.handles(q["source"], q["ticker"])
+
+    def meta(self, source: str, ticker: str, adjust: str = "none", auto: bool = False) -> dict:
+        if auto and self.window.handles(source, ticker):  # its levels, without loading its history
+            out = self.window.meta(source, ticker)
+            out["attribution"] = self.attribution(out["ticker"], "minute" if out["base"] != "day" else "day", out["asset"])
+            return out
         s = self.engine.series(source, ticker, _adjust(adjust))
         if s is None or s.frame.empty:
             raise LookupError(f"no data stored for {source}:{ticker}")
@@ -195,6 +210,12 @@ class ChartApp:
         if (style.box is not None and style.box <= 0) or (style.reversal is not None and style.reversal <= 0) \
                 or not 1 <= style.lines <= 10:
             raise ValueError("box, reversal and lines must be positive (lines 1-10)")
+        if self._auto(q, style.type):
+            page = self.window.page(
+                q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)), q.get("session", "regular"),
+                to_ms=int(q["to"]) if q.get("to") else None, after_ms=int(q["after"]) if q.get("after") else None,
+                since_ms=int(q["since"]) if q.get("since") else None, limit=limit)
+            return {**page, "style": {"type": style.type}}
         return self.engine.bars(
             q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
             q.get("session", "regular"),
@@ -252,6 +273,8 @@ class ChartApp:
 
     def info(self, source: str, ticker: str, adjust: str = "none") -> dict:
         """Side panel: symbol, business details, key statistics and data coverage."""
+        if self.window.handles(source, ticker):  # from its days and levels: no history loaded
+            return self._info_light(source, ticker)
         s = self.engine.series(source, ticker, _adjust(adjust))
         if s is None or s.frame.empty:
             raise LookupError(f"no data stored for {source}:{ticker}")
@@ -287,6 +310,44 @@ class ChartApp:
             out["futures"] = {"contract": s.rolls[-1]["to"], "rolls": len(s.rolls), "lastRoll": s.rolls[-1],
                               "adjust": s.adjust}
         return out
+
+    def _info_light(self, source: str, ticker: str) -> dict:
+        from .window import estimated_rows
+
+        levels = self.window.levels(source, ticker)
+        if not levels:
+            raise LookupError(f"no data stored for {source}:{ticker}")
+        s = self.window.series(source, ticker)
+        feeds = self.window.feeds(source, ticker)
+        daily = self.window._days(s, feeds)
+        with self._lock:
+            watch = next((w for w in self.store.watchlist(ticker=s.ticker) if w["source"] in feeds), {})
+            details = next((d for d in (self.store.details(f, s.ticker) for f in feeds) if d), None)
+            exchanges = self.store.exchanges()
+        mic = watch.get("exchange") or (details or {}).get("primary_exchange")
+        names = {r.mic: r.name for r in exchanges.itertuples() if r.mic}
+        base = levels[0]
+        iso = lambda ms: pd.Timestamp(ms, unit="ms", tz="UTC").tz_convert("America/New_York").isoformat()
+        return {
+            "symbol": {
+                "ticker": s.ticker, "name": watch.get("name") or (details or {}).get("name"),
+                "asset": s.asset, "kind": watch.get("kind"), "exchange": mic, "exchangeName": names.get(mic, mic),
+                "sourceTicker": watch.get("source_ticker"), "inverted": bool(watch.get("invert")),
+                "listed": str(watch["listed_from"]) if watch.get("listed_from") else None,
+                "figi": watch.get("figi"),
+            },
+            "details": details_subset(details),
+            "detailsUpdated": (details or {}).get("_updated_at"),
+            "stats": key_stats(daily),
+            "attribution": self.attribution(s.ticker, "minute" if base["type"] != "day" else "day", s.asset),
+            "audits": self.audit_summary(s.ticker),
+            "data": {
+                "feeds": feeds, "base": base["type"], "rows": estimated_rows(base),
+                "first": iso(min(lv["first"] for lv in levels)), "last": iso(max(lv["last"] for lv in levels)),
+                "officialDaily": bool(len(daily) and (~daily["derived"].astype(bool)).any()), "pricePrecision": 2,
+                "levels": levels,
+            },
+        }
 
     def markets(self) -> dict:
         from . import world
@@ -352,10 +413,14 @@ class ChartApp:
         """Sessions of a symbol between two times (ms), for annotating the chart."""
         from .markets import symbol_sessions
 
-        s = self.engine.series(q.get("source", "*"), q["ticker"])  # under the engine's own lock
         with self._lock:
             item = next(iter(self.store.watchlist(ticker=q["ticker"])), None)
-        asset = s.asset if s else (item or {}).get("asset", "stock")
+        source = q.get("source", "*")
+        if self.window.handles(source, q["ticker"]):  # the asset is all it needs: no history loaded
+            asset = self.window.asset(q["ticker"], None if source == "*" else source)
+        else:
+            s = self.engine.series(source, q["ticker"])  # under the engine's own lock
+            asset = s.asset if s else (item or {}).get("asset", "stock")
         product = item["source_ticker"] if item and item["asset"] == "future" else None
         start = datetime.fromtimestamp(int(q["from"]) / 1000, timezone.utc)
         end = datetime.fromtimestamp(int(q["to"]) / 1000, timezone.utc)
@@ -365,6 +430,18 @@ class ChartApp:
 
     def future(self, q: dict[str, str]) -> dict:
         style = Style(type=q.get("type", "candles"))
+        if self._auto(q, style.type):  # projected from the level's newest bar, not the whole history
+            from .projection import project
+
+            period, span, session = q.get("period", "minute"), int(q.get("span", 1)), q.get("session", "regular")
+            s = self.window.series(q["source"], q["ticker"])
+            newest = self.window.page(q["source"], q["ticker"], period, span, session, limit=1)["bars"]
+            if not newest:
+                return {"timestamps": [], "last": None, "total": 0}
+            last = pd.Timestamp(newest[-1]["timestamp"], unit="ms", tz="UTC").tz_convert("America/New_York")
+            ts = project(self.engine.calendar(), s, None, period, span, s.session_for(session), style.type, 1, 1, last,
+                         max(0, int(q.get("offset", 0))), min(int(q.get("count", 500)), 5000), cache=self.engine._future_cache)
+            return {"timestamps": ts, "last": newest[-1]["timestamp"], "total": 1, "lastBar": newest[-1]["timestamp"]}
         return self.engine.future(
             q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)), q.get("session", "regular"),
             style=style, adjust=_adjust(q.get("adjust")), lod=int(q.get("lod", 1)), model=_model(q),
@@ -861,7 +938,7 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 if url.path == "/api/symbols":
                     return self._json(app.symbols())
                 if url.path == "/api/meta":
-                    return self._json(app.meta(q["source"], q["ticker"], q.get("adjust")))
+                    return self._json(app.meta(q["source"], q["ticker"], q.get("adjust"), q.get("auto") == "1"))
                 if url.path == "/api/bars":
                     return self._json(app.bars(q))
                 if url.path == "/api/stream":
