@@ -95,9 +95,6 @@
   });
   window.addEventListener('massive:activity', (e) => renderRailIcons(e.detail));
   window.addEventListener('massive:symbol', () => renderRailIcons(window.Activity?.data));
-  window.addEventListener('massive:open-symbol', () => {
-    if (document.body.dataset.view !== 'chart') showPane('stock', { toggle: false });
-  });
   window.addEventListener('massive:run-finished', () => {
     // New data may have arrived: refresh symbols, the panel and the chart's newest bars.
     loadSymbols().then(renderSymbolButton).catch(() => {});

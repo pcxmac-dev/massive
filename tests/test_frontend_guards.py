@@ -50,3 +50,11 @@ def test_render_loop_loaders_are_rate_limited():
     assert "const loadTopo50 = loader(" in globe and "const loadHiresIndex = loader(" in globe
     assert "tilesLoading >= 4" in globe and "tileFailed" in globe
     assert "CACHE_MAX" in _js("globeicon.js")
+
+
+def test_the_market_map_is_drawn_once_the_dialog_has_a_size():
+    app = _js("app.js")
+    opening = app.split("function openSymbolDialog()", 1)[1].split("\n}\n", 1)[0]
+    assert opening.index("showModal()") < opening.index("renderSymbolList(")  # open first: a closed dialog is 0 px wide
+    drawing = app.split("function renderMapList(", 1)[1].split("\n}\n", 1)[0]
+    assert drawing.index("clientWidth") < drawing.index("MarketMap.render(")  # never laid out at no size

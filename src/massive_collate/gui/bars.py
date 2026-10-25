@@ -363,6 +363,55 @@ class _BoundedCache(OrderedDict):
             self.popitem(last=False)
 
 
+def _weight(value) -> int:
+    """Bytes a cached value holds: its frames' columns and index (a whole series: its bars and
+    its official days)."""
+    if isinstance(value, pd.DataFrame):
+        return int(value.memory_usage(index=True).sum())
+    if isinstance(value, tuple):
+        return sum(_weight(v) for v in value)
+    if isinstance(value, Series):
+        return _weight(value.frame) + (_weight(value.daily) if value.daily is not None else 0)
+    return 0
+
+
+class _SizedCache(OrderedDict):
+    """An LRU dict kept under `budget` bytes as well as `size` entries: counted by entries only,
+    a chart app holding a few long histories (twenty years of minutes, a year of seconds) and their
+    resampled frames grew to 13 GB and slowed the whole machine. The newest entry always stays."""
+
+    def __init__(self, budget: int, size: int):
+        super().__init__()
+        self._budget, self._size, self._bytes, self._weights = budget, size, 0, {}
+
+    def __setitem__(self, key, value):
+        if key in self:
+            self._bytes -= self._weights.pop(key, 0)
+        super().__setitem__(key, value)
+        self.move_to_end(key)
+        self._weights[key] = w = _weight(value)
+        self._bytes += w
+        while len(self) > 1 and (self._bytes > self._budget or len(self) > self._size):
+            self.popitem(last=False)
+
+    def popitem(self, last: bool = True):
+        key, value = super().popitem(last=last)
+        self._bytes -= self._weights.pop(key, 0)
+        return key, value
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        self._bytes -= self._weights.pop(key, 0)
+
+    @property
+    def nbytes(self) -> int:
+        return self._bytes
+
+
+SERIES_CACHE_BYTES = 2_500_000_000  # whole histories kept in memory, at most
+BARS_CACHE_BYTES = 1_500_000_000  # resampled and styled frames kept, at most
+
+
 class BarEngine:
     """Loads series from the store, caches them, and serves pages of bars.
 
@@ -374,8 +423,8 @@ class BarEngine:
         self.priority = priority or []
         self.quality = quality  # feed -> 0..1, for display priority (best first)
         self.store = store
-        self._series: dict[tuple, tuple] = _BoundedCache(48)  # each a whole history: not every symbol ever opened
-        self._bars: OrderedDict[tuple, pd.DataFrame] = OrderedDict()
+        self._series: dict[tuple, tuple] = _SizedCache(SERIES_CACHE_BYTES, 48)  # whole histories: a memory budget
+        self._bars: OrderedDict[tuple, pd.DataFrame] = _SizedCache(BARS_CACHE_BYTES, max(1, cache_size))
         self._cache_size = cache_size
         self._future_cache: OrderedDict = _BoundedCache(16)
         # One SQLite connection is shared by the server's threads: every store access holds this lock.
@@ -427,7 +476,7 @@ class BarEngine:
         with self._lock:
             if source == MERGED:
                 parts = [self.series(s, ticker, adjust) for s in self.sources_for(ticker)]
-                fp = tuple(self._series[(p.source, ticker, adjust)][0] for p in parts if p)
+                fp = tuple(p.fp for p in parts if p)  # from the parts: the cache may have let one go since
             else:
                 parts = None
                 fp = self._fingerprint(source, ticker)

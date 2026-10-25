@@ -1168,10 +1168,17 @@ $('typeSelect').addEventListener('change', (e) => {
 });
 
 // -- symbol selection ----------------------------------------------------------
-// The fetcher activity dialog opens a symbol it lists; new symbols may have arrived since startup.
-window.addEventListener('massive:open-symbol', (e) => {
-  loadSymbols().then(() => selectSymbol(e.detail)).catch(showError);
-});
+// Picking a symbol (the search dialog and its map, the watchlist, the news, the Fetcher) opens it
+// on the symbol page at once; the Analysis view keeps its own chart. The list of symbols is read
+// again only for one it does not know yet (a symbol added since): reading all of them first kept
+// a pick waiting for the whole list (half a minute with thousands of symbols).
+function openSymbol(ticker, source = null) {
+  if (!['stock', 'analysis'].includes(document.body.dataset.pane)) window.showPane?.('stock', { toggle: false });
+  const known = state.symbols.some((s) => s.ticker === String(ticker).toUpperCase());
+  return (known ? selectSymbol(ticker, source) : loadSymbols().then(() => selectSymbol(ticker, source))).catch(showError);
+}
+
+window.addEventListener('massive:open-symbol', (e) => openSymbol(e.detail));
 
 async function loadSymbols() {
   state.symbols = await api('/api/symbols');
@@ -1359,8 +1366,8 @@ function sortedSymbols(list) {
 function openSymbolDialog() {
   const dlg = $('symbolDialog');
   $('symbolSearch').value = '';
+  dlg.showModal();  // open first: the market map is laid out to the dialog's size
   renderSymbolList('');
-  dlg.showModal();
   $('symbolSearch').focus();
   loadSymbols().then(() => { if (dlg.open) renderSymbolList($('symbolSearch').value); }).catch(() => {});
 }
@@ -1438,6 +1445,10 @@ function renderMapList(query) {
     return;
   }
   const opts = { current: state.ticker, isMatch: q ? mapMatch(q) : null, isWatched: dir ? (s) => s.watched : null };
+  if (!$('marketMap').clientWidth) {  // not laid out yet (a closed dialog): drawn once it has a size
+    if ($('symbolDialog').open) requestAnimationFrame(() => renderMapList(query));
+    return;
+  }
   window.MarketMap.render($('marketMap'), mapped, opts);
   if (others.length) window.MarketMap.renderStrip($('marketStrip'), others, opts);
   renderMapPick();
@@ -1547,7 +1558,7 @@ $('symbolList').addEventListener('click', async (e) => {
     const item = state.switcherScope === 'stocks' ? directory.items.find((r) => r.ticker === t) : null;
     if (item && !item.watched) { mapPick = item; renderMapPick(); return; }  // pick, then + Watch
     $('symbolDialog').close();
-    selectSymbol(t).catch(showError);
+    openSymbol(t);
     return;
   }
   const add = e.target.closest('[data-watch]');
@@ -1569,7 +1580,7 @@ $('symbolList').addEventListener('click', async (e) => {
   if (!t) return;
   if (t.classList.contains('dir') && t.dataset.watched !== '1') return;  // placeholder: nothing collected yet
   $('symbolDialog').close();
-  selectSymbol(t.dataset.ticker).catch(showError);
+  openSymbol(t.dataset.ticker);
 });
 $('scopeTabs').addEventListener('click', (e) => {
   const b = e.target.closest('[data-scope]');

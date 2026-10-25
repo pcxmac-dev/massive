@@ -163,3 +163,27 @@ def test_a_zoomed_out_one_second_chart_pages_back_through_every_day(store):
     assert pd.Timestamp(stamps[0], unit="ms", tz="UTC").tz_convert(ET).date().isoformat() == "2026-10-20"  # the first day too
     assert sum(b["volume"] for b in got) == len(secs)  # every second counted once
     assert all(b["timestamp"] % 16_000 == 0 for b in got)  # buckets on the clock
+
+
+def test_the_series_cache_keeps_to_a_memory_budget(store, monkeypatch):
+    from massive_collate.gui import bars as gui_bars
+
+    for i, t in enumerate(("AAA", "BBB", "CCC")):
+        store.upsert_bars("massive", t, "minute", 1, [_bar(f"2026-10-20 10:{m:02d}", 10.0 + i) for m in range(50)])
+    monkeypatch.setattr(gui_bars, "SERIES_CACHE_BYTES", 1)  # room for the newest history only
+    eng = BarEngine(store)
+    for t in ("AAA", "BBB", "CCC"):
+        assert eng.series("massive", t) is not None
+    assert list(k[1] for k in eng._series) == ["CCC"] and eng._series.nbytes > 0
+    assert eng.series("*", "AAA").ticker == "AAA"  # a merged chart whose part was let go still loads
+
+
+def test_open_symbol_goes_to_the_symbol_page_without_waiting_for_the_whole_list():
+    from pathlib import Path
+
+    from massive_collate.gui import server
+
+    app = (Path(server.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
+    opener = app.split("function openSymbol(", 1)[1].split("\n}\n", 1)[0]
+    assert "showPane?.('stock'" in opener and "known ?" in opener
+    assert "selectSymbol(t).catch" not in app and "selectSymbol(t.dataset.ticker).catch" not in app  # every pick opens the page
