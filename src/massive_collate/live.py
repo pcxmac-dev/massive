@@ -59,6 +59,9 @@ MAX_BACKOFF = 300.0
 STABLE_SECONDS = 60.0
 KILL_CHECK_SECONDS = 30.0  # while a stream is killed: how often it looks whether the kill ended (or was lifted)
 REAP_SECONDS = 300.0  # how often the recorder looks for other recorder processes (and ends them)
+# Trades held in memory while the database refuses writes (locked, full disk): past this the
+# oldest go, and the time they cover is no longer claimed as recorded (the sync downloads it).
+MAX_BUFFERED = 500_000
 RECORDER_COMMAND = re.compile(r"-m\s+massive_collate\s+live\s*$")  # a recorder (not `live status`, `live stop`)
 DAY_MS = 86_400_000
 PING = "ping"  # keepalive by WebSocket ping frames rather than a message
@@ -444,7 +447,32 @@ class Recorder:
             with self._lock:  # kept for the next flush (a locked database, say), ahead of what came since
                 for key, trades in batch.items():
                     self._buffer[key][:0] = trades
+                self._shed()
             raise
+
+    def _shed(self) -> int:
+        """Past MAX_BUFFERED trades waiting (writes failing flush after flush), drop the oldest of
+        each pair in proportion, and move each stream's recorded-since past what was dropped: the
+        ledger then claims none of that time, and the sync downloads it. Called holding the lock.
+        Returns trades dropped."""
+        total = sum(len(v) for v in self._buffer.values())
+        if total <= MAX_BUFFERED:
+            return 0
+        excess, dropped, newest = total - MAX_BUFFERED, 0, {}
+        for (source, ticker), trades in sorted(self._buffer.items(), key=lambda kv: -len(kv[1])):
+            n = min(len(trades), -(-excess * len(trades) // total))  # this pair's share, rounded up
+            if n:
+                cut = trades[:n]
+                newest[source] = max(newest.get(source, 0), max(t["sip_timestamp"] for t in cut) // 1_000_000 + 1)
+                self._buffer[(source, ticker)] = trades[n:]
+                dropped += n
+        for source, ms in newest.items():
+            if source in self._since:
+                self._since[source] = max(self._since[source], ms)
+            self._status[source]["dropped"] = self._status[source].get("dropped", 0) + dropped
+        self.log(f"live: {dropped:,} trades dropped: the database refused writes for a while "
+                 f"(at most {MAX_BUFFERED:,} are held); that time is left for the sync to download")
+        return dropped
 
     def _store(self, store, batch, since, heard, subs, now_ms) -> int:
         from .ticks import build_bars

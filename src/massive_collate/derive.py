@@ -33,6 +33,7 @@ bars, so a gap in the finer data stays a gap.
 from __future__ import annotations
 
 import json
+import os
 import time as time_module
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -201,11 +202,53 @@ def build_series(store, source: str, ticker: str, asset: str = "stock", log=prin
     return build_chain(store, source, ticker, "minute", asset)
 
 
+LEASE_KEY = "derive:lease:{}:{}"  # source, ticker -> {pid, start, until}: the process building it
+LEASE_MS = 30 * 60_000  # a lease older than this is taken over (its build is stuck or gone)
+
+
+def take_lease(store, source: str, ticker: str, now_ms: int | None = None) -> bool:
+    """Claim the build of one series' frames for this process (the sync, the live recorder and a
+    "Build missing" may each start one): False while another live process holds an unexpired
+    lease. A lease of a process that has ended, or one past LEASE_MS, is taken over."""
+    from .proc import pid_alive, started
+
+    pid = os.getpid()
+    now_ms = now_ms or int(time_module.time() * 1000)
+    taken = [False]
+
+    def claim(held: dict) -> dict:
+        other = held.get("pid")
+        if other and other != pid and held.get("until", 0) > now_ms and pid_alive(other) \
+                and (not held.get("start") or started(other) in (None, held["start"])):
+            return held  # another build of this series is going on
+        taken[0] = True
+        return {"pid": pid, "start": started(pid) or 0, "until": now_ms + LEASE_MS}
+
+    store.kv_update(LEASE_KEY.format(source, ticker), claim, {})
+    return taken[0]
+
+
+def drop_lease(store, source: str, ticker: str) -> None:
+    pid = os.getpid()
+    store.kv_update(LEASE_KEY.format(source, ticker), lambda held: {} if held.get("pid") == pid else held, {})
+
+
 def build_symbol(store, source: str, ticker: str, asset: str = "stock", log=print,
                  progress: tuple[int, int] = (1, 1)) -> int:
     """Every frame above every base frame one series holds (CHAINS: seconds, then minutes, then
     days, so days built from minutes feed the weeks), from what changed since its last build.
-    `progress` (n, of) is what the status bar shows while it builds. Returns bars stored."""
+    `progress` (n, of) is what the status bar shows while it builds. One build of a series at a
+    time across processes (take_lease): another one going on, it is left to that. Returns bars stored."""
+    if not take_lease(store, source, ticker):
+        log(f"derive {source}:{ticker}: another process is building it; left to that one")
+        return 0
+    try:
+        return _build_symbol(store, source, ticker, asset, log, progress)
+    finally:
+        drop_lease(store, source, ticker)
+
+
+def _build_symbol(store, source: str, ticker: str, asset: str, log, progress: tuple[int, int]) -> int:
     total = 0
     for base, frames in CHAINS:
         if store.bar_edges(source, ticker, base) is None:

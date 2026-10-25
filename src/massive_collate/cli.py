@@ -25,8 +25,12 @@ TASK_NAME = "MassiveCollateSync"
 
 # -- helpers -------------------------------------------------------------------
 
+LOG_MAX_BYTES = 20 * 1024 * 1024  # a log file is rotated past this ...
+LOG_KEEP = 5  # ... and this many old ones are kept (massive-collate.log.1 newest): ~120 MB at most
+
+
 class Logger:
-    """Print and append to a log file next to the database."""
+    """Print and append to a log file next to the database, rotated at LOG_MAX_BYTES."""
 
     def __init__(self, path: Path | None):
         self.path = path
@@ -37,8 +41,43 @@ class Logger:
         line = f"{datetime.now().isoformat(timespec='seconds')} {msg}"
         print(msg, flush=True)
         if self.path:
+            self._rotate()
             with self.path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
+
+    def _rotate(self) -> None:
+        try:
+            if self.path.stat().st_size < LOG_MAX_BYTES:
+                return
+            for i in range(LOG_KEEP - 1, 0, -1):
+                older = self.path.with_name(f"{self.path.name}.{i}")
+                if older.exists():
+                    older.replace(self.path.with_name(f"{self.path.name}.{i + 1}"))
+            self.path.replace(self.path.with_name(f"{self.path.name}.1"))
+        except OSError:
+            pass  # another process rotated it, or it is not there yet: write on
+
+
+def prune_backups(folder: Path, keep: int) -> list[str]:
+    """The retention policy for `admin backup`'s backups (massive-YYYYMMDD-HHMMSS.db, with its
+    -feeds and -datasets folders): the newest `keep` stay, older ones go (keep 0: all stay).
+    Other files there (the pre-split safety copies) are never touched. Returns those removed."""
+    import re
+    import shutil
+
+    if keep <= 0 or not folder.is_dir():
+        return []
+    sets = sorted(f for f in folder.glob("massive-*.db") if re.fullmatch(r"massive-\d{8}-\d{6}\.db", f.name))
+    removed = []
+    for f in sets[:-keep]:
+        for extra in (f.with_name(f.stem + "-feeds"), f.with_name(f.stem + "-datasets")):
+            if extra.is_dir():
+                shutil.rmtree(extra)
+        for side in (f, f.with_name(f.name + "-wal"), f.with_name(f.name + "-shm")):
+            if side.exists():
+                side.unlink()
+        removed.append(f.name)
+    return removed
 
 
 from .proc import pid_alive  # noqa: E402,F401  (kept here for callers that import it from cli)
@@ -851,12 +890,15 @@ def cmd_admin(args, settings: Settings) -> int:
             print(f"integrity: {store.integrity_check()}")
         elif args.action == "vacuum":
             with run_lock(settings.db_path):
-                store.vacuum()
-            print("vacuumed")
+                done = store.vacuum()
+            print(f"vacuumed {len(done)} files")
         elif args.action == "backup":
             dest = args.dest or settings.db_path.parent / "backups" / f"massive-{datetime.now():%Y%m%d-%H%M%S}.db"
             print(f"backup written to {store.backup(Path(dest), ticks=args.ticks)}, feeds in {feeds_backup_dir(Path(dest))}"
                   + (" (with ticks)" if args.ticks else " (bars only; add --ticks for the tick files)"))
+            if not args.dest:  # the retention policy: the newest BACKUPS_KEEP of these backups
+                for old in prune_backups(Path(dest).parent, settings.backups_keep):
+                    print(f"removed old backup {old}")
         elif args.action == "reset-denied":
             print(f"cleared {store.clear_denied(args.source)} denied days")
     return 0

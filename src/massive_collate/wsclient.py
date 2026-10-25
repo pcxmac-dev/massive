@@ -39,6 +39,7 @@ def encode_frame(opcode: int, payload: bytes, mask: bytes | None = None) -> byte
 
 
 MAX_FRAME = 64 * 1024 * 1024  # a frame claiming more is a broken stream, not a message
+MAX_MESSAGE = 64 * 1024 * 1024  # a message reassembled from fragments: the same, in total
 
 
 class WebSocket:
@@ -134,6 +135,9 @@ class WebSocket:
             if opcode in (OP_TEXT, OP_BINARY):
                 self._kind, self._parts = opcode, [payload]
             elif opcode == OP_CONT:
+                if sum(map(len, self._parts)) + len(payload) > MAX_MESSAGE:
+                    self.sock.close()
+                    raise WebSocketClosed(f"a message of over {MAX_MESSAGE:,} bytes in fragments: the stream is broken")
                 self._parts = [*self._parts, payload]
             if fin and self._kind is not None:
                 message, self._kind, self._parts = b"".join(self._parts), None, []

@@ -367,7 +367,7 @@ def _weight(value) -> int:
     """Bytes a cached value holds: its frames' columns and index (a whole series: its bars and
     its official days)."""
     if isinstance(value, pd.DataFrame):
-        return int(value.memory_usage(index=True).sum())
+        return int(value.memory_usage(index=True, deep=True).sum())
     if isinstance(value, tuple):
         return sum(_weight(v) for v in value)
     if isinstance(value, Series):
@@ -378,7 +378,8 @@ def _weight(value) -> int:
 class _SizedCache(OrderedDict):
     """An LRU dict kept under `budget` bytes as well as `size` entries: counted by entries only,
     a chart app holding a few long histories (twenty years of minutes, a year of seconds) and their
-    resampled frames grew to 13 GB and slowed the whole machine. The newest entry always stays."""
+    resampled frames grew to 13 GB and slowed the whole machine. An entry over the budget on its
+    own is served but not kept."""
 
     def __init__(self, budget: int, size: int):
         super().__init__()
@@ -391,7 +392,7 @@ class _SizedCache(OrderedDict):
         self.move_to_end(key)
         self._weights[key] = w = _weight(value)
         self._bytes += w
-        while len(self) > 1 and (self._bytes > self._budget or len(self) > self._size):
+        while self and (self._bytes > self._budget or len(self) > self._size):
             self.popitem(last=False)
 
     def popitem(self, last: bool = True):

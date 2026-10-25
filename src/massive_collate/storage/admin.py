@@ -40,10 +40,24 @@ class AdminStore:
         bad = {k: v for k, v in found.items() if v != "ok"}
         return "ok" if not bad else "; ".join(f"{k}: {v}" for k, v in bad.items())
 
-    def vacuum(self) -> None:
+    def vacuum(self, log=print) -> list[str]:
+        """Compact every file: the main one, each feed's bars and its ticks (attached as `ticks`),
+        and each dataset's. Needs free disk about the size of the largest file. Returns the files."""
+        done = [str(self.path)]
         self.conn.execute("VACUUM")
         for feed in self._open_feeds():
+            log(f"vacuum {feed.name}")
             feed.conn.execute("VACUUM")
+            done.append(str(feed.path))
+            if feed.has_ticks():
+                feed.conn.execute("VACUUM ticks")
+                done.append(str(feed.ticks_path))
+        if self.datasets_dir is not None and self.datasets_dir.is_dir():
+            for f in sorted(self.datasets_dir.glob("*.db")):
+                with closing(sqlite3.connect(str(f))) as conn:
+                    conn.execute("VACUUM")
+                done.append(str(f))
+        return done
 
     def backup(self, dest: Path, ticks: bool = False) -> Path:
         """Copy the main file to `dest`, each feed's bars to `feeds_backup_dir(dest)` and the dataset
