@@ -98,12 +98,19 @@
   function statusLine() {
     if (!data) return '<span class="dot"></span><b>Unavailable</b>';
     const last = data.runs.find((r) => r.status !== 'running');
+    const d = data.derive, p = data.paused;
     if (data.running) {
       const live = data.live;
       const cap = live.source === data.source ? ` of ${num(data.plan.maxPerRun)}` : '';
       return `<span class="dot on"></span><b>Running ${esc(live.command)}</b> <span class="p-muted">(${esc(live.source)})</span>
         — ${live.current ? `fetching <b>${esc(live.current)}</b>` : 'starting'} · ${num(live.requests)}${cap} requests · ${dur(live.seconds)}`;
     }
+    if (d) {  // after a run: frames built from what arrived (nothing fetched meanwhile)
+      return `<span class="dot on"></span><b>Building derived frames</b> — ${esc(d.source)}:${esc(d.ticker)}, `
+        + `${esc(d.to.join(', '))} from ${esc(d.from)} (${num(d.n)} of ${num(d.of)}) · nothing is being fetched`;
+    }
+    if (p?.halt) return '<span class="dot"></span><b>Halted</b> — nothing is fetched until you resume';
+    if (p) return `<span class="dot"></span><b>Paused</b> until ${new Date(p.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} — the open symbol still updates`;
     return `<span class="dot"></span><b>Idle</b>${last ? ` — last run ${ago(last.finished_at || last.started_at)}
       (${esc(last.status)}, ${num(last.requests)} requests, ${num(last.rows)} rows)` : ''}`;
   }
@@ -142,6 +149,7 @@
           next = { ticker, phase: 'downloading', feeds, since: Date.now() };
           setTimeout(poll, 400);
         } else if (body.state === 'queued') next = { ticker, phase: 'waiting', feeds, since: Date.now() };
+        else if (body.state === 'halted') next = { ticker, phase: 'halted', since: Date.now() };
         else next = standing(ticker);  // a run for it went in the last few minutes
       }
     } catch (e) {
@@ -190,6 +198,7 @@
       else if (job.phase === 'current') { msg = `${t} ✓ to ${short(job.last)} · next ${short(job.nextDue)}`; }
       else if (job.phase === 'backfilling') { msg = `${t}: backfill ${Math.round((job.progress || 0) * 100)}%`; progress = job.progress || 0; }
       else if (job.phase === 'queued') { msg = `${t}: queued`; }
+      else if (job.phase === 'halted') { msg = `${t}: fetching halted (Resume to fetch it)`; }
       else if (job.phase === 'fetching') { msg = `${t}: fetching`; busy = true; }
       else if (job.phase === 'error') { msg = `${t}: fetch failed`; cls = 'bad'; title = job.message; }
     } else if (running) {
@@ -200,7 +209,10 @@
     const pausedUntil = data?.paused?.until;
     el('netPause').textContent = pausedUntil ? 'Resume fetching' : 'Pause fetching';
     el('netPause').classList.toggle('on', !!pausedUntil);
-    if (pausedUntil && !busy && !msg) {
+    el('netHalt').hidden = !!pausedUntil;  // halted or paused: Resume is the one way back
+    if (data?.paused?.halt && !busy) {
+      msg = 'Fetching halted: nothing is fetched until you resume (the live streams go on)';
+    } else if (pausedUntil && !busy && !msg) {
       msg = `Background fetching paused until ${new Date(pausedUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
         + ' · the open symbol still updates';
     }
@@ -248,11 +260,17 @@
   // Pause: the running background fetch stops before its next request, the hourly one does not
   // start; the open symbol is then fetched at once (priority), with the feeds to itself.
   el('netPause').addEventListener('click', async () => {
-    const pause = !data?.paused;
+    const pause = !data?.paused;  // paused or halted: this resumes (and a sync starts if none is running)
     try {
       await apiWrite('POST', '/api/fetching', { paused: pause });
       await poll();
-      if (pause && openTicker) checkSymbol(openTicker);
+      if (openTicker) checkSymbol(openTicker);
+    } catch (err) { showError(err); }
+  });
+  el('netHalt').addEventListener('click', async () => {
+    try {
+      await apiWrite('POST', '/api/fetching', { paused: true, halt: true });
+      await poll();
     } catch (err) { showError(err); }
   });
 

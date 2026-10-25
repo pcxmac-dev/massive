@@ -203,12 +203,15 @@ def test_pausing_stops_background_fetching_before_its_next_request_and_resumes(t
         assert collector.pause_state(store, now) is None and check() is None
 
 
-def test_the_chart_pauses_and_resumes_fetching(tmp_path):
+def test_the_chart_pauses_and_resumes_fetching(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
     store = Store(tmp_path / "m.db", check_same_thread=False)
     app = ChartApp(store)
+    monkeypatch.setattr(server.subprocess, "Popen", lambda args, **kw: SimpleNamespace(pid=7))  # no real sync
     assert app.set_fetching({"paused": True})["paused"]["until"]
     assert collector.pause_state(store) is not None
-    assert app.set_fetching({"paused": False}) == {"paused": None}
+    assert app.set_fetching({"paused": False}) == {"paused": None, "started": 7}  # resuming starts a sync
     store.close()
 
 
@@ -236,3 +239,36 @@ def test_a_symbol_asked_for_after_the_run_passed_it_is_taken_next(tmp_path):
         assert item["ticker"] == "AMD" and urgent and len(pending) == 2  # fetched from the watchlist again
         item, urgent = collector._next_item(pending, store, now, "massive", served)
         assert item["ticker"] != "AMD" and not urgent  # taken once
+
+
+def test_a_halt_stops_every_fetch_until_resumed_and_a_pause_only_the_background(tmp_path):
+    with Store(tmp_path / "m.db") as store:
+        collector.set_pause(store, True, minutes=30)
+        assert cli._pause_check(store, every=0)().startswith("fetching paused by you")
+        assert cli._pause_check(store, every=0, halt_only=True)() is None  # the open symbol's run goes on
+        collector.set_pause(store, True, halt=True)
+        assert collector.pause_state(store)["halt"]
+        assert cli._pause_check(store, every=0, halt_only=True)() == "fetching halted by you"  # it too stops
+        collector.set_pause(store, False)
+        assert collector.pause_state(store) is None
+
+
+def test_the_chart_halts_and_resumes_and_resuming_starts_a_sync(tmp_path, monkeypatch):
+    store = Store(tmp_path / "m.db", check_same_thread=False)
+    store.watch("massive", ["SPCX"], "minute")
+    app = ChartApp(store, settings=load_settings(env={}, env_file=None))
+    started = []
+
+    class Proc:  # tests never start processes
+        pid = 4343
+
+        def __init__(self, args, **kw):
+            started.append(args)
+
+    monkeypatch.setattr(server.subprocess, "Popen", Proc)
+    assert app.set_fetching({"paused": True, "halt": True})["paused"]["halt"]
+    assert app.priority("SPCX")["state"] == "halted" and started == []  # nothing starts while halted
+    with pytest.raises(RuntimeError, match="halted"):
+        app.start_scan("SPCX")
+    out = app.set_fetching({"paused": False})
+    assert out["paused"] is None and out["started"] == 4343 and started[-1][-2:] == ["massive_collate", "sync"]

@@ -694,14 +694,23 @@ def pause_state(store: Store, now: datetime | None = None) -> dict | None:
         return None
 
 
-def set_pause(store: Store, paused: bool, now: datetime | None = None, minutes: float | None = None) -> dict | None:
-    """Pause background fetching (for `minutes`, at most PAUSE_HOURS), or resume it."""
+HALT_UNTIL = "9999-12-31T00:00:00+00:00"  # a halt lasts until the user resumes
+
+
+def set_pause(store: Store, paused: bool, now: datetime | None = None, minutes: float | None = None,
+              halt: bool = False) -> dict | None:
+    """Pause background fetching (for `minutes`, at most PAUSE_HOURS: the open symbol's own
+    fetches go on), halt every fetch until resumed (`halt`: the open symbol's too), or resume."""
     import json
 
     now = now or datetime.now(timezone.utc)
     if not paused:
         store.kv_set(PAUSE_KEY, "")
         return None
+    if halt:
+        p = {"at": now.isoformat(timespec="seconds"), "until": HALT_UNTIL, "halt": True}
+        store.kv_set(PAUSE_KEY, json.dumps(p))
+        return p
     minutes = min(minutes or PAUSE_HOURS * 60, PAUSE_HOURS * 60)
     p = {"at": now.isoformat(timespec="seconds"), "until": (now + timedelta(minutes=minutes)).isoformat(timespec="seconds")}
     store.kv_set(PAUSE_KEY, json.dumps(p))

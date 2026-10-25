@@ -185,3 +185,31 @@ def test_a_class_plan_change_finds_resolutions_again(tmp_path):
                                             env_file=None), log.append)
         assert log and "crypto=starter" in log[0]
         assert store.watchlist("massive", "BTCUSD")[0]["resolution"] == "auto"
+
+
+def test_the_sync_lets_go_of_the_run_lock_before_building_derived_frames(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from massive_collate import cli, proc
+
+    db = tmp_path / "m.db"
+    settings = SimpleNamespace(db_path=db)
+    seen = {}
+    monkeypatch.setattr(cli, "_sync", lambda args, s: (seen.setdefault("during", proc.holder(db.with_suffix(".lock"))), (0, 1))[1])
+    monkeypatch.setattr(cli, "after_sync", lambda args, s: seen.setdefault("after", proc.holder(db.with_suffix(".lock"))))
+    assert cli.cmd_sync(SimpleNamespace(), settings) == 0
+    assert seen["during"] == proc.os.getpid() and seen["after"] is None  # building frames fetches nothing
+
+
+def test_one_pass_of_derived_frames_at_a_time(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from massive_collate import cli, proc
+
+    db = tmp_path / "m.db"
+    lock = db.with_name(cli.POST_LOCK)
+    lock.write_text(f"{proc.os.getppid()} 0")  # another process's pass (a live process)
+    logged = []
+    monkeypatch.setattr(cli, "Logger", lambda path: logged.append)
+    assert cli.after_sync(SimpleNamespace(tickers=None, all_sources=True), SimpleNamespace(db_path=db)) is False
+    assert "another process is building them" in logged[0]

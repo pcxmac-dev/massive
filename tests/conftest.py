@@ -38,6 +38,19 @@ def no_recorders(monkeypatch, tmp_path):
         raise AssertionError(f"a test tried to end process {pid}")
 
     monkeypatch.setattr(proc, "terminate", no_terminate)
+    # Nor start one from the chart app (resuming fetching starts a sync, a scan, a build): a test
+    # that resumed once started a real sync on the user's database. A test that wants to see what
+    # would start replaces Popen on this stand-in.
+    import subprocess
+    from types import SimpleNamespace
+
+    from massive_collate.gui import server
+
+    def no_spawn(args, **kw):
+        raise AssertionError(f"a test tried to start a process: {args}")
+
+    monkeypatch.setattr(server, "subprocess", SimpleNamespace(
+        Popen=no_spawn, DEVNULL=subprocess.DEVNULL, PIPE=subprocess.PIPE, CREATE_NO_WINDOW=0))
 
 
 class FakeResponse:

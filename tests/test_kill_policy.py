@@ -240,3 +240,10 @@ def test_an_offline_copy_says_so_rather_than_unable_to_fetch(store, monkeypatch,
     assert out["offline"] is True and out["canFetch"] is False  # every feed off: the page says "offline copy"
     js = (activity.Path(activity.__file__).parent / "static" / "activity.js").read_text(encoding="utf-8")
     assert js.index("data?.offline") < js.index("Unable to fetch data currently")
+
+
+def test_tests_cannot_start_processes_from_the_chart_app():
+    from massive_collate.gui import server
+
+    with pytest.raises(AssertionError, match="tried to start a process"):
+        server.subprocess.Popen(["python", "-m", "massive_collate", "sync"])  # conftest: a test once started a real sync

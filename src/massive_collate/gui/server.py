@@ -546,6 +546,8 @@ class ChartApp:
         the activity view and the status bar while it runs."""
         if self.settings.offline:
             raise RuntimeError("offline (MASSIVE_OFFLINE): this copy of the app fetches nothing")
+        if self._halted():
+            raise RuntimeError("fetching is halted: resume it first")
         if activity.lock_owner(self.store.path):
             raise RuntimeError("a run is already in progress")
         args = [sys.executable, "-m", "massive_collate", "scan", "--probe", "--fetch", "--all-sources"]
@@ -586,13 +588,30 @@ class ChartApp:
         return {"started": True, "pid": self._derive_proc.pid}
 
     def set_fetching(self, body: dict) -> dict:
-        """Pause background fetching ({"paused": true, "minutes": n}: at most two hours) or resume it.
-        The open symbol's own fetches go on (priority), so the chart gets the feeds to itself."""
+        """Pause background fetching ({"paused": true, "minutes": n}: at most two hours; the open
+        symbol's own fetches go on, so the chart gets the feeds to itself), halt all fetching until
+        resumed ({"paused": true, "halt": true}: the open symbol's too), or resume ({"paused":
+        false}): then a sync starts at once unless one is running, as the hourly one would."""
+        from .. import collector
+
+        paused = bool(body.get("paused"))
+        with self._lock:
+            p = collector.set_pause(self.store, paused, minutes=body.get("minutes"), halt=bool(body.get("halt")))
+        started = None
+        if not paused and not self.settings.offline and not activity.lock_owner(self.store.path):
+            exe = Path(sys.executable)
+            quiet = exe.with_name("pythonw.exe") if exe.with_name("pythonw.exe").exists() else exe
+            proc = subprocess.Popen([str(quiet), "-m", "massive_collate", "sync"], stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            self._scan, started = proc, proc.pid
+        return {"paused": p, "started": started}
+
+    def _halted(self) -> bool:
         from .. import collector
 
         with self._lock:
-            p = collector.set_pause(self.store, bool(body.get("paused")), minutes=body.get("minutes"))
-        return {"paused": p}
+            return bool((collector.pause_state(self.store) or {}).get("halt"))
 
     PRIORITY_COOLDOWN = 300  # seconds: a symbol opened again sooner is not asked for again
 
@@ -618,6 +637,8 @@ class ChartApp:
         out = {"ticker": ticker, "feeds": feeds, "asked": asked["at"].isoformat()}
         if self.settings.offline:
             return {**out, "state": "offline"}  # a test copy of the app: nothing is fetched
+        if self._halted():
+            return {**out, "state": "halted"}  # nothing is fetched until the user resumes
         if activity.lock_owner(self.store.path):
             return {**out, "state": "queued"}  # the running sync takes it next
         if asked["runs"]:

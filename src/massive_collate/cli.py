@@ -151,8 +151,8 @@ def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource
                 store.count_request(args.source)  # on the day it is made (the daily cap)
             client.on_request = on_request
             _share_limits(client, store, args.source, log)
-            if command == "sync" and not getattr(args, "tickers", None):  # background: stops when paused
-                client.should_stop = _pause_check(store)
+            # background syncs stop when paused; every run (the open symbol's, a scan) when halted
+            client.should_stop = _pause_check(store, halt_only=command != "sync" or bool(getattr(args, "tickers", None)))
         log(f"{command}: source={args.source} tier={settings.tier.name} "
             f"rate={settings.tier.requests_per_minute or 'unlimited'}/min cap={budget} requests")
         status, message = "ok", ""
@@ -181,15 +181,17 @@ def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource
             log(f"{command}: {source.requests_made} requests used")
 
 
-def _pause_check(store: Store, every: float = 2.0):
-    """A client's should_stop: the user's pause (collector.pause_state), read at most every `every` s."""
+def _pause_check(store: Store, every: float = 2.0, halt_only: bool = False):
+    """A client's should_stop: the user's pause or halt (collector.pause_state), read at most every
+    `every` s. With `halt_only` (a run for the open symbol, a scan) a pause lets it go on."""
     seen = [0.0, None]
 
     def check() -> str | None:
         if time.monotonic() - seen[0] >= every:
             seen[0] = time.monotonic()
             p = collector.pause_state(store)
-            seen[1] = f"fetching paused by you until {p['until'][11:16]} UTC" if p else None
+            seen[1] = None if not p or halt_only and not p.get("halt") else \
+                "fetching halted by you" if p.get("halt") else f"fetching paused by you until {p['until'][11:16]} UTC"
         return seen[1]
     return check
 
@@ -332,19 +334,57 @@ def cmd_initialize(args, settings: Settings) -> int:
 
 def cmd_sync(args, settings: Settings) -> int:
     """Sync every configured feed (or just --source), each within its own limits, holding the
-    run lock for the whole run (released between feeds, another run could take it and this one
-    would stop). With --tickers, those symbols only, on every feed (the chart opened them)."""
+    run lock while it downloads (released between feeds, another run could take it and this one
+    would stop). With --tickers, those symbols only, on every feed (the chart opened them).
+    Then, with the run lock released, the composites and derived frames from what arrived
+    (after_sync): they fetch nothing, and held the lock for most of an hour, so the chart's
+    requests for the symbol it opened waited and the Fetcher read idle while the run was busy."""
     with run_lock(settings.db_path):
-        return _sync(args, settings)
+        code, ran = _sync(args, settings)
+    if ran:
+        after_sync(args, settings)
+    return code
 
 
-def _sync(args, settings: Settings) -> int:
+POST_LOCK = "post.lock"  # beside the database: one pass of composites and derived frames at a time
+
+
+def after_sync(args, settings: Settings) -> bool:
+    """Composite models, exchange quality and the time frames the feeds do not send, built from
+    what the feeds hold (no requests), and research datasets that are due. One such pass at a
+    time (POST_LOCK): another going on, this one is left to it. Each series' build is also
+    leased (derive.take_lease), so a run's own per-symbol builds never overlap it."""
+    from . import composite, proc
+
+    logger = Logger(settings.db_path.parent / "logs" / "massive-collate.log")
+    lock = settings.db_path.with_name(POST_LOCK)
+    if not proc.acquire(lock):
+        logger("derived frames: another process is building them; left to it")
+        return False
+    tickers = {t.upper() for t in getattr(args, "tickers", None) or []} or None
+    try:
+        with Store(settings.db_path) as store:
+            composite.refresh(store, feed_profiles(settings), collector.now_et(), log=logger)
+            _derive(store, tickers, logger)  # the time frames the feeds do not send, from what just arrived
+            if args.all_sources and not tickers:  # research datasets fetched before, when due (never starts one)
+                from . import datasets
+
+                datasets.fetch(store, log=logger, only_started=True)
+    finally:
+        proc.release(lock)
+    return True
+
+
+def _sync(args, settings: Settings) -> tuple[int, int]:
+    """The feeds' downloads: (exit code, feeds that ran)."""
     tickers = {t.upper() for t in getattr(args, "tickers", None) or []} or None
     names = list(BUILDERS) if args.all_sources else [args.source]
     with Store(settings.db_path) as store:
         separated = store.kv_get("built-bars:separated:v1")
         _note_tier(store, settings, Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
-        paused = None if tickers else collector.pause_state(store)
+        paused = collector.pause_state(store)
+        if paused and tickers and not paused.get("halt"):
+            paused = None  # a pause leaves the open symbol's fetches; a halt stops them too
     from . import live
 
     if args.all_sources and (settings.live_coins or live.stock_keys(settings)) and not settings.offline:
@@ -353,8 +393,9 @@ def _sync(args, settings: Settings) -> int:
             Logger(settings.db_path.parent / "logs" / "massive-collate.log")("live: recorder started")
     if paused:
         Logger(settings.db_path.parent / "logs" / "massive-collate.log")(
-            f"sync: background fetching paused by you until {paused['until'][11:16]} UTC; not run")
-        return 0
+            "sync: fetching halted by you; not run" if paused.get("halt")
+            else f"sync: background fetching paused by you until {paused['until'][11:16]} UTC; not run")
+        return 0, 0
     if not separated:  # one-off: bars built from ticks before they were kept apart from the feeds' own
         with run_lock(settings.db_path), Store(settings.db_path) as store:
             store.separate_built_bars(log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
@@ -389,22 +430,11 @@ def _sync(args, settings: Settings) -> int:
         except Exception as e:  # noqa: BLE001 - recorded as this feed's run error (api_run); the next feeds go on
             errors.append(f"{name}: {type(e).__name__}: {e}")
             Logger(settings.db_path.parent / "logs" / "massive-collate.log")(f"sync {name}: failed ({e}); next feed")
-    if ran:  # composite models and exchange quality from what the feeds hold (no requests)
-        from . import composite
-
-        logger = Logger(settings.db_path.parent / "logs" / "massive-collate.log")
-        with Store(settings.db_path) as store:
-            composite.refresh(store, feed_profiles(settings), collector.now_et(), log=logger)
-            _derive(store, tickers, logger)  # the time frames the feeds do not send, from what just arrived
-            if args.all_sources and not tickers:  # research datasets fetched before, when due (never starts one)
-                from . import datasets
-
-                datasets.fetch(store, log=logger, only_started=True)
     if not ran and errors:
         raise ConfigError("; ".join(errors))
     for e in errors:
         print(f"skipped {e}", file=sys.stderr)
-    return 0
+    return 0, ran
 
 
 def cmd_datasets(args, settings: Settings) -> int:
