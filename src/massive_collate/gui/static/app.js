@@ -266,7 +266,7 @@ chart.setDataLoader({
     const token = type === 'init' ? ++state.loadToken : state.loadToken;
     const params = {
       source: symbol.source, ticker: symbol.ticker, period: period.type, span: period.span,
-      session: state.session, limit: state.meta?.auto ? AUTO_PAGE : PAGE, adjust: state.adjust, lod: lodFor(),
+      session: state.session, limit: state.meta?.auto ? autoPage() : PAGE, adjust: state.adjust, lod: lodFor(),
       ...typeQuery(), ...modelQuery(),
     };
     if (type === 'forward' && timestamp) params.to = timestamp;
@@ -535,14 +535,26 @@ const chartShown = () => chart.getSize('candle_pane', 'main')?.width > 0;
 
 // -- auto-ranging: the level follows the zoom ------------------------------------------------
 // No interval to pick: a symbol opens on its whole history at the finest level whose candles fit
-// the chart (AUTO_MIN_PX each), and as the chart zooms in it moves to finer levels (days, hours,
+// the chart (autoMinPx each), and as the chart zooms in it moves to finer levels (days, hours,
 // minutes, seconds) while the data has them for the window on screen; where it has none finer,
 // the candles just grow. Zooming out moves to coarser levels the same way. The level shows where
 // the interval menu was ("auto: 1 hour"). A level change keeps the window: the same moment in the
 // centre, the same span across the chart (finishLodSwitch).
-const AUTO_MIN_PX = 2;  // the narrowest candle: the chart holds at most its width / 2 of them
-const AUTO_PAGE = 3000;  // bars per request: a few screens at the narrowest
 const AUTO_SLACK = 0.15;  // hysteresis: a level is left only 15 % past its fit, so zooming does not flicker
+state.autoDetail = Math.min(100, Math.max(0, Number(prefs.get('autoDetail', 50)) || 0));
+
+// The narrowest candle (px) before the chart moves to a coarser level, from the Detail slider: 2 px in
+// the middle, halved every quarter to the right (0.5 px at the end: finer levels sooner, thinner
+// candles), doubled every quarter to the left (8 px at the end: coarser levels, bigger candles).
+function autoMinPx() {
+  return 2 * Math.pow(2, (50 - state.autoDetail) / 25);
+}
+
+// Bars per request: two screens at the narrowest (a level change's page ends a window past the
+// right edge), at least 3,000, at most what the server gives.
+function autoPage() {
+  return Math.min(20000, Math.max(3000, Math.ceil(2 * chartWidth() / autoMinPx())));
+}
 const LEVEL_NAMES = { second: 'sec', minute: 'min', hour: 'hour', day: 'day', week: 'week', month: 'month', year: 'year' };
 const LEVEL_MS = { second: 1e3, minute: 6e4, hour: 36e5, day: 864e5, week: 6048e5, month: 2629746e3, year: 31556952e3 };
 
@@ -581,7 +593,7 @@ const levelPerDay = (lv) => lv.perDay[state.session === 'extended' ? 'extended' 
 function chooseLevel(days, fromMs, current = null) {
   const levels = autoLevels();
   if (!levels.length) return null;
-  const fit = chartWidth() / AUTO_MIN_PX;
+  const fit = chartWidth() / autoMinPx();
   const oldest = Math.min(...levels.map((lv) => lv.first));
   const from = Math.max(Number.isFinite(fromMs) ? fromMs : oldest, oldest);
   const empty = state.model.kind === 'price' ? null : emptyLevels();
@@ -1328,6 +1340,7 @@ $('typeSelect').addEventListener('change', (e) => {
   state.styleUsed = null;
   applyChartType();
   renderTypeParams();
+  renderPeriods();  // bricks: no Detail (one level whatever the zoom)
   // Between two time-based types the same bars (and detail level) are reused; anything
   // involving a type the server builds reloads, and the detail level is chosen again after loading.
   if (wasServerBuilt || SERVER_TYPES.has(state.chartType)) {
@@ -1785,6 +1798,22 @@ const periodLabel = (p) => (p.type === 'day' || p.type === 'week' || p.type === 
   : `${p.span}${PERIOD_LABEL[p.type]}`);
 const PERIOD_NAMES = { second: 'second', minute: 'minute', hour: 'hour', day: 'day', week: 'week', month: 'month', year: 'year' };
 
+// The Detail slider beside the level: how narrow candles may get before the level changes (autoMinPx).
+function detailControl() {
+  const label = document.createElement('label');
+  label.className = 'auto-detail';
+  const input = document.createElement('input');
+  Object.assign(input, { id: 'autoDetail', type: 'range', min: '0', max: '100', step: '1', value: String(state.autoDetail) });
+  input.addEventListener('input', () => {
+    state.autoDetail = Number(input.value);
+    prefs.set('autoDetail', state.autoDetail);
+    renderPeriods();
+    autoSoon();  // the level for the zoom on screen, once the slider settles
+  });
+  label.append('coarse', input, 'fine');
+  return label;
+}
+
 function renderPeriods() {
   const box = $('periods');
   let tag = $('autoLevel');
@@ -1792,8 +1821,13 @@ function renderPeriods() {
     tag = document.createElement('span');
     tag.id = 'autoLevel';
     tag.className = 'auto-level';
-    box.replaceChildren(tag);
+    box.replaceChildren(tag, detailControl());
   }
+  const bricks = PRICE_BASED.has(state.chartType);
+  $('autoDetail').disabled = bricks;
+  $('autoDetail').parentElement.title = bricks ? 'Detail: bricks come from one level whatever the zoom'
+    : `Detail: the narrowest candle before the chart moves to a coarser level, now ${+autoMinPx().toFixed(2)} px `
+      + '(2 px in the middle). Right: finer levels sooner, more and thinner candles. Left: coarser levels, bigger candles.';
   const lv = currentLevel();
   const label = lv ? lv.label : periodLabel(state.period);
   tag.textContent = `auto: ${label}`;

@@ -187,6 +187,10 @@ body.panel-hidden #sidePanel, body.panel-hidden #panelResizer { display: none; }
 .kv dd small { color: var(--muted); }
 .auto-level { font-size: 12px; color: var(--text); padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px;
   white-space: nowrap; cursor: default; }
+.auto-detail { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; font-size: 11px; color: var(--muted);
+  white-space: nowrap; }
+.auto-detail input { width: 80px; margin: 0; }
+.auto-detail input:disabled { opacity: 0.4; }
 .p-feed { max-width: 100%; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
   border-radius: 4px; padding: 1px 4px; }
 .perf { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 4px; }

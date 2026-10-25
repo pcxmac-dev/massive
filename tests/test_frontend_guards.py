@@ -84,3 +84,13 @@ def test_the_auto_chart_loads_a_model_without_a_whole_history_probe():
 
 def test_zooming_with_a_model_reloads_only_for_more_decimals():
     assert "want < sym.pricePrecision" in _function(_js("app.js"), "applyModelPrecision")
+
+
+def test_the_detail_slider_sets_the_narrowest_candle_and_its_middle_is_the_old_setting():
+    app = _js("app.js")
+    width = _function(app, "autoMinPx")
+    assert "2 * Math.pow(2, (50 - state.autoDetail) / 25)" in width  # 50: 2 px (as before); 100: 0.5 px; 0: 8 px
+    assert "prefs.get('autoDetail', 50)" in app
+    assert "chartWidth() / autoMinPx()" in _function(app, "chooseLevel")
+    assert "autoPage()" in app.split("chart.setDataLoader(", 1)[1]  # pages grow with the candles a screen holds
+    assert re.search(r"Math\.min\(20000,", _function(app, "autoPage")) and server.MAX_LIMIT >= 20000
