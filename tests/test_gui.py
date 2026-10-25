@@ -470,3 +470,24 @@ def test_a_continuous_futures_data_by_feed_is_its_contracts(tmp_path):
     minute = next(f for f in feed["frames"] if f["frame"] == "1m")["sent"]
     assert minute["rows"] == 5 and minute["first"].startswith("2026-09-16T23:00")  # 19:00 New York, the NQU6 bar
     assert inventory.row_counts(s, "NQ1!")[("massive", "bars", "minute", 1)] == 5
+
+
+def test_the_dependency_checks_and_datasets_answer_while_the_shared_lock_is_held(tmp_path):
+    import threading
+
+    app = ChartApp(_store_with_bars(tmp_path))
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with app._lock:
+            held.set()
+            release.wait(5)
+    threading.Thread(target=hold, daemon=True).start()
+    held.wait(5)
+    try:
+        started = time.monotonic()
+        assert app.deps()["checks"] and "datasets" in app.datasets()
+        assert time.monotonic() - started < 4  # not behind the held lock (it would wait the full 5 s)
+        assert app.deps() is app.deps()  # kept a minute: one answer
+    finally:
+        release.set()

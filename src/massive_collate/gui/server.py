@@ -45,6 +45,7 @@ CALENDAR_MAX_DAYS = 3700  # the widest /api/calendar range (timeaxis.js asks for
 ROW_COUNTS_TTL_S = 600  # a symbol's bar counts (the Data panel) are counted again after this
 PRUNED_COUNTS_TTL_S = 300  # a symbol's pruned-list counts by rule (an index scan of up to millions)
 ACTIVITY_TTL_S = 2.0  # the status answer shared by polls this close together
+DEPS_TTL_S = 60.0  # the dependency checks' answer is kept this long
 MAX_BODY = 5 * 1024 * 1024
 WRITE_HEADER = "X-Massive-Charts"
 
@@ -74,6 +75,9 @@ class ChartApp:
         self._pruned_counts: dict[str, tuple[float, dict]] = {}  # ticker -> (counted at, by feed and rule)
         self._status_store, self._status_lock = store.reader(), threading.Lock()  # the Fetcher view and status bar
         self._activity: dict[tuple, tuple[float, dict]] = {}
+        self._deps_store, self._deps_lock = store.reader(), threading.Lock()  # dependency checks
+        self._deps: tuple[float, dict] | None = None
+        self._datasets_store, self._datasets_lock = store.reader(), threading.Lock()  # the datasets list
         self._open_noted: dict[str, int] = {}  # ticker -> ms it was last noted open (note_open)
         self._derive_proc: subprocess.Popen | None = None  # a build started by start_derive
 
@@ -388,8 +392,12 @@ class ChartApp:
     def deps(self) -> dict:
         from .. import deps
 
-        with self._lock:
-            return {"checks": deps.as_rows(deps.checks(self.store, self.settings))}
+        # Its own connections and lock, and its answer kept DEPS_TTL_S (4.6 s cold): under the shared
+        # lock the symbol list, and with it the first chart, waited behind it on every page load.
+        with self._deps_lock:
+            if self._deps is None or time.monotonic() - self._deps[0] > DEPS_TTL_S:
+                self._deps = (time.monotonic(), {"checks": deps.as_rows(deps.checks(self._deps_store, self.settings))})
+            return self._deps[1]
 
     def directory(self) -> dict:
         """Every listing in the directory (placeholders), with what is known locally."""
@@ -605,8 +613,8 @@ class ChartApp:
         """The research datasets: what is held, its span, files fetched and closed, quality."""
         from .. import datasets
 
-        with self._lock:
-            rows = datasets.status(self.store)
+        with self._datasets_lock:  # its own connections: never behind (or in front of) the shared lock
+            rows = datasets.status(self._datasets_store)
         for r in rows:
             r["fetched"] = r["fetched"].isoformat() if r["fetched"] else None
         return {"datasets": rows}
