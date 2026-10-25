@@ -2656,7 +2656,7 @@ function renderInventory() {
   const inv = state.inventory;
   if (!inv?.feeds?.length) { box.innerHTML = ''; return; }
   const when = (iso) => iso.slice(0, 16).replace('T', ' ');
-  const span = (p) => `${when(p.first)} → ${when(p.last)} UTC · ${p.rows.toLocaleString()} bars`;
+  const span = (p) => `${when(p.first)} → ${when(p.last)} UTC · ${p.rows != null ? `${p.rows.toLocaleString()} bars` : 'bars being counted'}`;
   const cols = inv.feeds.map((f) => ({ f, frames: Object.fromEntries(f.frames.map((x) => [x.frame, x])), missing: new Set(f.notBuilt) }));
   const rows = inv.frames.filter((label) => cols.some((c) => c.frames[label] || c.missing.has(label)));
   const cell = ({ f, frames, missing }, label) => {
@@ -2817,7 +2817,7 @@ function renderPanel() {
     <h3>Data</h3>
     ${kv([
       ['Feed', feedPicker(sy.ticker, data.feeds)], ['Resolution', esc(data.base) + (data.officialDaily ? ' + official daily' : '')],
-      ['Rows', data.rows.toLocaleString()], ['From', esc(data.first.slice(0, 16).replace('T', ' '))],
+      ['Rows', data.rows != null ? data.rows.toLocaleString() : 'counting…'], ['From', esc(data.first.slice(0, 16).replace('T', ' '))],
       ['To', esc(data.last.slice(0, 16).replace('T', ' '))], ['Price precision', `${data.pricePrecision} dp`],
       ['Times', 'US/Eastern'],
     ])}

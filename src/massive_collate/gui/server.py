@@ -7,6 +7,7 @@ from contextlib import contextmanager
 import mimetypes
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 import threading
 import webbrowser
@@ -41,6 +42,7 @@ def finite(data):
 
 MAX_LIMIT = 20000
 CALENDAR_MAX_DAYS = 3700  # the widest /api/calendar range (timeaxis.js asks for at most CALENDAR_DAYS)
+ROW_COUNTS_TTL_S = 600  # a symbol's bar counts (the Data panel) are counted again after this
 MAX_BODY = 5 * 1024 * 1024
 WRITE_HEADER = "X-Massive-Charts"
 
@@ -60,6 +62,13 @@ class ChartApp:
         from .window import WindowReader
 
         self.window = WindowReader(self.engine)  # the auto-ranging chart: any level, by window
+        # The Data panel's inventory reads through connections of its own, under its own lock, and
+        # its row counts are made in the background (counting AAPL's frames took 20 s under the
+        # shared lock, and the symbol list for the picker's map, the calendar and the side panel
+        # all waited behind it).
+        self._panel_store, self._panel_lock = store.reader(), threading.Lock()
+        self._row_counts: dict[str, tuple[float, dict]] = {}  # ticker -> (counted at, row_counts)
+        self._counting: set[str] = set()
         self._open_noted: dict[str, int] = {}  # ticker -> ms it was last noted open (note_open)
         self._derive_proc: subprocess.Popen | None = None  # a build started by start_derive
 
@@ -351,7 +360,7 @@ class ChartApp:
             "attribution": self.attribution(s.ticker, "minute" if base["type"] != "day" else "day", s.asset),
             "audits": self.audit_summary(s.ticker),
             "data": {
-                "feeds": feeds, "base": base["type"], "rows": self.window.base_rows(source, ticker, base["type"]),
+                "feeds": feeds, "base": base["type"], "rows": self._base_rows(s.ticker, feeds, base["type"]),
                 "first": iso(min(lv["first"] for lv in levels)), "last": iso(max(lv["last"] for lv in levels)),
                 "officialDaily": bool(len(daily) and (~daily["derived"].astype(bool)).any()), "pricePrecision": 2,
                 "levels": levels,
@@ -669,9 +678,42 @@ class ChartApp:
         what was built here from its finer data (*derived) and what is not built yet."""
         from .. import inventory
 
-        rank = self.engine.sources_for(ticker.upper())
-        with self._lock:
-            return inventory.symbol_inventory(self.store, ticker, rank)
+        t = ticker.upper()
+        rank = self.engine.sources_for(t)
+        counted = self._row_counts.get(t)
+        with self._panel_lock:
+            out = inventory.symbol_inventory(self._panel_store, t, rank, counts=counted[1] if counted else {})
+        if (counted is None or time.monotonic() - counted[0] > ROW_COUNTS_TTL_S) and t not in self._counting:
+            self._counting.add(t)  # the counts follow on the panel's next read
+            threading.Thread(target=self._count_rows, args=(t,), daemon=True, name=f"count-{t}").start()
+        return out
+
+    def _base_rows(self, ticker: str, feeds: list[str], base: str) -> int | None:
+        """The bars a series holds at its base level (the feed holding most, its own and built), from
+        the background counts (None until they are made; asked for here)."""
+        counted = self._row_counts.get(ticker)
+        if (counted is None or time.monotonic() - counted[0] > ROW_COUNTS_TTL_S) and ticker not in self._counting:
+            self._counting.add(ticker)
+            threading.Thread(target=self._count_rows, args=(ticker,), daemon=True, name=f"count-{ticker}").start()
+        if counted is None:
+            return None
+        rows = counted[1]
+        return max((rows.get((f, "bars", base, 1), 0) + rows.get((f, "built_bars", base, 1), 0) for f in feeds), default=0)
+
+    def _count_rows(self, ticker: str) -> None:
+        """Count a symbol's bars frame by frame (inventory.row_counts) on connections of this thread."""
+        from .. import inventory
+
+        reader = None
+        try:
+            reader = self.store.reader()
+            self._row_counts[ticker] = (time.monotonic(), inventory.row_counts(reader, ticker))
+        except Exception:  # noqa: BLE001 - the panel shows no counts; the next read tries again
+            pass
+        finally:
+            self._counting.discard(ticker)
+            if reader is not None and reader is not self.store:
+                reader.close()
 
     def pruned(self, ticker: str, source: str | None = None) -> dict:
         """A symbol's bad data (baddata.py): each feed's pruned list, newest first, and its counts."""

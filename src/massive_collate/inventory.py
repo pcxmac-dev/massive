@@ -34,22 +34,25 @@ def _iso(ms: int | None) -> str | None:
     return datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat(timespec="seconds") if ms is not None else None
 
 
-def symbol_inventory(store, ticker: str, rank: list[str] | None = None) -> dict:
+def symbol_inventory(store, ticker: str, rank: list[str] | None = None, counts: bool | dict = True) -> dict:
     """The symbol's data on every feed (see the module docstring). `rank`: feeds in the order a
-    merged chart takes them (BarEngine.sources_for), listed first."""
+    merged chart takes them (BarEngine.sources_for), listed first. `counts`: True counts each
+    frame's bars (exact, slow for long series); a dict {(feed, table, timespan, multiplier): rows}
+    gives counts made before (the chart app's, row_counts), None where it has none."""
     t = ticker.upper()
     watch = {w["source"]: w for w in store.watchlist(ticker=t)}
-    held = {s for s, tk, _ in store.stored_series() if tk == t}
+    held = set(store.feeds_holding(t))
     rank = [f for f in (rank or []) if f in held or f in watch]
     order = rank + sorted((held | set(watch)) - set(rank))
     records: dict[int, dict | None] = {}
     feeds = []
     for feed in order:
-        stored = store.frame_inventory(feed, t)
+        stored = store.frame_inventory(feed, t, counts=counts is True)
         frames: dict[tuple[str, int], dict] = {}
         for row in stored:
             key = (row["timespan"], row["multiplier"])
-            part = {"first": _iso(row["first"]), "last": _iso(row["last"]), "rows": row["rows"]}
+            rows = row["rows"] if counts is True else (counts or {}).get((feed, row["table"], *key))
+            part = {"first": _iso(row["first"]), "last": _iso(row["last"]), "rows": rows}
             if row["table"] == "bars":
                 frames.setdefault(key, {})["sent"] = part
             else:
@@ -81,3 +84,11 @@ _SECONDS = {"second": 1, "minute": 60, "hour": 3600, "day": 86_400, "week": 604_
 
 def _duration(frame: tuple[str, int]) -> int:
     return _SECONDS.get(frame[0], 0) * frame[1]
+
+
+def row_counts(store, ticker: str) -> dict:
+    """{(feed, table, timespan, multiplier): bars} of a symbol on every feed: the counts
+    symbol_inventory leaves out when asked to be quick (slow: every bar is counted)."""
+    t = ticker.upper()
+    return {(feed, r["table"], r["timespan"], r["multiplier"]): r["rows"]
+            for feed in store.feeds_holding(t) for r in store.frame_inventory(feed, t)}

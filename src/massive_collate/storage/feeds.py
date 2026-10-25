@@ -764,10 +764,12 @@ class FeedStore:
         return sum(conn.execute(f"SELECT COUNT(*) FROM {t} WHERE ticker=? AND timespan=? AND multiplier=?", key).fetchone()[0]
                    for t in _BAR_TABLES)
 
-    def frame_inventory(self, source: str, ticker: str) -> list[dict]:
+    def frame_inventory(self, source: str, ticker: str, counts: bool = True) -> list[dict]:
         """Every frame one feed holds for a symbol, as stored: {table (bars: the feed's own,
         built_bars: built here), timespan, multiplier, first, last (bar starts, ms), rows,
-        derivation (of the newest built bar)}. Index seeks and range counts only."""
+        derivation (of the newest built bar)}. Index seeks and range counts only; without
+        `counts`, seeks only (rows None): a count runs through every bar of a frame, twenty
+        seconds for a stock's millions of seconds and minutes."""
         conn = self._bars(source)
         if conn is None:
             return []
@@ -779,7 +781,11 @@ class FeedStore:
             while frame is not None:  # one seek per frame (a loose index scan within the ticker)
                 key = (t, *frame)
                 where = f"FROM {table} WHERE ticker=? AND timespan=? AND multiplier=?"
-                first, last, rows = conn.execute(f"SELECT MIN(ts), MAX(ts), COUNT(*) {where}", key).fetchone()
+                if counts:
+                    first, last, rows = conn.execute(f"SELECT MIN(ts), MAX(ts), COUNT(*) {where}", key).fetchone()
+                else:  # each an index seek when asked alone
+                    first = conn.execute(f"SELECT MIN(ts) {where}", key).fetchone()[0]
+                    last, rows = conn.execute(f"SELECT MAX(ts) {where}", key).fetchone()[0], None
                 derivation = None
                 if table == "built_bars":
                     derivation = conn.execute(f"SELECT derivation {where} ORDER BY ts DESC LIMIT 1", key).fetchone()[0]
@@ -788,6 +794,20 @@ class FeedStore:
                 frame = conn.execute(f"SELECT timespan, multiplier FROM {table} WHERE ticker=? "
                                      "AND (ticker, timespan, multiplier, ts) > (?, ?, ?, ?) ORDER BY timespan, multiplier, ts LIMIT 1",
                                      (t, t, *frame, 2**63 - 1)).fetchone()
+        return out
+
+    def feeds_holding(self, ticker: str) -> list[str]:
+        """The feeds with bars or trades of a symbol (a seek each: stored_series reads every symbol
+        of every feed, again whenever any file changes)."""
+        t = ticker.upper()
+        out = []
+        for feed in self._open_feeds():
+            held = any(feed.conn.execute(f"SELECT 1 FROM {table} WHERE ticker=? LIMIT 1", (t,)).fetchone()
+                       for table in _BAR_TABLES)
+            if not held and feed.has_ticks():
+                held = feed.conn.execute("SELECT 1 FROM ticks.trades WHERE ticker=? LIMIT 1", (t,)).fetchone() is not None
+            if held:
+                out.append(feed.name)
         return out
 
     def bars_changed_since(self, source: str, ticker: str, timespans: Sequence[str], stored_after: int) -> dict:

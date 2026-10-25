@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import json
 import threading
 from http.client import HTTPConnection
@@ -286,7 +288,14 @@ def test_info_combines_symbol_details_stats_and_coverage(tmp_path):
                                       "description": "Rockets.", "branding": {"logo_url": "x"}})
     day = int(pd.Timestamp("2026-10-20", tz=ET).timestamp() * 1000)
     s.upsert_bars("massive", "SPCX", "day", 1, [{"t": day, "o": 10, "h": 11, "l": 9, "c": 10.77, "v": 123456}])
-    info = ChartApp(s).info("*", "SPCX")
+    app = ChartApp(s)
+    info = app.info("*", "SPCX")
+    assert info["data"]["rows"] is None  # counted in the background (a count blocks nothing): the next read has it
+    for _ in range(200):
+        if not app._counting:
+            break
+        time.sleep(0.01)
+    info = app.info("*", "SPCX")
     assert info["symbol"]["ticker"] == "SPCX" and info["symbol"]["exchange"] == "XNAS"
     assert info["details"] == {"name": "Space Exploration Technologies Corp.", "market_cap": 1.9e12,
                                "description": "Rockets."}
@@ -423,3 +432,29 @@ def test_a_merged_crypto_chart_takes_the_reference_exchange_first_and_others_whe
         assert eng.sources_for("BTCUSD") == ["coinbase", "bitstamp"]  # alphabetically bitstamp would lead
         closes = [b["close"] for b in eng.bars("*", "BTCUSD", "minute", 1, "extended")["bars"]]
         assert closes == [1.0, 2.0]  # Bitstamp's older minute, then Coinbase's where it has one
+
+
+def test_the_data_panel_answers_while_the_shared_lock_is_held_and_counts_later(tmp_path):
+    import threading
+
+    app = ChartApp(_store_with_bars(tmp_path))
+    held, release = threading.Event(), threading.Event()
+
+    def hold():  # something slow under the app's lock (a count of millions of bars took 20 s)
+        with app._lock:
+            held.set()
+            release.wait(5)
+    threading.Thread(target=hold, daemon=True).start()
+    held.wait(5)
+    try:
+        inv = app.inventory("SPCX")  # its own connections and lock: not behind the held one
+        minute = next(f for f in inv["feeds"][0]["frames"] if f["frame"] == "1m")
+        assert minute["sent"]["rows"] is None and minute["sent"]["first"]
+    finally:
+        release.set()
+    for _ in range(200):
+        if not app._counting:
+            break
+        time.sleep(0.01)
+    minute = next(f for f in app.inventory("SPCX")["feeds"][0]["frames"] if f["frame"] == "1m")
+    assert minute["sent"]["rows"] == 390
