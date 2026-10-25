@@ -94,3 +94,12 @@ def test_the_detail_slider_sets_the_narrowest_candle_and_its_middle_is_the_old_s
     assert "chartWidth() / autoMinPx()" in _function(app, "chooseLevel")
     assert "autoPage()" in app.split("chart.setDataLoader(", 1)[1]  # pages grow with the candles a screen holds
     assert re.search(r"Math\.min\(20000,", _function(app, "autoPage")) and server.MAX_LIMIT >= 20000
+
+
+def test_the_next_hour_level_is_read_ahead_without_touching_the_chart_requests():
+    app = _js("app.js")
+    ahead = _function(app, "prefetchFiner")
+    assert "fetch(`/api/bars?" in ahead and "api(" not in ahead  # a failure must not pause the chart's requests
+    assert "state.prefetched.has(key)" in ahead  # once a window
+    assert "prefetchFiner(w, cur)" in _function(app, "checkLod")
+    assert "Math.max(1000," in _function(app, "autoPage")  # two screens, not 3,000 bars of 4 hours

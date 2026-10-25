@@ -142,3 +142,29 @@ def test_engine_future_endpoint(tmp_path):
     # Wednesday 25 ends at 15:30; Thanksgiving is skipped; Friday 27 closes at 13:00.
     assert got == ["Fri 27 09:30", "Fri 27 10:30", "Fri 27 11:30", "Fri 27 12:30",
                    "Mon 30 09:30", "Mon 30 10:30", "Mon 30 11:30", "Mon 30 12:30", "Mon 30 13:30"]
+
+
+def _regular_session_bar_by_bar(frame: pd.DataFrame) -> pd.DataFrame:
+    """The filter as it was (a Python call a bar): what the vectorised one must equal."""
+    from massive_collate.gui.bars import REGULAR_OPEN, _regular_close
+
+    local = frame.index.tz_convert(ET)
+    t = local.time
+    closes = {d: _regular_close(d.date()) for d in local.normalize().unique()}
+    close = [closes[d] for d in local.normalize()]
+    return frame[[tt >= REGULAR_OPEN and c is not None and tt < c for tt, c in zip(t, close)]]
+
+
+def test_the_regular_session_filter_keeps_the_bars_it_kept_bar_by_bar():
+    rng = np.random.default_rng(3)
+    # a year and a half of random stamps to the microsecond: clock changes, holidays, early closes, weekends
+    lo, hi = pd.Timestamp("2025-10-01", tz=ET).value, pd.Timestamp("2027-03-31", tz=ET).value
+    stamps = np.sort(rng.integers(lo, hi, 200_000) // 1000 * 1000)
+    edges = [datetime(2026, 3, 9, 9, 30, tzinfo=ET), datetime(2026, 3, 9, 9, 29, 59, 999999, tzinfo=ET),
+             datetime(2026, 11, 2, 15, 59, 59, 999999, tzinfo=ET), datetime(2026, 11, 2, 16, 0, tzinfo=ET),
+             datetime(2026, 11, 27, 12, 59, 59, tzinfo=ET), datetime(2026, 11, 27, 13, 0, tzinfo=ET)]
+    idx = pd.DatetimeIndex(stamps, tz="UTC").append(pd.DatetimeIndex(edges).tz_convert("UTC")).sort_values()
+    frame = _frame(idx)
+    kept = regular_session(frame)
+    assert kept.index.equals(_regular_session_bar_by_bar(frame).index)
+    assert 0 < len(kept) < len(frame)

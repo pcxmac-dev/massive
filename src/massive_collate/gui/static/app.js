@@ -551,9 +551,10 @@ function autoMinPx() {
 }
 
 // Bars per request: two screens at the narrowest (a level change's page ends a window past the
-// right edge), at least 3,000, at most what the server gives.
+// right edge; more load as the chart scrolls), at least 1,000, at most what the server gives. A
+// page of 4-hour bars is minutes to read: 3,000 of them were six years of minutes.
 function autoPage() {
-  return Math.min(20000, Math.max(3000, Math.ceil(2 * chartWidth() / autoMinPx())));
+  return Math.min(20000, Math.max(1000, Math.ceil(2 * chartWidth() / autoMinPx())));
 }
 const LEVEL_NAMES = { second: 'sec', minute: 'min', hour: 'hour', day: 'day', week: 'week', month: 'month', year: 'year' };
 const LEVEL_MS = { second: 1e3, minute: 6e4, hour: 36e5, day: 864e5, week: 6048e5, month: 2629746e3, year: 31556952e3 };
@@ -630,7 +631,7 @@ function checkLod() {
   if (!cur) return;
   const w = visibleWindow();
   const lv = chooseLevel(w.days, w.fromMs, cur);
-  if (!lv || (lv.type === cur.type && lv.span === cur.span)) return;
+  if (!lv || (lv.type === cur.type && lv.span === cur.span)) { prefetchFiner(w, cur); return; }
   const newBars = Math.max(1, w.days * levelPerDay(lv));
   state.lodSwitch = {
     barSpace: chartWidth() / newBars, anchor: w.centre ?? null, anchorX: chartWidth() / 2, atLatest: w.atLatest,
@@ -673,6 +674,25 @@ function skipEmptyLevel() {
   renderPeriods();
   chart.setPeriod(state.period);
   return true;
+}
+
+// Within one zoom step (half the span) of a finer level built from 30-minute bins (hours and 30
+// minutes, gui/window.py _half_hours), that level's window is asked for once in the background, so
+// the server has read its minutes before the zoom gets there: days to 4 hours took a second or
+// more. Plain fetch: a failure here must not pause the chart's own requests (api).
+function prefetchFiner(w, cur) {
+  const left = w.centre == null ? w.fromMs : w.centre - w.days * LEVEL_MS.day / 4;  // zoomed in on the centre
+  const next = chooseLevel(w.days / 2, left, null);
+  if (!next || (next.type === cur.type && next.span === cur.span) || PRICE_BASED.has(state.chartType)) return;
+  if (!(next.type === 'hour' || (next.type === 'minute' && next.span === 30))) return;
+  const to = w.atLatest || w.centre == null ? null : Math.round(w.centre + w.days * LEVEL_MS.day * 1.5);
+  const key = `${state.source}:${state.ticker}|${state.session}|${next.type}${next.span}|${to == null ? 'now' : Math.round(to / LEVEL_MS.month)}`;
+  state.prefetched ??= new Set();
+  if (state.prefetched.has(key)) return;
+  state.prefetched.add(key);
+  const q = { source: state.source, ticker: state.ticker, period: next.type, span: next.span, session: state.session,
+              limit: autoPage(), adjust: state.adjust, lod: 1, auto: 1, ...(to == null ? {} : { to }) };
+  fetch(`/api/bars?${new URLSearchParams(q)}`).catch(() => {});
 }
 
 // A symbol opens on its whole history: every bar of the opening level across the chart.

@@ -57,6 +57,9 @@ HA_WARMUP = 64  # Heikin Ashi's open halves its first bar's weight each bar: gon
 # gaps (crypto, or gaps not treated as breaks) it is fitted over this many bars either side.
 FOURIER_CONTEXT = 100_000
 MODEL_SKIP_PAGES = 10  # pages of bars all too short for a model's window passed over to reach its values
+HALF_HOUR_MS = 1_800_000  # the hour levels and 30 minutes are built from 30-minute bins (_half_hours)
+ROLLUP_TTL_S = 300.0  # a month of them is read again after this: a correction or backfill shows within it
+ROLLUP_CACHE_BYTES = 200_000_000  # twenty years of a stock's bins is about 15 MB
 
 
 def _empty() -> pd.DataFrame:
@@ -108,6 +111,8 @@ class WindowReader:
         self._levels: dict[tuple, tuple[float, list]] = {}
         self._bricks = _SizedCache(BRICK_CACHE_BYTES, 16)
         self._bricks_lock = threading.Lock()
+        self._rollup = _SizedCache(ROLLUP_CACHE_BYTES, 50_000)  # (feeds, ticker, month) -> (built at, 30-minute bins)
+        self._rollup_lock = threading.Lock()
 
     @property
     def store(self):
@@ -239,15 +244,62 @@ class WindowReader:
         return {"frame": bars.tail(limit), "more": more or len(bars) > limit,
                 "newer": to_ms is not None and to_ms < end}
 
-    def _built(self, s, feeds, base, period, span, session, lo, hi) -> pd.DataFrame:
-        """The bars of [lo, hi) at the level, built from the feeds' base bars in it (best feed
-        first per bar), with the feeds' own bars at the level in place of those built here."""
+    def _merged(self, s, feeds, base, lo, hi) -> pd.DataFrame | None:
+        """The feeds' base bars in [lo, hi), best feed first per bar."""
         with self.engine.lock:
             parts = [frame_from_bars(df) for df in
                      (self.store.bars_window([f], s.ticker, base, int(lo), int(hi)) for f in feeds) if len(df)]
         if not parts:
+            return None
+        return merge_frames(parts) if len(parts) > 1 else parts[0]
+
+    def _half_hours(self, s, feeds, lo, hi) -> pd.DataFrame | None:
+        """30-minute bins of the merged minutes (all hours) for [lo, hi), widened to whole bins: the
+        hour levels and 30 minutes are built from them. Every edge of those is on a half hour of New
+        York wall-clock time (stock hours from 09:30) and the regular session opens and closes on
+        one, so they are the bars the minutes give, from a 30th of the rows. Read a UTC month at a
+        time and kept ROLLUP_TTL_S (a correction or backfill shows within it), the month holding the
+        newest minute never kept: zooming between days, hours and 30 minutes reads each minute once."""
+        with self.engine.lock:
+            edges = [e for e in (self.store.bar_edges(f, s.ticker, "minute") for f in feeds) if e]
+        if not edges:
+            return None
+        newest = max(e[1] for e in edges)
+        start = int(lo) // HALF_HOUR_MS * HALF_HOUR_MS
+        months = [pd.Timestamp(start, unit="ms").to_period("M").start_time]  # UTC month starts, naive
+        while months[-1].value // 1_000_000 < hi:
+            months.append(months[-1] + pd.offsets.MonthBegin())
+        bounds = [int(m.value // 1_000_000) for m in months]
+        parts = []
+        for m0, m1 in zip(bounds, bounds[1:]):
+            key = (tuple(feeds), s.ticker, m0)
+            settled = m1 <= newest  # wholly before the newest minute: only a correction or backfill changes it
+            with self._rollup_lock:
+                hit = self._rollup.get(key) if settled else None
+            if hit is not None and time.monotonic() - hit[0] < ROLLUP_TTL_S:
+                parts.append(hit[1])
+                continue
+            minutes = self._merged(s, feeds, "minute", m0, m1)
+            bins = _empty() if minutes is None else resample(minutes, "minute", 30, "extended")
+            if settled:
+                with self._rollup_lock:
+                    self._rollup[key] = (time.monotonic(), bins)
+            parts.append(bins)
+        parts = [p for p in parts if len(p)]
+        if not parts:
+            return None
+        bins = pd.concat(parts) if len(parts) > 1 else parts[0]
+        t = epoch_ms(bins.index)
+        return bins[(t >= start) & (t < hi)]
+
+    def _built(self, s, feeds, base, period, span, session, lo, hi) -> pd.DataFrame:
+        """The bars of [lo, hi) at the level, built from the feeds' base bars in it (best feed
+        first per bar; hours and 30 minutes from their 30-minute bins, _half_hours), with the
+        feeds' own bars at the level in place of those built here."""
+        rolled = base == "minute" and (period == "hour" or (period == "minute" and span == 30))
+        merged = self._half_hours(s, feeds, lo, hi) if rolled else self._merged(s, feeds, base, lo, hi)
+        if merged is None or not len(merged):
             return _empty()
-        merged = merge_frames(parts) if len(parts) > 1 else parts[0]
         own = period == base and span == 1
         bars = resample(merged, period, span, session, align_hours_to_open=s.asset in ("stock", "index"),
                         utc_days=utc_days(s), session_hours=session_hours(s))

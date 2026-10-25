@@ -129,14 +129,18 @@ def regular_session(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return frame
     local = frame.index.tz_convert(ET)
-    t = local.time
+    # wall-clock time of day in microseconds (as datetime.time compares; elapsed time from midnight
+    # differs on the days the clocks change), against each day's close: one look-up a day, not a bar
+    hour, minute, second, micro = (np.asarray(f, dtype=np.int64) for f in
+                                   (local.hour, local.minute, local.second, local.microsecond))  # int32 overflows
+    tod = ((hour * 60 + minute) * 60 + second) * 1_000_000 + micro
     days = local.normalize()
     unique = days.unique()
-    closes = {d: _regular_close(d.date()) for d in unique}
-    close = days.map(lambda d: closes[d])
-    keep = (t >= REGULAR_OPEN) & np.array([c is not None for c in close])
-    keep &= np.array([c is not None and tt < c for tt, c in zip(t, close)])
-    return frame[keep]
+    closes = np.array([-1 if c is None else (c.hour * 60 + c.minute) * 60_000_000
+                       for c in (_regular_close(d.date()) for d in unique)], dtype=np.int64)
+    close = closes[unique.get_indexer(days)]
+    opens = (REGULAR_OPEN.hour * 60 + REGULAR_OPEN.minute) * 60_000_000
+    return frame[(tod >= opens) & (tod < close)]  # closed days: close -1
 
 
 def _regular_close(d) -> time | None:

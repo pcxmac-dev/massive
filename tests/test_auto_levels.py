@@ -320,3 +320,25 @@ def test_new_bars_build_the_newest_bricks_again_and_older_pages_keep_theirs(stor
     monkeypatch.setattr(window_module, "BRICK_TTL_S", 0.0)  # kept no longer: built again
     reader.bricks("massive", "SPCX", "extended", Style(type="renko"), limit=5)
     assert len(builds) == 3
+
+
+def test_hours_come_from_half_hours_read_once_a_month(store, monkeypatch):
+    store.upsert_bars("massive", "SPCX", "minute", 1, _minutes("2026-09-15", 9.0))  # a settled month before October
+    engine = BarEngine(store)
+    reader = WindowReader(engine)
+    reads = []
+    merged = reader._merged
+    monkeypatch.setattr(reader, "_merged", lambda s, feeds, base, lo, hi: reads.append((base, lo)) or
+                        merged(s, feeds, base, lo, hi))
+    september, october = _ms("2026-09-01 00:00", "UTC"), _ms("2026-10-01 00:00", "UTC")
+    reader.page("*", "SPCX", "hour", 4, "extended", limit=1000)
+    assert sorted(reads) == [("minute", september), ("minute", october)]
+    reads.clear()
+    hourly = _all_pages(reader, "*", "hour", 1, "regular", limit=1000)  # another level: the same bins
+    assert reads == [("minute", october)]  # the newest month is read again (live bars land there), not September
+    whole = engine.bars("*", "SPCX", "hour", 1, "regular", limit=100_000)["bars"]
+    assert [_key(b) for b in hourly] == [_key(b) for b in whole]
+    monkeypatch.setattr(window_module, "ROLLUP_TTL_S", 0.0)  # kept no longer: read again
+    reads.clear()
+    reader.page("*", "SPCX", "minute", 30, "extended", limit=1000)
+    assert sorted(reads) == [("minute", september), ("minute", october)]
