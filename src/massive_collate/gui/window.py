@@ -13,17 +13,27 @@ stock hours from the open, UTC days for crypto and forex, CME sessions for futur
 feed's own bars at the level replace the ones built here at the same times (sent data is prime).
 Merged charts take each base bar from the best-ranked feed holding it (bars.merge_frames).
 Continuous futures (contracts stitched at rolls) and the composite model keep the series path.
+
+Chart types and models are drawn from the same pages, as the series path draws them: Heikin Ashi
+and the 1st and 2nd derivatives from the page and the bars beside it that they need, Fourier from
+the page's whole segments (sessions), the integral at days and longer (each value sums the history
+before it; finer, it keeps the series path). Price-based types (Renko, Kagi, line break, point &
+figure, range) follow price, not time: they are built whole, once, from one level (brick_level),
+and paged. Box plots keep the series path.
 """
 from __future__ import annotations
 
 import json
+import threading
 import time
 from datetime import datetime, timezone
 
 import pandas as pd
 
-from .bars import (CALENDAR, COLUMNS, MERGED, MODEL_SOURCES, Series, _aggregate, _regular_close, calendar_key,
-                   decimals, epoch_ms, frame_from_bars, merge_frames, resample, session_hours, to_records, utc_days)
+from ..calc.derivatives import Model, apply_model, segments
+from .bars import (CALENDAR, COLUMNS, MERGED, MODEL_SOURCES, PERIOD_SECONDS, PRICE_BASED, TIME_TYPES, Series, Style,
+                   _aggregate, _regular_close, _SizedCache, calendar_key, decimals, epoch_ms, frame_from_bars,
+                   merge_frames, model_info, resample, session_hours, style_used, to_records, transformed, utc_days)
 
 # Every level the chart moves through, finest first.
 LEVELS = (("second", 1), ("second", 30), ("minute", 1), ("minute", 5), ("minute", 30), ("hour", 1), ("hour", 2),
@@ -33,6 +43,38 @@ UNIT_MS = {"second": 1_000, "minute": 60_000, "hour": 3_600_000, "day": 86_400_0
 BASE = {"second": "second", "minute": "minute", "hour": "minute"}  # the stored bars a level is built from
 PAGE = 2000  # bars per page, about three screens of candles at their narrowest
 LEVELS_TTL_S = 60.0
+# Price-based charts (Renko, Kagi, line break, point & figure, range) are built whole: each brick
+# depends on every one before it. From the finest level whose whole history is at most BRICK_ROWS
+# bars, read from at most BRICK_READ base bars, reaching back to within COVER_MS of the series'
+# first bar (days for a long history: twenty years of minutes is millions of bars to walk).
+BRICK_ROWS = 100_000
+BRICK_READ = 400_000
+COVER_MS = 7 * 86_400_000
+BRICK_TTL_S = 120.0  # an older page may come from a build this old while new bars arrive
+BRICK_CACHE_BYTES = 300_000_000
+HA_WARMUP = 64  # Heikin Ashi's open halves its first bar's weight each bar: gone below a float's precision
+# Fourier fits each segment (a session: up to the next gap) whole; where a market runs without
+# gaps (crypto, or gaps not treated as breaks) it is fitted over this many bars either side.
+FOURIER_CONTEXT = 100_000
+MODEL_SKIP_PAGES = 10  # pages of bars all too short for a model's window passed over to reach its values
+
+
+def _empty() -> pd.DataFrame:
+    return pd.DataFrame(columns=[*COLUMNS, "derived"], index=pd.DatetimeIndex([], tz="America/New_York"))
+
+
+def _paged(bars: pd.DataFrame, to_ms, after_ms, since_ms, limit) -> dict:
+    """A page of bars held whole: the newest `limit` before `to_ms` (or of all), the oldest after
+    `after_ms`, or all from `since_ms`."""
+    ts = epoch_ms(bars.index)
+    if since_ms is not None:
+        return {"frame": bars[ts >= since_ms], "more": False, "newer": False}
+    if after_ms is not None:
+        newer = bars[ts > after_ms]
+        return {"frame": newer.head(limit), "more": True, "newer": len(newer) > limit}
+    older = bars[ts < to_ms] if to_ms is not None else bars
+    return {"frame": older.tail(limit), "more": len(older) > limit,
+            "newer": to_ms is not None and bool((ts >= to_ms).any())}
 
 
 def per_day(asset: str, period: str, span: int, session: str) -> float:
@@ -64,6 +106,8 @@ class WindowReader:
     def __init__(self, engine):
         self.engine = engine
         self._levels: dict[tuple, tuple[float, list]] = {}
+        self._bricks = _SizedCache(BRICK_CACHE_BYTES, 16)
+        self._bricks_lock = threading.Lock()
 
     @property
     def store(self):
@@ -143,11 +187,16 @@ class WindowReader:
         {"bars", "more": older ones exist, "newer": newer ones exist, "level"}."""
         s = self.series(source, ticker)
         session = s.session_for(session)
-        feeds = self.feeds(source, ticker)
-        out = (self._calendar_page if period in CALENDAR else self._intraday_page)(
-            s, feeds, period, span, session, to_ms, after_ms, since_ms, max(1, limit))
+        out = self._frame_page(s, self.feeds(source, ticker), period, span, session, to_ms, after_ms, since_ms,
+                               max(1, limit))
+        out["bars"] = to_records(out.pop("frame"))
         out["level"] = {"type": period, "span": span, "label": level_label(period, span)}
         return out
+
+    def _frame_page(self, s, feeds, period, span, session, to_ms, after_ms, since_ms, limit) -> dict:
+        """page() with the bars as a frame ("frame"), for what is drawn from them."""
+        return (self._calendar_page if period in CALENDAR else self._intraday_page)(
+            s, feeds, period, span, session, to_ms, after_ms, since_ms, limit)
 
     def _intraday_page(self, s, feeds, period, span, session, to_ms, after_ms, since_ms, limit) -> dict:
         base = BASE[period]
@@ -155,7 +204,7 @@ class WindowReader:
         with self.engine.lock:
             edges = [e for e in (self.store.bar_edges(f, s.ticker, base) for f in feeds) if e]
         if not edges:
-            return {"bars": [], "more": False, "newer": False}
+            return {"frame": _empty(), "more": False, "newer": False}
         first, end = min(e[0] for e in edges), max(e[1] for e in edges) + base_ms
         # Wall-clock time a bar takes, sessions and nights included: the first window's width
         factor = 1.0 if s.around_the_clock else (5.5 if session == "regular" else 2.2)
@@ -163,7 +212,7 @@ class WindowReader:
             after_ms, since_ms = since_ms - 1, None  # far behind the newest: a page of newer bars, not years of them
         if since_ms is not None:  # the live tail: from the bar the chart has last, whole
             bars = self._built(s, feeds, base, period, span, session, since_ms - 2 * step, end)
-            return {"bars": to_records(bars[epoch_ms(bars.index) >= since_ms]), "more": False, "newer": False}
+            return {"frame": bars[epoch_ms(bars.index) >= since_ms], "more": False, "newer": False}
         width = limit * step * factor
         if after_ms is not None:  # newer: the bars after the newest the chart has
             while True:
@@ -176,7 +225,7 @@ class WindowReader:
             complete = hi >= end
             if not complete and len(bars):
                 bars = bars.iloc[:-1]  # the newest may be cut by the window: the next page reads it whole
-            return {"bars": to_records(bars.head(limit)), "more": True, "newer": not complete or len(bars) > limit}
+            return {"frame": bars.head(limit), "more": True, "newer": not complete or len(bars) > limit}
         hi = min(to_ms, end) if to_ms is not None else end
         while True:
             lo = max(first, hi - width)
@@ -187,7 +236,7 @@ class WindowReader:
         more = lo > first
         if more and len(bars):
             bars = bars.iloc[1:]  # the oldest may be cut by the window: the next page reads it whole
-        return {"bars": to_records(bars.tail(limit)), "more": more or len(bars) > limit,
+        return {"frame": bars.tail(limit), "more": more or len(bars) > limit,
                 "newer": to_ms is not None and to_ms < end}
 
     def _built(self, s, feeds, base, period, span, session, lo, hi) -> pd.DataFrame:
@@ -197,7 +246,7 @@ class WindowReader:
             parts = [frame_from_bars(df) for df in
                      (self.store.bars_window([f], s.ticker, base, int(lo), int(hi)) for f in feeds) if len(df)]
         if not parts:
-            return pd.DataFrame(columns=[*COLUMNS, "derived"], index=pd.DatetimeIndex([], tz="America/New_York"))
+            return _empty()
         merged = merge_frames(parts) if len(parts) > 1 else parts[0]
         own = period == base and span == 1
         bars = resample(merged, period, span, session, align_hours_to_open=s.asset in ("stock", "index"),
@@ -235,7 +284,7 @@ class WindowReader:
             parts = [frame_from_bars(df) for df in
                      (self.store.load_bars([s.ticker], "day", 1, source=f) for f in feeds) if len(df)]
         if not parts:
-            return pd.DataFrame(columns=[*COLUMNS, "derived"], index=pd.DatetimeIndex([], tz="America/New_York"))
+            return _empty()
         daily = merge_frames(parts) if len(parts) > 1 else parts[0]
         daily.index = calendar_key(daily.index, "day", utc=utc_days(s), session_hours=session_hours(s))
         daily = daily[~daily.index.duplicated(keep="first")]
@@ -243,24 +292,199 @@ class WindowReader:
             daily = daily[[_regular_close(d.date()) is not None for d in daily.index]]
         return daily
 
-    def _calendar_page(self, s, feeds, period, span, session, to_ms, after_ms, since_ms, limit) -> dict:
+    def _calendar_bars(self, s, feeds, period) -> pd.DataFrame:
+        """Every bar of a calendar level (days, weeks, months, years): few, read whole."""
         daily = self._days(s, feeds)
-        bars = daily if period == "day" else _aggregate(
+        return daily if period == "day" else _aggregate(
             daily.groupby(calendar_key(daily.index, period, utc=utc_days(s)))).assign(derived=True)
-        ts = epoch_ms(bars.index)
-        if since_ms is not None:
-            return {"bars": to_records(bars[ts >= since_ms]), "more": False, "newer": False}
-        if after_ms is not None:
-            newer = bars[ts > after_ms]
-            return {"bars": to_records(newer.head(limit)), "more": True, "newer": len(newer) > limit}
-        older = bars[ts < to_ms] if to_ms is not None else bars
-        return {"bars": to_records(older.tail(limit)), "more": len(older) > limit,
-                "newer": to_ms is not None and bool((ts >= to_ms).any())}
+
+    def _calendar_page(self, s, feeds, period, span, session, to_ms, after_ms, since_ms, limit) -> dict:
+        return _paged(self._calendar_bars(s, feeds, period), to_ms, after_ms, since_ms, limit)
+
+    def _level_bars(self, s, feeds, period, span, session) -> pd.DataFrame:
+        """Every bar of a level, from its base's first bar to its last."""
+        if period in CALENDAR:
+            return self._calendar_bars(s, feeds, period)
+        base = BASE[period]
+        with self.engine.lock:
+            edges = [e for e in (self.store.bar_edges(f, s.ticker, base) for f in feeds) if e]
+        if not edges:
+            return _empty()
+        return self._built(s, feeds, base, period, span, session, min(e[0] for e in edges),
+                           max(e[1] for e in edges) + UNIT_MS[base])
+
+    # -- chart types and models ----------------------------------------------------------------
+    def styled_page(self, source: str, ticker: str, period: str, span: int = 1, session: str = "regular",
+                    style: Style = Style(), model: Model = Model(), to_ms: int | None = None,
+                    after_ms: int | None = None, since_ms: int | None = None, limit: int = PAGE) -> dict:
+        """A page as page() gives it, drawn as `style` and in `model`'s units, the same as the
+        series path draws them (BarEngine.bars): price-based types from their own level, built
+        whole (bricks); Heikin Ashi and the models from the page's bars and the bars beside them
+        that they need (a model's window either side; Fourier to the ends of the page's segments)."""
+        model.validate()
+        if style.type in PRICE_BASED:
+            if not model.is_price:
+                raise ValueError("derivatives and integrals apply to time-based chart types")
+            return self.bricks(source, ticker, session, style, to_ms=to_ms, after_ms=after_ms, since_ms=since_ms,
+                               limit=limit)
+        if style.type not in TIME_TYPES and style.type != "heikin_ashi":
+            raise ValueError(f"{style.type} is not drawn from a window")
+        if not model.is_price and style.type not in TIME_TYPES:
+            raise ValueError("derivatives and integrals apply to time-based chart types")
+        if model.kind == "integral" and period not in CALENDAR:
+            raise ValueError("the integral sums the whole history: drawn from a window at days and longer only")
+        s = self.series(source, ticker)
+        session = s.session_for(session)
+        feeds = self.feeds(source, ticker)
+        out = self._frame_page(s, feeds, period, span, session, to_ms, after_ms, since_ms, max(1, limit))
+        bars = out.pop("frame")
+        used = {"type": style.type}
+        if style.type == "heikin_ashi":
+            bars = self._heikin_ashi(s, feeds, period, span, session, bars)
+        elif not model.is_price:
+            values, fitted = self._modelled(s, feeds, period, span, session, bars, model)
+            for _ in range(MODEL_SKIP_PAGES):  # every bar in stretches too short for the window: the next page
+                onward = out["newer"] if after_ms is not None else out["more"]
+                if len(values) or not len(bars) or since_ms is not None or not onward:
+                    break
+                edge = int(epoch_ms(bars.index[-1:] if after_ms is not None else bars.index[:1])[0])
+                out = self._frame_page(s, feeds, period, span, session, None if after_ms is not None else edge,
+                                       edge if after_ms is not None else None, None, max(1, limit))
+                bars = out.pop("frame")
+                values, fitted = self._modelled(s, feeds, period, span, session, bars, model)
+            out["model"] = model_info(model, values, len(bars) - len(values))
+            used.update(model=model.kind, window=model.window, basis=model.basis, per=model.per)
+            if fitted:
+                out["approximate"] = (f"Fourier fitted over the {fitted:,} bars around this window: the market runs "
+                                      "without a break that long, so a fit over its whole history may differ slightly")
+            bars = values
+        out.update(bars=to_records(bars), style=used,
+                   level={"type": period, "span": span, "label": level_label(period, span)})
+        return out
+
+    def _heikin_ashi(self, s, feeds, period, span, session, bars) -> pd.DataFrame:
+        """Heikin Ashi of the page's bars: each open carries the bar before it, so from HA_WARMUP
+        bars before the page (the whole level for days and longer)."""
+        from . import charttypes as ct
+
+        if not len(bars):
+            return bars
+        if period in CALENDAR:
+            return ct.heikin_ashi(self._calendar_bars(s, feeds, period)).loc[bars.index]
+        first = int(epoch_ms(bars.index[:1])[0])
+        before = self._frame_page(s, feeds, period, span, session, first, None, None, HA_WARMUP)["frame"]
+        return ct.heikin_ashi(pd.concat([before, bars])).iloc[len(before):]
+
+    def _modelled(self, s, feeds, period, span, session, bars, model: Model) -> tuple[pd.DataFrame, int]:
+        """The model's values at `bars` (those it gives: none in stretches shorter than its window)
+        as from the whole history, and 0; or, for a Fourier fit cut short in a market without gaps,
+        the number of bars it was fitted over."""
+        step_s = PERIOD_SECONDS[period] * span
+        if not len(bars):
+            return apply_model(bars, model, step_s), 0
+        if period in CALENDAR:  # few: the whole level
+            values = apply_model(self._calendar_bars(s, feeds, period), model, step_s)
+            return values[values.index.isin(bars.index)], 0
+        first, last = (int(t) for t in epoch_ms(bars.index[[0, -1]]))
+        before, cut_before = self._beside(s, feeds, period, span, session, first, True, model)
+        after, cut_after = self._beside(s, feeds, period, span, session, last, False, model)
+        held = pd.concat([before, bars, after])
+        values = apply_model(held, model, step_s)
+        return values[values.index.isin(bars.index)], (len(held) if cut_before or cut_after else 0)
+
+    def _beside(self, s, feeds, period, span, session, edge_ms, older, model: Model) -> tuple[pd.DataFrame, bool]:
+        """The bars beside a page that its model values need (older: before `edge_ms`, else after):
+        a derivative's window; for Fourier the rest of the edge bar's segment, up to the next gap
+        (a session), at most FOURIER_CONTEXT bars (then True: the fit is cut there)."""
+        def read(n):
+            p = self._frame_page(s, feeds, period, span, session, edge_ms if older else None,
+                                 None if older else edge_ms, None, n)
+            return p["frame"], not (p["more"] if older else p["newer"])
+
+        if model.kind != "fourier":
+            return read(model.window)[0], False
+        step_s = PERIOD_SECONDS[period] * span
+        edge = pd.DatetimeIndex([pd.Timestamp(edge_ms, unit="ms", tz="UTC")]).tz_convert("America/New_York")
+        n = min(FOURIER_CONTEXT, max(model.window, 2000))
+        while True:
+            bars, exhausted = read(n)
+            if model.reset_gaps and len(bars):
+                idx = bars.index.append(edge) if older else edge.append(bars.index)
+                seg = segments(idx, step_s, True)
+                if seg[0] != seg[-1]:  # a gap: the segment ends there
+                    own = seg[-1] if older else seg[0]
+                    return bars[(seg[:-1] if older else seg[1:]) == own], False
+            if exhausted:
+                return bars, False
+            if n >= FOURIER_CONTEXT:
+                return bars, True
+            n = min(FOURIER_CONTEXT, n * 4)
+
+    # -- price-based chart types ------------------------------------------------------------------
+    def brick_level(self, source: str, ticker: str, session: str = "regular") -> dict | None:
+        """The level a price-based chart is built from: the finest whose whole history is at most
+        BRICK_ROWS bars, read from at most BRICK_READ base bars, and reaches back to the series'
+        first (see BRICK_ROWS); the coarsest there is otherwise."""
+        levels = self.levels(source, ticker)
+        if not levels:
+            return None
+        session = self.series(source, ticker).session_for(session)
+        oldest = min(lv["first"] for lv in levels)
+        by_type = {(lv["type"], lv["span"]): lv for lv in levels}
+        for lv in levels:
+            if lv["first"] > oldest + COVER_MS:
+                continue  # its data starts later: bricks from it would start there
+            if lv["type"] in CALENDAR:
+                if estimated_rows(lv, session) <= BRICK_ROWS:
+                    return lv
+                continue
+            base = BASE[lv["type"]]
+            if estimated_rows(by_type[(base, 1)], session) > 10 * BRICK_READ:
+                continue  # far too many to count
+            read = self.base_rows(source, ticker, base)
+            if read <= BRICK_READ and min(read, estimated_rows(lv, session)) <= BRICK_ROWS:
+                return lv
+        return levels[-1]
+
+    def bricks(self, source: str, ticker: str, session: str, style: Style, to_ms: int | None = None,
+               after_ms: int | None = None, since_ms: int | None = None, limit: int = PAGE) -> dict:
+        """A page of a price-based chart (Renko, Kagi, line break, point & figure, range), built
+        whole from its level (brick_level) as the series path builds it at that interval, and kept
+        while the data is unchanged (older pages: up to BRICK_TTL_S while new bars arrive)."""
+        s = self.series(source, ticker)
+        session = s.session_for(session)
+        lv = self.brick_level(source, ticker, session)
+        if lv is None:
+            return {"bars": [], "more": False, "newer": False, "style": {"type": style.type}}
+        out, used = self._built_bricks(s, source, ticker, lv, session, style, older=to_ms is not None)
+        page = _paged(out, to_ms, after_ms, since_ms, max(1, limit))
+        page["bars"] = to_records(page.pop("frame"))
+        page.update(style=used, total=int(len(out)),
+                    level={"type": lv["type"], "span": lv["span"], "label": lv["label"], "fixed": True})
+        if style.type == "range":
+            page["approximate"] = (f"range bars built from {lv['label']} bars, not ticks: the order of each bar's "
+                                   "high and low is assumed")
+        return page
+
+    def _built_bricks(self, s, source, ticker, lv, session, style, older) -> tuple[pd.DataFrame, dict]:
+        key = (source, s.ticker, lv["type"], lv["span"], session, style)
+        fp = self.engine.fingerprint(source, ticker)
+        with self._bricks_lock:
+            hit = self._bricks.get(key)
+        if hit and (hit[0] == fp or (older and time.monotonic() - hit[1] < BRICK_TTL_S)):
+            return hit[2], hit[3]
+        base = self._level_bars(s, self.feeds(source, ticker), lv["type"], lv["span"], session)
+        prices = base[["open", "high", "low", "close"]].to_numpy().ravel()
+        used = style_used(style, base, decimals(prices, cap=6, minimum=2) if len(prices) else 2)
+        out = transformed(base, used)
+        with self._bricks_lock:
+            self._bricks[key] = (fp, time.monotonic(), out, used)
+        return out, used
 
     def range_stats(self, source: str, ticker: str, period: str, span: int, session: str, from_ms: int,
-                    to_ms: int) -> dict:
+                    to_ms: int, model: Model = Model()) -> dict:
         """The highlight's statistics (bars.summarize_range) from the bars of its own window at the
-        level: the same as from the whole history, without loading it."""
+        level, in the model's units: the same as from the whole history, without loading it."""
         from .bars import summarize_range
 
         s = self.series(source, ticker)
@@ -268,12 +492,16 @@ class WindowReader:
         feeds = self.feeds(source, ticker)
         lo, hi = sorted((int(from_ms), int(to_ms)))
         if period in CALENDAR:
-            daily = self._days(s, feeds)
-            bars = daily if period == "day" else _aggregate(daily.groupby(calendar_key(daily.index, period, utc=utc_days(s))))
+            bars = self._calendar_bars(s, feeds, period)
         else:
             step = UNIT_MS[period] * span
             bars = self._built(s, feeds, BASE[period], period, span, session, lo - step, hi + step)
-        return summarize_range(bars, lo, hi)
+        if not model.validate().is_price:
+            if model.kind == "integral" and period not in CALENDAR:
+                raise ValueError("the integral sums the whole history: drawn from a window at days and longer only")
+            ts = epoch_ms(bars.index)
+            bars, _ = self._modelled(s, feeds, period, span, session, bars[(ts >= lo) & (ts <= hi)], model)
+        return summarize_range(bars, lo, hi, model)
 
     # -- the virtual level 2: what traded at each price in one bar ------------------------------
     PROFILE_TICK_MS = 86_400_000  # bars up to a day read the feeds' ticks; longer ones their finer bars

@@ -262,7 +262,7 @@ const chart = kc.init('chart', {
 
 chart.setDataLoader({
   getBars: async ({ type, timestamp, symbol, period, callback }) => {
-    if (type === 'update' || (type === 'backward' && !state.meta?.auto)) { callback([], { backward: false }); return; }
+    if (type === 'update') { callback([], { backward: false }); return; }
     const token = type === 'init' ? ++state.loadToken : state.loadToken;
     const params = {
       source: symbol.source, ticker: symbol.ticker, period: period.type, span: period.span,
@@ -279,6 +279,14 @@ chart.setDataLoader({
       if (chart.getTimezone() !== zone) chart.setTimezone(zone);
       callback(res.bars, { forward: type === 'backward' ? undefined : res.more,
                            backward: type === 'forward' ? undefined : !!res.newer });
+      if (type === 'init' && res.level?.fixed && (res.level.type !== period.type || res.level.span !== period.span)) {
+        // a price-based chart is built from a level of its own (gui/window.py bricks): its times, once more
+        state.period = { type: res.level.type, span: res.level.span };
+        renderPeriods();
+        chart.setPeriod(state.period);  // from the server's cache
+        return;
+      }
+      if (type === 'init' && !res.bars.length && res.model?.hidden && state.meta?.auto && skipEmptyLevel()) return;
       if (type === 'init' || type === 'backward') state.hasNewer = !!res.newer;  // a window in the past: no live tail
       if (type === 'init' && state.fitAll) {  // a symbol opens on its whole history
         state.fitAll = false;
@@ -288,6 +296,7 @@ chart.setDataLoader({
       if (type === 'init') {
         state.styleUsed = res.style;
         state.approximate = res.approximate || null;
+        if (state.model.kind === 'fourier') renderModelControls();  // a fit cut short says so
         state.derivedFrom = res.derivedFrom || null;
         state.baseTotal = (res.total || 0) * lodFor();  // bars at full detail
         if (applyModelPrecision(res)) return;  // reloads once with the right precision
@@ -575,8 +584,9 @@ function chooseLevel(days, fromMs, current = null) {
   const fit = chartWidth() / AUTO_MIN_PX;
   const oldest = Math.min(...levels.map((lv) => lv.first));
   const from = Math.max(Number.isFinite(fromMs) ? fromMs : oldest, oldest);
+  const empty = state.model.kind === 'price' ? null : emptyLevels();
   for (const lv of levels) {
-    if (lv.first > from + LEVEL_MS.day) continue;
+    if (lv.first > from + LEVEL_MS.day || empty?.has(`${lv.type}:${lv.span}`)) continue;
     const same = current && lv.type === current.type && lv.span === current.span;
     if (days * levelPerDay(lv) <= fit * (same ? 1 + AUTO_SLACK : 1 - AUTO_SLACK)) return lv;
   }
@@ -603,6 +613,7 @@ function checkLod() {
     fitWhole(n);
     return;
   }
+  if (PRICE_BASED.has(state.chartType)) return;  // bricks are built from one level, whatever the zoom
   const cur = currentLevel();
   if (!cur) return;
   const w = visibleWindow();
@@ -617,6 +628,39 @@ function checkLod() {
   state.period = { type: lv.type, span: lv.span };
   renderPeriods();
   chart.setPeriod(state.period);
+}
+
+// Levels where the model draws nothing, for this symbol, session and model: every session there is
+// shorter than its window (an hour's bars in a regular session: 7 a day; the default window 13).
+function emptyLevels() {
+  const ctx = `${state.source}:${state.ticker}|${state.session}|${JSON.stringify(modelQuery())}`;
+  if (state.emptyLevels?.ctx !== ctx) state.emptyLevels = { ctx, set: new Set() };
+  return state.emptyLevels.set;
+}
+
+// Passes over the level just loaded when the model drew nothing there: to the level that fits the
+// window the chart was moving to (as the zoom would choose it), else the next coarser.
+function skipEmptyLevel() {
+  const levels = autoLevels();
+  const i = levels.findIndex((lv) => lv.type === state.period.type && lv.span === state.period.span);
+  if (i < 0) return false;
+  const was = levels[i];
+  const empty = emptyLevels();
+  empty.add(`${was.type}:${was.span}`);
+  const sw = state.lodSwitch;
+  let next;
+  if (sw) {
+    const days = chartWidth() / sw.barSpace / levelPerDay(was);
+    next = chooseLevel(days, sw.anchor != null ? sw.anchor - days * LEVEL_MS.day / 2 : NaN);
+  } else {
+    next = levels.slice(i + 1).find((lv) => !empty.has(`${lv.type}:${lv.span}`));
+  }
+  if (!next || (next.type === was.type && next.span === was.span)) return false;
+  if (sw) state.lodSwitch = { ...sw, barSpace: sw.barSpace * levelPerDay(was) / levelPerDay(next) };  // same span of time
+  state.period = { type: next.type, span: next.span };
+  renderPeriods();
+  chart.setPeriod(state.period);
+  return true;
 }
 
 // A symbol opens on its whole history: every bar of the opening level across the chart.
@@ -738,9 +782,11 @@ function renderModelControls() {
     : m.kind === 'fourier' ? `cycles of ${windowForDetail(m.detail)}+ bars (≈ ${windowSpan()}) kept`
       : `${windowForDetail(m.detail)} bars ≈ ${windowSpan()}`
     + (hidden ? ` · ${compact(hidden)} bars not drawn` : '');
-  note.classList.toggle('warn', hidden > 0);
-  note.title = hidden ? 'Stretches of data shorter than the smoothing window are not drawn: fitted to a whole short '
-    + 'stretch, the slope would be a single polynomial, not the price\'s. Slide Detail right for a shorter window.' : '';
+  const cut = m.kind === 'fourier' && state.approximate;  // a market without gaps: fitted around the window
+  if (cut) note.textContent += ' · fitted around the window';
+  note.classList.toggle('warn', hidden > 0 || !!cut);
+  note.title = cut ? state.approximate : hidden ? 'Stretches of data shorter than the smoothing window are not drawn: '
+    + 'fitted to a whole short stretch, the slope would be a single polynomial, not the price\'s.' : '';
   for (const opt of $('typeSelect').options) opt.disabled = m.kind !== 'price' && PRICE_ONLY_TYPES.has(opt.value);
 }
 
@@ -781,6 +827,8 @@ function setModel(patch) {
 async function reloadWithModelPrecision() {
   const sym = chart.getSymbol();
   let want = state.meta?.pricePrecision;
+  // the auto-ranging chart's first page is as quick as the probe and says its decimals (applyModelPrecision)
+  if (state.meta?.auto && state.model.kind !== 'price') { chart.resetData(); return; }
   if (sym && state.model.kind !== 'price') {
     try {
       const p = chart.getPeriod();
@@ -808,7 +856,12 @@ function applyModelPrecision(res) {
     state.modelHidden = res.model.hidden || 0;
     renderModelControls();
   }
-  if (sym.pricePrecision === want) return false;
+  // Zooming through levels with one model keeps its decimals unless a level needs more: setting
+  // them reloads the chart, which doubled every level switch.
+  const key = `${sym.source}:${sym.ticker}|${JSON.stringify(modelQuery())}`;
+  const zooming = res.model && state.meta?.auto && state.precisionKey === key;
+  state.precisionKey = key;
+  if (sym.pricePrecision === want || (zooming && want < sym.pricePrecision)) return false;
   chart.setSymbol({ ...sym, pricePrecision: want });  // reloads once
   return true;
 }
@@ -1742,10 +1795,15 @@ function renderPeriods() {
     box.replaceChildren(tag);
   }
   const lv = currentLevel();
-  tag.textContent = `auto: ${lv ? lv.label : periodLabel(state.period)}`;
-  tag.title = 'Auto-ranging: the candles follow the zoom. A symbol opens on its whole history; zooming in moves to '
-    + 'finer levels (days, hours, minutes, seconds) while the data has them for the window on screen, and where it '
-    + 'has none finer the candles grow. This is the level shown now.';
+  const label = lv ? lv.label : periodLabel(state.period);
+  tag.textContent = `auto: ${label}`;
+  if (state.model.kind !== 'price') renderModelControls();  // the model window's span in time is the level's
+  tag.title = PRICE_BASED.has(state.chartType)
+    ? `Built from ${label} bars over the whole history: bricks follow price, not time, and each depends on every `
+      + 'one before it, so they come from one level, the finest that builds in a moment; zooming does not change it.'
+    : 'Auto-ranging: the candles follow the zoom. A symbol opens on its whole history; zooming in moves to '
+      + 'finer levels (days, hours, minutes, seconds) while the data has them for the window on screen, and where it '
+      + 'has none finer the candles grow. This is the level shown now.';
 }
 
 function renderSession() {

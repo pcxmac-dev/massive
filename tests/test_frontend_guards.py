@@ -58,3 +58,29 @@ def test_the_market_map_is_drawn_once_the_dialog_has_a_size():
     assert opening.index("showModal()") < opening.index("renderSymbolList(")  # open first: a closed dialog is 0 px wide
     drawing = app.split("function renderMapList(", 1)[1].split("\n}\n", 1)[0]
     assert drawing.index("clientWidth") < drawing.index("MarketMap.render(")  # never laid out at no size
+
+
+def _function(src: str, name: str) -> str:
+    return src.split(f"function {name}(", 1)[1].split("\n}\n", 1)[0]
+
+
+def test_bricks_keep_their_level_whatever_the_zoom():
+    app = _js("app.js")
+    assert "if (PRICE_BASED.has(state.chartType)) return;" in _function(app, "checkLod")
+    loader = app.split("chart.setDataLoader(", 1)[1]
+    assert "res.level?.fixed" in loader  # the level the server built them from, shown as the chart's
+
+
+def test_a_level_where_the_model_draws_nothing_is_passed_over():
+    app = _js("app.js")
+    assert "emptyLevels()" in _function(app, "chooseLevel")
+    assert "skipEmptyLevel()" in app.split("chart.setDataLoader(", 1)[1]
+
+
+def test_the_auto_chart_loads_a_model_without_a_whole_history_probe():
+    probe = _function(_js("app.js"), "reloadWithModelPrecision")
+    assert probe.index("state.meta?.auto") < probe.index("api('/api/bars'")  # the probe has no auto: the series path
+
+
+def test_zooming_with_a_model_reloads_only_for_more_decimals():
+    assert "want < sym.pricePrecision" in _function(_js("app.js"), "applyModelPrecision")

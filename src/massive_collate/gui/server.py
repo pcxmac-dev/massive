@@ -20,7 +20,7 @@ from .. import live
 from ..config import Settings, load_settings
 from ..storage import LayoutLimit, Store
 from . import activity, astro
-from .bars import TIME_TYPES, BarEngine, Style, resample
+from .bars import CALENDAR, PRICE_BASED, TIME_TYPES, BarEngine, Style, resample
 from ..calc.derivatives import Model
 from .stats import details_subset, key_stats
 
@@ -160,10 +160,17 @@ class ChartApp:
         return out
 
     def _auto(self, q: dict[str, str], style_type: str = "candles") -> bool:
-        """Whether a request takes the auto-ranging path (window.py): asked for, a time-based chart
-        of the price, and a series it serves (not continuous futures or the composite model)."""
-        return q.get("auto") == "1" and style_type in TIME_TYPES and q.get("model", "price") == "price" \
-            and self.window.handles(q["source"], q["ticker"])
+        """Whether a request takes the auto-ranging path (window.py): asked for, a series it serves
+        (not continuous futures or the composite model) and a chart it draws: time-based types in
+        price or a model (the integral at days and longer: each of its values sums the history
+        before it), Heikin Ashi, and the price-based types (built whole, at a level of their own).
+        Box plots keep the series path."""
+        if q.get("auto") != "1" or not self.window.handles(q["source"], q["ticker"]):
+            return False
+        kind = q.get("model", "price")
+        if style_type in PRICE_BASED or style_type == "heikin_ashi":
+            return kind == "price"
+        return style_type in TIME_TYPES and (kind != "integral" or q.get("period", "minute") in CALENDAR)
 
     def meta(self, source: str, ticker: str, adjust: str = "none", auto: bool = False) -> dict:
         if auto and self.window.handles(source, ticker):  # its levels, without loading its history
@@ -210,17 +217,16 @@ class ChartApp:
         if (style.box is not None and style.box <= 0) or (style.reversal is not None and style.reversal <= 0) \
                 or not 1 <= style.lines <= 10:
             raise ValueError("box, reversal and lines must be positive (lines 1-10)")
+        to_ms = int(q["to"]) if q.get("to") else None
+        after_ms = int(q["after"]) if q.get("after") else None
+        since_ms = int(q["since"]) if q.get("since") else None
         if self._auto(q, style.type):
-            page = self.window.page(
+            return self.window.styled_page(
                 q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)), q.get("session", "regular"),
-                to_ms=int(q["to"]) if q.get("to") else None, after_ms=int(q["after"]) if q.get("after") else None,
-                since_ms=int(q["since"]) if q.get("since") else None, limit=limit)
-            return {**page, "style": {"type": style.type}}
+                style=style, model=_model(q), to_ms=to_ms, after_ms=after_ms, since_ms=since_ms, limit=limit)
         return self.engine.bars(
             q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
-            q.get("session", "regular"),
-            to_ms=int(q["to"]) if q.get("to") else None,
-            since_ms=int(q["since"]) if q.get("since") else None,
+            q.get("session", "regular"), to_ms=to_ms, since_ms=since_ms, after_ms=after_ms,
             limit=limit, style=style, adjust=_adjust(q.get("adjust")), lod=int(q.get("lod", 1)), model=_model(q),
         )
 
@@ -435,9 +441,14 @@ class ChartApp:
         if self._auto(q, style.type):  # projected from the level's newest bar, not the whole history
             from .projection import project
 
+            if style.type in PRICE_BASED:  # bricks follow price: no time axis to project
+                return {"timestamps": [], "last": None, "total": 0}
             period, span, session = q.get("period", "minute"), int(q.get("span", 1)), q.get("session", "regular")
             s = self.window.series(q["source"], q["ticker"])
-            newest = self.window.page(q["source"], q["ticker"], period, span, session, limit=1)["bars"]
+            model = _model(q)
+            # a model's newest value may be bars back (a stretch shorter than its window has none)
+            newest = self.window.styled_page(q["source"], q["ticker"], period, span, session, style=style, model=model,
+                                             limit=1 if model.is_price else 2 * model.window)["bars"]
             if not newest:
                 return {"timestamps": [], "last": None, "total": 0}
             last = pd.Timestamp(newest[-1]["timestamp"], unit="ms", tz="UTC").tz_convert("America/New_York")
@@ -458,9 +469,9 @@ class ChartApp:
         )
 
     def range_stats(self, q: dict[str, str]) -> dict:
-        if q.get("model", "price") == "price" and self.window.handles(q["source"], q["ticker"]):  # its own window only
+        if self._auto({**q, "auto": "1"}):  # its own window only
             return self.window.range_stats(q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
-                                           q.get("session", "regular"), int(q["from"]), int(q["to"]))
+                                           q.get("session", "regular"), int(q["from"]), int(q["to"]), model=_model(q))
         return self.engine.range_stats(
             q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
             q.get("session", "regular"), int(q["from"]), int(q["to"]), adjust=_adjust(q.get("adjust")),

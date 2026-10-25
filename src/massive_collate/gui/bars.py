@@ -353,6 +353,63 @@ TIME_TYPES = ("candles", "hollow", "bars", "volume_candles", "line", "line_marke
               "hlc_area", "baseline", "columns", "high_low")
 # Box plots: time bars with each bar's quartiles of traded price (calc/profile.py).
 BOX = "box"
+# Chart types that follow price, not time: a brick or line only when the price moves far enough.
+PRICE_BASED = ("renko", "line_break", "kagi", "point_figure", "range")
+
+
+def style_used(style: Style, base: pd.DataFrame, precision: int) -> dict:
+    """The parameters a transformed chart type (charttypes.TRANSFORMS) is drawn with: a box or
+    reversal not given is ATR(14) of `base` at its last bar, rounded to the prices' decimals."""
+    from . import charttypes as ct
+
+    default = ct.round_box(ct.atr(base), precision) if not base.empty else 1.0
+    box = style.box or default
+    used = {"type": style.type}
+    if style.type == "kagi":
+        used["reversal"] = style.reversal or default
+    elif style.type == "point_figure":
+        boxes = style.reversal if style.reversal is not None else 3
+        if boxes < 1 or boxes != int(boxes):
+            raise ValueError("point & figure reversal is a whole number of boxes (1 or more)")
+        used.update(box=box, reversal=int(boxes))
+    elif style.type == "line_break":
+        used["lines"] = style.lines
+    elif style.type in ("renko", "range"):
+        used["box"] = box
+    return used
+
+
+def transformed(base: pd.DataFrame, used: dict, fine: pd.DataFrame | None = None) -> pd.DataFrame:
+    """`base`'s bars drawn as the chart type `used` names, with its parameters (style_used).
+    Range bars are built from `fine` where given (the finest data), else from `base`."""
+    from . import charttypes as ct
+
+    kind = used["type"]
+    if kind == "heikin_ashi":
+        return ct.heikin_ashi(base)
+    if kind == "renko":
+        return ct.renko(base, used["box"])
+    if kind == "line_break":
+        return ct.line_break(base, used["lines"])
+    if kind == "kagi":
+        return ct.kagi(base, used["reversal"])
+    if kind == "point_figure":
+        return ct.point_figure(base, used["box"], used["reversal"])
+    return ct.range_bars(base if fine is None else fine, used["box"])
+
+
+def model_info(model: Model, values: pd.DataFrame, hidden: int) -> dict:
+    """What a page of model values says about them: the model, its unit, the decimals that show
+    it, the bars it leaves out (stretches too short for its window) and how it was derived."""
+    from dataclasses import asdict
+
+    from ..provenance import code_version
+
+    return {"kind": model.kind, "unit": model.unit_label(), "precision": model_precision(values["close"].to_numpy()),
+            "hidden": int(hidden), "window": model.window,
+            # an indicator is derived on request: how, with what code, and whether it looks ahead
+            "derivation": {"kind": "indicator", "code": code_version(), "settings": asdict(model),
+                           "lookAhead": not model.causal}}
 
 
 MERGED = "*"  # pseudo-source: every feed for a ticker combined
@@ -708,6 +765,7 @@ class BarEngine:
         self, source: str, ticker: str, period: str, span: int = 1, session: str = "regular",
         to_ms: int | None = None, since_ms: int | None = None, limit: int = 1000,
         style: Style = Style(), adjust: str = "none", lod: int = 1, model: Model = Model(),
+        after_ms: int | None = None,
     ) -> dict:
         """`lod` > 1 returns exact aggregates of `lod` consecutive bars (time-based chart types
         only) for drawing far zoomed-out views; statistics never use it. `model` turns the
@@ -720,6 +778,8 @@ class BarEngine:
             raise ValueError(f"{period}/{span} cannot be built from {s.kind} data")
         if not 1 <= lod <= MAX_LOD:
             raise ValueError(f"lod must be 1-{MAX_LOD}")
+        if self._windowed(s, period) and after_ms is not None:
+            return {"bars": [], "more": True, "newer": False}  # seconds read by window page backwards only
         if self._windowed(s, period) and style.type in TIME_TYPES and model.is_price and lod == 1:
             page = self._fine_page(s, span, session, to_ms, since_ms, limit)
             page["style"] = {"type": style.type}
@@ -753,23 +813,14 @@ class BarEngine:
                         self._bars.popitem(last=False)
             all_bars = cached
             used = {**used, "lod": lod}
-        page = self._page(all_bars, to_ms, since_ms, limit)
+        page = self._page(all_bars, to_ms, since_ms, limit, after_ms)
         page["style"] = used
         page["total"] = int(len(all_bars))
         # What the candles were built from when no feed sends this interval (all of them derived).
         page["derivedFrom"] = None if (period == s.kind and span == 1) or (period == "day" and s.daily is not None) \
             else ("trades" if s.kind == "trades" else f"1-{s.kind} bars")
         if not model.is_price:
-            from dataclasses import asdict
-
-            from ..provenance import code_version
-
-            page["model"] = {"kind": model.kind, "unit": model.unit_label(),
-                             "precision": model_precision(all_bars["close"].to_numpy()),
-                             "hidden": int(hidden), "window": model.window,
-                             # an indicator is derived on request: how, with what code, and whether it looks ahead
-                             "derivation": {"kind": "indicator", "code": code_version(), "settings": asdict(model),
-                                            "lookAhead": not model.causal}}
+            page["model"] = model_info(model, all_bars, hidden)
         if style.type == "range" and s.kind != "trades":
             page["approximate"] = "range bars built from bars, not ticks: intra-bar order of high and low is assumed"
         if style.type == BOX:
@@ -827,39 +878,16 @@ class BarEngine:
         if style.type not in ct.TRANSFORMS:
             raise ValueError(f"unknown chart type {style.type!r}")
         base = self._resampled(s, period, span, session)
-        default = ct.round_box(ct.atr(base), s.price_precision) if not base.empty else 1.0
-        box = style.box or default
-        used = {"type": style.type}
-        if style.type == "kagi":
-            used["reversal"] = style.reversal or default
-        elif style.type == "point_figure":
-            boxes = style.reversal if style.reversal is not None else 3
-            if boxes < 1 or boxes != int(boxes):
-                raise ValueError("point & figure reversal is a whole number of boxes (1 or more)")
-            used.update(box=box, reversal=int(boxes))
-        elif style.type == "line_break":
-            used["lines"] = style.lines
-        elif style.type in ("renko", "range"):
-            used["box"] = box
+        used = style_used(style, base, s.price_precision)
         key = (s.source, s.ticker, s.adjust, period, span, session, tuple(sorted(used.items())),
                s.fp)
         with self._lock:
             if key in self._bars:
                 self._bars.move_to_end(key)
                 return self._bars[key], used
-        if style.type == "heikin_ashi":
-            out = ct.heikin_ashi(base)
-        elif style.type == "renko":
-            out = ct.renko(base, box)
-        elif style.type == "line_break":
-            out = ct.line_break(base, style.lines)
-        elif style.type == "kagi":
-            out = ct.kagi(base, used["reversal"])
-        elif style.type == "point_figure":
-            out = ct.point_figure(base, box, used["reversal"])
-        else:  # range: from the finest data, not the chart interval
-            fine = s.frame if session == "extended" else regular_session(s.frame)
-            out = ct.range_bars(fine, box)
+        # range: from the finest data, not the chart interval
+        fine = (s.frame if session == "extended" else regular_session(s.frame)) if style.type == "range" else None
+        out = transformed(base, used, fine)
         with self._lock:
             self._bars[key] = out
             if len(self._bars) > self._cache_size:
@@ -989,16 +1017,23 @@ class BarEngine:
         return out
 
     @staticmethod
-    def _page(all_bars: pd.DataFrame, to_ms: int | None, since_ms: int | None, limit: int) -> dict:
+    def _page(all_bars: pd.DataFrame, to_ms: int | None, since_ms: int | None, limit: int,
+              after_ms: int | None = None) -> dict:
+        """The newest `limit` bars before `to_ms` (or of all), the oldest `limit` after `after_ms`,
+        or all from `since_ms`; `more`: older ones exist, `newer`: newer ones exist."""
         ts = epoch_ms(all_bars.index)
+        newer = False
         if since_ms is not None:
             sel, more = all_bars[ts >= since_ms], False
+        elif after_ms is not None:
+            later = all_bars[ts > after_ms]
+            sel, more, newer = later.head(limit), True, len(later) > limit
         elif to_ms is not None:
             older = all_bars[ts < to_ms]
-            sel, more = older.tail(limit), len(older) > limit
+            sel, more, newer = older.tail(limit), len(older) > limit, bool((ts >= to_ms).any())
         else:
             sel, more = all_bars.tail(limit), len(all_bars) > limit
-        return {"bars": to_records(sel), "more": bool(more)}
+        return {"bars": to_records(sel), "more": bool(more), "newer": bool(newer)}
 
     def range_stats(
         self, source: str, ticker: str, period: str, span: int, session: str, from_ms: int, to_ms: int,
