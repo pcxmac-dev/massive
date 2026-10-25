@@ -44,22 +44,27 @@ class MarketsStore:
                  int(bool(r.get("open_close"))), int(bool(r.get("volume")))) for r in rows])
         return len(rows)
 
-    def condition_rules(self) -> dict[tuple[str, str], tuple[bool, bool, bool]]:
-        """{(tape family 'cta'|'utp', code): (updates high/low, open/close, volume)}. A code is a
-        condition's letter on that tape (Alpaca's trades carry letters) or, for Massive's trades,
-        its numeric id: those take the rule of the letter they stand for, overrides included
-        (ticks.BAR_RULES), so a Massive odd lot sets no high or low either."""
+    def condition_rules(self, feed: str | None = None) -> dict[tuple[str, str], tuple[bool, bool, bool]]:
+        """{(tape family 'cta'|'utp', code): (updates high/low, open/close, volume)} for one feed's
+        trades. A feed whose reference this is (Massive) marks its trades with the reference's
+        numeric ids: each takes the rule of the letter it stands for, overrides included
+        (ticks.BAR_RULES), so a Massive odd lot sets no high or low. Any other feed (Alpaca) marks
+        them with the tapes' letters. The two are never mixed: some letters are digits, and with one
+        key for both, the letter '2' overwrote Massive's 2 (Average Price Trade), whose prints then
+        set the highs and lows of bars built from Massive's trades (NVDA after hours: $177 to $251
+        in one minute at $231)."""
         from ..ticks import BAR_RULES
 
+        rows = self.conn.execute("SELECT source, id, cta, utp, high_low, open_close, volume FROM conditions").fetchall()
+        numeric = feed is not None and any(r[0] == feed for r in rows)
         out = {}
-        for source, cid, cta, utp, hl, oc, vol in self.conn.execute(
-                "SELECT source, id, cta, utp, high_low, open_close, volume FROM conditions"):
+        for source, cid, cta, utp, hl, oc, vol in rows:
             flags = (bool(hl), bool(oc), bool(vol))
             for fam, letter in (("cta", cta), ("utp", utp)):
-                if letter:
-                    out[(fam, letter)] = flags
-                if source == "massive":
+                if numeric and source == feed:
                     out[(fam, str(cid))] = BAR_RULES.get((fam, letter), flags) if letter else flags
+                elif not numeric and letter:
+                    out[(fam, letter)] = flags
         return out
 
     # -- official calendars --------------------------------------------------

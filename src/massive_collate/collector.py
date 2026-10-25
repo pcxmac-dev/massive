@@ -223,7 +223,7 @@ def build_from_ticks(store: Store, source: str, ticker: str, a: int, b: int, rul
     hi = min(-(-b // minute) * minute, span[1] // minute * minute)
     if hi <= lo:
         return 0
-    rules = rules if rules is not None else store.condition_rules()
+    rules = rules if rules is not None else store.condition_rules(source)
     settings = {"steps": ["second", "minute"], "rules": provenance.digest(sorted(rules.items())), "rule_count": len(rules),
                 "overrides": sorted([f"{k[0]}:{k[1]}", v] for k, v in BAR_RULES.items()), "regular": list(REGULAR),
                 "method": "SIP consolidated update rules per trade condition (ticks.build_bars)"}

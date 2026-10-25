@@ -257,7 +257,7 @@ class Recorder:
         self._status: dict[str, dict] = {s.source: {"connected": False, "pairs": {}} for s in self.streams}
         self._wanted: tuple[str, ...] = ()  # stock symbols to stream (wanted_stocks)
         self._subs: dict[str, dict[str, int]] = {s.source: {} for s in self.streams}  # symbol -> asked for since (ms)
-        self._rules: tuple[float, dict] = (0.0, {})
+        self._rules: dict[str, tuple[float, dict]] = {}  # feed -> (read at, its condition rules)
         self._derivations: dict[tuple[str, str, int], int] = {}
         self._built: dict[int, int] = defaultdict(int)
         if self.connect is None:
@@ -416,12 +416,12 @@ class Recorder:
                                                        (day * DAY_MS, (day + 1) * DAY_MS))
         return self._derivations[key]
 
-    def _tape_rules(self, store) -> dict:
-        """The trade condition rules (ticks.py) stocks' bars are built by, reread hourly."""
-        at, rules = self._rules
+    def _tape_rules(self, store, feed: str) -> dict:
+        """The trade condition rules (ticks.py) a feed's stock bars are built by, reread hourly."""
+        at, rules = self._rules.get(feed, (0.0, {}))
         if not at or time.monotonic() - at > RULES_SECONDS:
-            self._rules = (time.monotonic(), store.condition_rules())
-        return self._rules[1]
+            self._rules[feed] = (time.monotonic(), store.condition_rules(feed))
+        return self._rules[feed][1]
 
     def _streamed(self, stream, since_ms: int, subs: dict[str, int]) -> dict[str, int]:
         """{symbol: streamed since (ms)} of a connected stream."""
@@ -501,7 +501,7 @@ class Recorder:
             # leave a trade out of its minute (the next flush starts at its own first trade's minute)
             hi_ns = max(now_ms * 1_000_000, max(t["sip_timestamp"] for t in trades) + 1)
             ticks = store.trades_between(source, ticker, lo * 1_000_000, hi_ns)
-            rules = self._tape_rules(store) if getattr(stream, "tape_rules", False) else {}
+            rules = self._tape_rules(store, source) if getattr(stream, "tape_rules", False) else {}
             did = self._derivation(store, stream, ticker, now_ms // DAY_MS, rules)
             prior = store.close_before(source, ticker, "minute", lo)  # an odd-lot-only first minute keeps it
             for step, timespan in ((1_000_000_000, "second"), (60_000_000_000, "minute")):

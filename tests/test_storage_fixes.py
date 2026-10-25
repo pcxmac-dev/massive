@@ -40,13 +40,34 @@ def store(tmp_path):
 def test_massive_condition_ids_apply_their_bar_rules(store):
     store.save_conditions("massive", [{"id": 37, "name": "Odd Lot Trade", "cta": "I", "utp": "I",
                                        "high_low": False, "open_close": False, "volume": True}])
-    rules = store.condition_rules()
-    assert rules[("utp", "37")] == (False, False, True) and rules[("utp", "I")] == (False, False, True)
+    rules = store.condition_rules("massive")
+    assert rules[("utp", "37")] == (False, False, True) and store.condition_rules()[("utp", "I")] == (False, False, True)
     ns = _ms("2026-10-20 10:00") * 1_000_000
     ticks = pd.DataFrame({"ts_ns": [ns, ns + 1_000_000_000], "price": [10.0, 55.0], "size": [100.0, 3.0],
                           "exchange": [4, 4], "conditions": ["", "37"], "tape": [3, 3]})
     (bar,), unknown = build_bars(ticks, 60_000_000_000, rules)
     assert (bar["h"], bar["c"], bar["v"]) == (10.0, 10.0, 103.0) and unknown == set()
+
+
+def test_a_massive_condition_id_never_takes_the_rule_of_a_tape_letter_with_its_digits(store):
+    # Massive's 2 is Average Price Trade; on the tapes '2' is a letter of another condition. With one key
+    # for both, the letter's rule won and NVDA's after-hours average-price prints set a $177-$251 minute.
+    store.save_conditions("massive", [
+        {"id": 2, "name": "Average Price Trade", "cta": "B", "utp": "W", "high_low": False, "open_close": False,
+         "volume": True},
+        {"id": 12, "name": "Form T/Extended Hours", "cta": "T", "utp": "T", "high_low": False, "open_close": False,
+         "volume": True},
+        {"id": 60, "name": "a condition lettered 2", "cta": "2", "utp": "2", "high_low": True, "open_close": True,
+         "volume": True}])
+    massive, alpaca = store.condition_rules("massive"), store.condition_rules("alpaca")
+    assert massive[("utp", "2")] == (False, False, True) and alpaca[("utp", "2")] == (True, True, True)
+    assert ("utp", "W") not in massive and ("utp", "60") not in alpaca  # each feed's own kind of code only
+    ns = _ms("2026-10-01 17:08") * 1_000_000
+    ticks = pd.DataFrame({"ts_ns": [ns, ns + 10**9, ns + 2 * 10**9], "price": [231.15, 251.7717, 231.14],
+                          "size": [100.0, 160.0, 100.0], "exchange": [4, 4, 4], "conditions": ["12", "12,2", "12"],
+                          "tape": [3, 3, 3]})
+    (bar,), _ = build_bars(ticks, 60_000_000_000, massive)
+    assert (bar["o"], bar["h"], bar["l"], bar["c"], bar["v"]) == (231.15, 231.15, 231.14, 231.14, 360.0)
 
 
 def test_the_fingerprint_changes_when_a_bar_is_corrected_in_place(store):
