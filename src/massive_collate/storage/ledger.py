@@ -105,9 +105,11 @@ class LedgerStore:
         the day it was backfilled to) through its last bar."""
         have = {r[0] for r in self.conn.execute(
             "SELECT DISTINCT source FROM coverage WHERE ticker=? AND timespan=?", (ticker, timespan))}
+        # the feeds holding the symbol: a seek or two each (stored_series lists every series of every
+        # feed, again whenever any file changes: rebuilt 15 times in one status request while the live
+        # recorder wrote); a feed without bars of this timespan has no edges below and is passed over
         sources = {r[0] for r in self.conn.execute(
-            "SELECT source FROM watchlist WHERE ticker=?", (ticker,))} | {
-            s for s, t, k in self.stored_series() if t == ticker and k == timespan}
+            "SELECT source FROM watchlist WHERE ticker=?", (ticker,))} | set(self.feeds_holding(ticker))
         for src in sources - have:
             r = self.bar_edges(src, ticker, timespan, received_only=True)  # two index seeks; bars built here are not held
             if not r:

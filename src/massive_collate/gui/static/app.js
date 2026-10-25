@@ -1653,11 +1653,10 @@ kc.registerOverlay({
     if (!coordinates.length) return [];
     const x = coordinates[0].x;
     const r = overlay.extendData || {};
-    const gap = r.gap == null ? '' : `  gap ${r.gap >= 0 ? '+' : ''}${Number(r.gap).toPrecision(6)}`;
-    return [
+    return [  // a roll says only the contract the series becomes there (the side panel has the rest)
       { type: 'line', ignoreEvent: true, attrs: { coordinates: [{ x, y: 0 }, { x, y: bounding.height }] },
         styles: { style: 'dashed', dashedValue: [3, 3], color: '#9598a1', size: 1 } },
-      { type: 'text', ignoreEvent: true, attrs: { x: x + 4, y: 4, text: `roll ${r.from} → ${r.to}${gap}`, align: 'left', baseline: 'top' },
+      { type: 'text', ignoreEvent: true, attrs: { x: x + 4, y: 4, text: r.to, align: 'left', baseline: 'top' },
         styles: { color: '#d1d4dc', backgroundColor: 'rgba(19,23,34,0.8)', size: 11, paddingLeft: 4, paddingRight: 4, paddingTop: 2, paddingBottom: 2 } },
     ];
   },

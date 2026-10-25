@@ -44,6 +44,7 @@ MAX_LIMIT = 20000
 CALENDAR_MAX_DAYS = 3700  # the widest /api/calendar range (timeaxis.js asks for at most CALENDAR_DAYS)
 ROW_COUNTS_TTL_S = 600  # a symbol's bar counts (the Data panel) are counted again after this
 PRUNED_COUNTS_TTL_S = 300  # a symbol's pruned-list counts by rule (an index scan of up to millions)
+ACTIVITY_TTL_S = 2.0  # the status answer shared by polls this close together
 MAX_BODY = 5 * 1024 * 1024
 WRITE_HEADER = "X-Massive-Charts"
 
@@ -71,6 +72,8 @@ class ChartApp:
         self._row_counts: dict[str, tuple[float, dict]] = {}  # ticker -> (counted at, row_counts)
         self._counting: set[str] = set()
         self._pruned_counts: dict[str, tuple[float, dict]] = {}  # ticker -> (counted at, by feed and rule)
+        self._status_store, self._status_lock = store.reader(), threading.Lock()  # the Fetcher view and status bar
+        self._activity: dict[tuple, tuple[float, dict]] = {}
         self._open_noted: dict[str, int] = {}  # ticker -> ms it was last noted open (note_open)
         self._derive_proc: subprocess.Popen | None = None  # a build started by start_derive
 
@@ -585,9 +588,16 @@ class ChartApp:
     def activity(self, q: dict[str, str]) -> dict:
         if q.get("open"):
             self.note_open(q["open"])
-        with self._lock:
-            out = activity.activity(self.store, self.settings, self.store.path, q.get("source", "massive"),
-                                    log_lines=min(int(q.get("lines", 200)), 1000), focus=q.get("open"))
+        # On connections and a lock of its own (it took 1 to 3 s under the shared lock, polled by every
+        # open page, and the symbol list and watchlists waited 17 s behind it), and one answer for the
+        # polls that arrive within ACTIVITY_TTL_S of each other.
+        key = (q.get("source", "massive"), min(int(q.get("lines", 200)), 1000), q.get("open"))
+        with self._status_lock:
+            hit = self._activity.get(key)
+            if hit is None or time.monotonic() - hit[0] > ACTIVITY_TTL_S:
+                hit = self._activity[key] = (time.monotonic(), activity.activity(
+                    self._status_store, self.settings, self.store.path, key[0], log_lines=key[1], focus=key[2]))
+            out = dict(hit[1])
         out["feeds"] = self.feeds()
         return out
 
