@@ -60,18 +60,37 @@ def _feeds(tick_days=365):
             "alpaca": FeedProfile("alpaca", ALPACA, frozenset({"stock", "crypto"}), 1, tick_days=tick_days)}
 
 
-def test_a_seconds_feed_takes_all_minutes_first_then_seconds_for_its_window_and_no_ticks(store):
-    store.watch_spec("alpaca", resolve("SPCX"), "auto")
-    store.set_listing("alpaca", "SPCX", None, None, date(2020, 1, 2), "SpaceX", "stock")
+def test_every_stocks_minutes_come_first_then_the_one_second_windows_in_a_second_pass(store):
+    for t in ("SPCX", "AAPL"):
+        store.watch_spec("alpaca", resolve(t), "auto")
+        store.set_listing("alpaca", t, None, None, date(2020, 1, 2), t, "stock")
+    store.kv_set("watchlist:order", '{"AAPL": 0, "SPCX": 1}')  # most traded first
     src = Ticky(entitled=("trades", "second", "minute"), trades=_ticks(datetime(2026, 10, 21, 9, 30, tzinfo=ET), 150),
                 bars={"minute": [], "second": [], "day": []})
     feeds = {"alpaca": FeedProfile("alpaca", ALPACA, frozenset({"stock"}), 0, second_days=30)}
+    sync(src, store, ALPACA, NOW, log=_log, feeds=feeds)  # pass 1: minutes for both, no seconds yet
+    assert {w["resolution"] for w in store.watchlist("alpaca")} == {"second"} and src.trade_calls == []
+    first = [(t, ts, s) for t, s, _, ts, _ in src.bar_calls if ts in ("minute", "second")]
+    assert {ts for _, ts, _ in first} == {"minute"}
+    assert min(s for _, _, s in first) < datetime(2021, 1, 1, tzinfo=ET)  # back to the listing
+    assert all(w["seconds_from"] is None for w in store.watchlist("alpaca"))
+    src.bar_calls = []
+    sync(src, store, ALPACA, NOW, log=_log, feeds=feeds)  # pass 2: every minute history is in
+    second = [(t, s) for t, s, _, ts, _ in src.bar_calls if ts == "second"]
+    assert [t for t, _ in second] == ["AAPL", "SPCX"]  # most traded first
+    assert min(s for _, s in second) >= datetime(2026, 9, 21, tzinfo=ET)  # 30 days of seconds
+    assert {w["seconds_from"] for w in store.watchlist("alpaca")} == {date(2026, 9, 21)}
+
+
+def test_a_symbol_opened_in_the_chart_gets_its_seconds_in_the_minutes_pass(store):
+    for t in ("SPCX", "AAPL"):
+        store.watch_spec("alpaca", resolve(t), "auto")
+        store.set_listing("alpaca", t, None, None, date(2020, 1, 2), t, "stock")
+    collector.request_priority(store, "SPCX", NOW)
+    src = Ticky(entitled=("second", "minute"), bars={"minute": [], "second": [], "day": []})
+    feeds = {"alpaca": FeedProfile("alpaca", ALPACA, frozenset({"stock"}), 0, second_days=30)}
     sync(src, store, ALPACA, NOW, log=_log, feeds=feeds)
-    assert store.watchlist("alpaca")[0]["resolution"] == "second" and src.trade_calls == []
-    calls = [(ts, s) for _, s, _, ts, _ in src.bar_calls if ts in ("minute", "second")]
-    assert calls[0][0] == "minute"  # all the minutes first
-    assert min(s for ts, s in calls if ts == "minute") < datetime(2021, 1, 1, tzinfo=ET)  # back to the listing
-    assert min(s for ts, s in calls if ts == "second") >= datetime(2026, 9, 21, tzinfo=ET)  # 30 days of seconds
+    assert {t for t, _, _, ts, _ in src.bar_calls if ts == "second"} == {"SPCX"}  # the open symbol only
 
 
 def test_minute_feed_leaves_the_tick_window_to_the_tick_feed(store):

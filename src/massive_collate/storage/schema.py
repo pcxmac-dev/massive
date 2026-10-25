@@ -330,6 +330,9 @@ MIGRATIONS = [
     ("futures_contracts", "checked", "TEXT"),
     # When a symbol last finished syncing completely (for the per-symbol refresh interval).
     ("watchlist", "synced_at", "TEXT"),
+    # The day its recent window of 1-second bars was filled from (None: not filled yet; collector.py
+    # fills every stock's minute history first, then these windows in a second pass).
+    ("watchlist", "seconds_from", "TEXT"),
     # Directory listings: first seen, and the day a listing left the active list (kept, not deleted).
     ("directory", "first_seen", "TEXT"),
     ("directory", "retired_on", "TEXT"),

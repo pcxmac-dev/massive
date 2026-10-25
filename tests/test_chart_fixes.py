@@ -135,3 +135,31 @@ def test_the_symbol_list_shows_the_state_of_the_feed_holding_the_data():
     assert _symbol_state(rows, [])["state"] == "backfilling"  # none holds data: the most pressing that collects it
     assert _symbol_state({"tiingo": {"state": "blocked"}}, [])["state"] == "blocked"
     assert _symbol_state({}, []) is None
+
+
+def test_a_zoomed_out_one_second_chart_pages_back_through_every_day(store):
+    days = ("2026-10-20", "2026-10-21", "2026-10-22")
+    secs, mins = [], []
+    for d in days:
+        t0 = _ms(f"{d} 10:00")
+        secs += [{"t": t0 + i * 1000, "o": 10.0, "h": 10.0 + i % 7, "l": 9.0, "c": 10.0, "v": 1.0, "vw": 10.0, "n": 1}
+                 for i in range(320)]
+        mins += [{"t": t0 + i * 60_000, "o": 10.0, "h": 16.0, "l": 9.0, "c": 10.0, "v": 60.0, "vw": 10.0, "n": 60}
+                 for i in range(6)]
+        store.add_coverage("massive", "SPCX", "second", t0, t0 + 320_000)
+    store.upsert_bars("massive", "SPCX", "second", 1, secs)
+    store.upsert_bars("massive", "SPCX", "minute", 1, mins)
+    store.watch("massive", ["SPCX"], "minute")
+    eng = BarEngine(store)
+    got, to = [], None
+    for _ in range(20):
+        page = eng.bars("massive", "SPCX", "second", 1, "extended", to_ms=to, limit=10, lod=16)
+        got = page["bars"] + got
+        if not page["more"]:
+            break
+        to = page["bars"][0]["timestamp"]
+    stamps = [b["timestamp"] for b in got]
+    assert stamps == sorted(set(stamps))  # pages meet without overlap
+    assert pd.Timestamp(stamps[0], unit="ms", tz="UTC").tz_convert(ET).date().isoformat() == "2026-10-20"  # the first day too
+    assert sum(b["volume"] for b in got) == len(secs)  # every second counted once
+    assert all(b["timestamp"] % 16_000 == 0 for b in got)  # buckets on the clock

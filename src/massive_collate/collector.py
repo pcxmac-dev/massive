@@ -714,6 +714,19 @@ def _backfilling(item: dict, floor: date) -> bool:
     return item["backfilled_to"] is None or item["backfilled_to"] > max(floor, item["listed_from"] or floor)
 
 
+def _seconds_pending(item: dict) -> bool:
+    """A symbol at 1-second resolution whose recent window of second bars is not filled yet."""
+    return item.get("resolution") == "second" and item.get("seconds_from") is None
+
+
+def _minutes_first(items: list[dict], floors: dict, refusals: "Refusals", now: datetime) -> int:
+    """Stocks still filling their minute history (those refused run after run, which may never
+    finish, aside): while any are, no 1-second window is started, so every stock gets its whole
+    minute history first (tens of requests each) before the 1-second years (a hundred and more)."""
+    return sum(1 for w in items if w["asset"] == "stock" and _backfilling(w, floors[w["asset"]])
+               and not refusals.paused(w["ticker"], now))
+
+
 def _due(asset: str, tier: Tier, synced: datetime, now: datetime, refresh_hours: float) -> bool:
     """Whether a fully synced symbol is worth asking again: its plan should have published
     data since the last sync (stocks on the free plan: once each morning; delayed futures:
@@ -848,10 +861,20 @@ def sync(
         from .initializer import load_order
 
         order = load_order(store)
-        pending = sorted(store.watchlist(source.name),
-                         key=lambda w: (_backfilling(w, floors[w["asset"]]), order.get(w["ticker"], len(order)),
-                                        w["ticker"]))
         refusals = Refusals(store, source.name)
+        watched = store.watchlist(source.name)
+        # Two passes: every stock's minute history first, most traded first; then, once none is left
+        # to fill, every stock's window of 1-second bars in the same order (SECOND_HISTORY_DAYS).
+        filling = _minutes_first(watched, floors, refusals, now)
+        if only is None and any(_seconds_pending(w) for w in watched):
+            log(f"{source.name}: minute history first ({filling:,} stocks still filling); 1-second bars after"
+                if filling else f"{source.name}: 1-second pass: "
+                f"{sum(1 for w in watched if _seconds_pending(w)):,} stocks' 1-second windows to fill")
+
+        def backfilling(w: dict) -> bool:
+            return _backfilling(w, floors[w["asset"]]) or (not filling and _seconds_pending(w))
+
+        pending = sorted(watched, key=lambda w: (backfilling(w), order.get(w["ticker"], len(order)), w["ticker"]))
         server_fails = 0  # symbols in a row whose server failed (5xx, no answer): FETCH_FAILURES kill the feed
         served: dict = {}  # priority requests taken this run (each once)
         while pending:
@@ -878,7 +901,7 @@ def sync(
                     result.skipped += 1
                     continue
                 floor = floors[asset]
-                if (only is None or published_only) and synced and not _backfilling(item, floors[asset]) and not _due(
+                if (only is None or published_only) and synced and not backfilling(item) and not _due(
                         asset, tier, synced, now, 0.0 if urgent or only is not None else refresh_hours):
                     # nothing new published since its last sync (a symbol still backfilling is never skipped)
                     result.skipped += 1
@@ -927,10 +950,15 @@ def sync(
                             listed_from=listing.listed_from, log=log)
                 try:
                     if resolution == "second":
-                        # minute bars for all the history first (tens of requests for twenty years),
-                        # then 1-second bars for the recent window (SECOND_HISTORY_DAYS)
+                        # minute bars for all the history (tens of requests for twenty years); 1-second
+                        # bars for the recent window (SECOND_HISTORY_DAYS) in the second pass, or now for
+                        # a symbol opened in the chart, or to keep a filled window current
                         n = sync_bars(source, store, ticker, "minute", item_floor, until, **span)
-                        n += sync_bars(source, store, ticker, "second", second_floor(me, today, item_floor), until, **span)
+                        if not filling or urgent or only is not None or item.get("seconds_from"):
+                            s_floor = second_floor(me, today, item_floor)
+                            n += sync_bars(source, store, ticker, "second", s_floor, until, **span)
+                            if not item.get("seconds_from"):
+                                store.set_seconds_from(source.name, ticker, s_floor)
                     else:
                         n = sync_bars(source, store, ticker, resolution, item_floor, until, **span)
                 except NotEntitled as e:

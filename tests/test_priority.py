@@ -60,8 +60,8 @@ def test_a_requested_symbol_goes_first_even_when_asked_mid_run(store):
 
 
 def test_a_requested_symbol_skips_the_refresh_interval_but_not_its_plans_publication(store):
-    src = FakeSource(trades=_trades())
-    store.watch("fake", ["AAA"], "trades")
+    src = FakeSource(entitled=("minute",))  # minute bars only: no 1-second window waits for its pass
+    store.watch("fake", ["AAA"], "minute")
     sync(src, store, FREE, NOW, log=lambda m: None)
     later = NOW + timedelta(days=1)  # the next session is published
     assert sync(src, store, FREE, later, log=lambda m: None, refresh_hours=48).skipped == 1

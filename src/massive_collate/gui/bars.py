@@ -640,12 +640,16 @@ class BarEngine:
         session = s.session_for(session)
         if not any(p["type"] == period and p["span"] == span for p in self.periods(s)):
             raise ValueError(f"{period}/{span} cannot be built from {s.kind} data")
+        if not 1 <= lod <= MAX_LOD:
+            raise ValueError(f"lod must be 1-{MAX_LOD}")
         if self._windowed(s, period) and style.type in TIME_TYPES and model.is_price and lod == 1:
             page = self._fine_page(s, span, session, to_ms, since_ms, limit)
             page["style"] = {"type": style.type}
             return page
-        if not 1 <= lod <= MAX_LOD:
-            raise ValueError(f"lod must be 1-{MAX_LOD}")
+        if self._windowed(s, period) and style.type in LOD_TYPES and model.is_price:  # zoomed out on seconds
+            page = self._fine_lod_page(s, span, session, to_ms, since_ms, limit, lod)
+            page["style"] = {"type": style.type, "lod": lod}
+            return page
         model.validate()
         if not model.is_price and style.type not in TIME_TYPES:
             raise ValueError("derivatives and integrals apply to time-based chart types")
@@ -970,11 +974,10 @@ class BarEngine:
         out = resample(frame_from_bars(raw), "second", span, session)
         return out if span == 1 else out.assign(derived=True)  # 30 s from seconds: built here
 
-    def _fine_page(self, s: Series, span: int, session: str, to_ms: int | None, since_ms: int | None,
-                   limit: int) -> dict:
-        """A page of second bars read from the layer: widen the window backwards until it holds
-        `limit` bars or the layer's start is reached. For INTERPOLATED symbols the history goes
-        on past the layer, interpolated from the minute bars (`_interpolated`)."""
+    def _fine_window(self, s: Series, span: int, session: str, to_ms: int | None, since_ms: int | None,
+                     limit: int) -> tuple[pd.DataFrame, bool, int]:
+        """The newest `limit` second bars before `to_ms` (or all since `since_ms`) from the layer,
+        whether older ones remain, and how many the window held."""
         interp = s.ticker in INTERPOLATED and not s.frame.empty
         first = min(a for a, _ in s.fine_spans)
         if interp:
@@ -982,7 +985,7 @@ class BarEngine:
         last = max(b for _, b in s.fine_spans)
         if since_ms is not None:
             bars = self._fine_bars(s, span, session, since_ms, last + 1000)
-            return {"bars": to_records(bars), "more": False, "total": int(len(bars)), "fine": True}
+            return bars, False, int(len(bars))
         hi = min(to_ms, last + 1000) if to_ms is not None else last + 1000
         width = max(3_600_000, limit * span * 1000 * 4)
         while True:
@@ -993,9 +996,46 @@ class BarEngine:
             if len(bars) >= limit or lo <= first:
                 break
             width *= 4
-        sel = bars.tail(limit)
-        more = len(bars) > limit or lo > first
-        page = {"bars": to_records(sel), "more": bool(more), "total": int(len(bars)), "fine": True}
+        return bars.tail(limit), len(bars) > limit or lo > first, int(len(bars))
+
+    FINE_LOD_ROWS = 1_000_000  # second bars read for one page of a zoomed-out view, at most
+
+    def _fine_lod_page(self, s: Series, span: int, session: str, to_ms: int | None, since_ms: int | None,
+                       limit: int, lod: int) -> dict:
+        """A zoomed-out page of second bars: each drawn bar the exact aggregate of `lod` x `span`
+        seconds of the clock, read back page by page like the zoomed-in view (it used to show the
+        layer's last day only, with nothing older to scroll to). Buckets are aligned on the clock,
+        so pages meet without overlap; a page's oldest bucket, cut by the window, is left for the
+        next page whole."""
+        step = lod * span * 1000
+        if since_ms is not None:
+            since_ms = since_ms // step * step  # the newest bucket whole, not from mid-bucket
+        if to_ms is not None:
+            to_ms = to_ms // step * step
+        raw, more, _ = self._fine_window(s, span, session, to_ms, since_ms, min(limit * lod, self.FINE_LOD_ROWS))
+        if raw.empty:
+            return {"bars": [], "more": bool(more), "total": 0, "fine": True}
+        keys = epoch_ms(raw.index) // step * step
+        g = raw.groupby(keys, sort=True)
+        out = pd.DataFrame({
+            "open": g["open"].first(), "high": g["high"].max(), "low": g["low"].min(), "close": g["close"].last(),
+            "volume": g["volume"].sum(), "turnover": g["turnover"].sum(), "trades": g["trades"].sum(),
+        })
+        if "derived" in raw:
+            out["derived"] = g["derived"].max()
+        out.index = pd.to_datetime(out.index, unit="ms", utc=True).tz_convert(ET)
+        if more and len(out) > 1:
+            out = out.iloc[1:]  # the oldest bucket may be cut: the next page reads it whole
+        return {"bars": to_records(out), "more": bool(more), "total": int(len(out)), "fine": True}
+
+    def _fine_page(self, s: Series, span: int, session: str, to_ms: int | None, since_ms: int | None,
+                   limit: int) -> dict:
+        """A page of second bars read from the layer: widen the window backwards until it holds
+        `limit` bars or the layer's start is reached. For INTERPOLATED symbols the history goes
+        on past the layer, interpolated from the minute bars (`_interpolated`)."""
+        interp = s.ticker in INTERPOLATED and not s.frame.empty
+        sel, more, total = self._fine_window(s, span, session, to_ms, since_ms, limit)
+        page = {"bars": to_records(sel), "more": bool(more), "total": total, "fine": True}
         if interp and "interp" in sel and sel["interp"].any():
             page["interpolated"] = (f"no one-second data here: a line interpolated from the {s.kind} bars' "
                                     "volume-weighted prices (derived, not trades)")

@@ -101,7 +101,7 @@ class WatchlistStore:
         of symbols, per-symbol code asks for its own rows rather than scanning them all)."""
         sql = (
             "SELECT source, ticker, resolution, backfilled_to, exchange, listed_from, figi, checked_at, "
-            "name, kind, asset, source_ticker, invert, rank, synced_at, closed_at, retired_on FROM watchlist"
+            "name, kind, asset, source_ticker, invert, rank, synced_at, closed_at, retired_on, seconds_from FROM watchlist"
         )
         where, params = [], []
         if source:
@@ -121,8 +121,8 @@ class WatchlistStore:
              "listed_from": d(lf), "figi": f, "checked_at": d(c), "name": n, "kind": k,
              "asset": a or "stock", "source_ticker": st or t, "invert": bool(inv), "rank": rk or 1,
              "synced_at": datetime.fromisoformat(sy) if sy else None,
-             "closed_at": datetime.fromisoformat(cl) if cl else None, "retired_on": d(ret)}
-            for s, t, r, b, e, lf, f, c, n, k, a, st, inv, rk, sy, cl, ret
+             "closed_at": datetime.fromisoformat(cl) if cl else None, "retired_on": d(ret), "seconds_from": d(sf)}
+            for s, t, r, b, e, lf, f, c, n, k, a, st, inv, rk, sy, cl, ret, sf
             in self.conn.execute(sql + " ORDER BY source, ticker", params)
         ]
 
@@ -147,6 +147,12 @@ class WatchlistStore:
 
     def reset_backfill(self, source: str, ticker: str) -> None:
         self.set_backfilled(source, ticker, None)
+
+    def set_seconds_from(self, source: str, ticker: str, day: date | None) -> None:
+        """The day a symbol's window of 1-second bars was filled from (None: to fill again)."""
+        with self.conn:
+            self.conn.execute("UPDATE watchlist SET seconds_from=? WHERE source=? AND ticker=?",
+                              (day.isoformat() if day else None, source, ticker.upper()))
 
     def set_backfilled(self, source: str, ticker: str, day: date | None) -> None:
         with self.conn:
