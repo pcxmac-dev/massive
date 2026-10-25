@@ -130,9 +130,7 @@ class WindowReader:
         best = 0
         with self.engine.lock:
             for feed in self.feeds(source, ticker):
-                rows = sum(r["rows"] for r in self.store.frame_inventory(feed, ticker)
-                           if r["timespan"] == base and r["multiplier"] == 1)
-                best = max(best, rows)
+                best = max(best, self.store.count_bars(feed, ticker, base))  # that level only
         self._levels[key] = (time.monotonic(), best)
         return best
 

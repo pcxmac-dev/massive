@@ -701,6 +701,15 @@ class FeedStore:
         spans = [s for s in spans if s[0] is not None]
         return (min(s[0] for s in spans), max(s[1] for s in spans)) if spans else None
 
+    def count_bars(self, source: str, ticker: str, timespan: str, multiplier: int = 1) -> int:
+        """Bars one feed holds for a series at one level, its own and built (a range count each)."""
+        conn = self._bars(source)
+        if conn is None:
+            return 0
+        key = (ticker.upper(), timespan, multiplier)
+        return sum(conn.execute(f"SELECT COUNT(*) FROM {t} WHERE ticker=? AND timespan=? AND multiplier=?", key).fetchone()[0]
+                   for t in _BAR_TABLES)
+
     def frame_inventory(self, source: str, ticker: str) -> list[dict]:
         """Every frame one feed holds for a symbol, as stored: {table (bars: the feed's own,
         built_bars: built here), timespan, multiplier, first, last (bar starts, ms), rows,
