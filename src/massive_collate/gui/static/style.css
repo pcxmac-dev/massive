@@ -300,6 +300,8 @@ button.primary[disabled] { opacity: .5; cursor: default; }
 /* The crosshair's vertical line across every pane and the gaps between them (app.js crossLine). */
 .cross-line { position: absolute; top: 0; width: 0; pointer-events: none; z-index: 5; }
 .cross-line[hidden] { display: none; }
+/* The band between the last pane and the time axis's labels, behind the chart's canvases. */
+.axis-gap { position: absolute; left: 0; pointer-events: none; z-index: 0; }
 /* The time zone switch in the corner under the price axis, and its menu. */
 .tz-btn { position: absolute; right: 0; bottom: 0; z-index: 6; font: 11px/1 inherit; color: var(--muted);
   background: transparent; border: 0; cursor: pointer; padding: 0; }

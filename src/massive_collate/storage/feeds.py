@@ -791,9 +791,13 @@ class FeedStore:
                     derivation = conn.execute(f"SELECT derivation {where} ORDER BY ts DESC LIMIT 1", key).fetchone()[0]
                 out.append({"table": table, "timespan": frame[0], "multiplier": frame[1], "first": first,
                             "last": last, "rows": rows, "derivation": derivation})
-                frame = conn.execute(f"SELECT timespan, multiplier FROM {table} WHERE ticker=? "
-                                     "AND (ticker, timespan, multiplier, ts) > (?, ?, ?, ?) ORDER BY timespan, multiplier, ts LIMIT 1",
-                                     (t, t, *frame, 2**63 - 1)).fetchone()
+                # the next frame: a larger multiplier of this timespan, else the next timespan (two range
+                # seeks; one row-value comparison walked through every bar of the frame, 0.5 s for a
+                # stock's minutes)
+                frame = conn.execute(f"SELECT timespan, multiplier FROM {table} WHERE ticker=? AND timespan=? "
+                                     "AND multiplier > ? ORDER BY multiplier LIMIT 1", key).fetchone() \
+                    or conn.execute(f"SELECT timespan, multiplier FROM {table} WHERE ticker=? AND timespan > ? "
+                                    "ORDER BY timespan, multiplier LIMIT 1", (t, frame[0])).fetchone()
         return out
 
     def feeds_holding(self, ticker: str) -> list[str]:

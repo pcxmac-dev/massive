@@ -128,6 +128,6 @@ def test_the_time_zone_wheel_shows_six_and_turns_round_and_round():
 def test_the_crosshair_line_runs_through_the_gaps_between_panes():
     app = _js("app.js")
     spacing = _function(app, "applyPaneSpacing")
-    assert "separator: { size: PANE_GAP, color: 'transparent' }" in spacing
+    assert "separator: { size: PANE_GAP, color: gapColor() }" in spacing and "placeAxisGap();" in spacing
     assert "crosshair: { vertical: { line: { show: false } } }" in spacing  # drawn by crossLine instead
     assert "applyPaneSpacing();" in _function(app, "applyChartType")  # after every theme

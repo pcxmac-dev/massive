@@ -1101,16 +1101,30 @@ const LIGHT_CHART = {
 // labels further from the last pane. The crosshair's vertical line is drawn here (crossLine) from
 // the top of the price pane to the time axis: the library draws it pane by pane, so it broke at
 // every gap.
-const PANE_GAP = 8;
+// The gaps are a darker band (a transparent one showed the same background as the panes: no gap to
+// see), and the same band runs above the time axis (axisGap, behind the chart: the axis's labels and
+// the crosshair's time stay on top).
+const PANE_GAP = 14;
 const crossLine = Object.assign(document.createElement('div'), { className: 'cross-line', hidden: true });
-$('chart').append(crossLine);
+const axisGap = Object.assign(document.createElement('div'), { className: 'axis-gap' });
+$('chart').append(crossLine, axisGap);
+
+const gapColor = () => (themeBase() === 'light' ? 'rgba(0,0,0,0.08)' : 'rgba(0,0,0,0.45)');
 
 function applyPaneSpacing() {
   const line = chart.getStyles().crosshair.vertical.line;  // the theme's: worn by crossLine
   crossLine.style.borderLeft = `${line.size || 1}px ${line.style === 'solid' ? 'solid' : 'dashed'} ${line.color}`;
-  chart.setStyles({ separator: { size: PANE_GAP, color: 'transparent' }, xAxis: { tickText: { marginStart: 10 } },
+  chart.setStyles({ separator: { size: PANE_GAP, color: gapColor() }, xAxis: { tickText: { marginStart: PANE_GAP + 4 } },
                     crosshair: { vertical: { line: { show: false } } } });
+  placeAxisGap();
 }
+
+function placeAxisGap() {
+  const axis = chart.getSize('x_axis_pane');
+  if (!axis) return;
+  Object.assign(axisGap.style, { top: `${axis.top}px`, height: `${PANE_GAP}px`, width: `${axis.width}px`, background: gapColor() });
+}
+new ResizeObserver(() => requestAnimationFrame(placeAxisGap)).observe($('chart'));  // panes added, dragged, resized
 
 // The time zone switch, in the corner under the price axis (as TradingView has it): the zone the
 // time axis and crosshair read intraday times in. Its list is a wheel: TZ_ROWS zones in view, the
@@ -1179,7 +1193,8 @@ chart.subscribeAction('onCrosshairChange', (c) => {
   const axis = chart.getSize('x_axis_pane');
   crossLine.hidden = !Number.isFinite(x) || x > chartWidth();
   crossLine.style.left = `${Math.round(x)}px`;
-  crossLine.style.height = `${axis ? axis.top : 0}px`;
+  crossLine.style.height = `${axis ? axis.top + PANE_GAP : 0}px`;  // through the band above the time axis too
+  placeAxisGap();  // follows a pane added or dragged (cheap)
 });
 $('chart').addEventListener('mouseleave', () => { crossLine.hidden = true; });
 
