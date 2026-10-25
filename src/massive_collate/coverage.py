@@ -52,6 +52,7 @@ class FeedProfile:
     assets: frozenset = field(default_factory=frozenset)
     priority: int = 99  # position in SOURCE_PRIORITY (lower first)
     tick_days: int = 365  # ticks are backfilled this far where the feed collects them
+    second_days: int = 365  # 1-second bars are backfilled this far (minutes cover all the history)
     venues: dict = field(default_factory=dict)  # asset class -> the market its data is ('sip', 'coinbase', ...)
 
 
@@ -127,6 +128,12 @@ def tick_floor(store, profile: FeedProfile, ticker: str, today: date, floor: dat
         held = [a for a, _ in store.coverage(ticker, "trades").get(profile.name, [])]
         lo = max(lo, datetime.fromtimestamp(min(held) / 1000, ET).date()) if held else today
     return lo
+
+
+def second_floor(profile: FeedProfile, today: date, floor: date) -> date:
+    """Oldest day a feed backfills 1-second bars to: SECOND_HISTORY_DAYS back, not before its
+    plan floor (minute bars cover everything older)."""
+    return max(floor, today - timedelta(days=profile.second_days))
 
 
 def latency(tier: Tier, asset: str) -> float:

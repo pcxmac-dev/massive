@@ -26,12 +26,12 @@ def test_history_floor_respects_plan():
     assert history_floor(FREE, date(2028, 2, 29)) == date(2026, 3, 1)
 
 
-def test_auto_picks_finest_resolution(store):
+def test_auto_picks_the_finest_bars_and_never_ticks(store):
     src = FakeSource(entitled=("trades", "second", "minute"), trades=_trades())
     store.watch("fake", ["SPCX"])
     sync(src, store, FREE, NOW, log=lambda m: None)
-    assert store.watchlist("fake")[0]["resolution"] == "trades"
-    assert store.trade_range("fake", "SPCX") is not None
+    assert store.watchlist("fake")[0]["resolution"] == "second"  # 1-second bars are the finest kept
+    assert src.trade_calls == [] and store.trade_range("fake", "SPCX") is None
 
 
 def test_falls_back_when_ticks_not_on_plan(store):
@@ -43,41 +43,13 @@ def test_falls_back_when_ticks_not_on_plan(store):
     assert store.bar_range("fake", "SPCX", "minute") == (bar["t"], bar["t"])
 
 
-def test_never_requests_before_plan_floor(store):
-    src = FakeSource(trades=_trades())
-    store.watch("fake", ["SPCX"], "trades")
+def test_a_symbol_left_at_ticks_is_found_again_and_asks_for_none(store):
+    src = FakeSource(entitled=("trades", "second", "minute"), trades=_trades())
+    store.watch("fake", ["SPCX"], "trades")  # from before ticks were dropped for history
     sync(src, store, FREE, NOW, log=lambda m: None)
-    floor_ns = collector._date_ns(history_floor(FREE, NOW.date()))
-    assert all(c["gte"] is None or c["gte"] >= floor_ns for c in src.trade_calls)
-
-
-def test_stopped_run_resumes_without_gaps(store):
-    all_trades = _trades(n_days=4, per_day=3)  # 12 trades, 2 per page
-    store.watch("fake", ["SPCX"], "trades")
-
-    first = FakeSource(trades=all_trades, budget=3)
-    result = sync(first, store, FREE, NOW, log=lambda m: None)
-    assert result.stopped and first.requests_made == 3
-    assert store.watchlist("fake")[0]["backfilled_to"] is None
-
-    second = FakeSource(trades=all_trades)
-    sync(second, store, FREE, NOW, log=lambda m: None)
-    got = store.load_trades("SPCX", "fake")
-    # every tick the plan has published (end of day: not today's) is in, none twice
-    published = [t for t in all_trades if t["sip_timestamp"] < int(datetime(2026, 10, 21, tzinfo=ET).timestamp()) * 10**9]
-    assert len(got) == len(published) == 9
-    assert store.watchlist("fake")[0]["backfilled_to"] == history_floor(FREE, NOW.date())
-
-
-def test_backfilled_series_only_fetches_new_data(store):
-    src = FakeSource(trades=_trades())
-    store.watch("fake", ["SPCX"], "trades")
-    sync(src, store, FREE, NOW, log=lambda m: None)
-    src.trade_calls.clear()
-    sync(src, store, FREE, NOW + timedelta(days=1), log=lambda m: None)  # the next session is out
-    # one request, for the newly published session only (newest first, like every gap)
-    assert len(src.trade_calls) == 1
-    assert src.trade_calls[0]["gte"] == int(datetime(2026, 10, 20, 20, 0, tzinfo=ET).timestamp()) * 10**9
+    assert src.trade_calls == [] and store.watchlist("fake")[0]["resolution"] == "second"
+    floor = datetime.combine(history_floor(FREE, NOW.date()), datetime.min.time(), tzinfo=ET)
+    assert all(start >= floor for _, start, _, _, _ in src.bar_calls)  # never before the plan floor
 
 
 def test_exchanges_saved_once(store):
@@ -90,8 +62,8 @@ def test_exchanges_saved_once(store):
 
 def test_trades_joined_with_exchange_names(store):
     src = FakeSource(trades=_trades())
-    store.watch("fake", ["SPCX"], "trades")
-    sync(src, store, FREE, NOW, log=lambda m: None)
+    sync(src, store, FREE, NOW, log=lambda m: None)  # the feed's exchanges (a live stream's trades join them)
+    store.upsert_trades("fake", "SPCX", _trades())
     df = store.load_trades("SPCX", "fake")
     assert set(df["exchange_name"]) == {"Nasdaq"}
     assert str(df["time"].dt.tz) == "America/New_York"

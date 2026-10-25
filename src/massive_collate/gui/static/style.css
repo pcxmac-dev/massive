@@ -185,6 +185,8 @@ body.panel-hidden #sidePanel, body.panel-hidden #panelResizer { display: none; }
 .kv dt { color: var(--muted); white-space: nowrap; }
 .kv dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
 .kv dd small { color: var(--muted); }
+.p-feed { max-width: 100%; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 1px 4px; }
 .perf { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 4px; }
 .perf div { background: var(--bg); border-radius: 4px; padding: 4px; text-align: center; font-variant-numeric: tabular-nums; }
 .perf span { display: block; font-size: 10px; color: var(--muted); }

@@ -2532,7 +2532,7 @@ function renderPanel() {
   $('pData').innerHTML = `
     <h3>Data</h3>
     ${kv([
-      ['Feed', esc(data.feeds.join(' > '))], ['Resolution', esc(data.base) + (data.officialDaily ? ' + official daily' : '')],
+      ['Feed', feedPicker(sy.ticker, data.feeds)], ['Resolution', esc(data.base) + (data.officialDaily ? ' + official daily' : '')],
       ['Rows', data.rows.toLocaleString()], ['From', esc(data.first.slice(0, 16).replace('T', ' '))],
       ['To', esc(data.last.slice(0, 16).replace('T', ' '))], ['Price precision', `${data.pricePrecision} dp`],
       ['Times', 'US/Eastern'],
@@ -2540,6 +2540,23 @@ function renderPanel() {
     ${attributionHtml(info.attribution, data.base)}
     ${auditsHtml(info.audits, info.symbol.ticker)}`;
 }
+
+// The feed the chart shows, as a menu of every feed that holds this symbol's data (best first, as a
+// merged chart takes them) and all of them merged: picking one opens the symbol on it.
+function feedPicker(ticker, shown) {
+  const held = (symbolInfo(ticker).feeds || []).map((f) => f.source);
+  const feeds = [...new Set([...held, ...shown.filter((f) => f !== MERGED)])];
+  if (feeds.length < 2 && state.source !== MERGED) return esc(shown.join(' > '));
+  const opt = (value, label) => `<option value="${esc(value)}"${value === state.source ? ' selected' : ''}>${esc(label)}</option>`;
+  return `<select id="pFeed" class="p-feed" aria-label="Feed" title="Feeds that hold ${esc(ticker)}'s data: pick one to chart it alone">
+    ${opt(MERGED, feeds.length > 1 ? `All merged (${feeds.join(' > ')})` : feeds[0] || 'merged')}
+    ${feeds.length > 1 ? feeds.map((f) => opt(f, f)).join('') : ''}
+    ${state.source !== MERGED && !feeds.includes(state.source) ? opt(state.source, state.source) : ''}</select>`;
+}
+
+$('pData').addEventListener('change', (e) => {
+  if (e.target.id === 'pFeed' && e.target.value !== state.source) selectSymbol(state.ticker, e.target.value).catch(showError);
+});
 
 // Where each span of the series came from (one feed per span), newest first.
 function attributionHtml(att, base) {

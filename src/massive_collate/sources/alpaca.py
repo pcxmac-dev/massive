@@ -148,10 +148,9 @@ class AlpacaSource(DataSource):
         return (("minute", 5), ("hour", 1)) if asset in ("stock", "crypto") else ()
 
     def resolutions(self, asset: str) -> tuple[str, ...]:
-        """Finest first: ticks (kept for a recent window, see TICK_HISTORY_DAYS), with minute bars
-        for the history before it. Alpaca has no second bars."""
+        """Minute bars (no ticks for history; Alpaca has no second bars)."""
         if asset in ("stock", "crypto"):
-            return ("trades", "minute")
+            return ("minute",)
         return ()
 
     # -- requests --------------------------------------------------------------

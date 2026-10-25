@@ -95,8 +95,10 @@ class ChartApp:
             profiles = self.store.company_profiles()
             members = self.store.constituents("sp500", "S&P 500")
             now = datetime.now(timezone.utc).astimezone(activity.ET)
-            states = {(r["ticker"]): r for src in {w["source"] for w in watch}
-                      for r in activity.symbol_rows(self.store, self.settings, src, now, detail=0)}
+            by_feed: dict[str, dict[str, dict]] = {}  # ticker -> feed -> its Fetcher row
+            for src in sorted({w["source"] for w in watch}):
+                for r in activity.symbol_rows(self.store, self.settings, src, now, detail=0):
+                    by_feed.setdefault(r["ticker"], {})[src] = r
         names = {r.mic: r.name for r in exchanges.itertuples() if r.mic}
         # Futures contracts are stored only as parts of a continuous series (NQ1!): not symbols of their own.
         with self._lock:
@@ -128,6 +130,7 @@ class ChartApp:
             fine = {s for s, ks in held.items() if any(k in ("trades", "second") for k in ks)}
             order = self.engine.rank_sources(have, fine, REFERENCE.get(w.get("asset") or "stock"), quality)
             feeds = [{"source": s, "data": sorted(held.get(s, []))} for s in order]
+            state = _symbol_state(by_feed.get(ticker, {}), order)
             out.append({
                 "ticker": ticker, "name": w.get("name"), "kind": w.get("kind") or w.get("asset") or "stock",
                 "asset": w.get("asset") or "stock",
@@ -140,8 +143,8 @@ class ChartApp:
                 **_sector(ticker, profiles.get(ticker), w.get("asset") or "stock", (snapshot.get(ticker) or {}).get("close"),
                           members.get(ticker)),
                 "changePct": _change(snapshot, ticker),
-                "data": {k: states[ticker][k] for k in ("state", "progress", "last", "expectedThrough", "nextDue")}
-                if ticker in states else None,
+                "data": {k: state[k] for k in ("state", "progress", "last", "expectedThrough", "nextDue")}
+                if state else None,
             })
         return out
 
@@ -649,6 +652,21 @@ def _sector(ticker: str, profile: dict | None, asset: str, close: float | None =
     cap = shares * close if shares and close else profile.get("market_cap")
     return {"sector": sector, "industry": industry, "sectorBasis": basis, "marketCap": cap,
             "companyCap": profile.get("market_cap")}
+
+
+NOT_COLLECTING = ("blocked", "closed", "retired")
+
+
+def _symbol_state(rows: dict[str, dict], order: list[str]) -> dict | None:
+    """One data state for a symbol watched on several feeds (the symbol list's icon): that of the
+    best-ranked feed holding its data (the one a merged chart shows first); with none holding
+    any, the most pressing of the feeds collecting it. Not whichever feed came last: AMD read "up
+    to date" from a feed that leaves its history to another while that one was still backfilling."""
+    for feed in order:
+        if feed in rows:
+            return rows[feed]
+    collecting = [r for r in rows.values() if r["state"] not in NOT_COLLECTING] or list(rows.values())
+    return min(collecting, key=lambda r: activity.STATE_RANK.get(r["state"], 9), default=None)
 
 
 def _change(snapshot: dict, ticker: str) -> float | None:

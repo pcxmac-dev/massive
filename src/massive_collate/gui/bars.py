@@ -484,8 +484,10 @@ class BarEngine:
 
     def _load(self, source: str, ticker: str, adjust: str = "none") -> Series | None:
         item = self._watch_item(source, ticker)
-        asset = item["asset"] if item else "stock"
-        if asset == "future":
+        if item is None:  # a feed holding a symbol it does not watch (Bitstamp's live BTCUSD): the symbol's class
+            item_asset = next((w["asset"] for w in self.store.watchlist(ticker=ticker)), "stock")
+        asset = item["asset"] if item else item_asset
+        if asset == "future" and item is not None:
             return self._load_future(source, item, adjust)
         s = self._load_plain(source, ticker)
         if s is not None:

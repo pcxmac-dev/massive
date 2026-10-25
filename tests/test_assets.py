@@ -133,7 +133,7 @@ def test_entitlements_are_probed_once_per_asset_class(store):
     src = FakeSource(entitled=("minute",))
     sync(src, store, FREE, NOW, log=_log)
     stock_probes = [p for p in src.probed if p[2] == "stock"]
-    assert [r for r, _, _ in stock_probes] == ["trades", "second", "minute"]  # once, not per ticker
+    assert [r for r, _, _ in stock_probes] == ["second", "minute"]  # once, not per ticker; no ticks
     assert {w["resolution"] for w in store.watchlist("fake")} == {"minute"}
 
 

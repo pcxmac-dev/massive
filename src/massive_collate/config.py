@@ -20,8 +20,10 @@ Settings come from environment variables, optionally loaded from a `.env` file
     AUDITS_PER_RUN    spot audits of another feed's newly downloaded data per feed run (default: 2)
     AUDITS_RANDOM_PER_RUN   spot audits of a random stored session per feed run (default: 1); each
                       compares one random hour, and a run's audits use at most 2 % of its requests
-    TICK_HISTORY_DAYS how far back ticks are backfilled where a feed has them (default: 365); ticks
-                      are collected going forward always, minute bars cover the history before
+    SECOND_HISTORY_DAYS how far back 1-second bars are backfilled where a feed has them (default:
+                      365); minute bars cover all the history (fetched first), back to the plan's start
+    TICK_HISTORY_DAYS (no longer used for history: no ticks are downloaded, only the live streams'
+                      trades are kept, to build their bars)
     TICK_MIN_FREE_GB  tick backfill pauses when the disk has less free space (default: 250); below
                       a fifth of it no ticks are downloaded at all
 
@@ -167,6 +169,7 @@ class Settings:
     audits_per_run: int = 2
     audits_random_per_run: int = 1
     tick_history_days: int = 365
+    second_history_days: int = 365
     tick_min_free_gb: int = 250
     tiingo_api_key: str | None = field(default=None, repr=False)
     crypto_venue_days: int = 0  # 0: all the history the exchange feeds hold
@@ -345,6 +348,7 @@ def load_settings(
         audits_per_run=_default(_int_setting(merged, "AUDITS_PER_RUN"), 2),
         audits_random_per_run=_default(_int_setting(merged, "AUDITS_RANDOM_PER_RUN"), 1),
         tick_history_days=_default(_int_setting(merged, "TICK_HISTORY_DAYS"), 365),
+        second_history_days=_default(_int_setting(merged, "SECOND_HISTORY_DAYS"), 365),
         tick_min_free_gb=_default(_int_setting(merged, "TICK_MIN_FREE_GB"), 250),
         tiingo_api_key=merged.get("TIINGO_API_KEY") or None,
         crypto_venue_days=_default(_int_setting(merged, "CRYPTO_VENUE_DAYS"), 0),

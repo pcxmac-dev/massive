@@ -17,6 +17,15 @@ TODAY = date(2026, 10, 23)
 
 
 @pytest.fixture(autouse=True)
+def fetched_on_today(monkeypatch):
+    """Files are recorded as fetched on TODAY, the day the tests schedule from, not on the real
+    date: refresh cadences compare the two (on a later real date files looked fetched since)."""
+    from massive_collate.storage import datasets as stored
+
+    monkeypatch.setattr(stored, "_now", lambda: f"{TODAY.isoformat()}T16:00:00+00:00")
+
+
+@pytest.fixture(autouse=True)
 def no_submodules(tmp_path, monkeypatch):
     """Tests never touch the repository's own dataset submodules."""
     monkeypatch.setattr(datasets, "REPOS", tmp_path / "no-repos")

@@ -20,7 +20,7 @@ from .config import UNLIMITED_BACKFILL_YEARS, Tier, asset_tier
 from .errors import BudgetExhausted, NotEntitled, Paused, RateLimited, SourceError
 from . import freshness
 from .futures import candidate_contracts, roll_schedule
-from .coverage import STEP_MS, FeedProfile, frame_key, frame_parts, frontier_ms, has_open_time, ms, plan
+from .coverage import STEP_MS, FeedProfile, frame_key, frame_parts, frontier_ms, has_open_time, ms, plan, second_floor
 from .sources.base import DataSource
 from .symbols import ASSETS
 from .storage import Store
@@ -819,11 +819,6 @@ def sync(
     me = feeds.get(source.name) or FeedProfile(source.name, tier, frozenset(ASSETS))
     feeds[source.name] = me
     waiting: dict[str, int] = {}
-    tick_state = tick_space(store, tick_min_free_gb)
-    if tick_state != "ok":
-        log(f"ticks: {'paused' if tick_state == 'stop' else 'backfill paused, new ticks only'} "
-            f"({store.kv_get('ticks:backfill-paused')}, TICK_MIN_FREE_GB={tick_min_free_gb})")
-    rules = store.condition_rules()
     archival = getattr(source, "archival", False)  # a closed feed: fills history once per symbol
     closed = capped = 0
     if not store.kv_get("ledger:empty-heads:v1"):  # one-off: feeds' empty history heads become 'none'
@@ -909,6 +904,8 @@ def sync(
                     if item.get("retired_on") else now
                 resolution, backfilled_to = item["resolution"], item["backfilled_to"]
                 fetch, invert = item["source_ticker"], item["invert"]
+                if resolution == "trades":  # no ticks for history any more: found again (second or minute)
+                    resolution = "auto"
                 if resolution == "auto":
                     resolution = resolve_resolution(source, store, ticker, log, asset=asset, fetch=fetch)
                     backfilled_to = None
@@ -918,13 +915,11 @@ def sync(
                 span = dict(me=me, feeds=feeds, fetch=fetch, asset=asset, invert=invert,
                             listed_from=listing.listed_from, log=log)
                 try:
-                    if resolution == "trades":
-                        # ticks for the recent window, then minute bars for everything before it
-                        n = 0
-                        if tick_state != "stop":
-                            n = sync_trades(source, store, ticker, item_floor, until, me, feeds, fetch=fetch, asset=asset,
-                                            listed_from=listing.listed_from, log=log, rules=rules)
-                        n += sync_bars(source, store, ticker, "minute", item_floor, until, **span)
+                    if resolution == "second":
+                        # minute bars for all the history first (tens of requests for twenty years),
+                        # then 1-second bars for the recent window (SECOND_HISTORY_DAYS)
+                        n = sync_bars(source, store, ticker, "minute", item_floor, until, **span)
+                        n += sync_bars(source, store, ticker, "second", second_floor(me, today, item_floor), until, **span)
                     else:
                         n = sync_bars(source, store, ticker, resolution, item_floor, until, **span)
                 except NotEntitled as e:

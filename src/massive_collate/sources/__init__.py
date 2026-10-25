@@ -135,7 +135,7 @@ def feed_profiles(settings: Settings) -> dict[str, FeedProfile]:
         else:
             assets = frozenset(ASSETS)
         out[name] = FeedProfile(name, tier, assets, i, tick_days=settings.tick_history_days,
-                                venues=markets(name, settings))
+                                second_days=settings.second_history_days, venues=markets(name, settings))
     return out
 
 

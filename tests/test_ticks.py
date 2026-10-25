@@ -60,26 +60,18 @@ def _feeds(tick_days=365):
             "alpaca": FeedProfile("alpaca", ALPACA, frozenset({"stock", "crypto"}), 1, tick_days=tick_days)}
 
 
-def test_tick_feed_takes_the_window_builds_bars_and_downloads_minutes_only_before_it(store, monkeypatch):
-    monkeypatch.setattr(collector, "tick_space", lambda store, gb: "ok")
-    store.watch_spec("alpaca", resolve("SPCX"), "trades")
-    store.set_listing("alpaca", "SPCX", None, None, NOW.date(), "SpaceX", "stock")
-    session = datetime(2026, 10, 21, 9, 30, tzinfo=ET)
-    src = Ticky(entitled=("trades", "minute"), trades=_ticks(session, 150), bars={"minute": [], "day": []})
-    sync(src, store, ALPACA, NOW, log=_log, feeds=_feeds(tick_days=30))
-    # ticks: newest first, from 30 days back to 15 minutes ago
-    first = src.trade_calls[0]
-    assert first["desc"] and first["lt"] == ms(datetime(2026, 10, 21, 11, 44, tzinfo=ET)) * 1_000_000
-    assert min(c["gte"] for c in src.trade_calls) == ms(datetime(2026, 9, 21, tzinfo=ET)) * 1_000_000
-    # bars built here: 150 one-second bars, 3 minutes (09:30, 09:31, 09:32 partial-by-data)
-    secs = store.load_bars(["SPCX"], "second", source="alpaca")
-    mins = store.load_bars(["SPCX"], "minute", source="alpaca")
-    assert len(secs) == 150 and list(mins["transactions"]) == [60, 60, 30]
-    detail = store.coverage_detail("SPCX", "minute")
-    assert any(o == "ticks" for _, o, _, _ in detail)
-    # its own minute bars were downloaded too, the tick window included: they replace the built ones
-    minute_calls = [(s, e) for _, s, e, ts, _ in src.bar_calls if ts == "minute"]
-    assert minute_calls and max(e for _, e in minute_calls) > datetime(2026, 9, 21, tzinfo=ET)
+def test_a_seconds_feed_takes_all_minutes_first_then_seconds_for_its_window_and_no_ticks(store):
+    store.watch_spec("alpaca", resolve("SPCX"), "auto")
+    store.set_listing("alpaca", "SPCX", None, None, date(2020, 1, 2), "SpaceX", "stock")
+    src = Ticky(entitled=("trades", "second", "minute"), trades=_ticks(datetime(2026, 10, 21, 9, 30, tzinfo=ET), 150),
+                bars={"minute": [], "second": [], "day": []})
+    feeds = {"alpaca": FeedProfile("alpaca", ALPACA, frozenset({"stock"}), 0, second_days=30)}
+    sync(src, store, ALPACA, NOW, log=_log, feeds=feeds)
+    assert store.watchlist("alpaca")[0]["resolution"] == "second" and src.trade_calls == []
+    calls = [(ts, s) for _, s, _, ts, _ in src.bar_calls if ts in ("minute", "second")]
+    assert calls[0][0] == "minute"  # all the minutes first
+    assert min(s for ts, s in calls if ts == "minute") < datetime(2021, 1, 1, tzinfo=ET)  # back to the listing
+    assert min(s for ts, s in calls if ts == "second") >= datetime(2026, 9, 21, tzinfo=ET)  # 30 days of seconds
 
 
 def test_minute_feed_leaves_the_tick_window_to_the_tick_feed(store):
@@ -127,7 +119,7 @@ def test_alpaca_crypto_ticks_need_no_key():
     assert pages[0][0]["sip_timestamp"] == 1792670400200261576
     url, params, headers = session.calls[0]
     assert url.endswith("/v1beta3/crypto/us-1/trades") and params["symbols"] == "BTC/USD" and "feed" not in params
-    assert not headers and src.resolutions("crypto") == ("trades", "minute")
+    assert not headers and src.resolutions("crypto") == ("minute",)  # trades for live use only, none for history
 
 
 def test_charts_read_seconds_by_window_on_a_minute_base(store):

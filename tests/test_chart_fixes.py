@@ -116,3 +116,22 @@ def test_a_read_does_not_write_unless_the_app_itself_asks(store):
         assert get({"X-Massive-Charts": "1"}) == 200 and "AAPL" in json.loads(store.kv_get(live.OPEN_KEY))
     finally:
         httpd.shutdown()
+
+
+def test_a_feed_holding_a_symbol_it_does_not_watch_charts_it_as_the_symbols_class(store):
+    sat = [_bar(f"2026-10-24 {h:02d}:00", 1.0, tz="UTC") for h in range(24)]  # a Saturday: crypto trades
+    store.upsert_built_bars("bitstamp", "BTCUSD", "minute", 1, sat, 1)  # its live trades, never watched there
+    store.watch("coinbase", ["BTCUSD"], "minute", asset="crypto")
+    eng = BarEngine(store)
+    assert eng.series("bitstamp", "BTCUSD").asset == "crypto"
+    assert len(eng.bars("bitstamp", "BTCUSD", "minute", 1, "regular")["bars"]) == 24  # not a stock's 9:30-16:00
+
+
+def test_the_symbol_list_shows_the_state_of_the_feed_holding_the_data():
+    from massive_collate.gui.server import _symbol_state
+
+    rows = {"massive": {"state": "backfilling"}, "alpaca": {"state": "current"}, "tiingo": {"state": "blocked"}}
+    assert _symbol_state(rows, ["massive"])["state"] == "backfilling"  # not whichever feed came last
+    assert _symbol_state(rows, [])["state"] == "backfilling"  # none holds data: the most pressing that collects it
+    assert _symbol_state({"tiingo": {"state": "blocked"}}, [])["state"] == "blocked"
+    assert _symbol_state({}, []) is None

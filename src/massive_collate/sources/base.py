@@ -8,8 +8,11 @@ from typing import Iterator
 from ..models import Exchange, Instrument
 
 # Finest first, per asset class. A source tries each in turn and keeps the first the plan allows.
+# No ticks for history (the user's call, 2026-10-24: a year of one busy stock's trades took hours
+# and ~40 GB): 1-second bars are the finest, kept for a recent window (SECOND_HISTORY_DAYS), with
+# minute bars for all the history before it.
 RESOLUTIONS_BY_ASSET = {
-    "stock": ("trades", "second", "minute"),
+    "stock": ("second", "minute"),
     "index": ("second", "minute"),
     "fx": ("second", "minute"),
     "crypto": ("second", "minute"),
