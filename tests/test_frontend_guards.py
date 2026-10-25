@@ -110,3 +110,24 @@ def test_every_chart_request_says_which_view_it_reads():
     assert "...(state.unfiltered ? { unfiltered: 1 } : {})" in _function(app, "typeQuery")  # bars, future, stream
     assert "...typeQuery()" in _function(app, "prefetchFiner")
     assert 'id="unfilteredBtn"' in _js("index.html") and 'id="pPruned"' in _js("index.html")
+
+
+def test_the_time_zone_wheel_shows_six_and_turns_round_and_round():
+    app = _js("app.js")
+    assert "const TZ_ROWS = 6;" in app
+    zones = re.search(r"const TIMEZONES = \['exchange', \.\.\.\[([^\]]+)\]", app).group(1)
+    hours = [float(h) for h in zones.split(",")]
+    assert hours == sorted(hours) and hours[0] == -12 and hours[-1] == 14 and 5.5 in hours and 5.75 in hours
+    turn = app.split("tzMenu.addEventListener('wheel'", 1)[1].split("});", 1)[0]
+    assert "% TIMEZONES.length + TIMEZONES.length) % TIMEZONES.length" in turn  # wraps both ways
+    assert "e.preventDefault()" in turn
+    zone = _function(app, "labelZone")
+    assert "if (daily) return" in zone and "return pickedZone();" in zone  # days keep the market's own dates
+
+
+def test_the_crosshair_line_runs_through_the_gaps_between_panes():
+    app = _js("app.js")
+    spacing = _function(app, "applyPaneSpacing")
+    assert "separator: { size: PANE_GAP, color: 'transparent' }" in spacing
+    assert "crosshair: { vertical: { line: { show: false } } }" in spacing  # drawn by crossLine instead
+    assert "applyPaneSpacing();" in _function(app, "applyChartType")  # after every theme

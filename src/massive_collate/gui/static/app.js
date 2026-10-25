@@ -114,11 +114,43 @@ function change(from, to, precision) {
   return `${signed(to - from, precision)} (${signed(pct, 2)}%)`;
 }
 
-// The zone a period's labels are read in: New York, except crypto and forex days, weeks and
-// months, which are UTC days (stamped 00:00 UTC, the previous evening in New York).
+// The zone a period's labels are read in. Days, weeks, months and years: the market's own days (New
+// York; UTC for crypto and forex, whose days are stamped 00:00 UTC, the previous evening in New
+// York), whatever zone is picked, or a day would read as the evening before. Within a day: the zone
+// picked with the switch under the price axis (state.timezone), the exchange's (New York) by default.
+// The exchange's zone (New York, with its daylight saving), then every UTC offset in use, as
+// '+05:30' (both Intl and the chart take an offset for a zone).
+const TIMEZONES = ['exchange', ...[-12, -11, -10, -9.5, -9, -8, -7, -6, -5, -4, -3.5, -3, -2, -1, 0, 1, 2, 3, 3.5, 4, 4.5, 5,
+  5.5, 5.75, 6, 6.5, 7, 8, 8.75, 9, 9.5, 10, 10.5, 11, 12, 12.75, 13, 13.75, 14].map((h) => {
+  const m = Math.round(Math.abs(h) * 60);
+  return `${h < 0 ? '-' : '+'}${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+})];
+state.timezone = TIMEZONES.includes(prefs.get('timezone')) ? prefs.get('timezone') : 'exchange';
+
+function pickedZone() {
+  return state.timezone === 'exchange' ? TZ : state.timezone;
+}
+
+// "GMT+5:30", "GMT-12", "GMT" for an offset zone.
+function gmtLabel(zone) {
+  const [, sign, hh, mm] = zone.match(/^([+-])(\d\d):(\d\d)$/) || [];
+  if (!sign) return zone;
+  if (hh === '00' && mm === '00') return 'GMT';
+  return `GMT${sign === '-' ? '−' : '+'}${Number(hh)}${mm !== '00' ? `:${mm}` : ''}`;
+}
+
 function labelZone(period) {
-  const daily = ['day', 'week', 'month'].includes(period?.type);
-  return daily && ['crypto', 'fx'].includes(state.meta?.asset) ? 'UTC' : TZ;
+  const daily = ['day', 'week', 'month', 'year'].includes(period?.type);
+  if (daily) return ['crypto', 'fx'].includes(state.meta?.asset) ? 'UTC' : TZ;
+  return pickedZone();
+}
+
+// "EDT", "UTC", "GMT+9": a zone's short name now.
+function zoneShort(zone) {
+  try {
+    return new Intl.DateTimeFormat('en-US', { timeZone: zone, timeZoneName: 'short' }).formatToParts(new Date())
+      .find((p) => p.type === 'timeZoneName')?.value || zone;
+  } catch { return zone; }
 }
 
 function fmtTime(ts) {
@@ -1057,12 +1089,97 @@ const LIGHT_CHART = {
   indicator: { tooltip: { text: { color: '#1b1f29' } } },
 };
 
+// Panes a little apart: a gap between the price pane and each indicator pane, and the time axis's
+// labels further from the last pane. The crosshair's vertical line is drawn here (crossLine) from
+// the top of the price pane to the time axis: the library draws it pane by pane, so it broke at
+// every gap.
+const PANE_GAP = 8;
+const crossLine = Object.assign(document.createElement('div'), { className: 'cross-line', hidden: true });
+$('chart').append(crossLine);
+
+function applyPaneSpacing() {
+  const line = chart.getStyles().crosshair.vertical.line;  // the theme's: worn by crossLine
+  crossLine.style.borderLeft = `${line.size || 1}px ${line.style === 'solid' ? 'solid' : 'dashed'} ${line.color}`;
+  chart.setStyles({ separator: { size: PANE_GAP, color: 'transparent' }, xAxis: { tickText: { marginStart: 10 } },
+                    crosshair: { vertical: { line: { show: false } } } });
+}
+
+// The time zone switch, in the corner under the price axis (as TradingView has it): the zone the
+// time axis and crosshair read intraday times in. Its list is a wheel: TZ_ROWS zones in view, the
+// mouse wheel turns it a zone a notch, round and round (past GMT+14 comes the exchange's zone, then
+// GMT−12 again).
+const TZ_ROWS = 6;
+const tzBtn = Object.assign(document.createElement('button'), { type: 'button', className: 'tz-btn', id: 'tzBtn' });
+const tzMenu = Object.assign(document.createElement('div'), { className: 'tz-menu', hidden: true });
+$('chart').append(tzBtn, tzMenu);
+let tzTop = 0;  // the zone at the top of the wheel's window (an index into TIMEZONES)
+
+function zoneName(z) {
+  return z === 'exchange' ? `Exchange (${zoneShort(TZ)})` : gmtLabel(z);
+}
+
+function renderTimezone() {
+  tzBtn.textContent = state.timezone === 'exchange' ? zoneShort(TZ) : gmtLabel(state.timezone);
+  tzBtn.title = `Time zone of the time axis and crosshair: ${zoneName(state.timezone)}. Days, weeks and months keep `
+    + 'the market\'s own dates. Click to change; the mouse wheel turns the list.';
+  tzBtn.style.width = `${Y_AXIS_WIDTH}px`;
+  tzBtn.style.height = `${chart.getSize('x_axis_pane')?.height || 26}px`;
+  if (tzMenu.hidden) return;
+  const n = TIMEZONES.length;
+  const clock = (z) => new Intl.DateTimeFormat('en-US', { timeZone: z === 'exchange' ? TZ : z, hour: '2-digit',
+                                                            minute: '2-digit', hourCycle: 'h23' }).format(new Date());
+  tzMenu.innerHTML = Array.from({ length: TZ_ROWS }, (_, i) => TIMEZONES[(((tzTop + i) % n) + n) % n]).map((z) =>
+    `<button type="button" data-tz="${esc(z)}" class="${z === state.timezone ? 'on' : ''}">${esc(zoneName(z))}`
+    + ` <span class="p-muted">${esc(clock(z))}</span></button>`).join('');
+}
+
+tzBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  tzMenu.hidden = !tzMenu.hidden;
+  tzTop = TIMEZONES.indexOf(state.timezone) - Math.floor(TZ_ROWS / 2);  // the zone in use in the middle
+  renderTimezone();
+});
+tzMenu.addEventListener('wheel', (e) => {
+  e.preventDefault();  // the wheel turns the list, never the page or the chart
+  tzTop = ((tzTop + Math.sign(e.deltaY)) % TIMEZONES.length + TIMEZONES.length) % TIMEZONES.length;
+  renderTimezone();
+}, { passive: false });
+tzMenu.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-tz]');
+  if (!b) return;
+  state.timezone = b.dataset.tz;
+  prefs.set('timezone', state.timezone);
+  tzMenu.hidden = true;
+  renderTimezone();
+  const zone = labelZone(chart.getPeriod());
+  if (chart.getTimezone() !== zone) chart.setTimezone(zone);  // the axis and crosshair relabel, no reload
+  window.renderCursor?.();
+});
+document.addEventListener('click', (e) => { if (!tzMenu.hidden && !tzMenu.contains(e.target)) tzMenu.hidden = true; });
+window.addEventListener('resize', () => requestAnimationFrame(renderTimezone));
+requestAnimationFrame(renderTimezone);
+
+chart.subscribeAction('onCrosshairChange', (c) => {
+  if (!c || !Number.isFinite(c.x) || !c.paneId || c.paneId === 'x_axis_pane' || !chart.getDataList().length) {
+    crossLine.hidden = true;
+    return;
+  }
+  const at = chart.convertFromPixel({ x: c.x }, { paneId: 'candle_pane' });  // the bar under the pointer, as the library snaps
+  const x = Number.isFinite(at?.dataIndex) ? chart.convertToPixel({ dataIndex: at.dataIndex }, { paneId: 'candle_pane' }).x : c.x;
+  const axis = chart.getSize('x_axis_pane');
+  crossLine.hidden = !Number.isFinite(x) || x > chartWidth();
+  crossLine.style.left = `${Math.round(x)}px`;
+  crossLine.style.height = `${axis ? axis.top : 0}px`;
+});
+$('chart').addEventListener('mouseleave', () => { crossLine.hidden = true; });
+
 function applyChartType() {
   const custom = !NATIVE[state.chartType];
   chart.setStyles(themeBase());
   if (themeBase() === 'light') chart.setStyles(LIGHT_CHART);
   if (THEMES[state.theme].chart) chart.setStyles(THEMES[state.theme].chart);
   chart.setStyles({ yAxis: { size: Y_AXIS_WIDTH } });
+  applyPaneSpacing();
   chart.setStyles({ candle: { type: NATIVE[state.chartType] || 'candle_solid', ...DEFAULT_CANDLE } });
   chart.removeIndicator({ name: 'GPU_BARS' });
   if (gpuActive() && ensureGpu()) {
