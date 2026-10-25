@@ -219,10 +219,11 @@ def test_new_data_queues_an_audit_that_the_other_feed_runs(store):
     # Massive-like feed: today's session is not on its end-of-day plan yet, so the audit waits ...
     first = FakeSource(entitled=("minute",), bars={"minute": today})
     assert audit.run_audits(first, store, _feeds()["fake"], _feeds(), NOW, queued=2, random_count=0, log=_log) == 0
-    # ... and runs once it is published, then leaves the queue
+    # ... and runs once it is published, then leaves the queue: the newest session, and every span the
+    # fetch updated (collector.verify_fetched)
     later = datetime(2026, 10, 22, 6, 0, tzinfo=ET)
-    assert audit.run_audits(first, store, _feeds()["fake"], _feeds(), later, queued=2, random_count=0, log=_log) == 1
-    assert store.audit_queue() == [] and store.audits(1)[0]["reason"] == "after-download"
+    assert audit.run_audits(first, store, _feeds()["fake"], _feeds(), later, queued=2, random_count=0, log=_log) == 2
+    assert store.audit_queue() == [] and {a["reason"] for a in store.audits(2)} == {"after-download"}
 
 
 def test_fetcher_rows_show_what_this_feed_still_needs(store):

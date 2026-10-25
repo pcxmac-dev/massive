@@ -2689,7 +2689,8 @@ function renderInventory() {
 // -- bad data: each feed's pruned list (baddata.py; docs/ARCHITECTURE.md "Bad data") --------------
 // What the rules took out of the filtered view, newest first; kept, never deleted ("All data" shows
 // it on the chart). Read with the inventory.
-const PRUNED_RULES = { malformed: 'malformed', spike: 'spike without volume', rebuilt: 'rebuilt (wrong rules)',
+const PRUNED_RULES = { malformed: 'malformed', spike: 'spike without volume',
+                       inconsistent: 'outside its own finer bars', rebuilt: 'rebuilt (wrong rules)',
                        out_of_line: 'out of line with other feeds' };
 async function loadPruned() {
   if (!state.ticker || document.body.classList.contains('panel-hidden')) return;
@@ -2711,6 +2712,9 @@ function prunedWhy(e) {
       + `${n(ev.volume)} = ${ev.volume_x ?? '∞'}× theirs` + (ev.trades?.length ? `; ${ev.trades.length} prints outside their range` : '');
   }
   if (e.rule === 'malformed') return (ev.failed || []).join(', ');
+  if (e.rule === 'inconsistent') {
+    return `high ${n(ev.high)}, low ${n(ev.low)}; its ${ev.finer_bars} ${ev.finer} bars ${n(ev.finer_low)} to ${n(ev.finer_high)}`;
+  }
   if (e.rule === 'rebuilt') {
     const now = ev.now;
     return now ? `now high ${n(now.high)}, low ${n(now.low)} (was ${n(e.high)}, ${n(e.low)})` : 'no longer built';

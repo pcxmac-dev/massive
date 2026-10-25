@@ -10,7 +10,10 @@ filtered view (storage/pruned.py); unfiltered reads still have it. The rules:
    hours, the rest against the rest: they trade very different volumes) and at least SPIKE_MOVE of
    the price, on a volume at most SPIKE_VOLUME times theirs, with the open and close inside their
    range: the price did not move on, and nothing traded to say it did.
-3. Built from the wrong rules (`repair_from_ticks`): a bar built here that a rebuild changes; the
+3. Outside its own finer bars (`inconsistent`): a feed's own day or minute whose high or low lies
+   more than CONSISTENT beyond its own minutes' or seconds' (what the fetch verifies too,
+   collector.verify_fetched).
+4. Built from the wrong rules (`repair_from_ticks`): a bar built here that a rebuild changes; the
    old version is kept on the list.
 
 Scans are incremental, like derive.py: each series is judged from where it changed since its last
@@ -134,6 +137,69 @@ def _trades_inside(store, source: str, ticker: str, ts: int, step_ms: int, lo: f
              else int(r.exchange), "conditions": r.conditions} for r in t.itertuples()]
 
 
+FINER = {"day": "minute", "minute": "second"}  # a feed's own bar is checked against its own bars of this frame
+CONSISTENT = 0.01  # how far (a share of the price) its high or low may lie beyond theirs
+
+
+def _ends(ts: np.ndarray, timespan: str, asset: str) -> np.ndarray:
+    """Where each bar ends (ms): a minute later; a day: the next midnight of its day's zone (New York
+    for stocks, whatever the clocks do; UTC for crypto and forex)."""
+    if timespan == "minute":
+        return ts + 60_000
+    if asset in ("crypto", "fx"):
+        return ts + 86_400_000
+    local = pd.DatetimeIndex(pd.to_datetime(ts, unit="ms", utc=True)).tz_convert("America/New_York")
+    nxt = (local.normalize().tz_localize(None) + pd.Timedelta(days=1)).tz_localize(
+        "America/New_York", nonexistent="shift_forward", ambiguous=True)
+    return np.asarray(nxt.as_unit("ms").asi8, dtype="int64")
+
+
+def inconsistent(store, source: str, ticker: str, timespan: str, lo_ms: int, hi_ms: int,
+                 asset: str = "stock") -> tuple[pd.DataFrame, list[dict]]:
+    """Rule 3: a feed's own bars in [lo, hi) whose high or low lies beyond its own finer bars' (a
+    day's minutes, a minute's seconds) by more than CONSISTENT: the extreme is in no trade the feed
+    shows at the finer frame. Judged only where the feed holds that finer frame for the whole bar
+    (its coverage) and has bars in it, the finer bars filtered (a pruned one supports nothing).
+    Returns (the bars, evidence)."""
+    finer = FINER.get(timespan)
+    empty = pd.DataFrame(), []
+    if finer is None or asset == "future":  # futures' days are CME sessions from 18:00: not a date's minutes
+        return empty
+    rows = store.series_rows(source, ticker, timespan, lo_ms, hi_ms)
+    own = rows[rows["derivation"].isna()].reset_index(drop=True) if len(rows) else rows
+    if own.empty:
+        return empty
+    ts = own["ts"].to_numpy(dtype="int64")
+    ends = _ends(ts, timespan, asset)
+    spans = sorted(store.coverage(ticker, finer, source=source).get(source, []))
+    if not spans:
+        return empty
+    starts = np.array([a for a, _ in spans], dtype="int64")
+    stops = np.array([b for _, b in spans], dtype="int64")
+    at = np.searchsorted(starts, ts, side="right") - 1
+    covered = (at >= 0) & (ends <= stops[np.clip(at, 0, None)])
+    if not covered.any():
+        return empty
+    fine = store.bars_window([source], ticker, finer, int(ts[covered].min()), int(ends[covered].max()))
+    if fine.empty:
+        return empty
+    f_ts = fine["ts"].to_numpy(dtype="int64")
+    k = np.searchsorted(ts, f_ts, side="right") - 1
+    inside = (k >= 0) & (f_ts < ends[np.clip(k, 0, None)])
+    hi_f = np.full(len(own), -np.inf)
+    lo_f = np.full(len(own), np.inf)
+    n_f = np.zeros(len(own), dtype=int)
+    np.maximum.at(hi_f, k[inside], fine["high"].to_numpy(dtype=float)[inside])
+    np.minimum.at(lo_f, k[inside], fine["low"].to_numpy(dtype=float)[inside])
+    np.add.at(n_f, k[inside], 1)
+    h, l = own["high"].to_numpy(dtype=float), own["low"].to_numpy(dtype=float)
+    bad = covered & (n_f > 0) & ((h > hi_f * (1 + CONSISTENT)) | (l < lo_f * (1 - CONSISTENT)))
+    hit = np.flatnonzero(bad)
+    evidence = [{"finer": finer, "finer_bars": int(n_f[i]), "finer_high": float(hi_f[i]), "finer_low": float(lo_f[i]),
+                 "high": float(h[i]), "low": float(l[i]), "tolerance": CONSISTENT} for i in hit]
+    return own.iloc[hit], evidence
+
+
 def scan_series(store, source: str, ticker: str, timespan: str, asset: str = "stock", lo_ms: int | None = None,
                 hi_ms: int | None = None, now_ms: int | None = None) -> int:
     """Judge one series' bars in [lo, hi) (all of them by default) by rules 1 and 2 and put what they
@@ -173,6 +239,11 @@ def scan_series(store, source: str, ticker: str, timespan: str, asset: str = "st
                 added += store.prune(source, ticker, timespan, 1, sub.iloc[hit], "spike", True, evidence)
                 t = sub["ts"].to_numpy(dtype="int64")[hit]
                 dirty.append((int(t.min()), int(t.max()) + STEP_MS[timespan]))
+        bad, evidence = inconsistent(store, source, ticker, timespan, start, end, asset)
+        if len(bad):
+            added += store.prune(source, ticker, timespan, 1, bad, "inconsistent", True, evidence)
+            t = bad["ts"].to_numpy(dtype="int64")
+            dirty.append((int(t.min()), int(t.max()) + STEP_MS[timespan]))
         start = end
     if dirty:
         from . import derive

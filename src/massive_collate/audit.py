@@ -43,14 +43,16 @@ QUEUE_MAX_AGE = timedelta(days=7)
 # span, and a run's audits stop once they have used AUDIT_SHARE of its request cap.
 AUDIT_SHARE = 0.02
 SPOT_MS = 3_600_000
+SPOT_DAYS_MS = 60 * 86_400_000  # daily bars: two months a spot (one request), an hour would hold one day at most
 
 
-def spot(a: int, b: int, rng: random.Random) -> tuple[int, int]:
-    """A random SPOT_MS window of [a, b), on whole minutes (all of it when shorter)."""
-    if b - a <= SPOT_MS:
+def spot(a: int, b: int, rng: random.Random, timespan: str = "minute") -> tuple[int, int]:
+    """A random window of [a, b) (SPOT_MS; SPOT_DAYS_MS for daily bars), on whole minutes (all of it when shorter)."""
+    width = SPOT_DAYS_MS if timespan == "day" else SPOT_MS
+    if b - a <= width:
         return a, b
-    start = a + int(rng.random() * (b - a - SPOT_MS)) // 60_000 * 60_000
-    return start, start + SPOT_MS
+    start = a + int(rng.random() * (b - a - width)) // 60_000 * 60_000
+    return start, start + width
 
 
 def allowance(source) -> int:
@@ -240,7 +242,7 @@ def run_audits(source, store, me: FeedProfile, feeds: dict[str, FeedProfile], no
         lo, hi = _window(me, w["asset"], q["timespan"], now)
         if not (lo <= q["start_ms"] and q["end_ms"] <= hi):
             continue  # not on this feed's plan yet (e.g. end of day): a later run
-        s0, s1 = spot(q["start_ms"], q["end_ms"], rng)
+        s0, s1 = spot(q["start_ms"], q["end_ms"], rng, q["timespan"])
         audit_span(source, store, q["ticker"], q["timespan"], s0, s1, q["owner"], "after-download", log)
         store.dequeue_audit(q["ticker"], q["timespan"], q["start_ms"], q["owner"])
         done += 1
@@ -250,7 +252,7 @@ def run_audits(source, store, me: FeedProfile, feeds: dict[str, FeedProfile], no
         pick = random_span(store, source, me, now, rng, mine, feeds)
         if pick:
             ticker, timespan, s0, s1, owner = pick
-            audit_span(source, store, ticker, timespan, *spot(s0, s1, rng), owner, "random", log)
+            audit_span(source, store, ticker, timespan, *spot(s0, s1, rng, timespan), owner, "random", log)
             done += 1
     return done
 

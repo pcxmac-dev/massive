@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS pruned (
     volume REAL, vwap REAL, transactions INTEGER,
     stored_at    INTEGER,            -- the pruned version's
     derivation   INTEGER,            -- built here: its derivation record; NULL: the feed's own
-    rule         TEXT    NOT NULL,   -- malformed | spike | rebuilt | out_of_line
+    rule         TEXT    NOT NULL,   -- malformed | spike | inconsistent | rebuilt | out_of_line
     excludes     INTEGER NOT NULL,   -- 1: the stored bar at this time is left out of filtered reads
     evidence     TEXT,               -- JSON: what the rule compared
     pruned_at    INTEGER NOT NULL,   -- ms

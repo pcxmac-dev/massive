@@ -15,7 +15,7 @@ import pandas as pd
 
 from .feeds import BAR_COLUMNS, _stored_ms
 
-RULES = ("malformed", "spike", "rebuilt", "out_of_line")
+RULES = ("malformed", "spike", "inconsistent", "rebuilt", "out_of_line")
 _VALUES = ["open", "high", "low", "close", "volume", "vwap", "transactions"]
 _ms_now = _stored_ms  # the clock stored_at is kept by
 

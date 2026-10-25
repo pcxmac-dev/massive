@@ -148,3 +148,71 @@ def test_the_chart_shows_filtered_data_unless_asked_for_all_of_it(store):
     assert highs["0"] < 51 and highs["1"] == 75.0
     listed = app.pruned("SPCX")
     assert listed["counts"] == {"massive": {"spike": 1}} and listed["entries"][0]["evidence"]["part"] == "extended"
+
+
+# -- rule 3: a feed's own bar against its own finer bars; the fetch's second answer; audits ----
+from massive_collate.collector import verify_fetched  # noqa: E402
+from massive_collate.config import TIERS  # noqa: E402
+from massive_collate.coverage import FeedProfile  # noqa: E402
+
+
+def _day(store, day: str, **bar):
+    t = _ms(f"{day} 00:00")
+    base = {"t": t, "o": 50.0, "h": 50.06, "l": 49.98, "c": 50.03, "v": 1e6, "vw": 50.0, "n": 900}
+    store.upsert_bars("massive", "SPCX", "day", 1, [{**base, **bar}])
+
+
+def test_a_daily_bar_outside_its_own_minutes_is_pruned(store):
+    store.add_coverage("massive", "SPCX", "minute", _ms("2026-10-19 00:00"), _ms("2026-10-21 00:00"))
+    _day(store, "2026-10-19", h=78.95)  # the feed's day: a high no minute of its own reached (NVDA 2024-06-10)
+    _day(store, "2026-10-20", h=50.30)  # within 1 % of its minutes' high (50.06): feeds filter prints a little differently
+    _day(store, "2026-10-16", h=99.0)  # no minutes held that day: nothing to judge it by
+    bad, evidence = baddata.inconsistent(store, "massive", "SPCX", "day", _ms("2026-10-15 00:00"), _ms("2026-10-21 00:00"))
+    assert list(bad["ts"]) == [_ms("2026-10-19 00:00")]
+    assert evidence[0]["finer"] == "minute" and evidence[0]["finer_high"] == pytest.approx(50.06)
+    assert evidence[0]["finer_bars"] == 960
+    baddata.scan_series(store, "massive", "SPCX", "day", "stock")
+    entry = store.pruned("massive", "SPCX", timespan="day")
+    assert list(entry["rule"]) == ["inconsistent"] and entry["high"].iloc[0] == 78.95
+    assert store.bars_window(["massive"], "SPCX", "day", _ms("2026-10-19 00:00"), _ms("2026-10-20 00:00")).empty
+    assert len(store.bars_window(["massive"], "SPCX", "day", _ms("2026-10-19 00:00"), _ms("2026-10-20 00:00"),
+                                 filtered=False)) == 1  # kept: all data shows it
+
+
+class _Asked:
+    """A feed that answers a re-asked day with `answer` (or nothing)."""
+    name = "massive"
+
+    def __init__(self, answer):
+        self.answer, self.asked = answer, []
+
+    def bar_pages(self, ticker, start, end, timespan, multiplier=1, descending=False, asset="stock"):
+        self.asked.append((ticker, start, end, timespan))
+        yield [self.answer] if self.answer else []
+
+
+def _feeds():
+    return {"massive": FeedProfile("massive", TIERS["advanced"], frozenset({"stock"}), 0),
+            "other": FeedProfile("other", TIERS["free"], frozenset({"stock"}), 1)}
+
+
+@pytest.mark.parametrize("second_answer, corrected", [(78.95, 0), (50.06, 1)])
+def test_a_fetched_bar_that_fails_is_asked_for_again_and_audited(store, second_answer, corrected):
+    store.add_coverage("massive", "SPCX", "minute", _ms("2026-10-19 00:00"), _ms("2026-10-21 00:00"))
+    since = int(pd.Timestamp.now(tz="UTC").timestamp() * 1000)  # the fetch began
+    _day(store, "2026-10-19", h=78.95)
+    feeds = _feeds()
+    feed = _Asked({"t": _ms("2026-10-19 00:00"), "o": 50.0, "h": second_answer, "l": 49.98, "c": 50.03, "v": 1e6,
+                   "vw": 50.0, "n": 900})
+    lines = []
+    out = verify_fetched(feed, store, "SPCX", "stock", "SPCX", False, since - 1000, feeds["massive"], feeds, lines.append)
+    assert out == {"failed": 1, "asked": 1, "corrected": corrected} and len(feed.asked) == 1
+    stored = store.bars_window(["massive"], "SPCX", "day", _ms("2026-10-19 00:00"), _ms("2026-10-20 00:00"),
+                               filtered=False)["high"].iloc[0]
+    assert stored == second_answer  # a different second answer is a correction; the first is kept as a revision
+    if corrected:
+        assert store._bars("massive").execute("SELECT high FROM bar_revisions WHERE timespan='day'").fetchone() == (78.95,)
+    queued = {(q["timespan"], q["start_ms"]) for q in store.audit_queue()}
+    assert ("day", _ms("2026-10-19 00:00")) in queued  # a second feed's audit of the failing day
+    derive.run(store, log=lambda *_: None)  # the check derive runs: a bar still failing is pruned
+    assert len(store.pruned("massive", "SPCX", timespan="day", rule="inconsistent")) == (0 if corrected else 1)

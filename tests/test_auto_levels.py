@@ -37,9 +37,10 @@ def store(tmp_path):
         for i, d in enumerate(DAYS):
             s.upsert_bars("massive", "SPCX", "minute", 1, _minutes(d, 10.0 + i))
         s.upsert_bars("alpaca", "SPCX", "minute", 1, _minutes(DAYS[2], 50.0, every=5))  # a second feed, one day
-        s.upsert_bars("massive", "SPCX", "day", 1, [{"t": _ms(f"{d} 00:00"), "o": 10.0 + i, "h": 11.0 + i, "l": 9.0 + i,
-                                                     "c": 10.5 + i, "v": 1e6, "vw": 10.2 + i, "n": 900}
-                                                    for i, d in enumerate(DAYS[:5])])  # official days, not the last two
+        # official days, not the last two; within their own minutes (a day beyond them is bad data, baddata.py)
+        s.upsert_bars("massive", "SPCX", "day", 1, [{"t": _ms(f"{d} 00:00"), "o": 10.0 + i, "h": 10.2 + i, "l": 9.9 + i,
+                                                     "c": 10.1 + i, "v": 1e6, "vw": 10.05 + i, "n": 900}
+                                                    for i, d in enumerate(DAYS[:5])])
         for feed in ("massive", "alpaca"):
             s.watch(feed, ["SPCX"], "minute")
         derive.run(s, log=lambda *_: None)

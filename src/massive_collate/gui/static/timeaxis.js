@@ -10,7 +10,7 @@
    as you scroll. Projected times are fetched ahead of the visible range in pages.
 
    Sessions are annotated on intraday charts: a dashed line where each session opens, shaded
-   pre-market and after-hours (US stocks with extended hours on), and a band along the top of
+   pre-market (blue) and after-hours (grey) (US stocks with extended hours on), and a band along the top of
    the current (or next) session. */
 (() => {
   const store = chart._chartStore;
@@ -182,7 +182,9 @@
       const t1 = store.dataIndexToTimestamp(to + 1);
       const xOf = (ts) => xAxis.convertToPixel(store.timestampToDataIndex(ts)) - c.getBarSpace().halfBar;
       const dark = !document.body.classList.contains('light');
-      const shade = dark ? 'rgba(120,123,134,0.07)' : 'rgba(120,123,134,0.08)';
+      // pre-market a cool blue, after-hours grey: one shade for both made them hard to tell apart
+      const preShade = dark ? 'rgba(10,32,96,0.45)' : 'rgba(20,60,170,0.13)';  // a deep navy
+      const postShade = dark ? 'rgba(120,123,134,0.07)' : 'rgba(120,123,134,0.08)';
       const now = Date.now();
       const cur = currentSession(sess.list, now);
       ctx.save();
@@ -190,7 +192,7 @@
         if (s.close < t0 || s.open > t1) continue;
         // Extended hours shading (US stocks with ETH on).
         if (s.regularOpen && state.session === 'extended') {
-          for (const [a, b] of [[s.open, s.regularOpen], [s.regularClose, s.close]]) {
+          for (const [a, b, shade] of [[s.open, s.regularOpen, preShade], [s.regularClose, s.close, postShade]]) {
             const xa = xOf(a), xb = xOf(b);
             if (xb > xa) { ctx.fillStyle = shade; ctx.fillRect(xa, 0, xb - xa, bounding.height); }
           }

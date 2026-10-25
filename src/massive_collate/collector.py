@@ -363,6 +363,73 @@ def sync_bars(
     return saved
 
 
+REFETCH_MAX = 10  # requests a symbol's fetch may spend asking again for bars that failed the check
+
+
+def verify_fetched(source: DataSource, store: Store, ticker: str, asset: str, fetch: str, invert: bool, since_ms: int,
+                   me: FeedProfile, feeds: dict[str, FeedProfile], log: Log = print) -> dict:
+    """Check what a symbol's fetch just stored against the feed's own finer bars (baddata.inconsistent:
+    a day within its minutes, a minute within its seconds), ask the feed once more for each bar that
+    fails (at most REFETCH_MAX requests; a different answer is stored as a correction, the first kept
+    in bar_revisions), and queue a second feed's audit of every span the fetch updated and of every bar
+    still failing. What still fails is pruned by the check derive runs next (baddata.scan_symbol), so it
+    never reaches the filtered data. Returns {"failed", "asked", "corrected"}."""
+    from . import baddata
+
+    out = {"failed": 0, "asked": 0, "corrected": 0}
+    for timespan in ("day", "minute"):
+        span = store.changed_span(source.name, ticker, timespan, since_ms - 60_000)
+        if span is None:
+            continue
+        lo, hi = span[0], span[1] + STEP_MS.get(timespan, 60_000)
+        _queue_audit_span(store, me, feeds, ticker, asset, timespan, lo, hi)  # a second feed's view of what changed
+        bad, evidence = baddata.inconsistent(store, source.name, ticker, timespan, lo, hi, asset)
+        if bad.empty:
+            continue
+        out["failed"] += len(bad)
+        for row, ev in zip(bad.itertuples(), evidence):
+            if out["asked"] >= REFETCH_MAX:
+                break
+            a = int(row.ts)
+            b = a + (86_400_000 if timespan == "day" else 60_000)
+            out["asked"] += 1
+            try:
+                page = [x for p in _guard(source.bar_pages(fetch, datetime.fromtimestamp(a / 1000, ET),
+                                                           datetime.fromtimestamp(b / 1000, ET), *frame_parts(timespan),
+                                                           asset=asset))
+                        for x in p if int(x["t"]) == a]
+            except SourceError as e:  # no second answer: the check prunes it as it stands
+                log(f"{ticker} {timespan}: could not ask {source.name} again ({e})")
+                page = []
+            again = page[0] if page else None
+            seen = (invert_bars([again])[0] if invert else again) if again is not None else None
+            if seen is not None and (seen["h"], seen["l"]) != (row.high, row.low):
+                _store_bars(store, source, ticker, timespan, [again], invert)  # a correction: the first is kept
+                out["corrected"] += 1
+                log(f"{ticker} {timespan} {datetime.fromtimestamp(a / 1000, ET):%Y-%m-%d %H:%M}: {source.name} answered "
+                    f"high {row.high} low {row.low}, its {ev['finer']} bars {ev['finer_low']}-{ev['finer_high']}; asked "
+                    f"again: high {seen['h']} low {seen['l']}")
+            else:
+                log(f"{ticker} {timespan} {datetime.fromtimestamp(a / 1000, ET):%Y-%m-%d %H:%M}: {source.name} answered "
+                    f"high {row.high} low {row.low} twice, its {ev['finer']} bars {ev['finer_low']}-{ev['finer_high']}: "
+                    "bad data, kept off the filtered view")
+            _queue_audit_span(store, me, feeds, ticker, asset, timespan, a, b)
+    if out["failed"]:
+        log(f"{ticker}: {out['failed']} fetched bars outside the feed's own finer bars; asked again {out['asked']}, "
+            f"{out['corrected']} answered differently")
+    return out
+
+
+def _queue_audit_span(store: Store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, asset: str,
+                      timespan: str, lo: int, hi: int) -> None:
+    """Ask another feed of the same market watching the ticker to audit [lo, hi) (a spot of it)."""
+    from .coverage import same_market
+
+    if any(f.name != me.name and asset in f.assets and same_market(feeds, f.name, me.name, asset)
+           for f in feeds.values()):
+        store.queue_audit(ticker, timespan, lo, hi, me.name)
+
+
 def _queue_audit(store: Store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, asset: str,
                  timespan: str, newest: int | None) -> None:
     """After new data: ask another feed watching the ticker to audit the newest session."""
@@ -918,6 +985,7 @@ def sync(
                 if on_item:
                     on_item(ticker)
                 spent = source.requests_made
+                began = int(datetime.now(timezone.utc).timestamp() * 1000)  # what this symbol's fetch stores is newer
                 if asset == "future":
                     try:
                         n = sync_future(source, store, item, floor, today, log)
@@ -999,7 +1067,8 @@ def sync(
                 else:
                     log(f"{ticker} {resolution}: {n} rows ({source.requests_made - spent} requests)")
                 store.set_synced(source.name, ticker, now)
-                _derive_symbol(store, source.name, ticker, asset, log)
+                verify_fetched(source, store, ticker, asset, fetch, invert, began, me, feeds, log)
+                _derive_symbol(store, source.name, ticker, asset, log)  # bad data checked first (baddata.py)
                 if archival:
                     spans = [resolution] if resolution == "day" else [resolution, "day"]
                     if not any(plan(store, me, feeds, ticker, asset, ts, item_floor, now, listing.listed_from) for ts in spans):
