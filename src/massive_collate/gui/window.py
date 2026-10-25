@@ -50,7 +50,7 @@ LEVELS_TTL_S = 60.0
 BRICK_ROWS = 100_000
 BRICK_READ = 400_000
 COVER_MS = 7 * 86_400_000
-BRICK_TTL_S = 120.0  # an older page may come from a build this old while new bars arrive
+BRICK_TTL_S = 120.0  # a build is kept this long (a bar corrected inside the history shows after it)
 BRICK_CACHE_BYTES = 300_000_000
 HA_WARMUP = 64  # Heikin Ashi's open halves its first bar's weight each bar: gone below a float's precision
 # Fourier fits each segment (a session: up to the next gap) whole; where a market runs without
@@ -450,7 +450,7 @@ class WindowReader:
                after_ms: int | None = None, since_ms: int | None = None, limit: int = PAGE) -> dict:
         """A page of a price-based chart (Renko, Kagi, line break, point & figure, range), built
         whole from its level (brick_level) as the series path builds it at that interval, and kept
-        while the data is unchanged (older pages: up to BRICK_TTL_S while new bars arrive)."""
+        a while (_built_bricks)."""
         s = self.series(source, ticker)
         session = s.session_for(session)
         lv = self.brick_level(source, ticker, session)
@@ -467,18 +467,24 @@ class WindowReader:
         return page
 
     def _built_bricks(self, s, source, ticker, lv, session, style, older) -> tuple[pd.DataFrame, dict]:
+        """The chart built whole, kept BRICK_TTL_S: the newest page builds it again sooner when its
+        level's base bars reach further (each feed's first and last: two index seeks, not the
+        series fingerprint, which counts every row and took over a second while a sync wrote);
+        an older page keeps the build the chart is showing (a new bar moves the ATR box of all)."""
         key = (source, s.ticker, lv["type"], lv["span"], session, style)
-        fp = self.engine.fingerprint(source, ticker)
+        feeds = self.feeds(source, ticker)
+        with self.engine.lock:
+            stamp = tuple(self.store.bar_edges(f, s.ticker, BASE.get(lv["type"], "day")) for f in feeds)
         with self._bricks_lock:
             hit = self._bricks.get(key)
-        if hit and (hit[0] == fp or (older and time.monotonic() - hit[1] < BRICK_TTL_S)):
+        if hit and time.monotonic() - hit[1] < BRICK_TTL_S and (older or hit[0] == stamp):
             return hit[2], hit[3]
-        base = self._level_bars(s, self.feeds(source, ticker), lv["type"], lv["span"], session)
+        base = self._level_bars(s, feeds, lv["type"], lv["span"], session)
         prices = base[["open", "high", "low", "close"]].to_numpy().ravel()
         used = style_used(style, base, decimals(prices, cap=6, minimum=2) if len(prices) else 2)
         out = transformed(base, used)
         with self._bricks_lock:
-            self._bricks[key] = (fp, time.monotonic(), out, used)
+            self._bricks[key] = (stamp, time.monotonic(), out, used)
         return out, used
 
     def range_stats(self, source: str, ticker: str, period: str, span: int, session: str, from_ms: int,

@@ -303,3 +303,20 @@ def test_the_series_path_pages_newer_bars_too(store):
     newer = engine.bars("*", "SPCX", "minute", 30, "extended", after_ms=older["bars"][-1]["timestamp"], limit=5)
     assert [b["timestamp"] for b in newer["bars"]] == [b["timestamp"] for b in every if b["timestamp"] >= anchor][:5]
     assert newer["newer"] and newer["more"]
+
+
+def test_new_bars_build_the_newest_bricks_again_and_older_pages_keep_theirs(store, monkeypatch):
+    reader = WindowReader(BarEngine(store))
+    builds = []
+    level_bars = reader._level_bars
+    monkeypatch.setattr(reader, "_level_bars", lambda *a: builds.append(a) or level_bars(*a))
+    monkeypatch.setattr(reader.engine, "fingerprint", lambda *a: pytest.fail("the fingerprint counts every row"))
+    first = reader.bricks("massive", "SPCX", "extended", Style(type="renko"), limit=5)
+    store.upsert_bars("massive", "SPCX", "minute", 1, _minutes("2026-10-21", 30.0))  # a new day: the bricks move on
+    reader.bricks("massive", "SPCX", "extended", Style(type="renko"), to_ms=first["bars"][0]["timestamp"], limit=5)
+    assert len(builds) == 1  # an older page of what the chart shows
+    newest = reader.bricks("massive", "SPCX", "extended", Style(type="renko"), limit=5)
+    assert len(builds) == 2 and newest["total"] > first["total"]
+    monkeypatch.setattr(window_module, "BRICK_TTL_S", 0.0)  # kept no longer: built again
+    reader.bricks("massive", "SPCX", "extended", Style(type="renko"), limit=5)
+    assert len(builds) == 3
