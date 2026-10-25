@@ -204,8 +204,11 @@
       msg = `Background fetching paused until ${new Date(pausedUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
         + ' · the open symbol still updates';
     }
-    // No source able to fetch (every one down, limited out or not set up): said plainly.
-    if (data && data.canFetch === false && !busy) {
+    // A copy of the app that fetches nothing by design (MASSIVE_OFFLINE: a test copy) says so.
+    if (data?.offline && !busy) {
+      msg = 'Offline copy: nothing is fetched here (MASSIVE_OFFLINE)';
+      title = 'A copy of the app on a copy of the data, for testing; the real app fetches as usual';
+    } else if (data && data.canFetch === false && !busy) {  // no source able to fetch (every one down, limited out or not set up)
       msg = 'Unable to fetch data currently';
       cls = 'bad';
       title = (data.health || []).filter((h) => h.state !== 'off').map((h) => `${h.source}: ${h.state} — ${h.why}`).join('\n')

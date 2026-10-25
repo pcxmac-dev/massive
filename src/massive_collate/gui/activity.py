@@ -460,6 +460,7 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
         "limits": limit_rows,
         "health": sources_health,
         "canFetch": can_fetch(sources_health),
+        "offline": bool(settings.offline),  # a copy that fetches nothing (MASSIVE_OFFLINE): said so, not "unable"
         "priority": {t: {"at": v["at"].isoformat(), "runs": v["runs"]}
                      for t, v in collector.priority_requests(store, now).items()},
         "runs": runs,

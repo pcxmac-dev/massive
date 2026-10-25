@@ -230,3 +230,13 @@ def test_tests_cannot_see_or_end_this_machines_processes():
     assert proc.processes() == []  # conftest: a test recorder once ended the user's real one
     with pytest.raises(AssertionError, match="tried to end"):
         proc.terminate(1)
+
+
+def test_an_offline_copy_says_so_rather_than_unable_to_fetch(store, monkeypatch, tmp_path):
+    from massive_collate.config import load_settings
+
+    monkeypatch.setenv("MASSIVE_OFFLINE", "1")
+    out = activity.activity(store, load_settings(), tmp_path / "m.db", "massive")
+    assert out["offline"] is True and out["canFetch"] is False  # every feed off: the page says "offline copy"
+    js = (activity.Path(activity.__file__).parent / "static" / "activity.js").read_text(encoding="utf-8")
+    assert js.index("data?.offline") < js.index("Unable to fetch data currently")
