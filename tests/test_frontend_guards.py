@@ -132,3 +132,8 @@ def test_the_gaps_between_panes_are_the_windows_grey_and_hold_no_crosshair_line(
     assert "crosshair" not in spacing  # the library's dashed line, drawn in the panes only
     assert "getPropertyValue('--panel')" in app.split("const gapColor", 1)[1].splitlines()[0]  # the window's grey
     assert "applyPaneSpacing();" in _function(app, "applyChartType")  # after every theme
+
+def test_the_time_zone_switch_sits_on_the_date_row_centred_on_the_dates():
+    place = _function(_js("app.js"), "placeTimezone")
+    assert "const mid = (text.marginStart ?? 4) + (text.size ?? 12) / 2;" in place  # where the axis draws its dates
+    assert "height = 2 * (mid - PANE_GAP)" in place and "top: `${axis.top + PANE_GAP}px`" in place

@@ -1117,6 +1117,7 @@ function placeAxisGap() {
   const axis = chart.getSize('x_axis_pane');
   if (!axis) return;
   Object.assign(axisGap.style, { top: `${axis.top}px`, height: `${PANE_GAP}px`, width: `${axis.width}px`, background: gapColor() });
+  placeTimezone();  // on the date row below the band
 }
 new ResizeObserver(() => requestAnimationFrame(placeAxisGap)).observe($('chart'));  // panes added, dragged, resized
 
@@ -1134,12 +1135,26 @@ function zoneName(z) {
   return z === 'exchange' ? 'Exchange' : gmtLabel(z);
 }
 
+// The switch sits on the time axis's date row, as tall as it and centred on the dates' line (the
+// axis draws its dates from the top of their margin, in its tick-text font): below the gap band,
+// under the price axis. Its list opens upward from it.
+function placeTimezone() {
+  const axis = chart.getSize('x_axis_pane');
+  if (!axis) return;
+  const text = chart.getStyles().xAxis.tickText;
+  const mid = (text.marginStart ?? 4) + (text.size ?? 12) / 2;  // the dates' centre, from the axis's top
+  const height = 2 * (mid - PANE_GAP);
+  Object.assign(tzBtn.style, { width: `${Y_AXIS_WIDTH}px`, top: `${axis.top + PANE_GAP}px`, bottom: 'auto',
+                               height: `${height}px`, lineHeight: `${height}px`, fontSize: `${text.size ?? 12}px`,
+                               color: text.color });
+  tzMenu.style.bottom = `${$('chart').clientHeight - (axis.top + PANE_GAP) + 4}px`;
+}
+
 function renderTimezone() {
   tzBtn.textContent = state.timezone === 'exchange' ? zoneShort(TZ) : gmtLabel(state.timezone);
   tzBtn.title = `Time zone of the time axis and crosshair: ${zoneName(state.timezone)}. Days, weeks and months keep `
     + 'the market\'s own dates. Click to change; the mouse wheel turns the list.';
-  tzBtn.style.width = `${Y_AXIS_WIDTH}px`;
-  tzBtn.style.height = `${chart.getSize('x_axis_pane')?.height || 26}px`;
+  placeTimezone();
   if (tzMenu.hidden) return;
   const n = TIMEZONES.length;
   const clock = (z) => new Intl.DateTimeFormat('en-US', { timeZone: z === 'exchange' ? TZ : z, hour: '2-digit',
