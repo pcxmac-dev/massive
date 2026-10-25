@@ -23,6 +23,45 @@ backtest can never see the future.
 - **One responsibility at a time.** Each refactor step moves one responsibility, keeps the public
   interface so callers change separately, and is checked by the full test suite before the next.
 
+## Bad data (draft for review, 2026-10-25)
+
+All source data is kept, always: received bars and ticks are never deleted or changed. Every series
+has two views:
+
+- **Unfiltered**: all data, everything stored, nothing taken out.
+- **Filtered** (the target data, what charts and calculations use by default): unfiltered without
+  the bad data.
+
+The **pruned list** holds the bad data, one per feed and symbol: each entry is what was taken out of
+the filtered view (a bar or a trade, as it was), the rule below that caught it, the evidence (the
+numbers the rule compared), when it was pruned and by which code. An entry can be released (put
+back) without losing the record that it was pruned. Pruning never mixes feeds: a feed's series is
+judged on its own, other feeds' data serving only as evidence.
+
+What constitutes bad data:
+
+1. **Malformed**: a bar whose prices are not positive and finite, whose high is below its low or
+   whose open or close lies outside them, whose volume is negative; a time in the future, or outside
+   every session of the market (a stock print on a weekend or holiday).
+2. **Spike without volume**: a bar whose range is at least 10 times the median range of its 20
+   nearest neighbours (10 each side) in the same part of the session (regular hours against regular
+   hours, after hours against after hours: they trade very different volumes), while its volume is at
+   most 2 times their median volume, and whose open and close both lie within the neighbours' range
+   (the price did not move on). A real move has volume behind it. The bar is pruned; the trades
+   inside it are named in the evidence.
+3. **Built from the wrong rules**: a bar built here (from ticks, or finer bars) whose build was
+   wrong, found when it is rebuilt: the old version goes to the pruned list, the rebuilt one takes
+   its place. (2026-10-25: Massive's condition id 2, Average Price Trade, took the rule of the tape
+   letter '2' and set highs and lows; NVDA after hours showed $177 to $251 in a minute at $231.)
+4. **Out of line with the other feeds**: a feed's bar whose high or low lies beyond the other feeds'
+   range for the same time by more than 5 times the composite's deviation, where at least two other
+   feeds hold that time.
+
+Not bad data: trades the consolidated tape's rules keep from setting prices (odd lots, average-price
+and cash-sale prints, ...). They are kept and counted in volume where the rules say so; they only do
+not set the open, high, low or close of filtered bars (`ticks.py`). A bar a feed corrects later is a
+revision (`bar_revisions`), not bad data. The thresholds in 2 and 4 are settings.
+
 ## State (2026-10-24)
 
 Already separated: data sources behind one interface (`sources/`), coverage planning
