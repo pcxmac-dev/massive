@@ -458,3 +458,15 @@ def test_the_data_panel_answers_while_the_shared_lock_is_held_and_counts_later(t
         time.sleep(0.01)
     minute = next(f for f in app.inventory("SPCX")["feeds"][0]["frames"] if f["frame"] == "1m")
     assert minute["sent"]["rows"] == 390
+
+
+def test_a_continuous_futures_data_by_feed_is_its_contracts(tmp_path):
+    from massive_collate import inventory
+
+    s = _future_store(tmp_path)
+    inv = inventory.symbol_inventory(s, "NQ1!", ["massive"], counts=True)  # stored under NQU6 and NQZ6, never NQ1!
+    feed = inv["feeds"][0]
+    assert feed["feed"] == "massive" and feed["contracts"] == ["NQU6", "NQZ6"]
+    minute = next(f for f in feed["frames"] if f["frame"] == "1m")["sent"]
+    assert minute["rows"] == 5 and minute["first"].startswith("2026-09-16T23:00")  # 19:00 New York, the NQU6 bar
+    assert inventory.row_counts(s, "NQ1!")[("massive", "bars", "minute", 1)] == 5

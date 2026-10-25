@@ -41,13 +41,15 @@ def symbol_inventory(store, ticker: str, rank: list[str] | None = None, counts: 
     gives counts made before (the chart app's, row_counts), None where it has none."""
     t = ticker.upper()
     watch = {w["source"]: w for w in store.watchlist(ticker=t)}
-    held = set(store.feeds_holding(t))
+    series = {feed: _series_tickers(store, feed, t, watch.get(feed)) for feed in set(store.feeds_holding(t)) | set(watch)}
+    held = {feed for feed, tickers in series.items() if any(store.feeds_holding(tk) for tk in tickers)}
     rank = [f for f in (rank or []) if f in held or f in watch]
     order = rank + sorted((held | set(watch)) - set(rank))
     records: dict[int, dict | None] = {}
     feeds = []
     for feed in order:
-        stored = store.frame_inventory(feed, t, counts=counts is True)
+        tickers = series.get(feed, [t])
+        stored = _merged_frames(store, feed, tickers, counts is True)
         frames: dict[tuple[str, int], dict] = {}
         for row in stored:
             key = (row["timespan"], row["multiplier"])
@@ -64,13 +66,16 @@ def symbol_inventory(store, ticker: str, rank: list[str] | None = None, counts: 
                                "from": (d["settings"] or {}).get("from")} if d else None
                 frames.setdefault(key, {})["derived"] = part
         bases = {ts for (ts, m) in frames if m == 1 and ts in dict(derive.CHAINS)}
-        ticks = store.trade_edges(feed, t)
+        edges = [e for e in (store.trade_edges(feed, tk) for tk in tickers) if e]
+        ticks = (min(e[0] for e in edges), max(e[1] for e in edges)) if edges else None
         w = watch.get(feed)
         feeds.append({
             "feed": feed, "model": feed in MODEL_FEEDS, "merged": feed in rank,
             "watch": {k: (str(w[k]) if w.get(k) is not None else None)
                       for k in ("asset", "resolution", "backfilled_to", "synced_at", "closed_at")} if w else None,
             "ticks": {"first": _iso(ticks[0] // 1_000_000), "last": _iso(ticks[1] // 1_000_000)} if ticks else None,
+            # a continuous future's bars are its contracts' (its roll schedule): which ones
+            "contracts": tickers if tickers != [t] else None,
             "frames": [{"frame": derive.label(ts, m), "timespan": ts, "multiplier": m, **frames[(ts, m)]}
                        for ts, m in sorted(frames, key=_duration)],
             "notBuilt": [derive.label(ts, m) for ts, m in sorted(expected(bases) - set(frames), key=_duration)],
@@ -87,8 +92,38 @@ def _duration(frame: tuple[str, int]) -> int:
 
 
 def row_counts(store, ticker: str) -> dict:
-    """{(feed, table, timespan, multiplier): bars} of a symbol on every feed: the counts
-    symbol_inventory leaves out when asked to be quick (slow: every bar is counted)."""
+    """{(feed, table, timespan, multiplier): bars} of a symbol on every feed (a continuous future's
+    over its contracts): the counts symbol_inventory leaves out when asked to be quick (slow: every
+    bar is counted)."""
     t = ticker.upper()
+    watch = {w["source"]: w for w in store.watchlist(ticker=t)}
     return {(feed, r["table"], r["timespan"], r["multiplier"]): r["rows"]
-            for feed in store.feeds_holding(t) for r in store.frame_inventory(feed, t)}
+            for feed in set(store.feeds_holding(t)) | set(watch)
+            for r in _merged_frames(store, feed, _series_tickers(store, feed, t, watch.get(feed)), True)}
+
+
+def _series_tickers(store, feed: str, ticker: str, watch_row: dict | None) -> list[str]:
+    """The tickers a symbol's bars are stored under on a feed: its own; a continuous future's are its
+    contracts (its roll schedule), never the continuous symbol."""
+    if watch_row and watch_row.get("asset") == "future" and watch_row.get("source_ticker"):
+        contracts = sorted({tk for _, tk in store.rolls(feed, watch_row["source_ticker"], watch_row.get("rank") or 1)})
+        return contracts or [ticker]
+    return [ticker]
+
+
+def _merged_frames(store, feed: str, tickers: list[str], counts: bool) -> list[dict]:
+    """frame_inventory over several tickers (a future's contracts), frame by frame: the first and
+    last bar over all, the counts summed, the newest built bar's derivation."""
+    merged: dict[tuple, dict] = {}
+    for tk in tickers:
+        for row in store.frame_inventory(feed, tk, counts=counts):
+            key = (row["table"], row["timespan"], row["multiplier"])
+            m = merged.get(key)
+            if m is None:
+                merged[key] = dict(row)
+                continue
+            m["first"] = min(x for x in (m["first"], row["first"]) if x is not None) if row["first"] or m["first"] else None
+            if row["last"] is not None and (m["last"] is None or row["last"] > m["last"]):
+                m["last"], m["derivation"] = row["last"], row["derivation"]
+            m["rows"] = None if m["rows"] is None or row["rows"] is None else m["rows"] + row["rows"]
+    return list(merged.values())

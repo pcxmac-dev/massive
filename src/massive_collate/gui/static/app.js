@@ -2815,7 +2815,9 @@ function renderInventory() {
     const w = f.watch || {};
     const about = [f.model ? `${f.feed}: a model built from several exchanges (derived)` : f.feed,
       w.resolution ? `collects ${w.resolution}${w.backfilled_to ? `, history from ${w.backfilled_to}` : ''}` : 'not collected here by this feed',
-      f.ticks ? `trades ${when(f.ticks.first)} → ${when(f.ticks.last)} UTC` : ''].filter(Boolean).join('\n');
+      f.ticks ? `trades ${when(f.ticks.first)} → ${when(f.ticks.last)} UTC` : '',
+      f.contracts ? `contracts ${f.contracts[0]} … ${f.contracts.at(-1)} (${f.contracts.length}, its roll schedule)` : '']
+      .filter(Boolean).join('\n');
     return `<th title="${esc(about)}">${esc(f.feed)}${f.model ? '*' : ''}</th>`;
   };
   const pending = inv.feeds.some((f) => f.notBuilt.length);
