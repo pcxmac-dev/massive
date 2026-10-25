@@ -259,6 +259,24 @@ class WindowReader:
         return {"bars": to_records(older.tail(limit)), "more": len(older) > limit,
                 "newer": to_ms is not None and bool((ts >= to_ms).any())}
 
+    def range_stats(self, source: str, ticker: str, period: str, span: int, session: str, from_ms: int,
+                    to_ms: int) -> dict:
+        """The highlight's statistics (bars.summarize_range) from the bars of its own window at the
+        level: the same as from the whole history, without loading it."""
+        from .bars import summarize_range
+
+        s = self.series(source, ticker)
+        session = s.session_for(session)
+        feeds = self.feeds(source, ticker)
+        lo, hi = sorted((int(from_ms), int(to_ms)))
+        if period in CALENDAR:
+            daily = self._days(s, feeds)
+            bars = daily if period == "day" else _aggregate(daily.groupby(calendar_key(daily.index, period, utc=utc_days(s))))
+        else:
+            step = UNIT_MS[period] * span
+            bars = self._built(s, feeds, BASE[period], period, span, session, lo - step, hi + step)
+        return summarize_range(bars, lo, hi)
+
     # -- the virtual level 2: what traded at each price in one bar ------------------------------
     PROFILE_TICK_MS = 86_400_000  # bars up to a day read the feeds' ticks; longer ones their finer bars
     PROFILE_MAX_ROWS = 2000

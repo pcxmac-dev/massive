@@ -130,3 +130,11 @@ def test_a_far_future_projection_stops_before_timestamps_end(store):
     app = ChartApp(store)
     fut = app.future({"source": "*", "ticker": "SPCX", "period": "month", "span": "1", "auto": "1", "count": "4000"})
     assert 0 < len(fut["timestamps"]) <= 600  # fifty years of months, not four thousand
+
+
+@pytest.mark.parametrize("period, span", [("minute", 5), ("hour", 1), ("day", 1), ("week", 1)])
+def test_the_highlights_statistics_from_its_window_are_the_whole_historys(store, period, span):
+    engine = BarEngine(store)
+    lo, hi = _ms(f"{DAYS[1]} 10:00"), _ms(f"{DAYS[5]} 15:00")
+    whole = engine.range_stats("*", "SPCX", period, span, "regular", lo, hi)
+    assert WindowReader(engine).range_stats("*", "SPCX", period, span, "regular", lo, hi) == whole and whole["bars"]

@@ -295,6 +295,34 @@ def utc_days(s) -> bool:
 BAR_KINDS = ("second", "minute", "hour", "day")  # series of bars (not ticks) that can take tail updates
 
 
+def summarize_range(bars: pd.DataFrame, lo_ms: int, hi_ms: int, model: Model = Model()) -> dict:
+    """Statistics over the bars whose start lies in [lo_ms, hi_ms]: what the chart's highlight shows."""
+    ts = epoch_ms(bars.index)
+    sel = bars[(ts >= lo_ms) & (ts <= hi_ms)]
+    if sel.empty:
+        return {"bars": 0}
+    sel_ts = epoch_ms(sel.index)
+    volume = float(sel["volume"].sum())
+    turnover = float(sel["turnover"].sum())
+    first_open, last_close = float(sel["open"].iloc[0]), float(sel["close"].iloc[-1])
+    hi_i, lo_i = int(np.argmax(sel["high"].to_numpy())), int(np.argmin(sel["low"].to_numpy()))
+    return {
+        "bars": int(len(sel)),
+        "from": int(sel_ts[0]), "to": int(sel_ts[-1]),
+        "open": first_open, "close": last_close,
+        "change": last_close - first_open,
+        "changePct": (last_close / first_open - 1) * 100 if first_open else None,
+        "high": float(sel["high"].iloc[hi_i]), "highTime": int(sel_ts[hi_i]),
+        "low": float(sel["low"].iloc[lo_i]), "lowTime": int(sel_ts[lo_i]),
+        "rangePct": (float(sel["high"].max()) / float(sel["low"].min()) - 1) * 100 if sel["low"].min() else None,
+        "volume": volume,
+        # VWAP and range % are price concepts: not shown for derivatives or integrals.
+        "vwap": turnover / volume if volume and model.is_price else None,
+        "trades": int(sel["trades"].sum()),
+        **({} if model.is_price else {"rangePct": None, "model": model.kind, "unit": model.unit_label()}),
+    }
+
+
 def to_records(bars: pd.DataFrame) -> list[dict]:
     ts = epoch_ms(bars.index).tolist()
     cols = {c: bars[c].to_numpy(dtype=float).tolist() for c in COLUMNS}
@@ -986,30 +1014,7 @@ class BarEngine:
         bars = self._fine_bars(s, span, session, lo_ms, hi_ms + 1) if self._windowed(s, period)             else self._resampled(s, period, span, session)
         if not model.validate().is_price:
             bars = self._modelled(s, bars, period, span, session, model)
-        ts = epoch_ms(bars.index)
-        sel = bars[(ts >= lo_ms) & (ts <= hi_ms)]
-        if sel.empty:
-            return {"bars": 0}
-        sel_ts = epoch_ms(sel.index)
-        volume = float(sel["volume"].sum())
-        turnover = float(sel["turnover"].sum())
-        first_open, last_close = float(sel["open"].iloc[0]), float(sel["close"].iloc[-1])
-        hi_i, lo_i = int(np.argmax(sel["high"].to_numpy())), int(np.argmin(sel["low"].to_numpy()))
-        return {
-            "bars": int(len(sel)),
-            "from": int(sel_ts[0]), "to": int(sel_ts[-1]),
-            "open": first_open, "close": last_close,
-            "change": last_close - first_open,
-            "changePct": (last_close / first_open - 1) * 100 if first_open else None,
-            "high": float(sel["high"].iloc[hi_i]), "highTime": int(sel_ts[hi_i]),
-            "low": float(sel["low"].iloc[lo_i]), "lowTime": int(sel_ts[lo_i]),
-            "rangePct": (float(sel["high"].max()) / float(sel["low"].min()) - 1) * 100 if sel["low"].min() else None,
-            "volume": volume,
-            # VWAP and range % are price concepts: not shown for derivatives or integrals.
-            "vwap": turnover / volume if volume and model.is_price else None,
-            "trades": int(sel["trades"].sum()),
-            **({} if model.is_price else {"rangePct": None, "model": model.kind, "unit": model.unit_label()}),
-        }
+        return summarize_range(bars, lo_ms, hi_ms, model)
 
     @staticmethod
     def _windowed(s: Series, period: str) -> bool:

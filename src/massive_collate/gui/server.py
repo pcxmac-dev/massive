@@ -327,7 +327,8 @@ class ChartApp:
             exchanges = self.store.exchanges()
         mic = watch.get("exchange") or (details or {}).get("primary_exchange")
         names = {r.mic: r.name for r in exchanges.itertuples() if r.mic}
-        base = levels[0]
+        # the series' base as the interval charts counted it: its minutes (seconds are a layer apart)
+        base = next((lv for lv in levels if lv["type"] == "minute"), levels[0])
         iso = lambda ms: pd.Timestamp(ms, unit="ms", tz="UTC").tz_convert("America/New_York").isoformat()
         return {
             "symbol": {
@@ -457,6 +458,9 @@ class ChartApp:
         )
 
     def range_stats(self, q: dict[str, str]) -> dict:
+        if q.get("model", "price") == "price" and self.window.handles(q["source"], q["ticker"]):  # its own window only
+            return self.window.range_stats(q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
+                                           q.get("session", "regular"), int(q["from"]), int(q["to"]))
         return self.engine.range_stats(
             q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
             q.get("session", "regular"), int(q["from"]), int(q["to"]), adjust=_adjust(q.get("adjust")),
