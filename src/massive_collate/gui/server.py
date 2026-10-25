@@ -312,8 +312,6 @@ class ChartApp:
         return out
 
     def _info_light(self, source: str, ticker: str) -> dict:
-        from .window import estimated_rows
-
         levels = self.window.levels(source, ticker)
         if not levels:
             raise LookupError(f"no data stored for {source}:{ticker}")
@@ -342,7 +340,7 @@ class ChartApp:
             "attribution": self.attribution(s.ticker, "minute" if base["type"] != "day" else "day", s.asset),
             "audits": self.audit_summary(s.ticker),
             "data": {
-                "feeds": feeds, "base": base["type"], "rows": estimated_rows(base),
+                "feeds": feeds, "base": base["type"], "rows": self.window.base_rows(source, ticker, base["type"]),
                 "first": iso(min(lv["first"] for lv in levels)), "last": iso(max(lv["last"] for lv in levels)),
                 "officialDaily": bool(len(daily) and (~daily["derived"].astype(bool)).any()), "pricePrecision": 2,
                 "levels": levels,

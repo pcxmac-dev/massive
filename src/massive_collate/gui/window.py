@@ -119,6 +119,22 @@ class WindowReader:
         self._levels[key] = (time.monotonic(), out)
         return out
 
+    def base_rows(self, source: str, ticker: str, base: str) -> int:
+        """The bars a series holds at its base level (the side panel's count), exact: the feed
+        holding most of them (a range count each, kept a minute)."""
+        key = ("rows", source, ticker.upper(), base)
+        hit = self._levels.get(key)
+        if hit and time.monotonic() - hit[0] < LEVELS_TTL_S:
+            return hit[1]
+        best = 0
+        with self.engine.lock:
+            for feed in self.feeds(source, ticker):
+                rows = sum(r["rows"] for r in self.store.frame_inventory(feed, ticker)
+                           if r["timespan"] == base and r["multiplier"] == 1)
+                best = max(best, rows)
+        self._levels[key] = (time.monotonic(), best)
+        return best
+
     # -- pages -------------------------------------------------------------------------------
     def page(self, source: str, ticker: str, period: str, span: int = 1, session: str = "regular",
              to_ms: int | None = None, after_ms: int | None = None, since_ms: int | None = None,
