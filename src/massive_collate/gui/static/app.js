@@ -262,19 +262,28 @@ const chart = kc.init('chart', {
 
 chart.setDataLoader({
   getBars: async ({ type, timestamp, symbol, period, callback }) => {
-    if (type === 'backward' || type === 'update') { callback([], { backward: false }); return; }
+    if (type === 'update' || (type === 'backward' && !state.meta?.auto)) { callback([], { backward: false }); return; }
     const token = type === 'init' ? ++state.loadToken : state.loadToken;
     const params = {
       source: symbol.source, ticker: symbol.ticker, period: period.type, span: period.span,
-      session: state.session, limit: PAGE, adjust: state.adjust, lod: lodFor(), ...typeQuery(), ...modelQuery(),
+      session: state.session, limit: state.meta?.auto ? AUTO_PAGE : PAGE, adjust: state.adjust, lod: lodFor(),
+      ...typeQuery(), ...modelQuery(),
     };
     if (type === 'forward' && timestamp) params.to = timestamp;
+    if (type === 'backward' && timestamp) params.after = timestamp;  // newer bars, after the newest loaded
+    if (type === 'init' && state.lodSwitch?.to) params.to = state.lodSwitch.to;  // a level change keeps its window
     try {
       const res = await api('/api/bars', params);
       if (token !== state.loadToken) return; // a newer symbol/interval was chosen meanwhile
       const zone = labelZone(period);  // the time axis and crosshair read the bars' own days
       if (chart.getTimezone() !== zone) chart.setTimezone(zone);
-      callback(res.bars, { forward: res.more, backward: false });
+      callback(res.bars, { forward: type === 'backward' ? undefined : res.more,
+                           backward: type === 'forward' ? undefined : !!res.newer });
+      if (type === 'init' || type === 'backward') state.hasNewer = !!res.newer;  // a window in the past: no live tail
+      if (type === 'init' && state.fitAll) {  // a symbol opens on its whole history
+        state.fitAll = false;
+        requestAnimationFrame(() => fitWhole(res.bars.length));
+      }
       showError(null);
       if (type === 'init') {
         state.styleUsed = res.style;
@@ -310,7 +319,7 @@ chart.setDataLoader({
     // Also run at once when a fetch run finishes (panels.js), not only every POLL_MS.
     state.pollNow = async () => {
       const list = chart.getDataList();
-      if (!list.length || state.polling) return;  // one poll at a time
+      if (!list.length || state.polling || state.hasNewer) return;  // one poll at a time; only at the newest bars
       state.polling = true;
       try {
         if (PRICE_BASED.has(state.chartType)) return; // path-dependent: refreshed by reloading
@@ -333,7 +342,7 @@ chart.setDataLoader({
     state.streamFailed = false;
     const openStream = () => {
       const list = chart.getDataList();
-      if (!list.length || PRICE_BASED.has(state.chartType)) return;
+      if (!list.length || PRICE_BASED.has(state.chartType) || state.hasNewer) return;
       const kind = state.model.kind;
       const q = new URLSearchParams(Object.entries({
         source: symbol.source, ticker: symbol.ticker, period: period.type, span: period.span,
@@ -477,7 +486,7 @@ nowHandle.addEventListener('dblclick', () => {
   state.nowAt = null;
   prefs.set('nowAt', null);
   applyNowPosition();
-  chart.scrollToRealTime(200);
+  goLatest();
 });
 chart.subscribeAction('onVisibleRangeChange', () => requestAnimationFrame(() => { placeNowHandle(); placeHighlightMask(); }));
 window.addEventListener('massive:activity', () => requestAnimationFrame(() => {  // live or not, again
@@ -497,7 +506,7 @@ state.lod = 1;
 state.lodSwitch = null;
 
 function lodFor() {
-  return LOD_TYPES.has(state.chartType) ? state.lod : 1;
+  return 1;  // auto-ranging moves to a coarser level instead of aggregating k bars (checkLod below)
 }
 
 function resetLod() {
@@ -505,29 +514,121 @@ function resetLod() {
   state.lodSwitch = null;
 }
 
+// The chart's plot width; while it is hidden (another view showing: no size, or a negative one)
+// the last width it had, so levels and fits are worked out for the screen it comes back to.
 function chartWidth() {
-  return chart.getSize('candle_pane', 'main')?.width || 800;
+  const w = chart.getSize('candle_pane', 'main')?.width;
+  if (w > 0) state.chartW = w;
+  return state.chartW || Math.max(400, window.innerWidth - 420);
+}
+
+const chartShown = () => chart.getSize('candle_pane', 'main')?.width > 0;
+
+// -- auto-ranging: the level follows the zoom ------------------------------------------------
+// No interval to pick: a symbol opens on its whole history at the finest level whose candles fit
+// the chart (AUTO_MIN_PX each), and as the chart zooms in it moves to finer levels (days, hours,
+// minutes, seconds) while the data has them for the window on screen; where it has none finer,
+// the candles just grow. Zooming out moves to coarser levels the same way. The level shows where
+// the interval menu was ("auto: 1 hour"). A level change keeps the window: the same moment in the
+// centre, the same span across the chart (finishLodSwitch).
+const AUTO_MIN_PX = 2;  // the narrowest candle: the chart holds at most its width / 2 of them
+const AUTO_PAGE = 3000;  // bars per request: a few screens at the narrowest
+const AUTO_SLACK = 0.15;  // hysteresis: a level is left only 15 % past its fit, so zooming does not flicker
+const LEVEL_NAMES = { second: 'sec', minute: 'min', hour: 'hour', day: 'day', week: 'week', month: 'month', year: 'year' };
+const LEVEL_MS = { second: 1e3, minute: 6e4, hour: 36e5, day: 864e5, week: 6048e5, month: 2629746e3, year: 31556952e3 };
+
+// Bars a calendar day holds at a level (as gui/window.py per_day): for series served whole
+// (continuous futures, the composite) whose metadata has no levels.
+function perDayGuess(asset, p, session) {
+  const days = asset === 'stock' || asset === 'index' ? 252 / 365 : asset === 'crypto' ? 1 : 5 / 7;
+  if (['day', 'week', 'month', 'year'].includes(p.type)) {
+    const per = asset === 'stock' || asset === 'index' ? { day: 1, week: 1 / 5, month: 1 / 21, year: 1 / 252 }[p.type] * days
+      : { day: 1, week: 1 / 7, month: 1 / 30.44, year: 1 / 365.25 }[p.type];
+    return per / p.span;
+  }
+  const minutes = asset === 'stock' ? (session === 'regular' ? 390 : 960) : asset === 'index' ? 390 : asset === 'crypto' ? 1440 : 1380;
+  return days * minutes * 6e4 / (LEVEL_MS[p.type] * p.span);
+}
+
+function autoLevels() {
+  const m = state.meta;
+  if (!m) return [];
+  if (m.levels) return m.levels;
+  const first = Date.parse(m.first), last = Date.parse(m.last);
+  return (m.allPeriods || m.periods || []).filter((p) => p.available !== false).map((p) => ({
+    type: p.type, span: p.span, first, last, label: `${p.span} ${LEVEL_NAMES[p.type]}`,
+    perDay: { regular: perDayGuess(m.asset, p, 'regular'), extended: perDayGuess(m.asset, p, 'extended') },
+  }));
+}
+
+function currentLevel() {
+  return autoLevels().find((lv) => lv.type === state.period.type && lv.span === state.period.span) || null;
+}
+
+const levelPerDay = (lv) => lv.perDay[state.session === 'extended' ? 'extended' : 'regular'] || lv.perDay.extended;
+
+// The finest level whose candles for `days` of history fit the chart and whose data reaches back
+// to `fromMs` (a level with nothing that old is not shown for that window: candles grow instead).
+function chooseLevel(days, fromMs, current = null) {
+  const levels = autoLevels();
+  if (!levels.length) return null;
+  const fit = chartWidth() / AUTO_MIN_PX;
+  const oldest = Math.min(...levels.map((lv) => lv.first));
+  const from = Math.max(Number.isFinite(fromMs) ? fromMs : oldest, oldest);
+  for (const lv of levels) {
+    if (lv.first > from + LEVEL_MS.day) continue;
+    const same = current && lv.type === current.type && lv.span === current.span;
+    if (days * levelPerDay(lv) <= fit * (same ? 1 + AUTO_SLACK : 1 - AUTO_SLACK)) return lv;
+  }
+  return levels[levels.length - 1];
+}
+
+// The window on screen: its span in days (from the level's bars a day) and its first bar's time.
+function visibleWindow() {
+  const data = chart.getDataList();
+  const r = chart.getVisibleRange();
+  const lo = r.realFrom ?? r.from, hi = r.realTo ?? r.to;
+  const cur = currentLevel();
+  const bars = Math.max(1, hi - lo);
+  return { bars, days: cur ? bars / levelPerDay(cur) : 0, fromMs: data[Math.max(0, Math.min(data.length - 1, lo))]?.timestamp,
+           centre: data[Math.max(0, Math.min(data.length - 1, Math.floor((lo + hi) / 2)))]?.timestamp, atLatest: hi >= data.length };
 }
 
 function checkLod() {
-  if (state.lodSwitch || !LOD_TYPES.has(state.chartType)) return;
-  const bar = chart.getBarSpace().bar;
-  // A hidden chart (another view is showing) has no width: decide when it is shown again.
-  if (!Number.isFinite(bar) || bar <= 0 || !(chart.getSize('candle_pane', 'main')?.width > 0)) return;
-  let k = state.lod;
-  if (bar < 0.5) k = state.lod * 2 ** Math.ceil(Math.log2(1 / bar));
-  else if (bar > 4 && state.lod > 1) k = Math.max(1, state.lod / 2 ** Math.floor(Math.log2(bar)));
-  // Never aggregate further than needed: keep at least half the chart width in candles.
-  if (state.baseTotal) k = Math.min(k, 2 ** Math.max(0, Math.floor(Math.log2(state.baseTotal / (chartWidth() / 2)))));
-  k = Math.min(MAX_LOD, Math.max(1, k));
-  if (!Number.isFinite(k) || k === state.lod) return;
-  const data = chart.getDataList();
-  const { from, to } = chart.getVisibleRange();
-  const centre = data[Math.min(data.length - 1, Math.max(0, Math.floor((from + to) / 2)))];
-  state.lodSwitch = { barSpace: bar * (k / state.lod), anchor: centre ? centre.timestamp : null, atLatest: to >= data.length };
-  state.lod = k;
-  chart.resetData();
+  if (state.lodSwitch || !state.meta || !chart.getDataList().length) return;
+  if (!chartShown()) return;  // a hidden chart: decided when it is shown (showPane calls this)
+  if (state.fitPending) {  // opened while hidden: its whole history now that it has a width
+    const n = state.fitPending;
+    state.fitPending = 0;
+    fitWhole(n);
+    return;
+  }
+  const cur = currentLevel();
+  if (!cur) return;
+  const w = visibleWindow();
+  const lv = chooseLevel(w.days, w.fromMs, cur);
+  if (!lv || (lv.type === cur.type && lv.span === cur.span)) return;
+  const newBars = Math.max(1, w.days * levelPerDay(lv));
+  state.lodSwitch = {
+    barSpace: chartWidth() / newBars, anchor: w.centre ?? null, anchorX: chartWidth() / 2, atLatest: w.atLatest,
+    // a window in the past: its page ends a window past its right edge (older and newer load on scroll)
+    to: w.atLatest || w.centre == null ? null : Math.round(w.centre + w.days * 864e5 * 1.5),
+  };
+  state.period = { type: lv.type, span: lv.span };
+  renderPeriods();
+  chart.setPeriod(state.period);
 }
+
+// A symbol opens on its whole history: every bar of the opening level across the chart.
+function fitWhole(n) {
+  if (!n) return;
+  if (!chartShown()) { state.fitPending = n; return; }  // done when the chart is shown
+  chart.setBarSpace(Math.max(MIN_BAR_SPACE, (chartWidth() - DEFAULT_RIGHT_OFFSET) / n));
+  chart.scrollToRealTime(0);
+}
+
+let autoTimer = null;
+const autoSoon = () => { clearTimeout(autoTimer); autoTimer = setTimeout(checkLod, 200); };  // once a zoom or scroll settles
 
 function finishLodSwitch() {
   const sw = state.lodSwitch;
@@ -546,7 +647,20 @@ function finishLodSwitch() {
   updateStatus(chart.getDataList().length);
 }
 
-chart.subscribeAction('onZoom', () => checkLod());
+chart.subscribeAction('onZoom', autoSoon);
+// scrolled (or moved) to where the finer data ends or starts: at full zoom no zoom event comes
+chart.subscribeAction('onVisibleRangeChange', autoSoon);
+
+// The newest bars: scrolled to when they are loaded; loaded first when the chart shows a window in
+// the past (its page ends before them), at the level it is at.
+function goLatest(ms = 200) {
+  if (state.hasNewer) {
+    state.lodSwitch = null;
+    chart.resetData();
+    return;
+  }
+  chart.scrollToRealTime(ms);
+}
 
 // -- chart types -------------------------------------------------------------------
 // Native KLineChart candle types; transformed types come back from the server as OHLC
@@ -562,9 +676,11 @@ const LINE = '#2962ff';
 const CLEAR = 'rgba(0,0,0,0)';
 
 function typeQuery() {
-  if (!SERVER_TYPES.has(state.chartType)) return {};
+  const auto = { auto: 1 };  // the auto-ranging chart: the server reads only the window asked for (gui/window.py)
+  if (!SERVER_TYPES.has(state.chartType)) return auto;
   const p = state.typeParams[state.chartType] || {};
-  return { type: state.chartType, box: p.box || undefined, reversal: p.reversal || undefined, lines: p.lines || undefined };
+  return { ...auto, type: state.chartType, box: p.box || undefined, reversal: p.reversal || undefined,
+           lines: p.lines || undefined };
 }
 
 // -- models: price, 1st / 2nd derivative, integral, Fourier low-pass (computed by the server) ----
@@ -1193,7 +1309,7 @@ function symbolInfo(ticker) {
 async function selectSymbol(ticker, source = null) {
   source = source ?? MERGED;
   const pick = state.selectToken = (state.selectToken || 0) + 1;
-  const meta = await api('/api/meta', { source, ticker, adjust: state.adjust });
+  const meta = await api('/api/meta', { source, ticker, adjust: state.adjust, auto: 1 });
   if (pick !== state.selectToken) return;  // another symbol was picked while this one was asked for
   resetLod();
   $('ethBtn').hidden = meta.aroundTheClock;  // fx and futures trade around the clock
@@ -1206,8 +1322,13 @@ async function selectSymbol(ticker, source = null) {
   prefs.set('last', { ticker: meta.ticker, source });
   markDirty();
 
-  if (!meta.periods.some((p) => p.type === state.period.type && p.span === state.period.span)) {
-    state.period = meta.periods.find((p) => p.type === 'minute' && p.span === 1) || meta.periods[0];
+  // Whole history on screen: the finest level whose candles for all of it fit the chart.
+  const levels = autoLevels();
+  if (levels.length) {
+    const first = Math.min(...levels.map((lv) => lv.first)), last = Math.max(...levels.map((lv) => lv.last));
+    const lv = chooseLevel((last - first) / 864e5, first);
+    state.period = { type: lv.type, span: lv.span };
+    state.fitAll = true;
   }
   const info = symbolInfo(meta.ticker);
   renderSymbolButton();
@@ -1613,47 +1734,18 @@ const PERIOD_NAMES = { second: 'second', minute: 'minute', hour: 'hour', day: 'd
 
 function renderPeriods() {
   const box = $('periods');
-  let sel = $('periodSelect');
-  if (!sel) {
-    sel = document.createElement('select');
-    sel.id = 'periodSelect';
-    sel.title = 'Interval';
-    sel.setAttribute('aria-label', 'Interval');
-    sel.addEventListener('change', () => {
-      const [type, span] = sel.value.split(':');
-      const p = { type, span: Number(span) };
-      state.period = p;
-      resetLod();
-      prefs.set('period', p); markDirty();
-      renderPeriods();
-      chart.setPeriod(p);
-    });
-    box.replaceChildren(sel);
+  let tag = $('autoLevel');
+  if (!tag) {
+    tag = document.createElement('span');
+    tag.id = 'autoLevel';
+    tag.className = 'auto-level';
+    box.replaceChildren(tag);
   }
-  sel.innerHTML = '';
-  const offered = state.meta?.allPeriods || state.meta?.periods || [];
-  // An interval no longer offered (a saved 10s, 3m, 15m or 45m): 1 minute, or the first this symbol has.
-  if (offered.length && !offered.some((p) => p.type === state.period.type && p.span === state.period.span && p.available !== false)) {
-    const pick = offered.find((p) => p.type === 'minute' && p.span === 1 && p.available !== false)
-      || offered.find((p) => p.available !== false);
-    if (pick) {
-      state.period = { type: pick.type, span: pick.span };
-      prefs.set('period', state.period);
-      queueMicrotask(() => chart.setPeriod(state.period));
-    }
-  }
-  for (const p of offered) {
-    const o = document.createElement('option');
-    o.value = `${p.type}:${p.span}`;
-    o.textContent = `${p.span} ${PERIOD_NAMES[p.type]}${p.span > 1 ? 's' : ''}`;
-    o.title = periodLabel(p);
-    if (p.available === false) {
-      o.disabled = true;
-      o.textContent += ' (no source this fine)';
-    }
-    sel.append(o);
-  }
-  sel.value = `${state.period.type}:${state.period.span}`;
+  const lv = currentLevel();
+  tag.textContent = `auto: ${lv ? lv.label : periodLabel(state.period)}`;
+  tag.title = 'Auto-ranging: the candles follow the zoom. A symbol opens on its whole history; zooming in moves to '
+    + 'finer levels (days, hours, minutes, seconds) while the data has them for the window on screen, and where it '
+    + 'has none finer the candles grow. This is the level shown now.';
 }
 
 function renderSession() {
@@ -2265,7 +2357,7 @@ async function ensureLayout() {
 // -- top bar actions and keys ----------------------------------------------------
 $('zoomIn').addEventListener('click', () => chart.zoomAtCoordinate(1.25, undefined, 150));
 $('zoomOut').addEventListener('click', () => chart.zoomAtCoordinate(0.8, undefined, 150));
-$('latestBtn').addEventListener('click', () => chart.scrollToRealTime(200));
+$('latestBtn').addEventListener('click', () => goLatest());
 $('shotBtn').addEventListener('click', () => {
   const bg = getComputedStyle(document.body).getPropertyValue('--bg').trim();
   const a = document.createElement('a');
@@ -2297,7 +2389,7 @@ document.addEventListener('keydown', (e) => {
     if (e.key !== '/') { $('symbolSearch').value = e.key; renderSymbolList(e.key); }
   } else if (e.key === '+' || e.key === '=') chart.zoomAtCoordinate(1.25, undefined, 150);
   else if (e.key === '-') chart.zoomAtCoordinate(0.8, undefined, 150);
-  else if (e.key === 'End') chart.scrollToRealTime(200);
+  else if (e.key === 'End') goLatest();
 });
 
 // -- status bar ------------------------------------------------------------------

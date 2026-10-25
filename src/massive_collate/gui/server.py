@@ -229,6 +229,9 @@ class ChartApp:
         step = float(q["step"]) if q.get("step") not in (None, "", "auto") else None
         if step is not None and not 0 < step < 1e9:
             raise ValueError("step must be a positive price")
+        if self.window.handles(q["source"], q["ticker"]):  # the one bar's window, not the whole history
+            return self.window.profile(q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
+                                       q.get("session", "regular"), at_ms=int(q["at"]) if q.get("at") else None, step=step)
         return self.engine.profile(
             q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)), q.get("session", "regular"),
             at_ms=int(q["at"]) if q.get("at") else None, step=step, adjust=_adjust(q.get("adjust")))
@@ -437,8 +440,15 @@ class ChartApp:
             if not newest:
                 return {"timestamps": [], "last": None, "total": 0}
             last = pd.Timestamp(newest[-1]["timestamp"], unit="ms", tz="UTC").tz_convert("America/New_York")
+            if period in ("day", "week", "month", "year"):  # days from the exchange's sessions, not every minute
+                s.daily = pd.DataFrame({"close": [newest[-1]["close"]]}, index=pd.DatetimeIndex([last]))
+            from .window import UNIT_MS
+
+            # slots for at most 50 years ahead: 4,000 months is centuries of sessions to walk
+            cap = max(1, int(50 * 365.25 * 86_400_000 // (UNIT_MS[period] * span)))
             ts = project(self.engine.calendar(), s, None, period, span, s.session_for(session), style.type, 1, 1, last,
-                         max(0, int(q.get("offset", 0))), min(int(q.get("count", 500)), 5000), cache=self.engine._future_cache)
+                         max(0, int(q.get("offset", 0))), min(int(q.get("count", 500)), 5000, cap),
+                         cache=self.engine._future_cache)
             return {"timestamps": ts, "last": newest[-1]["timestamp"], "total": 1, "lastBar": newest[-1]["timestamp"]}
         return self.engine.future(
             q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)), q.get("session", "regular"),

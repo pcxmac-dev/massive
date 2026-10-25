@@ -204,8 +204,9 @@ def project(cal: MarketCalendar, s: Series, product: str | None, period: str, sp
         return bins.picks(picks).tolist()
     starts = cache.get(key) if cache is not None else None
     if starts is None or len(starts) <= last_base:
-        horizon = _horizon(period, span, last_base + 1, s.asset)
-        limit = timedelta(days=365 * MAX_YEARS)
+        # never past 2200: timestamps in ns end in 2262 (a monthly chart asked 4,000 slots: 333 years)
+        limit = min(timedelta(days=365 * MAX_YEARS), pd.Timestamp("2200-01-01", tz=last.tz or "UTC") - last)
+        horizon = min(limit, _horizon(period, span, last_base + 1, s.asset))
         while True:
             starts = future_bar_starts_reference(cal, s, product, period, span, session, last,
                                                  last.to_pydatetime() + horizon)

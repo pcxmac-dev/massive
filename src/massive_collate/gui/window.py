@@ -16,6 +16,7 @@ Continuous futures (contracts stitched at rolls) and the composite model keep th
 """
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timezone
 
@@ -160,6 +161,8 @@ class WindowReader:
         first, end = min(e[0] for e in edges), max(e[1] for e in edges) + base_ms
         # Wall-clock time a bar takes, sessions and nights included: the first window's width
         factor = 1.0 if s.around_the_clock else (5.5 if session == "regular" else 2.2)
+        if since_ms is not None and end - since_ms > limit * step * factor:
+            after_ms, since_ms = since_ms - 1, None  # far behind the newest: a page of newer bars, not years of them
         if since_ms is not None:  # the live tail: from the bar the chart has last, whole
             bars = self._built(s, feeds, base, period, span, session, since_ms - 2 * step, end)
             return {"bars": to_records(bars[epoch_ms(bars.index) >= since_ms]), "more": False, "newer": False}
@@ -255,6 +258,71 @@ class WindowReader:
         older = bars[ts < to_ms] if to_ms is not None else bars
         return {"bars": to_records(older.tail(limit)), "more": len(older) > limit,
                 "newer": to_ms is not None and bool((ts >= to_ms).any())}
+
+    # -- the virtual level 2: what traded at each price in one bar ------------------------------
+    PROFILE_TICK_MS = 86_400_000  # bars up to a day read the feeds' ticks; longer ones their finer bars
+    PROFILE_MAX_ROWS = 2000
+
+    def profile(self, source: str, ticker: str, period: str, span: int = 1, session: str = "regular",
+                at_ms: int | None = None, step: float | None = None) -> dict:
+        """Volume and trades by price in the bar at `at_ms` (the newest without), as the series
+        path gives it (BarEngine.profile), from that bar's window alone: the bar, its day, and the
+        trades or finer bars inside it."""
+        from ..calc.profile import from_bars, from_trades, nice_step
+        from .bars import _money, bar_end, calendar_key
+
+        s = self.series(source, ticker)
+        session = s.session_for(session)
+        feeds = self.feeds(source, ticker)
+        newest = self.page(source, ticker, period, span, session, limit=1)["bars"]
+        if not newest:
+            return {"ticker": s.ticker, "rows": []}
+        at = newest[-1] if at_ms is None or at_ms >= newest[-1]["timestamp"] else \
+            (self.page(source, ticker, period, span, session, to_ms=int(at_ms) + 1, limit=1)["bars"] or newest)[-1]
+        start = pd.Timestamp(at["timestamp"], unit="ms", tz="UTC").tz_convert("America/New_York")
+        lo, hi = at["timestamp"], int(bar_end(start, period, span, utc=utc_days(s)).value // 1_000_000)
+        d0 = calendar_key(pd.DatetimeIndex([start]), "day", utc=utc_days(s))[0]
+        d0_ms = int(epoch_ms(pd.DatetimeIndex([d0]))[0])
+        days = self.page(source, ticker, "day", 1, session, to_ms=d0_ms + 1, limit=1)["bars"]
+        day = next(({"from": d0_ms, **{k: float(d[k]) for k in ("open", "high", "low", "close", "volume")}}
+                    for d in days if d["timestamp"] == d0_ms), None)
+        span_px = float(at["high"] - at["low"])
+        if step is not None and step > 0 and span_px / step > self.PROFILE_MAX_ROWS:
+            step = nice_step(span_px, self.PROFILE_MAX_ROWS)
+        rows, basis, derived = None, None, None
+        if hi - lo <= self.PROFILE_TICK_MS:
+            for feed in feeds:
+                with self.engine.lock:
+                    t = self.store.trades_between(feed, s.ticker, lo * 1_000_000, hi * 1_000_000)
+                if len(t):
+                    rows, summed = from_trades(t["price"].to_numpy(), t["size"].to_numpy(), step)
+                    basis = f"{len(t):,} trade{'' if len(t) == 1 else 's'} on {feed}"
+                    used = step or (nice_step(float(t["price"].max() - t["price"].min())) if summed else None)
+                    derived = f"summed into {_money(used)} price segments" if summed else None
+                    step = used
+                    break
+        if rows is None:
+            base = "second" if period == "second" else "minute"
+            with self.engine.lock:
+                parts = [frame_from_bars(df) for df in
+                         (self.store.bars_window([f], s.ticker, base, lo, hi) for f in feeds) if len(df)]
+            sub = merge_frames(parts) if len(parts) > 1 else (parts[0] if parts else
+                                                              pd.DataFrame(columns=[*COLUMNS, "derived"]))
+            unit = f"1-{base} bars"
+            rows, step = from_bars(sub["low"].to_numpy(), sub["high"].to_numpy(), sub["volume"].to_numpy(),
+                                   sub["trades"].to_numpy(), step)
+            basis = f"{len(sub):,} {unit}"
+            derived = (f"estimated from {unit}: each one's volume and trades spread evenly across its range, "
+                       f"in {_money(step)} price segments")
+        return {
+            "ticker": s.ticker, "period": period, "span": span,
+            "bar": {"from": lo, "to": hi, **{k: float(at[k]) for k in ("open", "high", "low", "close", "volume")},
+                    "trades": float(at["trades"])},
+            "day": day, "last": float(newest[-1]["close"]), "newest": at["timestamp"] == newest[-1]["timestamp"],
+            "rows": json.loads(rows.to_json(orient="records")) if len(rows) else [],
+            "step": step, "basis": basis, "derived": derived,
+            "note": "Traded volume by price, not an order book: what changed hands, not what was resting.",
+        }
 
     # -- what the chart asks for when it opens a symbol ---------------------------------------
     def meta(self, source: str, ticker: str) -> dict:

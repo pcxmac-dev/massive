@@ -115,3 +115,18 @@ def test_the_chart_opens_a_symbol_on_the_auto_path_without_its_history(store, mo
     assert info["data"]["levels"] and info["stats"]
     assert app.calendar({"source": "*", "ticker": "SPCX", "from": str(_ms(DAYS[0] + " 00:00")),
                          "to": str(_ms(DAYS[-1] + " 00:00"))})["asset"] == "stock"
+
+
+@pytest.mark.parametrize("period, span", [("minute", 1), ("hour", 1), ("day", 1)])
+def test_the_level_2_profile_from_one_bars_window_is_the_series_paths(store, period, span):
+    engine = BarEngine(store)
+    whole = engine.profile("*", "SPCX", period, span, "extended")
+    windowed = WindowReader(engine).profile("*", "SPCX", period, span, "extended")
+    for k in ("bar", "day", "last", "newest", "rows", "step", "basis"):
+        assert windowed[k] == whole[k], k
+
+
+def test_a_far_future_projection_stops_before_timestamps_end(store):
+    app = ChartApp(store)
+    fut = app.future({"source": "*", "ticker": "SPCX", "period": "month", "span": "1", "auto": "1", "count": "4000"})
+    assert 0 < len(fut["timestamps"]) <= 600  # fifty years of months, not four thousand
