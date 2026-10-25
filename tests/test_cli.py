@@ -106,12 +106,24 @@ def test_missing_key_skips_that_feed_and_says_so(env, monkeypatch, capsys):
     assert cli.main(["--source", "massive", "sync", "--only"]) == 2  # only an unconfigured feed: an error
 
 
-def test_export_writes_csv(env):
+def test_export_writes_csv(env, monkeypatch, capsys):
     with Store(env / "data" / "m.db") as s:
         s.upsert_trades("massive", "SPCX", [{"sip_timestamp": 1, "sequence_number": 1, "price": 1.0, "size": 1}])
     out = env / "out.csv"
+    assert cli.main(["export", "SPCX", "--out", str(out)]) == 2  # bars-only (the default) reads no ticks
+    assert "bars-only mode" in capsys.readouterr().err and not out.exists()
+    monkeypatch.setenv("BARS_ONLY", "off")
     assert cli.main(["export", "SPCX", "--out", str(out)]) == 0
     assert out.read_text().count("\n") == 2
+
+
+def test_tick_backups_and_tick_charts_wait_for_bars_only_to_be_off(env, capsys):
+    dest = env / "b.db"
+    assert cli.main(["admin", "backup", "--dest", str(dest), "--ticks"]) == 2
+    assert cli.main(["chart", "SPCX", "--ticks"]) == 2
+    err = capsys.readouterr().err
+    assert "backup --ticks: bars-only mode" in err and "chart --ticks: bars-only mode" in err
+    assert not dest.exists()
 
 
 def test_offline_copies_of_the_app_fetch_nothing(env, monkeypatch, capsys):

@@ -87,6 +87,40 @@ check that follows prunes it. Every span the fetch updated, and every bar still 
 for a second feed's audit (`audit.py`: a random hour of minutes, two months of days), so auditors run
 against what was just updated, not only the newest session.
 
+## Memory and disk (2026-10-25)
+
+The databases stay on disk; RAM holds what is being drawn or built, in batches, and lets it go.
+(2026-10-25: the chart app's live check counted a stock's every bar and trade each time a file
+changed, about every two seconds while the sync and the live recorder wrote: 31 GB of
+`massive-ticks.db` stayed active in Windows' file cache and the chart app read 76 MB/s at rest. The
+live recorder, whose "what changed since" read every bar's `stored_at`, had read 1.7 TB.)
+
+- **Windows, not whole histories.** The auto-ranging chart reads the visible window and what its
+  indicators and models need beside it (`gui/window.py`). A whole history is read only at the level
+  drawn: a calendar level's bars, or the level a price-based chart builds whole. The page reads the
+  next finer level ahead for a smooth change of level. Still on the whole-history series path:
+  continuous futures, the composite model, box plots and the intraday integral.
+- **The change log.** Whether a series changed, and what changed since a moment, come from each feed
+  file's `changes` table (per series and minute written: the earliest and latest bar time, rows
+  written), kept by triggers on `bars` and `built_bars`, so every writer keeps it whatever its code
+  version. A seek, not a read of the series: the live chart's check, derive's and the bad-data
+  scan's "since the last build", the fetch check's "what this fetch stored". It is complete from
+  `changes_since` and kept a week (`CHANGES_KEEP_MS`); a reader further behind reads `stored_at`, once.
+- **Bars-only mode** (`BARS_ONLY`, on by default). The app works from bars: no process opens the
+  feeds' tick files but the live recorder, which records the streams' trades and builds their bars.
+  The chart app, the sync, audits and checks never read them; a volume profile is spread from the
+  finest bars instead (1-second bars where held, for bars up to a day); commands that would read ticks (exports of trades, tick charts, tick backups,
+  `pruned repair-ticks`) say so and stop. The tick files are kept, never touched.
+- **Caps.** The chart app's caches share one budget (`CHART_CACHE_MB`, 1 GB: whole histories 40 %,
+  styled frames 30 %, bricks and 30-minute bins 15 % each; they had 4 GB between them, and the app
+  once grew to 13 GB). At most two requests build chart data at once (`HEAVY_REQUESTS`); the rest wait
+  up to 30 s, then are answered busy (503). The live recorder holds at most 64 MB of trades while the
+  database refuses writes. numpy loads with one thread: OpenBLAS committed 757 MB per process, per
+  CPU thread's buffer, almost none of it used.
+- **Measured apart.** `python -m massive_collate admin memory` shows each app process's own memory
+  (private bytes, working set) and disk reads, apart from Windows' file cache: active (held) and
+  standby (handed back whenever anything needs it, counted as available).
+
 ## State (2026-10-24)
 
 Already separated: data sources behind one interface (`sources/`), coverage planning

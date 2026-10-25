@@ -332,4 +332,5 @@ def run(store, sources=None, tickers=None, log=print) -> int:
         total += build_symbol(store, source, ticker, asset, log=log, progress=(i + 1, len(series)))
     if series:
         store.kv_set(PROGRESS_KEY, "")
+    store.prune_changes()  # the change log's old minutes (at most hourly)
     return total

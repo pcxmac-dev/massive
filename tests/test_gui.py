@@ -481,13 +481,34 @@ def test_the_dependency_checks_and_datasets_answer_while_the_shared_lock_is_held
     def hold():
         with app._lock:
             held.set()
-            release.wait(5)
+            release.wait(60)
     threading.Thread(target=hold, daemon=True).start()
     held.wait(5)
     try:
         started = time.monotonic()
         assert app.deps()["checks"] and "datasets" in app.datasets()
-        assert time.monotonic() - started < 4  # not behind the held lock (it would wait the full 5 s)
+        assert time.monotonic() - started < 30  # not behind the held lock (it would wait the full 60 s)
         assert app.deps() is app.deps()  # kept a minute: one answer
     finally:
         release.set()
+
+
+def test_the_symbol_list_and_layouts_do_not_wait_for_each_other(tmp_path):
+    import threading
+
+    app = ChartApp(_store_with_bars(tmp_path))
+    held, release = threading.Event(), threading.Event()
+
+    def hold():  # the symbol list being built (a second or more for thousands of symbols)
+        with app._symbols_lock:
+            held.set()
+            release.wait(5)
+    threading.Thread(target=hold, daemon=True).start()
+    held.wait(5)
+    try:
+        started = time.monotonic()
+        app.layouts()  # the shared lock: free
+        assert time.monotonic() - started < 4
+    finally:
+        release.set()
+    assert any(s["ticker"] == "SPCX" for s in app.symbols())

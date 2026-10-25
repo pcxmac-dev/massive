@@ -214,6 +214,8 @@ def build_from_ticks(store: Store, source: str, ticker: str, a: int, b: int, rul
     from .ticks import BAR_RULES, REGULAR, build_bars
 
     minute = 60_000
+    if not store.ticks_allowed:  # bars-only mode: the ticks are not read (none would be built, all claimed)
+        return 0
     spans = store.coverage(ticker, "trades").get(source, [])
     span = next(((x, y) for x, y in spans if x < b and y > a), None)  # the merged span holding [a, b)
     if span is None:

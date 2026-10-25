@@ -27,6 +27,12 @@ Settings come from environment variables, optionally loaded from a `.env` file
                       trades are kept, to build their bars)
     TICK_MIN_FREE_GB  tick backfill pauses when the disk has less free space (default: 250); below
                       a fifth of it no ticks are downloaded at all
+    CHART_CACHE_MB    memory the chart app's caches may hold together (default: 1024): recent
+                      windows, bricks and 30-minute bins; the databases stay on disk
+    BARS_ONLY         on (default): the app works from bars alone and no command opens the feeds'
+                      tick files (the chart app, the sync, audits and checks never read them), except
+                      the live recorder, which records the streams' trades and builds their bars;
+                      off: commands that read ticks (exports, volume profiles from trades) may
 
 Public historical sources (closed feeds: they fill history nobody else holds, then are not asked
 again): Bitstamp (crypto minute bars from 2011) and Cboe (index daily history) need nothing;
@@ -179,6 +185,10 @@ class Settings:
     live_coins: tuple[str, ...] = ("BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LTC", "LINK")
     # Stocks streamed live from Alpaca's IEX feed (with its keys; live.py); LIVE_STOCKS=off for none.
     live_stocks: bool = True
+    # BARS_ONLY (on by default): no tick file is opened but by the live recorder (cli.main).
+    bars_only: bool = True
+    # CHART_CACHE_MB: every cache of the chart app together (gui/bars.py CACHE_SHARES).
+    chart_cache_mb: int = 1024
     # MASSIVE_OFFLINE=1: nothing is fetched and no recorder starts (a test copy of the app on a
     # scratch database must never spend the real plan's requests: its own ledger would not know them).
     offline: bool = False
@@ -358,6 +368,8 @@ def load_settings(
         live_coins=_live_coins(merged.get("LIVE_CRYPTO")),
         live_stocks=str(merged.get("LIVE_STOCKS", "on")).strip().lower() not in ("off", "0", "false", "no", "none"),
         offline=str(merged.get("MASSIVE_OFFLINE", "")).strip().lower() in ("1", "true", "yes", "on"),
+        bars_only=str(merged.get("BARS_ONLY", "on")).strip().lower() not in ("off", "0", "false", "no", "none"),
+        chart_cache_mb=max(64, _default(_int_setting(merged, "CHART_CACHE_MB"), 1024)),
     )
 
 

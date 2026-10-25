@@ -14,6 +14,7 @@ from typing import Iterator
 
 from . import analysis, charts, collector
 from .config import ConfigError, Settings, load_settings
+from .storage.feeds import TicksBlocked
 from .errors import NotEntitled, SourceError
 from .sessions import ET
 from .symbols import resolve
@@ -963,6 +964,13 @@ def cmd_admin(args, settings: Settings) -> int:
         with run_lock(settings.db_path):  # no sync may write while the data moves
             split(settings.db_path, log=print)
         return 0
+    if args.action == "memory":  # no database needed
+        from . import memory
+
+        print(memory.report(memory.measure(max(0.0, args.seconds))))
+        return 0
+    if args.action == "backup" and args.ticks and _ticks_refused("backup --ticks", settings):
+        return 2
     with Store(settings.db_path) as store:
         if args.action == "check":
             print(f"integrity: {store.integrity_check()}")
@@ -1012,6 +1020,8 @@ def cmd_analyze(args, settings: Settings) -> int:
 
 
 def cmd_chart(args, settings: Settings) -> int:
+    if args.ticks and _ticks_refused("chart --ticks", settings):
+        return 2
     with Store(settings.db_path) as store:
         bars, trades = _load_prices(store, args)
     out_dir = settings.db_path.parent / "charts"
@@ -1033,7 +1043,16 @@ def cmd_chart(args, settings: Settings) -> int:
     return 0
 
 
+def _ticks_refused(what: str, settings: Settings) -> bool:
+    """In bars-only mode a command that would read the tick files says so instead (exit 2)."""
+    if settings.bars_only:
+        print(f"{what}: bars-only mode does not read the tick files (BARS_ONLY=off allows it)", file=sys.stderr)
+    return settings.bars_only
+
+
 def cmd_export(args, settings: Settings) -> int:
+    if args.kind == "trades" and _ticks_refused("export of trades", settings):
+        return 2
     with Store(settings.db_path) as store:
         if args.kind == "trades":
             df = store.load_trades(args.ticker, args.source, args.start, args.end)
@@ -1208,10 +1227,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_status)
 
     s = sub.add_parser("admin", help="database maintenance")
-    s.add_argument("action", choices=["check", "vacuum", "backup", "reset-denied", "split-feeds"],
-                   help="split-feeds: move every feed's data from the single-file layout to files of its own")
+    s.add_argument("action", choices=["check", "vacuum", "backup", "reset-denied", "split-feeds", "memory"],
+                   help="split-feeds: move every feed's data from the single-file layout to files of its own; "
+                        "memory: each app process's own memory and disk reads, apart from Windows' file cache")
     s.add_argument("--dest")
     s.add_argument("--ticks", action="store_true", help="backup: also copy the tick files (large)")
+    s.add_argument("--seconds", type=float, default=5.0, help="memory: how long to watch disk reads (0: not)")
     s.set_defaults(func=cmd_admin)
 
     for name, func, helptext in (
@@ -1250,7 +1271,13 @@ def main(argv: list[str] | None = None) -> int:
         args.ticker = resolve(args.ticker).ticker  # data commands accept SPCX::NASDAQ, USDEUR, NQ1! ...
     try:
         settings = load_settings()
+        from .storage.feeds import set_tick_access
+
+        set_tick_access(not settings.bars_only)  # bars-only: no store this command opens reads ticks
         return args.func(args, settings)
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
+        return 2
+    except TicksBlocked as e:
+        print(str(e), file=sys.stderr)
         return 2

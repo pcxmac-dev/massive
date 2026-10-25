@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from dataclasses import replace
 from datetime import datetime, time
 from time import monotonic
+from time import time as _wall_clock
 from zoneinfo import ZoneInfo
 from threading import RLock
 
@@ -505,8 +506,12 @@ class _SizedCache(OrderedDict):
         return self._bytes
 
 
-SERIES_CACHE_BYTES = 2_500_000_000  # whole histories kept in memory, at most
-BARS_CACHE_BYTES = 1_500_000_000  # resampled and styled frames kept, at most
+# Every cache of the chart app together (CHART_CACHE_MB, config.py: a gigabyte by default), shared
+# out: the whole histories the series path still loads (continuous futures, the composite, box
+# plots), resampled and styled frames, the price-based charts' bricks and the 30-minute bins
+# (window.py). They had 4 GB between them, and the app once grew to 13 GB and slowed the machine.
+CHART_CACHE_BYTES = 1024 * 2**20
+CACHE_SHARES = {"series": 0.40, "bars": 0.30, "bricks": 0.15, "rollup": 0.15}
 
 
 class BarEngine:
@@ -516,17 +521,24 @@ class BarEngine:
     combined in `priority` order (feeds not listed come after, alphabetically).
     """
 
-    def __init__(self, store: Store, cache_size: int = 64, priority: list[str] | None = None, quality=None):
+    def __init__(self, store: Store, cache_size: int = 64, priority: list[str] | None = None, quality=None,
+                 cache_bytes: int | None = None):
         self.priority = priority or []
         self.quality = quality  # feed -> 0..1, for display priority (best first)
         self.store = store
-        self._series: dict[tuple, tuple] = _SizedCache(SERIES_CACHE_BYTES, 48)  # whole histories: a memory budget
-        self._bars: OrderedDict[tuple, pd.DataFrame] = _SizedCache(BARS_CACHE_BYTES, max(1, cache_size))
+        self.cache_bytes = int(cache_bytes or CHART_CACHE_BYTES)  # every cache's budget together (budget())
+        self._series: dict[tuple, tuple] = _SizedCache(self.budget("series"), 48)  # whole histories: a memory budget
+        self._bars: OrderedDict[tuple, pd.DataFrame] = _SizedCache(self.budget("bars"), max(1, cache_size))
         self._cache_size = cache_size
         self._future_cache: OrderedDict = _BoundedCache(16)
+        self._stream_feeds: OrderedDict = _BoundedCache(64)  # ticker -> (ranked at, feeds): fingerprint()
         # One SQLite connection is shared by the server's threads: every store access holds this lock.
         self.lock = RLock()
         self._lock = self.lock
+
+    def budget(self, cache: str) -> int:
+        """Bytes one of the chart app's caches may hold (CACHE_SHARES of cache_bytes)."""
+        return int(self.cache_bytes * CACHE_SHARES[cache])
 
     def _watch_item(self, source: str, ticker: str) -> dict | None:
         return next(iter(self.store.watchlist(source, ticker)), None)
@@ -666,12 +678,19 @@ class BarEngine:
                     "to": r.new, "gap": r.gap} for r in roll_list],
         )
 
+    STREAM_FEEDS_S = 60.0
+
     def fingerprint(self, source: str, ticker: str) -> tuple:
         """Changes whenever the symbol's stored data changes (the live stream's trigger)."""
         ticker = ticker.upper()
         with self._lock:
             if source == MERGED:
-                return tuple(self._fingerprint(s, ticker) for s in self.sources_for(ticker))
+                # the feeds ranked once a minute: a live chart asks twice a second, and the ranking
+                # lists every series of every feed again after any write
+                hit = self._stream_feeds.get(ticker)
+                if hit is None or monotonic() - hit[0] > self.STREAM_FEEDS_S:
+                    hit = self._stream_feeds[ticker] = (monotonic(), self.sources_for(ticker))
+                return tuple(self._fingerprint(s, ticker) for s in hit[1])
             return self._fingerprint(source, ticker)
 
     # A change further back than this, or a series loaded whole longer ago than that, reloads
@@ -725,6 +744,9 @@ class BarEngine:
         kind = "minute" if "minute" in kinds else next((k for k in BASE_KINDS if k in kinds), None)
         if kind is None:
             return None
+        # what is stored from here on is read again by _refresh_tail (the change log; reading every
+        # bar's stored_at for the newest of them was a second scan of the whole series)
+        started = int(_wall_clock() * 1000)
         if kind == "trades":
             frame = frame_from_trades(self.store.load_trades(ticker, source))
         else:
@@ -734,8 +756,6 @@ class BarEngine:
             daily = frame_from_bars(self.store.load_bars([ticker], "day", 1, source=source))
         prices = frame[["open", "high", "low", "close"]].to_numpy().ravel()
         fine = self._fine(source, ticker, kind)
-        hw = self.store.bars_changed_since(source, ticker, [kind] if kind == "day" else [kind, "day"], -1) \
-            if kind in BAR_KINDS else {}
         if source in MODEL_SOURCES:  # the composite carries its deviation across exchanges
             stats = self.store.composite_stats(ticker, kind)
             if not stats.empty:
@@ -749,7 +769,7 @@ class BarEngine:
             price_precision=decimals(prices, cap=6, minimum=2),
             volume_precision=decimals(frame["volume"].to_numpy(), cap=4),
             fine_sources=[source] if fine else [], fine_spans=fine,
-            stored_hw=max((hi for _, hi in hw.values()), default=0), loaded_at=monotonic(),
+            stored_hw=started if kind in BAR_KINDS else 0, loaded_at=monotonic(),
         )
 
     PERIOD_CHOICES = (("second", (1, 30)), ("minute", (1, 5, 30)), ("hour", (1, 2, 4)),

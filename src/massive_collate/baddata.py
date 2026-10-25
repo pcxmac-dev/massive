@@ -282,7 +282,10 @@ def repair_from_ticks(store, source: str, tickers=None, log=print) -> dict:
     {ticker: entries added}."""
     from . import derive
     from .collector import build_from_ticks
+    from .storage import TicksBlocked
 
+    if not store.ticks_allowed:
+        raise TicksBlocked("bars-only mode: the ticks are not read here (BARS_ONLY=off to rebuild from them)")
     rows = store.conn.execute("SELECT product, span_lo, span_hi FROM derivations WHERE kind='bars-from-ticks' "
                               "AND product LIKE ?", (f"{source}:%",)).fetchall()
     days: dict[str, set] = {}

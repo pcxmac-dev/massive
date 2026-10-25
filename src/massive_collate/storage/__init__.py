@@ -15,8 +15,8 @@ from __future__ import annotations
 from .appstate import LayoutLimit
 from .datasets import DATASET_SCHEMA, datasets_backup_dir
 from .feeds import (
-    BAR_COLUMNS, COMPOSITE, COMPOSITE_SCHEMA, FEED_SCHEMA, OldLayout, TICKS_SCHEMA, feeds_backup_dir,
-    old_layout)
+    BAR_COLUMNS, COMPOSITE, COMPOSITE_SCHEMA, FEED_SCHEMA, OldLayout, TICKS_SCHEMA, TicksBlocked, feeds_backup_dir,
+    old_layout, set_tick_access, tick_access)
 from .store import Store
 
 __all__ = [
@@ -29,7 +29,10 @@ __all__ = [
     'OldLayout',
     'Store',
     'TICKS_SCHEMA',
+    'TicksBlocked',
     'datasets_backup_dir',
     'feeds_backup_dir',
     'old_layout',
+    'set_tick_access',
+    'tick_access',
 ]

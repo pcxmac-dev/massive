@@ -171,14 +171,13 @@ def test_the_series_cache_keeps_to_a_memory_budget(store, monkeypatch):
     for i, t in enumerate(("AAA", "BBB", "CCC")):
         store.upsert_bars("massive", t, "minute", 1, [_bar(f"2026-10-20 10:{m:02d}", 10.0 + i) for m in range(50)])
     one = gui_bars._weight(BarEngine(store).series("massive", "AAA"))
-    monkeypatch.setattr(gui_bars, "SERIES_CACHE_BYTES", int(one * 1.5))  # room for one history
-    eng = BarEngine(store)
+    share = gui_bars.CACHE_SHARES["series"]
+    eng = BarEngine(store, cache_bytes=int(one * 1.5 / share))  # room for one history
     for t in ("AAA", "BBB", "CCC"):
         assert eng.series("massive", t) is not None
     assert list(k[1] for k in eng._series) == ["CCC"] and 0 < eng._series.nbytes <= one * 1.5
     assert eng.series("*", "AAA").ticker == "AAA"  # a merged chart whose part was let go still loads
-    monkeypatch.setattr(gui_bars, "SERIES_CACHE_BYTES", 1)  # a history over the budget on its own
-    small = BarEngine(store)
+    small = BarEngine(store, cache_bytes=1)  # a history over the budget on its own
     assert small.series("massive", "AAA") is not None and len(small._series) == 0  # served, not kept
 
 

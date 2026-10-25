@@ -204,6 +204,58 @@ END;
 """
 
 
+# The change log: what was written when, per series and minute of stored_at (a removal: the minute
+# it was removed), with the earliest and latest bar time written then. Whether a series changed,
+# and what changed since a moment, are then a seek or two here instead of reading the series: the
+# chart's live check counted a stock's 13 million bars (11 s) and its trades (31 GB of the tick
+# file held in Windows' file cache) every few seconds while the sync wrote. Kept by triggers, so
+# every writer keeps it whatever its code version; complete from `changes_since` on (set when it
+# was made, moved up when old minutes are pruned: CHANGES_KEEP_MS).
+CHANGES_KEEP_MS = 7 * 86_400_000  # about a million entries with the live recorder writing forty symbols
+CHANGES_PRUNE_MS = 3_600_000  # pruned at most this often (a pass reads the whole log)
+CHANGES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS changes (
+    ticker       TEXT    NOT NULL,
+    timespan     TEXT    NOT NULL,
+    multiplier   INTEGER NOT NULL,
+    minute       INTEGER NOT NULL,   -- stored_at // 60,000 of the rows written (a removal: when removed)
+    lo           INTEGER NOT NULL,   -- the earliest bar time written in it (ms)
+    hi           INTEGER NOT NULL,   -- the latest
+    n            INTEGER NOT NULL,   -- rows written (inserted, changed or removed)
+    PRIMARY KEY (ticker, timespan, multiplier, minute)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS changes_since (ms INTEGER NOT NULL);
+""" + "".join(f"""
+CREATE TRIGGER IF NOT EXISTS {table}_logged_{event} AFTER {event.upper()} ON {table}
+BEGIN
+    INSERT INTO changes VALUES ({row}.ticker, {row}.timespan, {row}.multiplier, {minute}, {row}.ts, {row}.ts, 1)
+    ON CONFLICT (ticker, timespan, multiplier, minute) DO UPDATE SET
+        lo = MIN(lo, excluded.lo), hi = MAX(hi, excluded.hi), n = n + 1;
+END;
+""" for table in ("bars", "built_bars") for event, row, minute in (
+    ("insert", "new", "COALESCE(new.stored_at, CAST(strftime('%s', 'now') AS INTEGER) * 1000) / 60000"),
+    ("update", "new", "COALESCE(new.stored_at, CAST(strftime('%s', 'now') AS INTEGER) * 1000) / 60000"),
+    ("delete", "old", "CAST(strftime('%s', 'now') AS INTEGER) / 60")))
+
+
+class TicksBlocked(RuntimeError):
+    """Bars-only mode (BARS_ONLY, config.py): this process does not open the tick files."""
+
+
+# Whether a Store opens the feeds' tick files when it is not told (Store(ticks=...)): a process
+# sets it once it knows its mode (cli.py: off in bars-only mode, where only the live recorder,
+# which records the streams' trades, opens them).
+_TICKS_DEFAULT = [True]
+
+
+def set_tick_access(allowed: bool) -> None:
+    _TICKS_DEFAULT[0] = bool(allowed)
+
+
+def tick_access() -> bool:
+    return _TICKS_DEFAULT[0]
+
+
 def _stored_ms() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
 
@@ -248,8 +300,9 @@ class _Feed:
     """One feed's files: its bars in this connection's main database and its ticks attached as
     `ticks` once it has any (both in memory when the store is)."""
 
-    def __init__(self, name: str, folder: Path | None, check_same_thread: bool):
+    def __init__(self, name: str, folder: Path | None, check_same_thread: bool, ticks: bool = True):
         self.name = name
+        self.ticks_allowed = ticks
         self.path = folder / f"{name}.db" if folder else None
         self.ticks_path = folder / f"{name}-ticks.db" if folder else None
         self.conn = sqlite3.connect(str(self.path) if self.path else ":memory:", check_same_thread=check_same_thread,
@@ -272,18 +325,25 @@ class _Feed:
                 for table in ("bars", "composite_stats"):
                     if "derivation" not in {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}:
                         self.conn.execute(f"ALTER TABLE {table} ADD COLUMN derivation INTEGER")
+        self.conn.executescript(CHANGES_SCHEMA)
+        if self.conn.execute("SELECT 1 FROM changes_since").fetchone() is None:  # a write only the first time
+            with self.conn:  # complete from now: the triggers exist, so every write after this is logged
+                self.conn.execute("INSERT INTO changes_since SELECT ? WHERE NOT EXISTS (SELECT 1 FROM changes_since)",
+                                  (_stored_ms(),))
         self.ticks = False
         self._lock = threading.Lock()
         self.has_ticks()
 
     def has_ticks(self) -> bool:
         """Whether the feed has a tick file, attaching it when one has appeared (another process
-        may have written the feed's first ticks)."""
-        if not self.ticks and self.ticks_path is not None and self.ticks_path.exists():
+        may have written the feed's first ticks). Never in bars-only mode."""
+        if self.ticks_allowed and not self.ticks and self.ticks_path is not None and self.ticks_path.exists():
             self.attach_ticks()
         return self.ticks
 
     def attach_ticks(self) -> None:
+        if not self.ticks_allowed:
+            raise TicksBlocked(f"bars-only mode: {self.name}'s tick file is not opened here (BARS_ONLY=off allows it)")
         with self._lock:
             if self.ticks:
                 return
@@ -348,7 +408,7 @@ class FeedStore:
             if feed is None:
                 if self.feeds_dir is not None:
                     self.feeds_dir.mkdir(parents=True, exist_ok=True)
-                feed = self._feeds[name] = _Feed(name, self.feeds_dir, self._check_same_thread)
+                feed = self._feeds[name] = _Feed(name, self.feeds_dir, self._check_same_thread, self.ticks_allowed)
         return feed
 
     def _open_feeds(self, scan: bool = True) -> list[_Feed]:
@@ -479,14 +539,13 @@ class FeedStore:
         stored = _stored_ms()
         rows = [(*_bar_row(ticker, timespan, multiplier, b, stored)[:11], derivation, stored) for b in bars]
         conn = self._feed(source, create=True).conn
-        before = conn.total_changes
-        with conn:
-            conn.executemany(
+        with conn:  # the statement's own rows (total_changes would count the change log's too)
+            n = conn.executemany(
                 "INSERT OR REPLACE INTO built_bars SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS "
                 "(SELECT 1 FROM bars WHERE ticker=? AND timespan=? AND multiplier=? AND ts=?)",
-                [(*r, *r[:4]) for r in rows])
+                [(*r, *r[:4]) for r in rows]).rowcount
         self._wrote()
-        return conn.total_changes - before
+        return max(0, n)
 
     def close_before(self, source: str, ticker: str, timespan: str, before_ms: int) -> float | None:
         """The close of a series' last bar before `before_ms` (the feed's own or built): what a
@@ -747,12 +806,37 @@ class FeedStore:
         self._cache[key] = (version, value)
         return value
 
+    @staticmethod
+    def _logged_since(conn: sqlite3.Connection) -> int | None:
+        """From when the change log is complete (ms), or None without one."""
+        row = conn.execute("SELECT MAX(ms) FROM changes_since").fetchone()
+        return row[0] if row else None
+
+    def prune_changes(self, keep_ms: int = CHANGES_KEEP_MS, now_ms: int | None = None) -> int:
+        """Forget the change log's minutes older than `keep_ms` in every feed (a reader further
+        behind reads the series' stored_at instead, once). Returns entries removed."""
+        horizon = (now_ms if now_ms is not None else _stored_ms()) - keep_ms
+        n = 0
+        for feed in self._open_feeds():
+            if (self._logged_since(feed.conn) or 0) >= horizon - CHANGES_PRUNE_MS:
+                continue
+            with feed.conn:
+                n += feed.conn.execute("DELETE FROM changes WHERE minute < ?", (horizon // 60_000,)).rowcount
+                feed.conn.execute("UPDATE changes_since SET ms=?", (horizon // 60_000 * 60_000,))
+        return n
+
     def changed_span(self, source: str, ticker: str, timespan: str, stored_after: int) -> tuple[int, int] | None:
         """(first, last) start in ms of a series' bars, its own or built, stored after
-        `stored_after` (ms): the span a build from them has to redo. None if nothing changed."""
+        `stored_after` (ms) (or removed since: from the change log, which may also name the rest of
+        that minute's writes): the span a build from them has to redo. None if nothing changed."""
         conn = self._bars(source)
         if conn is None:
             return None
+        since = self._logged_since(conn)
+        if since is not None and stored_after >= since:
+            lo, hi = conn.execute("SELECT MIN(lo), MAX(hi) FROM changes WHERE ticker=? AND timespan=? AND multiplier=1 "
+                                  "AND minute >= ?", (ticker.upper(), timespan, stored_after // 60_000)).fetchone()
+            return None if lo is None else (lo, hi)
         spans = [conn.execute(f"SELECT MIN(ts), MAX(ts) FROM {table} WHERE ticker=? AND timespan=? AND multiplier=1 "
                               "AND stored_at > ?", (ticker.upper(), timespan, stored_after)).fetchone()
                  for table in _BAR_TABLES]
@@ -826,6 +910,14 @@ class FeedStore:
         if feed is None or not timespans:
             return out
         marks = ",".join("?" * len(timespans))
+        since = self._logged_since(feed.conn)
+        if since is not None and stored_after >= since:  # the change log: the minute's end for the newest
+            for span, lo, minute in feed.conn.execute(
+                    f"SELECT timespan, MIN(lo), MAX(minute) FROM changes WHERE ticker=? AND timespan IN ({marks}) "
+                    "AND multiplier=1 AND minute >= ? GROUP BY timespan",
+                    (ticker.upper(), *timespans, stored_after // 60_000)):
+                out[span] = (lo, minute * 60_000 + 59_999)
+            return out
         for table in _BAR_TABLES:
             rows = feed.conn.execute(
                 f"SELECT timespan, MIN(ts), MAX(stored_at) FROM {table} WHERE ticker=? AND timespan IN ({marks})"
@@ -839,18 +931,17 @@ class FeedStore:
         return out
 
     def _fingerprint(self, source: str, ticker: str) -> tuple:
+        # From the change log (a seek), never by reading the series: its writes, corrections and
+        # removals since the log began (its start too: pruning it changes every fingerprint once).
+        # Ticks: the newest one (an index seek), where this process opens tick files at all.
         feed = self._feed(source)
         if feed is None:
-            return (0, None, 0, None)
-        t = feed.conn.execute(
-            "SELECT COUNT(*), MAX(ts_ns) FROM ticks.trades WHERE ticker=?", (ticker.upper(),)
-        ).fetchone() if feed.has_ticks() else (0, None)
-        # the newest stored_at too: a bar corrected in place, or a feed's own bar taking a built one's
-        # place, changes neither the count nor the newest time
-        b = [feed.conn.execute(f"SELECT COUNT(*), MAX(ts), MAX(stored_at) FROM {table} WHERE ticker=?",
-                               (ticker.upper(),)).fetchone() for table in _BAR_TABLES]
-        return tuple(t) + (sum(n for n, _, _ in b), max((m for _, m, _ in b if m is not None), default=None),
-                           max((s for _, _, s in b if s is not None), default=None))
+            return (None, 0, None, None)
+        t = ticker.upper()
+        n, newest = feed.conn.execute("SELECT SUM(n), MAX(minute) FROM changes WHERE ticker=?", (t,)).fetchone()
+        tick = feed.conn.execute("SELECT MAX(ts_ns) FROM ticks.trades WHERE ticker=?", (t,)).fetchone()[0] \
+            if feed.has_ticks() else None
+        return (self._logged_since(feed.conn), n or 0, newest, tick)
 
     def stored_series(self) -> list[tuple]:
         """(source, ticker, kind) for every series with data, kind = trades | second | minute | ...

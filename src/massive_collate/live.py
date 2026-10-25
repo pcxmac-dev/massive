@@ -59,9 +59,11 @@ MAX_BACKOFF = 300.0
 STABLE_SECONDS = 60.0
 KILL_CHECK_SECONDS = 30.0  # while a stream is killed: how often it looks whether the kill ended (or was lifted)
 REAP_SECONDS = 300.0  # how often the recorder looks for other recorder processes (and ends them)
-# Trades held in memory while the database refuses writes (locked, full disk): past this the
-# oldest go, and the time they cover is no longer claimed as recorded (the sync downloads it).
-MAX_BUFFERED = 500_000
+# Trades held in memory while the database refuses writes (locked, full disk): past this many
+# bytes the oldest go, and the time they cover is no longer claimed as recorded (the sync
+# downloads it). A waiting trade is a dict of about TRADE_BYTES (its keys shared): some 110,000.
+MAX_BUFFERED_BYTES = 64 * 2**20
+TRADE_BYTES = 600
 RECORDER_COMMAND = re.compile(r"-m\s+massive_collate\s+live\s*$")  # a recorder (not `live status`, `live stop`)
 DAY_MS = 86_400_000
 PING = "ping"  # keepalive by WebSocket ping frames rather than a message
@@ -451,14 +453,14 @@ class Recorder:
             raise
 
     def _shed(self) -> int:
-        """Past MAX_BUFFERED trades waiting (writes failing flush after flush), drop the oldest of
+        """Past MAX_BUFFERED_BYTES of trades waiting (writes failing flush after flush), drop the oldest of
         each pair in proportion, and move each stream's recorded-since past what was dropped: the
         ledger then claims none of that time, and the sync downloads it. Called holding the lock.
         Returns trades dropped."""
-        total = sum(len(v) for v in self._buffer.values())
-        if total <= MAX_BUFFERED:
+        total, cap = sum(len(v) for v in self._buffer.values()), max(1, MAX_BUFFERED_BYTES // TRADE_BYTES)
+        if total <= cap:
             return 0
-        excess, dropped, newest = total - MAX_BUFFERED, 0, {}
+        excess, dropped, newest = total - cap, 0, {}
         for (source, ticker), trades in sorted(self._buffer.items(), key=lambda kv: -len(kv[1])):
             n = min(len(trades), -(-excess * len(trades) // total))  # this pair's share, rounded up
             if n:
@@ -471,7 +473,7 @@ class Recorder:
                 self._since[source] = max(self._since[source], ms)
             self._status[source]["dropped"] = self._status[source].get("dropped", 0) + dropped
         self.log(f"live: {dropped:,} trades dropped: the database refused writes for a while "
-                 f"(at most {MAX_BUFFERED:,} are held); that time is left for the sync to download")
+                 f"(at most {cap:,}, {MAX_BUFFERED_BYTES // 2**20} MB, are held); that time is left for the sync to download")
         return dropped
 
     def _store(self, store, batch, since, heard, subs, now_ms) -> int:
@@ -535,7 +537,8 @@ class Recorder:
         for t in threads:
             t.start()
         stocks = any(getattr(s, "dynamic", False) for s in self.streams)
-        with Store(self.db_path) as store:
+        # the one process that opens tick files in bars-only mode: it records the streams' trades
+        with Store(self.db_path, ticks=True) as store:
             total, last_log, last_derive, last_want, last_lock = 0, time.time(), time.time(), 0.0, time.time()
             last_reap = 0.0
             while True:

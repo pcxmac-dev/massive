@@ -26,7 +26,7 @@ def _trade(ms: int, seq: int) -> dict:
 
 
 def test_a_backlog_kept_while_writes_fail_is_bounded_and_not_claimed(tmp_path, monkeypatch):
-    monkeypatch.setattr(live, "MAX_BUFFERED", 10)
+    monkeypatch.setattr(live, "MAX_BUFFERED_BYTES", 10 * live.TRADE_BYTES)  # ten trades
     logged = []
     rec = live.Recorder(tmp_path / "m.db", coins=("BTC",), sources=("coinbase",), log=logged.append)
     rec._since["coinbase"] = 1_000

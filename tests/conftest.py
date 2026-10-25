@@ -21,6 +21,17 @@ def no_saved_keys(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def tick_access_restored():
+    """cli.main sets the process's tick access from BARS_ONLY (off by default): a test that runs a
+    command must not leave the stores of the tests after it unable to open tick files."""
+    from massive_collate.storage import set_tick_access, tick_access
+
+    was = tick_access()
+    yield
+    set_tick_access(was)
+
+
+@pytest.fixture(autouse=True)
 def no_recorders(monkeypatch, tmp_path):
     """Tests never start the live recorder: `sync` would start a real detached process (with real
     exchange connections) pointed at the test's temporary folder."""

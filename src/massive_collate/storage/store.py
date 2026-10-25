@@ -13,7 +13,7 @@ from .audits import AuditStore
 from .common import BUSY_TIMEOUT_S
 from .datasets import DatasetStore
 from .directory import DirectoryStore
-from .feeds import FeedStore, OldLayout, _Feed, old_layout
+from .feeds import FeedStore, OldLayout, _Feed, old_layout, tick_access
 from .ledger import LedgerStore
 from .markets import MarketsStore
 from .provenance import ProvenanceStore
@@ -25,8 +25,10 @@ from .watchlist import WatchlistStore
 class Store(ProvenanceStore, AdminStore, FeedStore, PrunedStore, DatasetStore, DirectoryStore, MarketsStore,
             WatchlistStore, LedgerStore, AuditStore, AppStateStore):
     def __init__(self, path: Path | str, check_same_thread: bool = True, feeds_dir: Path | str | None = None,
-                 datasets_dir: Path | str | None = None):
+                 datasets_dir: Path | str | None = None, ticks: bool | None = None):
         self.path = Path(path)
+        # Whether the feeds' tick files are opened at all (bars-only mode: not; feeds.set_tick_access)
+        self.ticks_allowed = tick_access() if ticks is None else ticks
         memory = str(path) == ":memory:"
         if not memory:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -62,7 +64,7 @@ class Store(ProvenanceStore, AdminStore, FeedStore, PrunedStore, DatasetStore, D
         if str(self.path) == ":memory:":
             return self
         return Store(self.path, check_same_thread=self._check_same_thread, feeds_dir=self.feeds_dir,
-                     datasets_dir=self.datasets_dir)
+                     datasets_dir=self.datasets_dir, ticks=self.ticks_allowed)
 
     def _version(self) -> tuple:
         self._scan_feeds()

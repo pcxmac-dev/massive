@@ -52,7 +52,6 @@ BRICK_ROWS = 100_000
 BRICK_READ = 400_000
 COVER_MS = 7 * 86_400_000
 BRICK_TTL_S = 120.0  # a build is kept this long (a bar corrected inside the history shows after it)
-BRICK_CACHE_BYTES = 300_000_000
 HA_WARMUP = 64  # Heikin Ashi's open halves its first bar's weight each bar: gone below a float's precision
 # Fourier fits each segment (a session: up to the next gap) whole; where a market runs without
 # gaps (crypto, or gaps not treated as breaks) it is fitted over this many bars either side.
@@ -60,7 +59,8 @@ FOURIER_CONTEXT = 100_000
 MODEL_SKIP_PAGES = 10  # pages of bars all too short for a model's window passed over to reach its values
 HALF_HOUR_MS = 1_800_000  # the hour levels and 30 minutes are built from 30-minute bins (_half_hours)
 ROLLUP_TTL_S = 300.0  # a month of them is read again after this: a correction or backfill shows within it
-ROLLUP_CACHE_BYTES = 200_000_000  # twenty years of a stock's bins is about 15 MB
+# The bricks and the 30-minute bins each keep to a share of the chart app's caches (bars.CACHE_SHARES:
+# 150 MB of the default gigabyte; twenty years of a stock's bins is about 15 MB).
 
 
 # The view a request reads (server.ChartApp._view): filtered, bad data left out (the pruned list,
@@ -119,9 +119,9 @@ class WindowReader:
     def __init__(self, engine):
         self.engine = engine
         self._levels: dict[tuple, tuple[float, list]] = {}
-        self._bricks = _SizedCache(BRICK_CACHE_BYTES, 16)
+        self._bricks = _SizedCache(engine.budget("bricks"), 16)
         self._bricks_lock = threading.Lock()
-        self._rollup = _SizedCache(ROLLUP_CACHE_BYTES, 50_000)  # (feeds, ticker, month) -> (built at, 30-minute bins)
+        self._rollup = _SizedCache(engine.budget("rollup"), 50_000)  # (feeds, ticker, month) -> (built at, 30-minute bins)
         self._rollup_lock = threading.Lock()
 
     @property
@@ -615,12 +615,15 @@ class WindowReader:
                     derived = f"summed into {_money(used)} price segments" if summed else None
                     step = used
                     break
-        if rows is None:
-            base = "second" if period == "second" else "minute"
-            with self.engine.lock:
-                parts = [frame_from_bars(df) for df in
-                         (self.store.bars_window([f], s.ticker, base, lo, hi, filtered=_filtered()) for f in feeds)
-                         if len(df)]
+        if rows is None:  # no trades (bars-only mode opens no tick file): the finest bars, seconds up to a day
+            parts = []
+            for base in ("second", "minute") if hi - lo <= self.PROFILE_TICK_MS or period == "second" else ("minute",):
+                with self.engine.lock:
+                    parts = [frame_from_bars(df) for df in
+                             (self.store.bars_window([f], s.ticker, base, lo, hi, filtered=_filtered()) for f in feeds)
+                             if len(df)]
+                if parts:
+                    break
             sub = merge_frames(parts) if len(parts) > 1 else (parts[0] if parts else
                                                               pd.DataFrame(columns=[*COLUMNS, "derived"]))
             unit = f"1-{base} bars"

@@ -1,6 +1,7 @@
 """Local HTTP server for the chart app. Binds to 127.0.0.1 only and serves data from the local store."""
 from __future__ import annotations
 
+import functools
 import json
 import math
 from contextlib import contextmanager
@@ -48,6 +49,23 @@ ACTIVITY_TTL_S = 2.0  # the status answer shared by polls this close together
 DEPS_TTL_S = 60.0  # the dependency checks' answer is kept this long
 MAX_BODY = 5 * 1024 * 1024
 WRITE_HEADER = "X-Massive-Charts"
+# Chart data built at once (bars, level 2 profiles, projections, range statistics): each holds a
+# window's frames, up to MAX_LIMIT bars; the rest wait their turn, then are answered busy.
+HEAVY_REQUESTS = 2
+HEAVY_WAIT_S = 30.0
+
+
+class Busy(RuntimeError):
+    """More chart requests than HEAVY_REQUESTS waited past HEAVY_WAIT_S (answered 503)."""
+
+
+def _heavy(method):
+    """A ChartApp method that builds chart data: run under its in-flight cap (ChartApp.heavy_work)."""
+    @functools.wraps(method)
+    def run(self, *a, **k):
+        with self.heavy_work():
+            return method(self, *a, **k)
+    return run
 
 
 class ChartApp:
@@ -60,7 +78,9 @@ class ChartApp:
         # long history (twenty years of minutes) held the one shared lock for over a minute, and
         # the symbol list, the Fetcher's poll and the search dialog all waited behind it.
         reader = store.reader()
-        self.engine = BarEngine(reader, priority=priority, quality=lambda feed: self._feed_quality(feed, reader))
+        self.engine = BarEngine(reader, priority=priority, quality=lambda feed: self._feed_quality(feed, reader),
+                                cache_bytes=self.settings.chart_cache_mb * 2**20)
+        self._heavy = threading.BoundedSemaphore(HEAVY_REQUESTS)
         self._lock = threading.RLock()  # the app's own reads and writes through `store`
         from .window import WindowReader
 
@@ -78,8 +98,20 @@ class ChartApp:
         self._deps_store, self._deps_lock = store.reader(), threading.Lock()  # dependency checks
         self._deps: tuple[float, dict] | None = None
         self._datasets_store, self._datasets_lock = store.reader(), threading.Lock()  # the datasets list
+        self._symbols_store, self._symbols_lock = store.reader(), threading.RLock()  # the symbol list
         self._open_noted: dict[str, int] = {}  # ticker -> ms it was last noted open (note_open)
         self._derive_proc: subprocess.Popen | None = None  # a build started by start_derive
+
+    @contextmanager
+    def heavy_work(self):
+        """One of at most HEAVY_REQUESTS requests building chart data at once; Busy after waiting
+        HEAVY_WAIT_S (a page asks again), rather than a queue of requests each holding frames."""
+        if not self._heavy.acquire(timeout=HEAVY_WAIT_S):
+            raise Busy("the chart app is building other charts' data: ask again shortly")
+        try:
+            yield
+        finally:
+            self._heavy.release()
 
     def _feed_quality(self, feed: str, store: Store | None = None) -> float:
         """A feed's best quality over asset classes (display priority between feeds). Read through
@@ -89,9 +121,11 @@ class ChartApp:
         store = store or self.store
         return max((quality_of(store, feed, a) for a in ("stock", "crypto", "index", "fx", "future")), default=1.0)
 
-    def models(self, ticker: str, asset: str, sources: list[str], feeds: dict | None = None) -> dict | None:
+    def models(self, ticker: str, asset: str, sources: list[str], feeds: dict | None = None,
+               store: Store | None = None, lock=None) -> dict | None:
         """The models of an asset traded on several exchanges: the gold-standard reference (one
-        exchange), the composite across exchanges, the consolidated tape, and each exchange's quality."""
+        exchange), the composite across exchanges, the consolidated tape, and each exchange's quality.
+        Read through `store` under `lock` (the app's own by default)."""
         from ..composite import exchange_feeds, quality_of, reference_feed
         from ..sources import feed_profiles
 
@@ -100,9 +134,10 @@ class ChartApp:
         if len(exch) < 2:
             return None
         consolidated = next((f for f in sources if f in feeds and feeds[f].venues.get(asset) in ("consolidated", "sip")), None)
-        with self._lock:
-            has_composite = self.store.bar_edges("composite", ticker, "minute") is not None
-            exchanges = sorted(({"feed": f, "exchange": v, "quality": round(quality_of(self.store, f, asset), 3)}
+        store, lock = store or self.store, lock or self._lock
+        with lock:
+            has_composite = store.bar_edges("composite", ticker, "minute") is not None
+            exchanges = sorted(({"feed": f, "exchange": v, "quality": round(quality_of(store, f, asset), 3)}
                                 for f, v in exch.items()), key=lambda x: -x["quality"])
         return {"reference": reference_feed(feeds, asset, set(sources)), "composite": has_composite,
                 "consolidated": consolidated, "exchanges": exchanges}
@@ -116,24 +151,27 @@ class ChartApp:
         from ..composite import REFERENCE
         from ..sources import feed_profiles
 
-        with self._lock:
-            watch = self.store.watchlist()
-            stored = self.store.stored_series()
-            exchanges = self.store.exchanges()
-            snapshot = self.store.daily_snapshot()
-            icons = self.store.icon_tickers()
-            profiles = self.store.company_profiles()
-            members = self.store.constituents("sp500", "S&P 500")
+        # Its own connections and lock (a second or more for thousands of symbols): under the shared
+        # lock the layouts, watchlists and the first chart waited behind it on every page load.
+        store = self._symbols_store
+        with self._symbols_lock:
+            watch = store.watchlist()
+            stored = store.stored_series()
+            exchanges = store.exchanges()
+            snapshot = store.daily_snapshot()
+            icons = store.icon_tickers()
+            profiles = store.company_profiles()
+            members = store.constituents("sp500", "S&P 500")
             now = datetime.now(timezone.utc).astimezone(activity.ET)
             by_feed: dict[str, dict[str, dict]] = {}  # ticker -> feed -> its Fetcher row
             for src in sorted({w["source"] for w in watch}):
-                for r in activity.symbol_rows(self.store, self.settings, src, now, detail=0):
+                for r in activity.symbol_rows(store, self.settings, src, now, detail=0):
                     by_feed.setdefault(r["ticker"], {})[src] = r
         names = {r.mic: r.name for r in exchanges.itertuples() if r.mic}
         # Futures contracts are stored only as parts of a continuous series (NQ1!): not symbols of their own.
-        with self._lock:
+        with self._symbols_lock:
             parts = {c["ticker"] for w in watch if w["asset"] == "future"
-                     for c in self.store.contracts(w["source"], w["source_ticker"])}
+                     for c in store.contracts(w["source"], w["source_ticker"])}
         watched = {w["ticker"] for w in watch}
         tickers = sorted(({t for _, t, _ in stored} - (parts - watched)) | watched)
         by_ticker: dict[str, list] = defaultdict(list)
@@ -146,8 +184,8 @@ class ChartApp:
 
         def quality(feed: str) -> float:  # once per feed, not per symbol
             if feed not in qualities:
-                with self._lock:
-                    qualities[feed] = self._feed_quality(feed)
+                with self._symbols_lock:
+                    qualities[feed] = self._feed_quality(feed, store)
             return qualities[feed]
         feed_set = feed_profiles(self.settings)
         out = []
@@ -167,7 +205,8 @@ class ChartApp:
                 "exchange": mic, "exchangeName": names.get(mic, mic) if mic else None,
                 "listed": str(w["listed_from"]) if w.get("listed_from") else None,
                 "feeds": feeds,
-                "models": self.models(ticker, w.get("asset") or "stock", [f["source"] for f in feeds], feed_set),
+                "models": self.models(ticker, w.get("asset") or "stock", [f["source"] for f in feeds], feed_set,
+                                      store, self._symbols_lock),
                 "icon": ticker in icons,
                 "market": _market(snapshot, ticker, w),
                 **_sector(ticker, profiles.get(ticker), w.get("asset") or "stock", (snapshot.get(ticker) or {}).get("close"),
@@ -222,7 +261,12 @@ class ChartApp:
                 out[timespan] = sorted(spans)
             return out
 
+    @_heavy
     def bars(self, q: dict[str, str]) -> dict:
+        return self._bars(q)
+
+    def _bars(self, q: dict[str, str]) -> dict:
+        """bars() outside the in-flight cap: the live stream's tail (a few bars, never waiting)."""
         limit = int(q.get("limit", 1000))
         if not 1 <= limit:
             raise ValueError("limit must be at least 1")
@@ -249,6 +293,7 @@ class ChartApp:
             limit=limit, style=style, adjust=_adjust(q.get("adjust")), lod=int(q.get("lod", 1)), model=_model(q),
         )
 
+    @_heavy
     def profile(self, q: dict[str, str]) -> dict:
         """The virtual level 2 for the chart's bar at `at` (the newest without)."""
         step = float(q["step"]) if q.get("step") not in (None, "", "auto") else None
@@ -287,7 +332,7 @@ class ChartApp:
                         yield b"data: " + json.dumps({"reload": True}).encode() + b"\n\n"
                         beat = _time.monotonic()
                 else:
-                    page = self.bars({**q, "since": str(since)})
+                    page = self._bars({**q, "since": str(since)})  # the bars since its newest: few
                     if page["bars"]:
                         since = page["bars"][-1]["timestamp"]
                         msg = {"bars": page["bars"], "model": None}
@@ -459,6 +504,7 @@ class ChartApp:
             raise ValueError("calendar range is limited to 10 years")
         return {"asset": asset, "sessions": symbol_sessions(self.engine.calendar(), asset, product, start, end)}
 
+    @_heavy
     def future(self, q: dict[str, str]) -> dict:
         style = Style(type=q.get("type", "candles"))
         if self._auto(q, style.type):  # projected from the level's newest bar, not the whole history
@@ -491,6 +537,7 @@ class ChartApp:
             offset=max(0, int(q.get("offset", 0))), count=min(int(q.get("count", 500)), 5000),
         )
 
+    @_heavy
     def range_stats(self, q: dict[str, str]) -> dict:
         if self._auto({**q, "auto": "1"}):  # its own window only
             return self.window.range_stats(q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
@@ -1105,6 +1152,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 return self._json({"error": f"bad request: {e}"}, HTTPStatus.BAD_REQUEST)
             except LookupError as e:
                 return self._json({"error": str(e)}, HTTPStatus.NOT_FOUND)
+            except Busy as e:
+                return self._json({"error": str(e)}, HTTPStatus.SERVICE_UNAVAILABLE)
             return self._static(url.path)
 
         def _static(self, path: str) -> None:

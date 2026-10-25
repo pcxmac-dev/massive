@@ -1524,6 +1524,7 @@ window.addEventListener('massive:open-symbol', (e) => openSymbol(e.detail));
 
 async function loadSymbols() {
   state.symbols = await api('/api/symbols');
+  state.symbolsLoaded = true;
 }
 
 function symbolInfo(ticker) {
@@ -2463,7 +2464,9 @@ async function applyLayout(l) {
     renderIndicatorMenu();
     renderLayoutButton();
     state.restoredFor = null;
-    const sym = d.symbol && state.symbols.some((s) => s.ticker === d.symbol.ticker) ? d.symbol
+    // the saved symbol, if the symbol list (still on its way at start: trusted till then) has it
+    const known = (t) => !state.symbolsLoaded || state.symbols.some((s) => s.ticker === t);
+    const sym = d.symbol && known(d.symbol.ticker) ? d.symbol
       : state.ticker ? { ticker: state.ticker, source: state.source }
       : state.symbols.length ? { ticker: state.symbols[0].ticker, source: MERGED } : null;
     // A layout saved on a reference exchange only because that was once the default opens merged.
@@ -3112,12 +3115,21 @@ function renderHighlightPanel() {
   renderTypeParams();
   state.indicators.forEach(addIndicator);
   try {
-    await loadSymbols();
-    if (!state.symbols.length) {
-      $('statusText').textContent = 'No data stored yet. Add a ticker with: python -m massive_collate watch add TICKER::EXCHANGE, then sync.';
-      return;
-    }
-    await ensureLayout();
+    // The chart opens the saved symbol at once; the symbol list (every symbol with its feeds and
+    // state: a second or more) arrives alongside and fills in the symbol button and feed menu. The
+    // chart waited for it first: three seconds and more on every page load.
+    const symbols = loadSymbols().then(() => {
+      if (!state.symbols.length) {
+        $('statusText').textContent = 'No data stored yet. Add a ticker with: python -m massive_collate watch add TICKER::EXCHANGE, then sync.';
+        return;
+      }
+      if (state.ticker) {
+        renderSymbolButton();
+        renderFeeds(symbolInfo(state.ticker));
+      }
+    });
+    await Promise.all([ensureLayout(), symbols]);  // the layout opens its symbol; nothing saved: the first below
+    if (!state.ticker && !state.selectToken && state.symbols.length) await selectSymbol(state.symbols[0].ticker);
   } catch (err) {
     showError(err);
   }
