@@ -4,7 +4,9 @@
      Stock     the chart, with the symbol (its own logo), key statistics and business beside it
      Analysis  the same symbol's chart with content of its own (interval, chart type, model,
                indicators and their panes, zoom, drawings), the highlight's measurements and the
-               bar under the cursor beside it
+               bar under the cursor beside it; schemes and replay (schemes.js, replay.js)
+     Trading   the same symbol's chart with content of its own, the paper account and the brokers beside it
+               (trading.js); live trading is off
      Markets   the world's exchanges on a globe turned to where it is noon now (globe.js)
      News      every announcement the globe's ticker shows (news.js)
      Datasets  research series drawn on one time axis: factors, CAPE, COT positioning (datasets.js)
@@ -17,8 +19,8 @@
 (() => {
   const { symbolIcon, icon } = window.MassiveIcons;
   // The watchlist sits beside whichever chart was showing (it has no chart content of its own).
-  const VIEWS = { stock: 'chart', analysis: 'chart', watchlist: 'chart', markets: 'markets', news: 'news', datasets: 'datasets',
-                  fetcher: 'fetcher', live: 'live' };
+  const VIEWS = { stock: 'chart', analysis: 'chart', trading: 'chart', watchlist: 'chart', markets: 'markets', news: 'news',
+                  datasets: 'datasets', fetcher: 'fetcher', live: 'live' };
 
   // -- rail --------------------------------------------------------------------------------
   function showPane(name, { toggle = true } = {}) {
@@ -66,6 +68,7 @@
     $('railStock').innerHTML = state.ticker ? symbolIcon(symbolInfo(state.ticker), RAIL_ICON + 4) : icon('analysis', RAIL_ICON);
     $('railAnalysis').innerHTML = icon('analysis', RAIL_ICON);
     $('railWatch').innerHTML = icon('watchlist', RAIL_ICON);
+    $('railTrading').innerHTML = icon('trading', RAIL_ICON);
     if (!window.GlobeIcon?.update()) $('railMarkets').innerHTML = icon('globe', RAIL_ICON);  // the Earth, once its images are here
     $('railNews').innerHTML = icon('news', RAIL_ICON);
     $('railDatasets').innerHTML = icon('dataset', RAIL_ICON);

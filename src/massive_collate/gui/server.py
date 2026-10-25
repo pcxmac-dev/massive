@@ -501,6 +501,101 @@ class ChartApp:
             model=_model(q),
         )
 
+    # -- schemes and replay (calc/schemes.py, window.py; docs/ARCHITECTURE.md) --------
+    def schemes(self) -> dict:
+        """The built-in schemes and their settings, for the Analysis panel."""
+        from ..calc.schemes import SCHEMES
+
+        return {"schemes": [{"key": s.key, "label": s.label, "about": s.about, "params": [
+            {"key": p.key, "label": p.label, "default": p.default, "lo": p.lo, "hi": p.hi, "step": p.step,
+             "choices": list(p.choices), "about": p.about} for p in s.params]} for s in SCHEMES.values()]}
+
+    def _windowed(self, q: dict[str, str], what: str) -> None:
+        if not self.window.handles(q["source"], q["ticker"]):
+            raise ValueError(f"{what} on the chart's own series only (not continuous futures or the composite model yet)")
+
+    def scheme(self, q: dict[str, str]) -> dict:
+        from ..calc.schemes import Costs
+
+        self._windowed(q, "schemes run")
+        given = json.loads(q.get("params") or "{}")
+        if not isinstance(given, dict):
+            raise ValueError("params: an object of settings")
+        fee, slip = float(q.get("fee") or 0), float(q.get("slippage") or 0)
+        if not (0 <= fee <= 1000 and 0 <= slip <= 1000):
+            raise ValueError("fee and slippage: 0 to 1,000 basis points")
+        return self.window.scheme(q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
+                                  q.get("session", "regular"), int(q["from"]), int(q["to"]), q["scheme"], given,
+                                  Costs(fee, slip), q.get("longOnly") == "1")
+
+    def replay(self, q: dict[str, str]) -> dict:
+        from .window import REPLAY_PAGE
+
+        self._windowed(q, "replay runs")
+        limit = int(q.get("limit") or REPLAY_PAGE)
+        if not 1 <= limit <= 20_000:
+            raise ValueError("limit: 1 to 20,000 bars")
+        return self.window.replay(q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
+                                  q.get("session", "regular"), int(q["from"]), limit)
+
+    # -- trading (trading/; docs/ARCHITECTURE.md, "Trading"): paper first, live trading off ----------
+    @property
+    def paper(self):
+        if getattr(self, "_paper", None) is None:
+            from ..trading.paper import PaperBook
+
+            self._paper = PaperBook(self.store.conn, self._fill_bars, self._last_price,
+                                    lambda t: self.window.asset(t))
+        return self._paper
+
+    def _fill_bars(self, source: str, ticker: str, at_ms: int, until_ms: int):
+        """The finest bars stored from `at_ms` to `until_ms` (1-second where held, else minutes), in
+        the symbol's regular session (stocks; round the clock for crypto): what a paper order fills from."""
+        import pandas as pd
+
+        from ..trading.paper import MATCH_PAGE
+        from .bars import epoch_ms
+
+        if not self.window.handles(source, ticker):
+            raise ValueError("paper orders fill from the chart's own series (not continuous futures or the composite yet)")
+        s = self.window.series(source, ticker)
+        feeds = self.window.feeds(source, ticker)
+        fine = "second" if self.window.replay_fine(source, ticker, "minute", at_ms) == "second" else "minute"
+        page = self.window._intraday_page(s, feeds, fine, 1, s.session_for("regular"), None, at_ms - 1, None, MATCH_PAGE)
+        bars = page["frame"]
+        t = epoch_ms(bars.index) if len(bars) else []
+        out = pd.DataFrame({"t": t, **{k: bars[k].to_numpy() for k in ("open", "high", "low", "close")}}) if len(bars)             else pd.DataFrame(columns=["t", "open", "high", "low", "close"])
+        return out[out["t"] < until_ms], 1000 if fine == "second" else 60_000
+
+    def _last_price(self, source: str, ticker: str) -> float | None:
+        if not self.window.handles(source, ticker):
+            return None
+        bars = self.window.page(source, ticker, "minute", 1, "extended", limit=1)["bars"]
+        return float(bars[-1]["close"]) if bars else None
+
+    def trading(self) -> dict:
+        """The Trading view: the brokers, and the paper account (its orders matched first)."""
+        from ..trading.brokers import PLANNED
+
+        with self._lock:
+            book = self.paper.summary()
+        return {"brokers": [{"key": "paper", "label": self.paper.label, "live": False, "status": "ready"}, *PLANNED],
+                "liveTrading": False, "broker": "paper", **book}
+
+    def trade_place(self, body: dict) -> dict:
+        with self._lock:
+            return self.paper.place(body.get("ticker", ""), body.get("source") or "*", body.get("side", ""),
+                                    body.get("qty", 0), body.get("type", "market"), body.get("limit"), body.get("stop"),
+                                    body.get("tif", "day"))
+
+    def trade_cancel(self, order_id: int) -> dict:
+        with self._lock:
+            return self.paper.cancel(order_id)
+
+    def trade_reset(self, body: dict) -> dict:
+        with self._lock:
+            return self.paper.reset(body.get("cash", 100_000), body.get("feeBps", 0))
+
     # -- watchlists (the rail's lists of symbols) --------------------------------
     WATCHLISTS_KEY = live.WATCHLISTS_KEY  # the live recorder streams their stocks
     MAX_LISTS, MAX_LIST_TICKERS = 50, 1000
@@ -1005,6 +1100,14 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                         return self._json(app.start_scan(ticker), HTTPStatus.ACCEPTED)
                     except RuntimeError as e:
                         return self._json({"error": str(e)}, HTTPStatus.CONFLICT)
+                if parts[:3] == ["", "api", "trading"]:  # paper only: live trading is off
+                    if method == "POST" and parts[3:] == ["orders"]:
+                        return self._json(app.trade_place(body), HTTPStatus.CREATED)
+                    if method == "DELETE" and len(parts) == 5 and parts[3] == "orders":
+                        return self._json(app.trade_cancel(int(parts[4])))
+                    if method == "POST" and parts[3:] == ["reset"]:
+                        return self._json(app.trade_reset(body))
+                    return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
                 if parts[:3] != ["", "api", "layouts"]:
                     return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
                 if method == "POST" and len(parts) == 3:
@@ -1079,6 +1182,16 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 if url.path == "/api/range":
                     with app._view(q):
                         return self._json(app.range_stats(q))
+                if url.path == "/api/schemes":
+                    return self._json(app.schemes())
+                if url.path == "/api/trading":
+                    return self._json(app.trading())
+                if url.path == "/api/scheme":
+                    with app._view(q):
+                        return self._json(app.scheme(q))
+                if url.path == "/api/replay":
+                    with app._view(q):
+                        return self._json(app.replay(q))
                 if url.path == "/api/icon":
                     icon = app.icon(q["ticker"])
                     if icon is None:
