@@ -66,7 +66,7 @@ def _utc(text: str | None) -> datetime | None:
 
 def symbol_status(item: dict, edges: tuple | None, floor: date, today: date, now: datetime,
                   tier: Tier, current: str | None, probe: tuple | None = None, newest_any: int | None = None,
-                  bars_per_request: int | None = None) -> dict:
+                  bars_per_request: int | None = None, horizon: datetime | None = None) -> dict:
     """One watchlist row: how far back it is stored, whether backfill is done, whether newer
     data should exist (plan calendar), and what the last scan found at the source.
     `newest_any` is the newest bar any feed holds (each span is downloaded by one feed only)."""
@@ -94,7 +94,10 @@ def symbol_status(item: dict, edges: tuple | None, floor: date, today: date, now
     # Behind by its last bar is not enough: a stock nobody traded after 16:37 stays short of the
     # plan's last minute, yet it is complete once synced after the session was published. The
     # sync's own rule (collector._due) decides: newer data can exist only if published since.
-    published_since = item.get("synced_at") is None or collector._due(item["asset"], tier, item["synced_at"], now, 0.0)
+    # (`horizon`: how far the run fetches it: freshness.history_horizon, completed sessions only,
+    # unless it is opened in the chart or on a watchlist)
+    published_since = item.get("synced_at") is None or collector._due(item["asset"], tier, item["synced_at"],
+                                                                      horizon or now, 0.0)
     if item["ticker"] == current:
         state = "fetching"
     elif not done:
@@ -141,6 +144,7 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
     from .. import collector
 
     asked = collector.priority_requests(store, now)  # opened in the chart: taken before anything else
+    live_too = set(asked) | set(collector.watchlist_tickers(store))  # fetched through the session
     paused = collector.updates_pause(store, now)
     picked = collector.picked_symbols(store, now) if paused else set()
     rows, items = [], []
@@ -153,9 +157,10 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
         else:
             edges = store.bar_edges(source, item["ticker"])
         newest = store.newest_any(item["ticker"], "minute", holders) if item["asset"] != "future" else None
+        horizon = now if item["ticker"] in live_too else freshness.history_horizon(item["asset"], settings.tier, now)
         row = symbol_status(item, edges, floor, today, now, settings.tier, current,
                             store.probe(source, item["ticker"]), newest[1] if newest else None,
-                            10_000 if source == "alpaca" else None)
+                            10_000 if source == "alpaca" else None, horizon=horizon)
         if item.get("closed_at"):
             row.update(state="closed", requestsLeft=0, progress=1.0, note="archive complete: not asked again")
         elif item.get("retired_on"):

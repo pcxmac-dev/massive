@@ -8,6 +8,7 @@ from massive_collate import audit
 from massive_collate.collector import ET, sync
 from massive_collate.config import ALPACA_TIERS, TIERS
 from massive_collate.coverage import FeedProfile, has_open_time, ms, plan, subtract
+from massive_collate.live import WATCHLISTS_KEY
 from massive_collate.models import Instrument
 from massive_collate.symbols import resolve
 
@@ -44,6 +45,13 @@ def test_subtract_and_open_time():
     assert has_open_time("crypto", sat, sat + 60_000)
 
 
+def _picked(store, ticker: str) -> None:
+    """On a watchlist: fetched through the session under way (freshness.history_horizon)."""
+    import json
+
+    store.kv_set(WATCHLISTS_KEY, json.dumps([{"name": "Picked", "tickers": [ticker]}]))
+
+
 def test_second_feed_downloads_only_what_nobody_holds_or_will_serve(store):
     """Massive-like feed (2 years, end of day) holds its span; the Alpaca-like feed (from 2016,
     15 minutes delayed) takes the older history and today's session, nothing in between."""
@@ -53,6 +61,7 @@ def test_second_feed_downloads_only_what_nobody_holds_or_will_serve(store):
     held = _minutes(date(2025, 6, 2)) + _minutes(date(2026, 10, 20), (19, 57))
     store.upsert_bars("fake", "SPCX", "minute", 1, held)
     store.set_backfilled("fake", "SPCX", date(2024, 10, 22))
+    _picked(store, "SPCX")  # today's session too (history takes completed sessions only otherwise)
     today = _minutes(NOW.date(), (9, 30), 5, 101.0)
     other = Other(entitled=("minute",), bars={"minute": today, "day": []}, listing=Instrument("SPCX"))
     sync(other, store, ALPACA, NOW, log=_log, feeds=_feeds())
@@ -211,6 +220,7 @@ def test_new_data_queues_an_audit_that_the_other_feed_runs(store):
         store.set_listing(feed, "SPCX", None, None, NOW.date(), "SpaceX", "stock")
     store.upsert_bars("fake", "SPCX", "minute", 1, _minutes(date(2024, 10, 22)))
     store.set_backfilled("fake", "SPCX", date(2024, 10, 22))
+    _picked(store, "SPCX")  # today's session too (history takes completed sessions only otherwise)
     today = _minutes(NOW.date(), (9, 30), 5, 101.0)
     other = Other(entitled=("minute",), bars={"minute": today, "day": []})
     sync(other, store, ALPACA, NOW, log=_log, feeds=_feeds())

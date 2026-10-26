@@ -124,6 +124,25 @@ def next_session(d: date) -> date:
     return d
 
 
+def history_horizon(asset: str, tier: Tier, now: datetime) -> datetime:
+    """The moment a history fetch looks from: `now`, except for a stock or index on a plan that
+    publishes as it trades (real time or delayed): the moment its last completed session was fully
+    published (that session's end, extended hours included, plus the plan's delay). The session
+    under way belongs to the live feeds; history takes completed sessions only (an end-of-day plan
+    has only those anyway). Other assets trade around the clock: `now`."""
+    delay = plan_delay(tier, asset)
+    if asset not in ("stock", "index") or delay.kind != "delay":
+        return now
+    t = now.astimezone(ET)
+    d = t.date() if is_trading_day(t.date()) else previous_session(t.date())
+    for _ in range(15):  # a holiday week at most
+        hours = session_hours(asset, d)
+        if hours and hours[1] + delay.lag <= t:
+            return hours[1] + delay.lag
+        d = previous_session(d)
+    return now
+
+
 def _open(asset: str, t: datetime) -> bool:
     return CALENDAR.is_open(asset, t)
 

@@ -1172,6 +1172,7 @@ def sync(
         paused_updates = updates_pause(store, now) if not archival else None
         held_back = 0 if paused_updates else None  # symbols whose update the pause left for later
         picked = picked_symbols(store, now) if paused_updates else set()
+        on_lists = set(watchlist_tickers(store))  # updated through the session (history_horizon)
         server_fails = 0  # symbols in a row whose server failed (5xx, no answer): FETCH_FAILURES kill the feed
         while pending:
             if sweep_left and not _unserved_request(store, source.name, now, served):
@@ -1208,8 +1209,13 @@ def sync(
                     result.skipped += 1
                     continue
                 floor = floors[asset]
+                # History takes completed sessions only; the session under way is the live feeds'.
+                # A symbol opened in the chart, or on a watchlist, is the exception: the best feed
+                # for its current session is this one (freshness.history_horizon).
+                horizon = now if urgent or only is not None or ticker in on_lists \
+                    else freshness.history_horizon(asset, tier, now)
                 if (only is None or published_only) and synced and not backfilling(item) and not _due(
-                        asset, tier, synced, now, 0.0 if urgent or only is not None else refresh_hours):
+                        asset, tier, synced, horizon, 0.0 if urgent or only is not None else refresh_hours):
                     # nothing new published since its last sync (a symbol still backfilling is never skipped)
                     if urgent or only is not None:  # opened in the chart: checked, nothing new; its request is met
                         store.set_synced(source.name, ticker, now)
@@ -1249,8 +1255,8 @@ def sync(
                 item_floor = max(floor, listing.listed_from) if listing.listed_from else floor
                 item = store.watchlist(source.name, ticker)[0]
                 # a retired symbol has nothing after its last listed day: only its history is filled
-                until = min(now, datetime.combine(item["retired_on"] + timedelta(days=1), datetime.min.time(), tzinfo=ET)) \
-                    if item.get("retired_on") else now
+                until = min(horizon, datetime.combine(item["retired_on"] + timedelta(days=1), datetime.min.time(), tzinfo=ET)) \
+                    if item.get("retired_on") else horizon
                 resolution, backfilled_to = item["resolution"], item["backfilled_to"]
                 fetch, invert = item["source_ticker"], item["invert"]
                 if resolution == "trades":  # no ticks for history any more: found again (second or minute)
