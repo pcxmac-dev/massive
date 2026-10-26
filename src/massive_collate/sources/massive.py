@@ -1,22 +1,43 @@
 """Massive (massive.com, formerly Polygon.io) REST API source."""
 from __future__ import annotations
 
+import email.utils
+import math
 import re
 import time
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any, Callable, Iterator
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import requests
 
-from ..errors import BudgetExhausted, NotEntitled, Paused, RateLimited, SourceError
+from ..errors import BudgetExhausted, NotEntitled, Paused, RateLimited, SourceError, Unauthorized
 from ..models import Exchange, Instrument, country, instrument_class
 from ..ratelimit import RateLimiter
 from .base import DataSource
 
 TIMESPANS = ("second", "minute", "hour", "day", "week", "month", "quarter", "year")
 PAGE_LIMIT = 50000
+# A server's Retry-After longer than this is not waited out inside a run: the request fails there
+# and then (a 429 stops the run and kills the feed's fetching for a while), never sooner than asked.
+RETRY_WAIT_MAX = 300.0
+WAIT_SLICE = 2.0  # a wait before trying again is slept in slices this long, so a pause ends it
+
+
+class SameHostSession(requests.Session):
+    """Follows a redirect only to the scheme and host the request was sent to. requests strips the
+    Authorization header (Massive's key) on a redirect to another host, but not a source's own key
+    headers (Alpaca's APCA-API-KEY-ID and secret): those must never reach another host. A redirect
+    elsewhere is not followed; it comes back as the answer, and is an error."""
+
+    def get_redirect_target(self, resp):
+        target = super().get_redirect_target(resp)
+        if target:
+            to, at = urlparse(urljoin(resp.url, target)), urlparse(resp.url)
+            if (to.scheme, to.netloc) != (at.scheme, at.netloc):
+                return None
+        return target
 
 
 class MassiveClient:
@@ -38,8 +59,10 @@ class MassiveClient:
         self._limiter = rate_limiter or RateLimiter(None)
         # Asset classes on another plan, with that plan's rate (asset_class: which a request is).
         self.class_limiters: dict[str, RateLimiter] = {}
-        self._session = session or requests.Session()
+        self._session = session or SameHostSession()
         self._headers = {"Authorization": f"Bearer {api_key}"}
+        # Hosts that refused the key (401) this run, with the error: nothing more is sent to them.
+        self._refused: dict[str, SourceError] = {}
         self._max_retries = max_retries
         self._timeout = timeout
         self._sleep = sleep
@@ -53,6 +76,9 @@ class MassiveClient:
         self.on_retry: Callable[[float, int], None] | None = None
         # Asked before every request: a reason to stop (the user paused background fetching), or None.
         self.should_stop: Callable[[], str | None] | None = None
+        # Asked as each request goes, counting it: False once the machine's requests on this key
+        # today have reached the daily cap (every database on the machine counts: MachineLedger).
+        self.take_day: Callable[[], bool] | None = None
 
     def get(self, path_or_url: str, params: dict[str, Any] | None = None) -> dict:
         resp = self._request(path_or_url, params)
@@ -74,6 +100,10 @@ class MassiveClient:
             url = path_or_url
         else:
             url = self.base_url + path_or_url
+        host = urlparse(url).netloc
+        if host in self._refused:  # the key was refused here already: every request would be, so none is sent
+            was = self._refused[host]
+            raise type(was)(was.status, f"{was.message} (refused earlier this run; nothing sent)")
 
         for attempt in range(self._max_retries + 1):
             reason = self.should_stop() if self.should_stop else None
@@ -85,6 +115,8 @@ class MassiveClient:
             reason = self.should_stop() if self.should_stop else None  # paused during the window's wait
             if reason:
                 raise Paused(reason)
+            if self.take_day is not None and not self.take_day():
+                raise BudgetExhausted("the daily request cap is reached on this machine (all its databases together)")
             self.requests_made += 1  # counted before it goes: one that times out may have reached the server
             if self.on_request:
                 self.on_request(self.requests_made)
@@ -96,24 +128,50 @@ class MassiveClient:
                 delay = _retry_delay(None, attempt)
                 if self.on_retry:
                     self.on_retry(delay, 0)
-                self._sleep(delay)
+                self._wait(delay)
                 continue
             retryable = resp.status_code == 429 or resp.status_code >= 500
             if not retryable or attempt == self._max_retries:
                 break
             delay = _retry_delay(resp, attempt)
+            if delay > RETRY_WAIT_MAX:  # longer than a run waits: it fails now (not tried again sooner)
+                break
             if self.on_retry:
                 self.on_retry(delay, resp.status_code)
-            self._sleep(delay)
+            self._wait(delay)
 
+        if 300 <= resp.status_code < 400:  # a redirect to another host (SameHostSession): not followed
+            where = urlparse(resp.headers.get("Location") or "").netloc or "elsewhere"
+            raise SourceError(resp.status_code, f"redirected to {where}; not followed (the key stays on {host})")
         if resp.status_code >= 400:
             message = _error_message(resp)
-            if resp.status_code in (401, 403):
+            if resp.status_code == 401:  # the key itself: the run stops and the feed is killed, not symbol by symbol
+                self._refused[host] = self._unauthorized(host, message)
+                raise self._refused[host]
+            if resp.status_code == 403:
                 raise NotEntitled(resp.status_code, message)
             if resp.status_code == 429:
                 raise RateLimited(resp.status_code, message)
             raise SourceError(resp.status_code, message)
         return resp
+
+    def _unauthorized(self, host: str, message: str) -> SourceError:
+        """The error a 401 from `host` is (and stays for the rest of the run)."""
+        return Unauthorized(401, message)
+
+    def _wait(self, seconds: float) -> None:
+        """Wait before trying again. With a pause to honour (should_stop), in slices of WAIT_SLICE,
+        so a pause during a long wait (a server's Retry-After) takes effect then, not after it."""
+        if self.should_stop is None:
+            self._sleep(seconds)
+            return
+        left = seconds
+        while left > 0:
+            self._sleep(min(WAIT_SLICE, left))
+            left -= WAIT_SLICE
+            reason = self.should_stop()
+            if reason:
+                raise Paused(reason)
 
     def pages(self, path: str, params: dict[str, Any] | None = None, max_pages: int | None = None) -> Iterator[list[dict]]:
         """Yield each page of results, following next_url links. With `max_pages`, a list longer than
@@ -216,9 +274,10 @@ class MassiveSource(DataSource):
             raise ValueError(f"futures timespan must be one of {tuple(FUTURE_RESOLUTIONS)}")
         params = {
             "resolution": FUTURE_RESOLUTIONS[timespan],
-            # Sessions open the evening before they settle: start a day early so `start`'s session is included.
+            # Sessions open the evening before they settle: a day early, so `start`'s session is
+            # included, and `end`'s is the last (the session opening on `end`'s evening settles after it).
             "window_start.gte": str(start - timedelta(days=1) if timespan == "day" else start),
-            "window_start.lt": str(end + timedelta(days=1)),
+            "window_start.lt": str(end if timespan == "day" else end + timedelta(days=1)),
             "sort": f"window_start.{'desc' if descending else 'asc'}",
             "limit": limit,
         }
@@ -415,13 +474,23 @@ def _first(pages: Iterator[list[dict]]) -> Iterator[list[dict]]:
     yield next(pages)
 
 
-def _retry_delay(resp: requests.Response | None, attempt: int) -> float:
-    retry_after = resp.headers.get("Retry-After") if resp is not None else None
+def _retry_delay(resp: requests.Response | None, attempt: int, now: datetime | None = None) -> float:
+    """Seconds before trying again: the server's Retry-After (seconds, or an HTTP date), else 5 s
+    doubling up to 60 s."""
+    retry_after = (resp.headers.get("Retry-After") or "").strip() if resp is not None else ""
     if retry_after:
         try:
-            return float(retry_after)
+            seconds = float(retry_after)
+            if math.isfinite(seconds):
+                return max(0.0, seconds)
         except ValueError:
-            pass
+            try:
+                when = email.utils.parsedate_to_datetime(retry_after)
+            except (TypeError, ValueError, IndexError):
+                when = None
+            if when is not None:
+                when = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+                return max(0.0, (when - (now or datetime.now(timezone.utc))).total_seconds())
     return min(60.0, 5.0 * 2**attempt)
 
 

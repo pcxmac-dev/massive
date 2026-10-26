@@ -49,10 +49,12 @@ def test_candidates_and_contract_months():
 
 
 def test_roll_moves_on_when_held_contract_stops_trading():
-    # provisional expiry far away, but U6 has no session on the 21st: re-select
-    vol = {"NQU6": {D[4]: 900}, "NQZ6": {D[4]: 100, D[5]: 500}}
+    # provisional expiry far away, but U6 has no session from the 16th on (STOPPED_SESSIONS in a
+    # row): re-selected from the first of them. (One newest session without its bar is not that:
+    # test_review_sources.)
+    vol = {"NQU6": {D[0]: 900, D[1]: 900}, "NQZ6": {D[0]: 100, D[1]: 100, D[2]: 500, D[3]: 500, D[4]: 500}}
     far = {"NQU6": date(2026, 11, 1), "NQZ6": date(2027, 2, 1)}
-    assert roll_schedule(vol, far) == [(D[4], "NQU6"), (D[5], "NQZ6")]
+    assert roll_schedule(vol, far) == [(D[0], "NQU6"), (D[1], "NQU6"), (D[2], "NQZ6"), (D[3], "NQZ6"), (D[4], "NQZ6")]
 
 
 def _frame(times, closes):

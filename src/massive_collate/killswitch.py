@@ -8,7 +8,8 @@ and left off for a while, longer each time:
   connection or subscription limit ("subscription limit reached"), keys or plan refused (401,
   403, Alpaca's 402/406/409), or a policy close of a stream (WebSocket 1008, 1013, 4000-4999).
 - **Failing: killed after a few in a row.** A live stream that drops within STABLE_SECONDS of
-  connecting FLAP_LIMIT times within FLAP_WINDOW_S (the server accepting and dropping it); a
+  connecting FLAP_LIMIT times within FLAP_WINDOW_S (the server accepting and dropping it; a
+  connection that could not be made at all, the network down, is not one: it only backs off); a
   fetch run whose server fails (5xx, no answer) on FETCH_FAILURES symbols in a row, or whose run
   ends in a server error.
 - **For how long:** KILL_MINUTES, one step further for each kill within STRIKE_MEMORY_H of the

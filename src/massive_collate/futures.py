@@ -7,7 +7,8 @@ Sources such as Massive have no continuous series, so it is built here:
    after adding 6 hours.
 2. The roll schedule holds the most-traded contract: it switches only to a
    later-expiring contract that trades more volume in a session, never back,
-   and moves on when the held contract expires. (Rank 2 is the next contract
+   and moves on when the held contract expires or has stopped trading (no bar
+   for STOPPED_SESSIONS sessions in a row). (Rank 2 is the next contract
    after the rank-1 contract, e.g. NQ2!.)
 3. The continuous series joins each contract's own bars over the sessions it
    was held. Prices are left as traded unless back-adjustment is asked for;
@@ -59,25 +60,35 @@ def session_dates(index: pd.DatetimeIndex) -> pd.Index:
     return (index.tz_convert(ET) + SESSION_SHIFT).normalize().date
 
 
+# Sessions in a row without a bar of the held contract, while others trade, before it counts as
+# stopped (its expiry is only provisional until it has ended). One or two are not enough: the
+# newest session is often there for a later contract before the held one is fetched again, and
+# the series would roll forward on it for good (rolls never go back).
+STOPPED_SESSIONS = 3
+
+
 def roll_schedule(
     volumes: dict[str, dict[date, float]], expiries: dict[str, date], rank: int = 1
 ) -> list[tuple[date, str]]:
-    """[(session, contract held)] from per-contract session volumes."""
+    """[(session, contract held)] from per-contract session volumes. A session the held contract
+    has no bar for stays with it, unless it has stopped (STOPPED_SESSIONS): then the contract is
+    chosen again from that session on."""
     sessions = sorted({d for v in volumes.values() for d in v})
     front: str | None = None
     out: list[tuple[date, str]] = []
-    for d in sessions:
+    for i, d in enumerate(sessions):
         live = [t for t in volumes if expiries.get(t) and expiries[t] >= d and d in volumes[t]]
         if not live:
             continue
         vol = lambda t: volumes[t].get(d, 0.0)  # noqa: E731
-        # Re-select at expiry, or when the held contract has stopped trading (its expiry is only
-        # provisional until it has ended).
-        if front is None or d > expiries[front] or front not in live:
+        ahead = sessions[i:i + STOPPED_SESSIONS]
+        stopped = front is not None and len(ahead) == STOPPED_SESSIONS and not any(s in volumes[front] for s in ahead)
+        # Re-select at expiry, or once the held contract has stopped trading.
+        if front is None or d > expiries[front] or stopped:
             later = [t for t in live if front is None or expiries[t] >= expiries[front]]
             pool = later or live
             front = max(pool, key=lambda t: (vol(t), -expiries[t].toordinal()))
-        else:
+        elif front in live:  # without its bar for the session, nothing to compare: it is held
             challengers = [t for t in live if expiries[t] > expiries[front] and vol(t) > vol(front)]
             if challengers:
                 front = max(challengers, key=vol)

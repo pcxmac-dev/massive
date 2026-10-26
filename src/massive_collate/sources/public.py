@@ -297,18 +297,30 @@ class CboeSource(_Archive):
         return ticker.upper().removeprefix("I:") in CBOE_INDICES
 
     def _history(self, code: str) -> list[dict]:
+        """An index's whole daily history. Most files have DATE, OPEN, HIGH, LOW, CLOSE; some only
+        a close (VVIX, SKEW: DATE and a column named after the index), whose bars are that close
+        at all four prices. A file with rows of which none can be read is an error, never an empty
+        history: the archive would be closed as complete without it."""
         if code not in self._files:
             text = self.client.text(f"/{code}_History.csv")
-            bars = []
+            bars, rows = [], 0
             for row in csv.DictReader(io.StringIO(text)):
+                rows += 1
+                row = {(k or "").strip("﻿ \t").upper(): v.strip() for k, v in row.items() if isinstance(v, str)}
                 try:
                     d = datetime.strptime(row["DATE"], "%m/%d/%Y")
-                    o, h, l, c = (float(row[k]) for k in ("OPEN", "HIGH", "LOW", "CLOSE"))
+                    if all(row.get(k) for k in ("OPEN", "HIGH", "LOW")):
+                        o, h, l, c = (float(row[k]) for k in ("OPEN", "HIGH", "LOW", "CLOSE"))
+                    else:  # a close-only file (or a day it gives the close of only)
+                        o = h = l = c = float(row.get("CLOSE") or row[code])
                 except (KeyError, ValueError):
                     continue
                 # day bars are stamped at midnight US/Eastern of the session date, like the other feeds'
                 bars.append({"t": _ms(datetime(d.year, d.month, d.day, tzinfo=ET)), "o": o, "h": h, "l": l, "c": c,
                              "v": None, "vw": None, "n": None})
+            if not bars:  # answered (200), but nothing in it: not an outage, and not an empty history
+                raise SourceError(200, f"Cboe {code}: no daily rows read from the history file ({rows} lines; "
+                                       "format changed?); the archive stays open")
             self._files[code] = bars
         return self._files[code]
 
