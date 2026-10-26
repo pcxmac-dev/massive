@@ -112,7 +112,7 @@ def test_drawings_go_back_on_their_indicators_pane():
     restore = _function(app, "restoreDrawings")
     assert "const paneId = d.pane ? indicatorPane(d.pane) : undefined;" in restore
     assert "if (d.pane && !paneId) { state.drawingsAside.push(d); continue; }" in restore  # never onto the price pane
-    assert "groupId: 'user', paneId," in restore
+    assert "drawSaved(d, paneId);" in restore and "groupId: 'user', paneId," in _function(app, "drawSaved")
     assert "chart.getIndicators({ paneId })" in _function(app, "paneIndicator")
     clip = _js("drawclip.js")
     assert "pane: paneIndicator(o.paneId)" in clip
@@ -261,3 +261,11 @@ def test_watchlist_saves_go_one_at_a_time():
     wl = _js("watchlist.js")
     assert "saving = saving.then(async () => {" in wl
     assert "if (waiting === 1) lists = res.lists;" in wl  # an earlier answer lacks the changes still to go
+
+
+def test_an_indicator_turned_on_brings_back_the_drawings_waiting_for_its_pane():
+    app = _js("app.js")
+    menu = app.split("cb.addEventListener('change', () => {", 1)[1].split("});", 1)[0]
+    assert "drawAside(name)" in menu
+    aside = app.split("function drawAside(name) {", 1)[1].split("\n}\n", 1)[0]
+    assert "indicatorPane(name)" in aside and "drawSaved(d, paneId)" in aside

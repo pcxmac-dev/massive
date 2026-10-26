@@ -2211,7 +2211,7 @@ function renderIndicatorMenu() {
       cb.type = 'checkbox';
       cb.checked = state.indicators.includes(name);
       cb.addEventListener('change', () => {
-        if (cb.checked) { addIndicator(name); state.indicators.push(name); }
+        if (cb.checked) { addIndicator(name); state.indicators.push(name); drawAside(name); }
         else { chart.removeIndicator({ name }); state.indicators = state.indicators.filter((n) => n !== name); }
         prefs.set('indicators', state.indicators); markDirty();
       });
@@ -2395,14 +2395,27 @@ function restoreDrawings() {
     if (d.name === 'measure' && i !== lastHighlight) continue;
     const paneId = d.pane ? indicatorPane(d.pane) : undefined;  // undefined: the price pane
     if (d.pane && !paneId) { state.drawingsAside.push(d); continue; }
-    if (paneId) paneNames.set(paneId, d.pane);
-    chart.createOverlay({
-      name: d.name, groupId: 'user', paneId, points: d.points, lock: d.lock, visible: d.visible,
-      extendData: d.extendData ?? undefined, styles: d.styles ?? undefined, ...overlayEvents(),
-    });
+    drawSaved(d, paneId);
   }
   state.restoredFor = drawingsKey();
   scheduleHighlightPanel();
+}
+
+function drawSaved(d, paneId) {
+  if (paneId) paneNames.set(paneId, d.pane);
+  chart.createOverlay({
+    name: d.name, groupId: 'user', paneId, points: d.points, lock: d.lock, visible: d.visible,
+    extendData: d.extendData ?? undefined, styles: d.styles ?? undefined, ...overlayEvents(),
+  });
+}
+
+// An indicator turned on brings back the drawings waiting aside for its pane.
+function drawAside(name) {
+  const paneId = indicatorPane(name);
+  const back = paneId ? (state.drawingsAside || []).filter((d) => d.pane === name) : [];
+  if (!back.length) return;
+  state.drawingsAside = state.drawingsAside.filter((d) => d.pane !== name);
+  for (const d of back) drawSaved(d, paneId);
 }
 
 // -- layouts (saved markups), like TradingView's layout menu ------------------------
