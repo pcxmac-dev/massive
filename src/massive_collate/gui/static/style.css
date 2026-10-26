@@ -537,6 +537,27 @@ table.gov-sources th, table.gov-sources td { text-align: left; padding: 3px 8px;
 .gov-state.ok { color: var(--up); }
 .gov-state.wait { color: var(--st-wait); }
 .gov-state.bad { color: var(--st-blocked); }
+/* The Resources view (resources.js): tiles with sparklines, the processes, disks and data files */
+.res-h { margin: 14px 0 6px; font-size: 13px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; flex: none; }
+.res-h .p-muted { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 6px; }
+.res-tiles { flex: none; margin-top: 8px; }
+.res-tiles .tile { background: var(--panel); min-width: 0; }
+.res-tiles .big { font-size: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.res-tiles .tile > small { display: block; }
+.res-tiles svg.spark { margin-top: 4px; width: 100%; }
+.res-out { margin-left: 10px; }
+svg.spark { display: block; }
+svg.spark path { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.res-pair { display: grid; grid-template-columns: auto 1fr; align-items: center; gap: 0 6px; font-size: 10px; color: var(--muted); }
+.res-table td { vertical-align: middle; }
+.res-table tr.res-sub td { padding-top: 0; white-space: normal; }
+.res-remote { display: inline-block; font-size: 11px; font-variant-numeric: tabular-nums; margin-right: 12px; }
+.res-remote.local { color: var(--muted); }
+.res-meter { min-width: 140px; }
+.res-file td:first-child { padding-left: 26px; color: var(--muted); }
+.res-note { margin: 6px 0; flex: none; }
+.res-tip { position: fixed; z-index: 50; pointer-events: none; padding: 3px 7px; border-radius: 4px; font-size: 11px;
+  background: var(--panel); color: var(--text); border: 1px solid var(--border); box-shadow: 0 2px 8px rgba(0, 0, 0, .3); white-space: nowrap; }
 .news-row { display: flex; gap: 10px; align-items: flex-start; padding: 8px 4px; border-bottom: 1px solid var(--border); }
 .news-row .src { flex: none; width: 130px; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: #f0b90b;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-top: 2px; }

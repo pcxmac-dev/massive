@@ -2,6 +2,21 @@
 
 Working notes so work can resume in a fresh session. Newest first.
 
+## State (2026-10-26, afternoon)
+
+- **Review fixes merged** (CODE_REVIEW.md, "Implemented"); the sync and the chart app run them.
+- **Fetch cutoff fixed**: a symbol opened hours into a run was fetched only up to the run's start
+  (SPCX opened at 15:06 ET stopped at 12:54, a two-hour hole) and stayed "next in line"; each
+  symbol now takes the run's clock when it is served (test_fetch_cutoff.py). The sync runs it.
+- **Resources view** (rail: a chip; resources.py, resources.js): the app's processes (CPU, memory,
+  reads and writes, TCP connections and their remote ends), the machine's CPU, memory and
+  bandwidth, the disks, the data files with growth. Windows counters through ctypes (no package);
+  sampled every 30 s in the background, every 2 s while viewed, within 5 % of a core (the user's
+  limit: 10 %), history capped at 16 MB. Bandwidth is the machine's: Windows has no per-process
+  network bytes without administrator tracing. The chart app on 8765 runs it once restarted.
+- **Still to do**: restart the live recorder (Oct 25 code); "next in line" during market hours and
+  the redesign below; the chart's GMT−8 axis is Pacific standard time (Pacific is GMT−7 until 1 Nov).
+
 ## State (2026-10-26, early morning)
 
 - **Code review**: CODE_REVIEW.md (top level): five reviews by area, fixes made, 44 open findings

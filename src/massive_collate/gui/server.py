@@ -132,6 +132,7 @@ class ChartApp:
         self._derive_proc: subprocess.Popen | None = None  # a build started by start_derive
         self._gov_db, self._gov_lock = None, threading.Lock()  # gov/gov.db, opened on first use
         self._paper, self._paper_lock = None, threading.RLock()  # the paper account (paper), opened on first use
+        self._monitor, self._monitor_lock = None, threading.Lock()  # the Resources view's sampler, made on first use
 
     @property
     def settings(self) -> Settings:
@@ -556,6 +557,22 @@ class ChartApp:
             if self._gov_db is None:
                 self._gov_db = gov.GovDB(gov.db_path(self.store.path))
             return gov.view(self._gov_db, contact_set=bool(self.settings.gov_contact), spx_close=self._spx_close())
+
+    @property
+    def monitor(self):
+        """The Resources view's sampler (resources.Monitor): it samples in the background once
+        serve() starts it, every 30 s, and every 2 s while the view is open."""
+        with self._monitor_lock:
+            if self._monitor is None:
+                from ..resources import Monitor
+
+                self._monitor = Monitor(Path(self.store.path).parent)
+            return self._monitor
+
+    def resources(self, span: str = "recent") -> dict:
+        """The Resources view: the app's processes, the machine, its bandwidth and connections, the
+        disks and the data files, with the last ten minutes (or `span` "day", the last day)."""
+        return self.monitor.view(span)
 
     def _spx_close(self) -> tuple[str, float] | None:
         """The S&P 500's newest daily close held (the circuit breakers' reference), or None."""
@@ -1441,6 +1458,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.announcements())
                 if url.path == "/api/gov":
                     return self._json(app.gov())
+                if url.path == "/api/resources":
+                    return self._json(app.resources(q.get("span", "recent")))
                 if url.path == "/api/markets":
                     return self._json(app.markets())
                 if url.path == "/api/calendar":
@@ -1518,6 +1537,7 @@ def serve(db_path: Path, port: int = 8765, open_browser: bool = True, priority: 
     app = ChartApp(store, priority, settings, reload_settings=reload_settings)
     from . import world
     threading.Thread(target=world.warm, daemon=True).start()  # world calendars take a few seconds
+    app.monitor.start()  # Resources: sampled in the background from now on
     port_ref = [port]
     try:
         httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app, port_ref))

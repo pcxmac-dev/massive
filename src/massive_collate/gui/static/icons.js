@@ -46,6 +46,8 @@
     disk: '<g stroke-width="1.5"><g class="disk-platter"><circle cx="11" cy="11" r="8.5"/><path stroke-width="1.1" d="M5.36 8.95A6 6 0 0 1 12.55 5.20M16.64 13.05A6 6 0 0 1 9.45 16.80M9.15 14.20A3.7 3.7 0 0 1 7.97 8.88M12.85 7.80A3.7 3.7 0 0 1 14.03 13.12"/><circle cx="11" cy="11" r="1.3"/></g><g class="disk-arm"><circle cx="20.3" cy="20.3" r="1.6"/><path d="M19.2 19.1 14.2 15.2"/><path stroke-width="2" d="m13.2 16.3 2-2.2"/></g></g>',
     // the Gov view: a state house (its dome and lantern, the columns of its portico, its steps)
     statehouse: '<g stroke-width="1.5"><path d="M12 1.8v1.6"/><path d="M11 3.4h2v2.1h-2z"/><path d="M7.6 10a4.4 4.6 0 0 1 8.8 0"/><path d="M6.8 10h10.4v1.8H6.8z"/><path d="M3.5 13.2 12 11.8l8.5 1.4"/><path d="M4.2 13.2v6.1M19.8 13.2v6.1"/><path stroke-width="1.3" d="M7.4 14.6v4.7M10.5 14.6v4.7M13.5 14.6v4.7M16.6 14.6v4.7"/><path d="M3 19.3h18M2.2 21.4h19.6"/></g>',
+    // the Resources view: a chip with its leads (three on each side) and its die
+    chip: '<g stroke-width="1.5"><rect x="6" y="6" width="12" height="12" rx="1.5"/><rect x="9.3" y="9.3" width="5.4" height="5.4" rx=".6"/><path stroke-width="1.3" d="M9 2.4V6M12 2.4V6M15 2.4V6M9 18v3.6M12 18v3.6M15 18v3.6M2.4 9H6M2.4 12H6M2.4 15H6M18 9h3.6M18 12h3.6M18 15h3.6"/></g>',
     // the News view: a thermometer (the markets' temperature)
     thermometer: '<g stroke-width="1.5"><path d="M14 14.6V4.75a2 2 0 0 0-4 0v9.85a4 4 0 1 0 4 0z"/><path stroke-width="2" d="M12 8v8.3"/><circle cx="12" cy="17.75" r="1.7" fill="currentColor" stroke="none"/><path stroke-width="1.1" d="M16 5.5h2.2M16 8.25h1.4M16 11h2.2M16 13.75h1.4"/></g>',
     // the Datasets view (research series): a scroll

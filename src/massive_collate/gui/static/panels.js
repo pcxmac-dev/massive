@@ -14,6 +14,8 @@
      Datasets  research series drawn on one time axis: factors, CAPE, COT positioning (datasets.js)
      Fetcher   historical data (sessions before the current one); coloured while a run is active
      Live      current-session feeds; a red "recording" dot while live data is being recorded
+     Resources the app's processes (CPU, memory, disk, connections), the machine's bandwidth, the
+               disks and the data files (resources.js)
 
    Clicking Stock or Analysis again while it is showing hides or shows its side panel.
    Also: the cursor statistics box in the price window's upper right (on-screen max/min and the bar under the
@@ -22,7 +24,7 @@
   const { symbolIcon, icon, esc } = window.MassiveIcons;
   // The watchlist sits beside whichever chart was showing (it has no chart content of its own).
   const VIEWS = { stock: 'chart', analysis: 'chart', trading: 'chart', watchlist: 'chart', markets: 'markets', news: 'news',
-                  gov: 'gov', datasets: 'datasets', fetcher: 'fetcher', live: 'live' };
+                  gov: 'gov', datasets: 'datasets', fetcher: 'fetcher', live: 'live', resources: 'resources' };
 
   // -- rail --------------------------------------------------------------------------------
   function showPane(name, { toggle = true } = {}) {
@@ -76,6 +78,7 @@
     $('railNews').innerHTML = icon('thermometer', RAIL_ICON);
     $('railGov').innerHTML = icon('statehouse', RAIL_ICON);
     $('railDatasets').innerHTML = icon('scroll', RAIL_ICON);
+    $('railResources').innerHTML = icon('chip', RAIL_ICON);
     const running = !!activity?.running;
     const fresh = activity?.newData || 0;
     // its platter turns while a run fetches (.busy): redrawn only when it changes, or each poll would

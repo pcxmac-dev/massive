@@ -304,9 +304,23 @@ def test_the_gov_view_has_its_rail_button_icon_and_script():
     assert "api('/api/gov')" in g and "e.detail.view === 'gov'" in g
 
 
+def test_the_resources_view_has_its_rail_button_icon_and_script():
+    html = _js("index.html")
+    assert 'id="railResources"' in html and 'id="viewResources" data-view="resources"' in html
+    assert 'src="resources.js"' in html
+    panels = _js("panels.js")
+    assert "resources: 'resources'" in panels and "$('railResources').innerHTML = icon('chip', RAIL_ICON);" in panels
+    assert "chip:" in _js("icons.js")
+    r = _js("resources.js")
+    assert "api('/api/resources', { span })" in r and "e.detail.view === 'resources'" in r
+    assert "box.scrollTop = scrolled;" in r  # drawn again every couple of seconds: the reader keeps their place
+    assert "document.hidden" in r and "clearTimeout(timer)" in r  # nothing asked while hidden or on another view
+
+
 def test_views_restored_on_opening_the_page_load_their_content():
     # panels.js restores the last view before these scripts listen for its event: each loads itself too
     order = _js("index.html")
-    for name, view in (("news.js", "news"), ("gov.js", "gov"), ("datasets.js", "datasets")):
+    for name, view in (("news.js", "news"), ("gov.js", "gov"), ("datasets.js", "datasets"),
+                       ("resources.js", "resources")):
         assert order.index('src="panels.js"') < order.index(f'src="{name}"')
         assert f"if (document.body.dataset.view === '{view}')" in _js(name).split("massive:view", 1)[1]
