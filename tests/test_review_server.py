@@ -156,3 +156,18 @@ def test_a_stretch_within_the_cap_still_answers(served):
     lo, hi = _ms(f"{DAYS[1]} 10:00"), _ms(f"{DAYS[2]} 15:00")
     status, body = _call(port, f"/api/range?source=*&ticker=SPCX&period=minute&span=5&session=regular&from={lo}&to={hi}")
     assert status == 200 and body["bars"]
+
+
+# -- low: an unexpected error is answered, not dropped ------------------------------------------------
+def test_an_unexpected_error_is_answered_not_dropped(served, monkeypatch, capsys):
+    app, port = served
+    monkeypatch.setattr(app, "layouts", _raise(RuntimeError("boom")))
+    status, body = _call(port, "/api/layouts")
+    assert status == 500 and "RuntimeError: boom" in body["error"]
+    monkeypatch.setattr(app, "layouts", _raise(sqlite3.OperationalError("database is locked")))
+    status, body = _call(port, "/api/layouts")
+    assert status == 503 and "busy" in body["error"]
+    monkeypatch.setattr(app, "save_watchlists", _raise(RuntimeError("boom")))
+    status, body = _call(port, "/api/watchlists", "PUT", {WRITE_HEADER: "1"}, {"lists": []})
+    assert status == 500 and "boom" in body["error"]
+    assert "RuntimeError: boom" in capsys.readouterr().err  # logged

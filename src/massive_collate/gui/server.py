@@ -4,6 +4,9 @@ from __future__ import annotations
 import functools
 import json
 import math
+import sqlite3
+import traceback
+from collections import OrderedDict
 from contextlib import contextmanager
 import mimetypes
 import subprocess
@@ -1197,6 +1200,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass  # the page went away
+            except Exception:  # noqa: BLE001 - the answer has begun: logged, and the stream ends (the page opens another)
+                traceback.print_exc()
 
         def _json(self, data, status: int = 200) -> None:
             try:
@@ -1204,6 +1209,15 @@ def make_handler(app: ChartApp, port_ref: list[int]):
             except ValueError:  # a NaN slipped in (pandas' missing value): sent as null, not a broken endpoint
                 body = json.dumps(finite(data), allow_nan=False)
             self._send(status, body.encode(), "application/json")
+
+        def _failed(self, err: Exception) -> None:
+            """An error no route expects: logged and answered (500; 503 while another process holds
+            the database), not a dropped connection the page cannot tell from the app being gone."""
+            traceback.print_exc()
+            if isinstance(err, sqlite3.OperationalError) and "locked" in str(err):
+                return self._json({"error": "the database is busy (another process is writing to it): ask again shortly"},
+                                  HTTPStatus.SERVICE_UNAVAILABLE)
+            self._json({"error": f"the chart app failed: {type(err).__name__}: {err}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
         def _local(self) -> bool:
             # Only answer requests addressed to this machine (blocks DNS-rebinding from web pages).
@@ -1285,6 +1299,10 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 return self._json({"error": f"bad request: {e}"}, HTTPStatus.BAD_REQUEST)
             except LookupError as e:
                 return self._json({"error": str(e)}, HTTPStatus.NOT_FOUND)
+            except ConnectionError:
+                pass  # the page went away
+            except Exception as e:  # noqa: BLE001 - answered, not dropped (_failed)
+                return self._failed(e)
 
         def do_POST(self) -> None:
             self._write("POST")
@@ -1382,6 +1400,10 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 return self._json({"error": str(e)}, HTTPStatus.NOT_FOUND)
             except Busy as e:
                 return self._json({"error": str(e)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            except ConnectionError:
+                return  # the page went away
+            except Exception as e:  # noqa: BLE001 - answered, not dropped (_failed)
+                return self._failed(e)
             return self._static(url.path)
 
         def _static(self, path: str) -> None:
