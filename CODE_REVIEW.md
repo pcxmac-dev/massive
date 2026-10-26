@@ -9,8 +9,43 @@ the chart server and calculations, and the front end. The most severe findings w
 by hand (marked **checked**). Line numbers are as of `4cb826b`; later commits moved some by a few lines.
 
 Alongside the review, the fetcher was examined for disk use and needless updates (see
-[Disk and updates](#disk-and-updates)). Fixes already made are listed first; everything after
-[Open findings](#open-findings) is still to do, most severe first.
+[Disk and updates](#disk-and-updates)). Fixes made during the review are listed first, then the
+implementation of every open finding; the findings themselves follow, most severe first.
+
+---
+
+## Implemented (26 October, branch `fix/review-all`)
+
+Every open finding below is fixed, each with tests, except where noted. Five parallel workers took
+one area each on a branch of its own; the branches were merged into `fix/review-all`, where the full
+suite passes (1,026 tests) and the app was checked on an offline copy (highlight and level 2, drawings
+on an indicator pane across a reload, replay controls while playing, the server refusing a bad level,
+the Fetcher and Gov views). Not yet in `feature/collector` or running: that waits for your go-ahead to
+restart the sync and the chart app.
+
+| Area | Branch | Fixed | Not done, and why |
+|---|---|---|---|
+| Front end | `fix/review-frontend` | 10–13, 38–44 and the lows | 44's request abort (an in-flight answer is shared between callers, so aborting one would fail the others); dataset marks kept only in the browser (needs a store on the server) |
+| Chart server | `fix/review-server` | 1, 7, 32–37 and the lows | 39's server half was not a bug (`/api/replay` already honoured "All data"; the answer now says which view) |
+| Sources and live | `fix/review-sources` | 2, 3, 21–25 and the lows | — |
+| Storage | `fix/review-storage` | 8, 9, 26–31 and the lows | `COMP` (the index and Compass Inc. share a stored ticker: renaming your stored index series is your decision); storing `pruned`'s repeated text once (the ~2 GB already there needs a rewrite and compaction: your decision) |
+| Fetching core | `fix/review-fetcher` | 4–6, 14–20 and the lows | — |
+
+Worth knowing before the restart:
+
+- **Migrations on first open:** the coverage ledger is re-keyed by origin (a few rows per series, under
+  a second) and each feed file's two revision triggers are recreated (no data rewritten).
+- **`admin vacuum`** now skips files over 4 GB and points to **`admin compact`**, which copies a file
+  compacted beside it while the app runs and swaps it in only with `--swap`, keeping the old file.
+- **Request limits** now hold per key across this machine (`request-windows.db` beside the live
+  recorder's lock), whatever database a process uses.
+- **Real-time minutes** settle 3 minutes before they count as held, so a completed session's history is
+  fetched from 3 minutes after its end.
+- **Schemes** leave out the bar still forming; the newest stored bar waits for data past its end.
+- **Follow-ups left:** tick-backfill leftovers in the Fetcher view and `deps` (`ticks:backfill-paused`,
+  `TICK_MIN_FREE_GB`, unused now); a 429's strike could last as long as its Retry-After asks; the
+  Fetcher's limits table could read the machine-wide ledger; the held futures contract could be
+  refreshed before a later one is first fetched.
 
 ---
 
@@ -73,7 +108,7 @@ Measured on this machine:
 
 ---
 
-## Open findings
+## Findings
 
 Severity: **critical** loses or corrupts data or spends without limit; **high** a likely failure with
 real cost; **medium** a real defect with bounded cost; **low** an edge case or hardening.
