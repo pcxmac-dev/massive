@@ -286,8 +286,8 @@
   });
 
   // Every server's state and limits beside what this machine keeps to and has used.
-  const HEALTH_CLASS = { ok: 'run-ok', fetching: 'fetching', idle: '', done: 'run-ok', limited: 'backfilling',
-                         down: 'run-error', off: '', killed: 'run-error' };
+  const HEALTH_CLASS = { ok: 'run-ok', fetching: 'fetching', idle: 'idle', done: 'run-ok', limited: 'backfilling',
+                         down: 'run-error', off: '', killed: 'killed' };
   function limitsHtml(rows) {
     const t = Date.now() / 1000;
     const health = Object.fromEntries((data.health || []).map((h) => [h.source, h]));
@@ -358,7 +358,8 @@
     if (!data.symbolCounts) for (const s of data.symbols) counts[s.state] = (counts[s.state] || 0) + 1;
     el('actFilters').innerHTML = ['all', 'fetching', 'new', 'backfilling', 'queued', 'current', 'retired', 'closed', 'blocked']
       .filter((k) => k === 'all' || counts[k])
-      .map((k) => `<button data-filter="${k}" class="${k === filter ? 'active' : ''}">${k === 'all' ? 'All' : DATA_LABEL[k]} <span class="chip">${counts[k] || 0}</span></button>`)
+      .map((k) => `<button data-filter="${k}" class="${k === filter ? 'active' : ''}">${k === 'all' ? 'All'
+        : `<span class="st-dot ${k}"></span>${DATA_LABEL[k]}`} <span class="chip">${counts[k] || 0}</span></button>`)
       .join('');
     const rows = data.symbols
       .filter((s) => filter === 'all' || s.state === filter)

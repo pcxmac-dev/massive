@@ -79,7 +79,6 @@
       <div id="indMenu" class="dropdown" hidden></div>
     </div>
     </div>
-    <span class="spacer"></span>
     <div class="strip">
     <div class="menu layout-menu">
       <button id="layoutBtn" aria-haspopup="true" title="Layouts: saved markups">
@@ -159,18 +158,12 @@
       <div id="actStatus" class="act-status"></div>
       <div id="scanNote" class="small"></div>
       <div id="actTiles" class="tiles"></div>
+      <h4>Live log — what the fetcher is gathering</h4>
+      <div id="actLog" class="act-log"></div>
       <h4>Sources — status and limits <span class="p-muted small">ok, fetching, limited (out of requests or rate-limited), down (last run failed) or off (not set up); limits kept a little inside what each publishes, runs share each window</span></h4>
       <div class="table-wrap"><table class="act-table limits"><thead><tr><th>Server</th><th>Status</th><th>Published</th><th>Kept to</th>
         <th>Window now</th><th>Next request</th><th class="num">Today</th><th class="num">Per run</th></tr></thead>
         <tbody id="actLimits"></tbody></table></div>
-      <h4>Audits — feeds compared on the same span <span id="auditScores" class="p-muted small"></span></h4>
-      <div class="p-muted small">A second feed's copy of a stored span, compared bar by bar and never stored. Differences
-        (other feed minus stored) as box plots: whiskers min–max, box quartiles, tick median; shaded band = margin of error.</div>
-      <div class="table-wrap"><table class="act-table audits"><thead><tr><th>When</th><th>Symbol · span</th><th>Stored → checked by</th>
-        <th>Verdict</th><th>Bars</th><th>Close (bps)</th><th>High−low (bps)</th><th>Volume (%)</th><th>Timing</th></tr></thead>
-        <tbody id="actAudits"></tbody></table></div>
-      <h4>Live log — what the fetcher is gathering</h4>
-      <div id="actLog" class="act-log"></div>
       <h4>Symbols</h4>
       <div id="actFilters" class="filters"></div>
       <div class="table-wrap scroll"><table class="act-table">
@@ -192,6 +185,12 @@
         <thead><tr><th>Started</th><th>Command</th><th>Status</th><th class="num">Requests</th><th class="num">Rows</th><th class="num">Took</th><th>Note</th></tr></thead>
         <tbody id="actRuns"></tbody>
       </table></div>
+      <h4>Audits — feeds compared on the same span <span id="auditScores" class="p-muted small"></span></h4>
+      <div class="p-muted small">A second feed's copy of a stored span, compared bar by bar and never stored. Differences
+        (other feed minus stored) as box plots: whiskers min–max, box quartiles, tick median; shaded band = margin of error.</div>
+      <div class="table-wrap"><table class="act-table audits"><thead><tr><th>When</th><th>Symbol · span</th><th>Stored → checked by</th>
+        <th>Verdict</th><th>Bars</th><th>Close (bps)</th><th>High−low (bps)</th><th>Volume (%)</th><th>Timing</th></tr></thead>
+        <tbody id="actAudits"></tbody></table></div>
     </div>
 
     <div class="view scroll-view" id="viewLive" data-view="live" hidden></div>
@@ -203,7 +202,6 @@
     <nav id="rail" aria-label="Views">
       <button data-pane="stock" id="railStock" title="Stock: chart with the symbol, key statistics and business"></button>
       <button data-pane="analysis" id="railAnalysis" title="Analysis: chart with the highlight and cursor statistics"></button>
-      <button data-pane="watchlist" id="railWatch" title="Watchlist: every collected symbol and your own lists, beside the chart"></button>
       <button data-pane="trading" id="railTrading" title="Trading: chart with the paper account beside it (simulated; Interactive Brokers planned; live trading is off)"></button>
       <button data-pane="markets" id="railMarkets" title="Markets: the world's exchanges on a globe, what is open now"></button>
       <button data-pane="news" id="railNews" title="News: exchange events and headlines"></button>
@@ -211,6 +209,7 @@
       <hr>
       <button data-pane="fetcher" id="railFetcher" title="Fetcher: historical data (past sessions)"></button>
       <button data-pane="live" id="railLive" title="Live feeds: the current session"></button>
+      <button data-pane="watchlist" id="railWatch" title="Watchlist: every collected symbol and your own lists, beside the chart"></button>
     </nav>
   </main>
   <footer id="status">

@@ -39,6 +39,10 @@
     download: '<path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/>',
     database: '<ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/><path d="M4.5 5.5v13c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-13"/><path d="M4.5 12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8"/>',
     analysis: '<path d="M3 3v18h18"/><path d="m7 15 4-5 3 3 5-7"/><path d="M15 6h4v4"/>',
+    abacus: '<rect x="3" y="3" width="18" height="18" rx="1.5"/><path d="M3 8h18M3 12h18M3 16h18"/>'  // the Analysis view
+      + '<g fill="currentColor" stroke="none"><circle cx="6.8" cy="8" r="1.6"/><circle cx="10.2" cy="8" r="1.6"/>'
+      + '<circle cx="14.4" cy="12" r="1.6"/><circle cx="17.6" cy="12" r="1.6"/><circle cx="6.8" cy="16" r="1.6"/>'
+      + '<circle cx="10.2" cy="16" r="1.6"/><circle cx="17.6" cy="16" r="1.6"/></g>',
     trading: '<path d="M7 3v4M7 17v4M17 5v3M17 16v3"/><rect x="4.5" y="7" width="5" height="10" rx="1"/><rect x="14.5" y="8" width="5" height="8" rx="1"/>',
     watchlist: '<path d="M9 6h12M9 12h12M9 18h7"/><path d="M4 6h.01M4 12h.01M4 18h.01"/><path d="m19 15 .9 1.8 2 .3-1.45 1.4.35 2-1.8-.95-1.8.95.35-2-1.45-1.4 2-.3z"/>',
     dataset: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/><path d="m7 17 3-4 3 2 4-4"/>',

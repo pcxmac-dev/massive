@@ -263,6 +263,10 @@ dialog::backdrop { background: rgba(0, 0, 0, .5); }
 .data-icon.backfilling { color: #f0a020; }
 .data-icon.new { color: var(--accent); }
 .data-icon.current { color: var(--up); }
+.data-icon.queued { color: var(--st-queued); }
+.data-icon.blocked { color: var(--st-blocked); }
+.data-icon.retired { color: var(--st-retired); }
+.data-icon.closed { color: var(--st-closed); }
 .ico.spin, .spin .ico { animation: spin 1.1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .ico.spin, .spin .ico, .dot.on, .rec.on { animation: none; } }
@@ -379,13 +383,31 @@ dialog.wide { width: min(1100px, 96vw); max-height: 90vh; }
 .act-table .num { text-align: right; }
 .act-table .prog { min-width: 180px; }
 .act-table .sub { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+/* Fetcher statuses, a colour each (symbols, sources, runs, audits, dependencies): blue at work, cyan
+   new data, amber waiting on a limit or a backfill, violet queued, green done and current, red a
+   problem, slate and brown finished archives and retired listings, grey off. */
+body { --st-new: #26c6da; --st-wait: #f0a020; --st-queued: #9575cd; --st-blocked: #ef5350; --st-retired: #a1887f;
+  --st-closed: #78909c; --st-idle: #8d9bb3; --st-interrupted: #ff7043; }
+body.light { --st-new: #00838f; --st-wait: #a85d00; --st-queued: #5e35b1; --st-blocked: #c62828; --st-retired: #6d4c41;
+  --st-closed: #455a64; --st-idle: #5c6b85; --st-interrupted: #d84315; }
 .state { font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); color: var(--muted); }
-.state.fetching { color: #fff; background: var(--accent); border-color: var(--accent); }
-.state.new { color: var(--accent); border-color: var(--accent); }
-.state.backfilling { color: #f0a020; border-color: #f0a020; }
-.state.fresh, .state.run-ok { color: var(--up); border-color: var(--up); }
+.state.fetching, .state.run-running { color: #fff; background: var(--accent); border-color: var(--accent); }
+.state.new { color: var(--st-new); border-color: var(--st-new); }
+.state.backfilling, .state.run-stopped { color: var(--st-wait); border-color: var(--st-wait); }
+.state.queued { color: var(--st-queued); border-color: var(--st-queued); }
+.state.blocked { color: var(--st-blocked); border-color: var(--st-blocked); }
+.state.current, .state.fresh, .state.run-ok { color: var(--up); border-color: var(--up); }
+.state.retired { color: var(--st-retired); border-color: var(--st-retired); }
+.state.closed { color: var(--st-closed); border-color: var(--st-closed); }
+.state.idle { color: var(--st-idle); border-color: var(--st-idle); }
+.state.run-interrupted { color: var(--st-interrupted); border-color: var(--st-interrupted); }
 .state.run-error, .state.run-abandoned { color: var(--down); border-color: var(--down); }
-.state.run-running { color: var(--accent); border-color: var(--accent); }
+.state.killed { color: #fff; background: var(--down); border-color: var(--down); }
+.st-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; background: var(--muted); }
+.st-dot.fetching { background: var(--accent); } .st-dot.new { background: var(--st-new); }
+.st-dot.backfilling { background: var(--st-wait); } .st-dot.queued { background: var(--st-queued); }
+.st-dot.blocked { background: var(--st-blocked); } .st-dot.current { background: var(--up); }
+.st-dot.retired { background: var(--st-retired); } .st-dot.closed { background: var(--st-closed); }
 .act-log { max-height: 220px; min-height: 60px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
   padding: 6px 8px; font: 12px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
 .act-log .head { color: var(--accent); }
