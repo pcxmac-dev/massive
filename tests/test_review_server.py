@@ -479,6 +479,17 @@ def test_a_scheme_leaves_out_the_bar_still_forming(tmp_path, monkeypatch):
         assert [e[0] for e in app.scheme(today)["equity"]] == [_ms(f"{day} 00:00")]  # over
 
 
+# -- low: the range-bar guard follows the path inside each bar ----------------------------------------
+def test_range_bars_count_the_path_inside_each_bar_not_only_the_closes():
+    idx = pd.date_range("2026-10-20 09:30", periods=1000, freq="1min", tz=ET)
+    flat = pd.DataFrame({"open": 100.0, "high": 110.0, "low": 90.0, "close": 100.0, "volume": 1.0, "turnover": 100.0,
+                         "trades": 1}, index=idx)  # wide bars whose closes never move
+    assert charttypes._path_length(flat.iloc[:2]) == pytest.approx(2 * (10 + 20 + 10))
+    with pytest.raises(ValueError, match="too small"):
+        charttypes.range_bars(flat, 0.0001)  # four hundred million bars from closes that "never move"
+    assert len(charttypes.range_bars(flat.iloc[:3], 5.0))
+
+
 # -- low: an unexpected error is answered, not dropped ------------------------------------------------
 def test_an_unexpected_error_is_answered_not_dropped(served, monkeypatch, capsys):
     app, port = served
