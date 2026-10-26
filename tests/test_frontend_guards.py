@@ -273,8 +273,9 @@ def test_the_level_2_follows_the_cursors_price_and_the_bar_box_its_bar():
 def test_a_highlight_shows_its_major_prices_in_the_level_2():
     l2 = _js("level2.js")
     load = l2.split("async function load() {", 1)[1].split("\n  }\n", 1)[0]
-    assert "const hl = highlightSpan();" in load and "{ from: hl.from, to: hl.to }" in load  # the stretch, not one bar
-    assert "hlKey() !== lastHl" in l2 and "addEventListener('massive:highlight'" in l2  # read again when it moves
+    assert "const c = cover();" in load and "{ from: c.from, to: c.to }" in load  # a stretch, not one bar
+    assert "if (busy) { again = true; return; }" in load  # one request at a time while scrolling
+    assert "addEventListener('massive:highlight', coverMoved)" in l2  # read again when it moves
     marks = l2.split("function marksOf(r, m) {", 1)[1].split("\n  }\n", 1)[0]
     for mark in ("'poc'", "'va'", "'vah'", "'val'", "'hvn'"):
         assert mark in marks
@@ -282,3 +283,12 @@ def test_a_highlight_shows_its_major_prices_in_the_level_2():
     assert "window.dispatchEvent(new Event('massive:highlight'))" in _function(_js("app.js"), "scheduleHighlightPanel")
     css = _js("style.css")
     assert "table.l2 tr.va td" in css and "table.l2 tr.poc" in css and ".l2-tag" in css
+
+
+def test_without_a_highlight_the_level_2_covers_the_bars_in_view():
+    # so the cursor's price has a row wherever it is on the chart, not only within the newest bar
+    l2 = _js("level2.js")
+    cover = l2.split("function cover() {", 1)[1].split("\n  }\n", 1)[0]
+    assert cover.index("highlightSpan()") < cover.index("chart.getVisibleRange()")  # the highlight first
+    assert "over: 'view'" in cover and "rp.lastClosed" in cover  # in a replay, nothing it has not closed
+    assert "chart.subscribeAction('onVisibleRangeChange', coverMoved);" in l2  # read again after a scroll or zoom

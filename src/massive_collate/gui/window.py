@@ -750,7 +750,7 @@ class WindowReader:
     def range_profile(self, source: str, ticker: str, period: str, span: int, session: str, from_ms: int,
                       to_ms: int, step: float | None = None) -> dict:
         """Volume and trades by price across the chart's bars from `from_ms` to `to_ms` (the
-        highlight), spread from the finest bars that keep the read under RANGE_PROFILE_BARS (1-second,
+        highlight, or the bars in view), spread from the finest bars that keep the read under RANGE_PROFILE_BARS (1-second,
         minutes, 30-minute bins, days), with its major prices (calc.profile.major_prices): the point of
         control, the value area, the high-volume nodes. Derived (bars spread over their ranges)."""
         from ..calc.profile import from_bars, major_prices, nice_step
@@ -815,7 +815,7 @@ class WindowReader:
             "marks": major_prices(rows), "step": step, "basis": f"{len(sub):,} {unit}",
             "derived": (f"estimated from {unit}: each one's volume and trades spread evenly across its range, "
                         f"in {_money(step)} price segments"),
-            "note": "Traded volume by price across the highlight, not an order book: what changed hands.",
+            "note": "Traded volume by price across these bars, not an order book: what changed hands.",
         }
 
     # -- what the chart asks for when it opens a symbol ---------------------------------------

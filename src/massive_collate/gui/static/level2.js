@@ -1,8 +1,9 @@
-// Virtual level 2 (Analysis view): the volume and trades at each price in the chart's newest bar,
-// with the bar's and its day's range and the last price; with a highlight drawn, across the
-// highlight's bars instead, with its major prices marked: the point of control (the most traded
-// price), the value area holding 70% of the volume (its high and low) and the other high-volume
-// nodes. It is not an order book: it shows what changed hands, not what was resting. Prices summed into
+// Virtual level 2 (Analysis view): the volume and trades at each price across the chart's bars in
+// view, or across the highlight's bars when one is drawn, so the cursor's price, wherever it is on
+// the chart, has a row of its own; with the stretch's major prices marked: the point of control
+// (the most traded price), the value area holding 70% of the volume (its high and low) and the
+// other high-volume nodes. Without bars to cover, the newest bar's, with its day's range and the
+// last price. It is not an order book: it shows what changed hands, not what was resting. Prices summed into
 // segments (every $0.10, $1 ...) or estimated from bars are derived data: each carries an
 // asterisk, and the panel says how they were derived.
 (() => {
@@ -13,15 +14,37 @@
   const STEPS = ['auto', '0.01', '0.05', '0.1', '0.25', '0.5', '1', '5', '10', '50', '100', '500'];
   const LIVE_MS = 3000;   // the newest bar of a live symbol is read again this often
   const IDLE_MS = 30000;  // otherwise
+  const COVER_LIVE_MS = 10000;  // the bars in view (or the highlight's) while they reach a live symbol's newest bar
   let step = STEPS.includes(prefs.get('l2Step', 'auto')) ? prefs.get('l2Step', 'auto') : 'auto';
-  let at = null;  // the bar shown (its timestamp); null: the newest
+  let at = null;  // the bar shown (its timestamp) when there are no bars to cover; null: the newest
   let cursorPrice = null;  // the price under the cursor on the price pane: its row is marked (null: off it)
   let lastProfile = null;
   let token = 0, debounce = 0, lastLoad = 0, shownFor = '';
+  let busy = false, again = false;  // one request at a time: scrolling asks again once it is answered
+  let lastCover = '';  // the bars last asked for (keyOf)
 
   const shown = () => document.body.dataset.pane === 'analysis' && !document.body.classList.contains('panel-hidden');
   const key = () => `${state.ticker}|${state.source}|${state.period?.type}|${state.period?.span}|${state.session}|${state.adjust}`;
-  const hlKey = () => { const h = highlightSpan(); return h ? `${h.from}-${h.to}` : ''; };  // the highlight's bars
+
+  // The bars the ladder covers: the highlight's, else those in view; in a replay none it has not
+  // closed yet. {from, to, over} (bar timestamps), or null without bars.
+  function cover() {
+    const hl = highlightSpan();
+    if (hl) return { ...hl, over: 'highlight' };
+    const data = chart.getDataList();
+    if (!data.length) return null;
+    const r = chart.getVisibleRange();
+    const a = data[Math.max(0, r.from)], b = data[Math.min(data.length - 1, r.to - 1)];
+    if (!a || !b) return null;
+    const rp = state.replay;
+    const to = rp ? Math.min(b.timestamp, rp.lastClosed ?? rp.start - 1) : b.timestamp;
+    return to >= a.timestamp ? { from: a.timestamp, to, over: 'view' } : null;
+  }
+  const keyOf = (c) => (c ? `${c.over}:${c.from}-${c.to}` : '');
+  const coverKey = () => keyOf(cover());
+  const overText = (p) => (!p.range ? 'this bar' : p.over === 'view' ? 'the bars in view' : 'the highlight');
+  // a stretch's bars change only while it reaches the newest bar of a live symbol
+  const growing = (c) => { const d = chart.getDataList(); return isLive() && d.length > 0 && c.to >= d[d.length - 1].timestamp; };
 
   function schedule(ms = 200) {
     clearTimeout(debounce);
@@ -30,18 +53,24 @@
 
   async function load() {
     if (!shown() || !state.ticker || !state.period) return;
+    if (busy) { again = true; return; }
+    busy = true;
     const my = ++token;
     lastLoad = Date.now();
-    const hl = highlightSpan();
+    const c = cover();
+    lastCover = keyOf(c);
     try {
       const res = await api('/api/profile', {
         source: state.source, ticker: state.ticker, period: state.period.type, span: state.period.span,
         session: state.session, adjust: state.adjust,
-        ...(hl ? { from: hl.from, to: hl.to } : at != null ? { at } : {}), ...(step !== 'auto' ? { step } : {}),
+        ...(c ? { from: c.from, to: c.to } : at != null ? { at } : {}), ...(step !== 'auto' ? { step } : {}),
       });
-      if (my === token) render(res);
+      if (my === token) render(c && res.range ? { ...res, over: c.over } : res);
     } catch (err) {
       if (my === token) $('pLevel2').innerHTML = `<h3>Virtual level 2</h3><div class="p-muted">${esc(err.message || err)}</div>`;
+    } finally {
+      busy = false;
+      if (again) { again = false; schedule(0); }
     }
   }
 
@@ -59,8 +88,8 @@
     return intraday ? `${f.format(new Date(p.bar.from))}–${f.format(new Date(p.bar.to))} ET` : f.format(new Date(p.bar.from));
   }
 
-  // The highlight's stretch: "Oct 14 09:30 → 16:00 ET", "Oct 14 09:30 → Oct 16 16:00 ET", "Oct 1, 2026 → Oct 16, 2026".
-  function stretch(p) {
+  // A stretch's time: "Oct 14 09:30 → 16:00 ET", "Oct 14 09:30 → Oct 16 16:00 ET", "Oct 1, 2026 → Oct 16, 2026".
+  function spanText(p) {
     const intraday = ['second', 'minute', 'hour'].includes(p.period);
     const day = new Intl.DateTimeFormat('en-US', { timeZone: !intraday && ['crypto', 'fx'].includes(state.meta?.asset) ? 'UTC' : TZ,
       month: 'short', day: 'numeric', ...(intraday ? {} : { year: 'numeric' }) });
@@ -88,9 +117,9 @@
     const box = $('pLevel2');
     const select = `<select id="l2Step" title="Price segment: rows sum the volume in each (derived)">${STEPS.map((s) =>
       `<option value="${s}"${s === step ? ' selected' : ''}>${money(s)}</option>`).join('')}</select>`;
-    const range = p.range;  // a highlight's stretch rather than one bar
+    const range = p.range;  // a stretch of bars (in view, or the highlight's) rather than one bar
     if (!p.rows?.length) {
-      box.innerHTML = `<h3>Virtual level 2 ${select}</h3><div class="p-muted">Nothing traded in ${range ? 'the highlight' : 'this bar'}.</div>`;
+      box.innerHTML = `<h3>Virtual level 2 ${select}</h3><div class="p-muted">Nothing traded in ${overText(p)}.</div>`;
       lastProfile = null;
       return;
     }
@@ -110,7 +139,7 @@
     box.innerHTML = `
       <h3>Virtual level 2${star} ${select}</h3>
       <div class="p-muted small">${range
-        ? `Highlight · ${esc(bars(range.bars))} · ${esc(stretch(p))}`
+        ? `${p.over === 'view' ? 'In view' : 'Highlight'} · ${esc(bars(range.bars))} · ${esc(spanText(p))}`
         : `${esc(p.period === 'day' ? 'Day' : `${p.span} ${p.period}`)} bar · ${esc(when(p))}${p.newest ? ' · newest' : ''}`}</div>
       <div class="p-muted small l2-cursor"></div>
       ${kv(range ? [
@@ -138,7 +167,7 @@
       <div class="p-sub l2-note">From ${esc(p.basis)}.</div>`;
     const wrap = box.querySelector('.l2-wrap'), row = box.querySelector(range ? 'tr.poc' : 'tr.at');
     if (kept != null) wrap.scrollTop = kept;
-    else if (row) wrap.scrollTop = row.offsetTop - wrap.clientHeight / 2;  // a new bar: its price (a highlight: its POC) in the middle
+    else if (row) wrap.scrollTop = row.offsetTop - wrap.clientHeight / 2;  // new bars: their POC (one bar: its price) in the middle
     shownFor = id;
     lastProfile = p;
     markCursor();
@@ -151,7 +180,7 @@
     load();
   });
   // The ladder follows the cursor's price, not its time: the row at the price under the cursor is
-  // marked and kept in view (the edge row nearest it when it is beyond what traded in the bar).
+  // marked and kept in view (the edge row nearest it when it is beyond what traded in the bars).
   let markFrame = 0;
   function followCursor(c) {
     let price = null;
@@ -183,24 +212,30 @@
     if (!tr) return;
     tr.classList.add('cursor');
     if (beyond) tr.classList.add('beyond');
-    if (label) label.textContent = `Cursor ${priceText(cursorPrice)}${beyond ? ` · ${beyond} what traded in ${p.range ? 'the highlight' : 'this bar'}` : ''}`;
+    if (label) label.textContent = `Cursor ${priceText(cursorPrice)}${beyond ? ` · ${beyond} what traded in ${overText(p)}` : ''}`;
     const wrap = box.querySelector('.l2-wrap'), head = wrap.querySelector('thead')?.offsetHeight || 0;
     if (tr.offsetTop < wrap.scrollTop + head || tr.offsetTop + tr.offsetHeight > wrap.scrollTop + wrap.clientHeight) {
       wrap.scrollTop = tr.offsetTop - wrap.clientHeight / 2;
     }
   }
-  window.addEventListener('massive:symbol', () => { at = null; schedule(50); });
+  window.addEventListener('massive:symbol', () => { at = null; schedule(300); });
   window.addEventListener('massive:view', (e) => { if (e.detail?.pane === 'analysis') schedule(50); });
-  let lastKey = '', lastHl = '';
-  // A highlight drawn, moved or taken off (app.js scheduleHighlightPanel): read once it settles.
-  window.addEventListener('massive:highlight', () => { if (shown() && hlKey() !== lastHl) { lastHl = hlKey(); schedule(300); } });
-  setInterval(() => {  // follows interval changes, the highlight, and the newest bar as it grows
+  let lastKey = '';
+  // A highlight drawn, moved or taken off (app.js scheduleHighlightPanel), or the chart scrolled or
+  // zoomed: read once it settles.
+  function coverMoved() {
+    if (!shown() || coverKey() === lastCover) return;
+    lastCover = coverKey();
+    schedule(400);
+  }
+  window.addEventListener('massive:highlight', coverMoved);
+  chart.subscribeAction('onVisibleRangeChange', coverMoved);
+  setInterval(() => {  // follows interval changes, the bars covered, and the newest bar as it grows
     if (!shown()) return;
-    if (key() !== lastKey) { lastKey = key(); lastHl = hlKey(); at = null; load(); return; }
-    if (hlKey() !== lastHl) { lastHl = hlKey(); schedule(300); return; }
-    const since = Date.now() - lastLoad;
-    // a highlight's bars change only while it reaches the newest bar of a live symbol
-    if (lastHl ? isLive() && since >= IDLE_MS : at == null && since >= (isLive() ? LIVE_MS : IDLE_MS)) load();
+    if (key() !== lastKey) { lastKey = key(); lastCover = coverKey(); at = null; schedule(300); return; }
+    if (coverKey() !== lastCover) { coverMoved(); return; }
+    const since = Date.now() - lastLoad, c = cover();
+    if (c ? growing(c) && since >= COVER_LIVE_MS : at == null && since >= (isLive() ? LIVE_MS : IDLE_MS)) load();
   }, 1000);
   // for inspection and checks: the profile shown, the cursor's price, and the cursor's handling
   window.Level2 = { get profile() { return lastProfile; }, get cursorPrice() { return cursorPrice; },
