@@ -90,6 +90,49 @@ def from_bars(low: np.ndarray, high: np.ndarray, volume: np.ndarray, trades: np.
     return rows.sort_values("price", ascending=False, ignore_index=True), step
 
 
+VALUE_AREA = 0.70  # the share of a profile's volume its value area holds
+NODE_SHARE = 0.5   # a high-volume node: a peak with at least this share of the point of control's volume
+NODES = 5          # the largest of them listed
+
+
+def major_prices(rows: pd.DataFrame, value_area: float = VALUE_AREA) -> dict:
+    """The prices a profile's volume gathers at: the point of control (the most traded segment),
+    the value area around it holding `value_area` of the volume (grown a segment at a time toward
+    the busier neighbour; its high and low), and the high-volume nodes (other peaks with at least
+    NODE_SHARE of the point of control's volume, the NODES largest). A flat top, a bar spread
+    evenly over several segments, counts once, at its middle. {} without volume."""
+    if not len(rows) or not rows["volume"].sum() > 0:
+        return {}
+    r = rows.sort_values("price", ignore_index=True)  # lowest first
+    v, price = r["volume"].to_numpy(float), r["price"].to_numpy(float)
+    total = v.sum()
+    same = lambda a, b: abs(a - b) <= 1e-9 * max(abs(a), abs(b))
+    tops, i = [], 0  # (middle, top's volume) of each run of equal segments higher than both sides
+    while i < len(v):
+        j = i
+        while j + 1 < len(v) and same(v[j + 1], v[i]):
+            j += 1
+        if (i == 0 or v[i - 1] < v[i]) and (j == len(v) - 1 or v[j + 1] < v[i]):
+            tops.append(((i + j + 1) // 2, v[i]))
+        i = j + 1
+    poc = max(tops, key=lambda t: t[1])[0]
+    lo = hi = poc
+    held = v[poc]
+    while held < value_area * total and (lo > 0 or hi < len(v) - 1):
+        down = v[lo - 1] if lo > 0 else -1.0
+        up = v[hi + 1] if hi < len(v) - 1 else -1.0
+        if up >= down:
+            hi += 1
+            held += v[hi]
+        else:
+            lo -= 1
+            held += v[lo]
+    peaks = [t for t in tops if t[0] != poc and t[1] >= NODE_SHARE * v[poc]]
+    nodes = sorted(i for i, _ in sorted(peaks, key=lambda t: -t[1])[:NODES])
+    return {"poc": float(price[poc]), "vah": float(price[hi]), "val": float(price[lo]),
+            "valueArea": value_area, "held": float(held / total), "nodes": [float(price[i]) for i in nodes]}
+
+
 def weighted_quartiles(group: np.ndarray, price: np.ndarray, weight: np.ndarray,
                        groups: int) -> np.ndarray:
     """Volume-weighted 25th, 50th and 75th percentiles of price in each group 0..groups-1:

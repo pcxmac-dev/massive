@@ -3025,7 +3025,11 @@ function auditsHtml(au, ticker) {
 let hlFrame = 0;
 function scheduleHighlightPanel() {
   if (hlFrame) return;
-  hlFrame = requestAnimationFrame(() => { hlFrame = 0; renderHighlightPanel(); });
+  hlFrame = requestAnimationFrame(() => {
+    hlFrame = 0;
+    renderHighlightPanel();
+    window.dispatchEvent(new Event('massive:highlight'));  // level 2 reads the highlight's prices (level2.js)
+  });
 }
 
 function currentHighlight() {

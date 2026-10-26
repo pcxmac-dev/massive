@@ -304,6 +304,10 @@ class ChartApp:
         if step is not None and not 0 < step < 1e9:
             raise ValueError("step must be a positive price")
         if self.window.handles(q["source"], q["ticker"]):  # the one bar's window, not the whole history
+            if q.get("from") and q.get("to"):  # the highlight's stretch, with its major prices
+                return self.window.range_profile(q["source"], q["ticker"], q.get("period", "minute"),
+                                                 int(q.get("span", 1)), q.get("session", "regular"), int(q["from"]),
+                                                 int(q["to"]), step=step)
             return self.window.profile(q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
                                        q.get("session", "regular"), at_ms=int(q["at"]) if q.get("at") else None, step=step)
         return self.engine.profile(

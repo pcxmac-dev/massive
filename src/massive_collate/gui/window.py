@@ -743,6 +743,81 @@ class WindowReader:
             "note": "Traded volume by price, not an order book: what changed hands, not what was resting.",
         }
 
+    # -- the highlight's profile: what traded at each price across a stretch ----------------------
+    RANGE_PROFILE_BARS = 60_000  # the finer bars a stretch's profile is spread from, at most (RAM)
+    RANGE_PROFILE_ROWS = 60  # about this many price segments, automatically
+
+    def range_profile(self, source: str, ticker: str, period: str, span: int, session: str, from_ms: int,
+                      to_ms: int, step: float | None = None) -> dict:
+        """Volume and trades by price across the chart's bars from `from_ms` to `to_ms` (the
+        highlight), spread from the finest bars that keep the read under RANGE_PROFILE_BARS (1-second,
+        minutes, 30-minute bins, days), with its major prices (calc.profile.major_prices): the point of
+        control, the value area, the high-volume nodes. Derived (bars spread over their ranges)."""
+        from ..calc.profile import from_bars, major_prices, nice_step
+        from .bars import _money, bar_end, regular_mask
+
+        s = self.series(source, ticker)
+        session = s.session_for(session)
+        feeds = self.feeds(source, ticker)
+        lo, hi = sorted((int(from_ms), int(to_ms)))
+        if period in CALENDAR:
+            every = self._calendar_bars(s, feeds, period)
+            ts = epoch_ms(every.index)
+            level = every[(ts >= lo) & (ts <= hi)]
+        else:
+            step_ms = UNIT_MS[period] * span
+            level = self._built(s, feeds, BASE[period], period, span, session, lo, hi + step_ms)
+            ts = epoch_ms(level.index)
+            level = level[(ts >= lo) & (ts <= hi)]
+        if not len(level):
+            return {"ticker": s.ticker, "rows": [], "range": {"from": lo, "to": hi, "bars": 0}}
+        first = int(epoch_ms(level.index[:1])[0])
+        last_start = pd.Timestamp(int(epoch_ms(level.index[-1:])[0]), unit="ms", tz="UTC").tz_convert("America/New_York")
+        end = int(bar_end(last_start, period, span, utc=utc_days(s)).value // 1_000_000)
+        days = max(1.0, (end - first) / 86_400_000)
+        held = {lv["type"] for lv in self.levels(source, ticker)}
+        bases = [("second", "1-second bars", per_day(s.asset, "second", 1, session)),
+                 ("minute", "1-minute bars", per_day(s.asset, "minute", 1, session)),
+                 ("half_hour", "30-minute bars", per_day(s.asset, "minute", 30, session)),
+                 ("day", "daily bars", per_day(s.asset, "day", 1, session))]
+        base, unit = "day", "daily bars"
+        for name, label, n in bases:
+            if (name in held or name in ("half_hour", "day") and "minute" in held or name == "day") \
+                    and n * days <= self.RANGE_PROFILE_BARS:
+                base, unit = name, label
+                break
+        if base == "half_hour":
+            sub = self._half_hours(s, feeds, first, end)
+        elif base == "day":
+            sub = self._days(s, feeds)
+            t = epoch_ms(sub.index)
+            sub = sub[(t >= first) & (t < end)]
+        else:
+            sub = self._merged(s, feeds, base, first, end)
+        if sub is None or not len(sub):
+            sub, unit = level, f"{level_label(period, span)} bars"
+        if base != "day" and session == "regular" and s.asset in ("stock", "index") and len(sub):
+            sub = sub[regular_mask(sub.index)]  # the chart's session only
+        span_px = float(level["high"].max() - level["low"].min())
+        if step is None or step <= 0 or span_px / step > self.PROFILE_MAX_ROWS:
+            step = nice_step(span_px, self.RANGE_PROFILE_ROWS)
+        rows, step = from_bars(sub["low"].to_numpy(), sub["high"].to_numpy(), sub["volume"].to_numpy(),
+                               sub["trades"].to_numpy(), step)
+        newest = self.page(source, ticker, period, span, session, limit=1)["bars"]
+        return {
+            "ticker": s.ticker, "period": period, "span": span,
+            "range": {"from": first, "to": end, "bars": int(len(level)), "open": float(level["open"].iloc[0]),
+                      "close": float(level["close"].iloc[-1]), "high": float(level["high"].max()),
+                      "low": float(level["low"].min()), "volume": float(level["volume"].sum()),
+                      "trades": float(level["trades"].sum())},
+            "last": float(newest[-1]["close"]) if newest else None,
+            "rows": json.loads(rows.to_json(orient="records")) if len(rows) else [],
+            "marks": major_prices(rows), "step": step, "basis": f"{len(sub):,} {unit}",
+            "derived": (f"estimated from {unit}: each one's volume and trades spread evenly across its range, "
+                        f"in {_money(step)} price segments"),
+            "note": "Traded volume by price across the highlight, not an order book: what changed hands.",
+        }
+
     # -- what the chart asks for when it opens a symbol ---------------------------------------
     def meta(self, source: str, ticker: str) -> dict:
         """What the chart needs to open a symbol, without loading its history: its levels, where

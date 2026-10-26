@@ -268,3 +268,17 @@ def test_the_level_2_follows_the_cursors_price_and_the_bar_box_its_bar():
     assert "at =" not in follow and "kLineData" not in l2  # ... not its time: the bar shown stays put
     assert "lastProfile = p;\n    markCursor();" in l2  # marked again after each load
     assert "cursorIndex = crosshairBar(c)?.index ?? null;" in _js("panels.js")
+
+
+def test_a_highlight_shows_its_major_prices_in_the_level_2():
+    l2 = _js("level2.js")
+    load = l2.split("async function load() {", 1)[1].split("\n  }\n", 1)[0]
+    assert "const hl = highlightSpan();" in load and "{ from: hl.from, to: hl.to }" in load  # the stretch, not one bar
+    assert "hlKey() !== lastHl" in l2 and "addEventListener('massive:highlight'" in l2  # read again when it moves
+    marks = l2.split("function marksOf(r, m) {", 1)[1].split("\n  }\n", 1)[0]
+    for mark in ("'poc'", "'va'", "'vah'", "'val'", "'hvn'"):
+        assert mark in marks
+    assert "box.querySelector(range ? 'tr.poc' : 'tr.at')" in l2  # opened at the point of control
+    assert "window.dispatchEvent(new Event('massive:highlight'))" in _function(_js("app.js"), "scheduleHighlightPanel")
+    css = _js("style.css")
+    assert "table.l2 tr.va td" in css and "table.l2 tr.poc" in css and ".l2-tag" in css
