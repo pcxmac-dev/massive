@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
 
-from .. import config, live
+from .. import config, freshness, live
 from ..config import Settings, load_settings
 from ..storage import LayoutLimit, Store
 from . import activity, astro
@@ -53,6 +53,7 @@ COUNTING_AT_ONCE = 2  # counts made at once, each on a thread and connections of
 PRUNED_COUNTS_TTL_S = 300  # a symbol's pruned-list counts by rule (an index scan of up to millions)
 ACTIVITY_TTL_S = 2.0  # the status answer shared by polls this close together
 SYMBOL_ROWS_TTL_S = 10.0  # its symbols' rows (index seeks in every feed file) kept this long
+OFFICIAL_TTL_S = 600.0  # the official holidays the sync fetched, read again this often (freshness.use_official)
 FEEDS_TTL_S = 60.0  # the feeds' summary (configuration and the watchlist) kept this long
 DEPS_TTL_S = 60.0  # the dependency checks' answer is kept this long
 MAX_BODY = 5 * 1024 * 1024
@@ -120,6 +121,7 @@ class ChartApp:
         self._pruned_counts: OrderedDict[str, tuple[float, dict]] = _BoundedCache(ROW_COUNTS_KEPT)
         self._status_store, self._status_lock = store.reader(), threading.Lock()  # the Fetcher view and status bar
         self._activity: dict[str, tuple[float, tuple, dict]] = {}  # feed -> (made at, (lines, open symbol), answer)
+        self._official_at: float | None = None  # when the official holidays were last applied (OFFICIAL_TTL_S)
         self._activity_rows: dict = {}  # activity.activity's symbol rows (SYMBOL_ROWS_TTL_S)
         self._feeds_summary: tuple[float, list] | None = None
         self._deps_store, self._deps_lock = store.reader(), threading.Lock()  # dependency checks
@@ -873,6 +875,10 @@ class ChartApp:
                 del self._activity[k]  # expired: made again when asked
             hit = self._activity.get(source)
             if hit is None or hit[1] != (lines, focus):
+                if self._official_at is None or now - self._official_at >= OFFICIAL_TTL_S:
+                    # the sync's official holidays, so "new" here agrees with it on an unscheduled closure
+                    self._official_at = now
+                    freshness.use_official(self._status_store)
                 hit = self._activity[source] = (now, (lines, focus), activity.activity(
                     self._status_store, self.settings, self.store.path, source, log_lines=lines, focus=focus,
                     rows_cache=self._activity_rows, rows_ttl_s=SYMBOL_ROWS_TTL_S))
@@ -917,7 +923,7 @@ class ChartApp:
     def audit_summary(self, ticker: str | None = None, limit: int = 40) -> dict:
         with self._lock:
             rows = self.store.audits(limit, ticker)
-            return {"audits": rows, "scores": self.store.audit_scores(), "queued": len(self.store.audit_queue()),
+            return {"audits": rows, "scores": self.store.audit_scores(), "queued": self.store.audit_queue_count(),
                     "quality": self.store.qualities()}
 
     def feeds(self) -> list[dict]:

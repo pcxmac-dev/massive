@@ -503,3 +503,17 @@ def test_an_unexpected_error_is_answered_not_dropped(served, monkeypatch, capsys
     status, body = _call(port, "/api/watchlists", "PUT", {WRITE_HEADER: "1"}, {"lists": []})
     assert status == 500 and "boom" in body["error"]
     assert "RuntimeError: boom" in capsys.readouterr().err  # logged
+
+
+def test_the_fetcher_view_applies_the_official_holidays_and_counts_audits_cheaply(store, monkeypatch):
+    from massive_collate import freshness
+    from massive_collate.gui import server as srv
+
+    applied = []
+    monkeypatch.setattr(freshness, "use_official", lambda s, source="massive": applied.append(s) or False)
+    app = srv.ChartApp(store)
+    app.activity({})
+    app._activity.clear()
+    app.activity({})
+    assert len(applied) == 1  # read again only every OFFICIAL_TTL_S
+    assert app.audit_summary()["queued"] == 0

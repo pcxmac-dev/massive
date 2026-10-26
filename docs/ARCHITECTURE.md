@@ -133,7 +133,8 @@ are backtests only: nothing places orders anywhere. (`calc/schemes.py`; `/api/sc
 panel's Schemes section.)
 
 Every scheme is causal: what it decides at a bar uses that bar and the bars before it, never a later
-one. A bar's signal is known when the bar closes and filled at the next bar's open; a stop or target
+one. A bar's signal is known when the bar closes (the bar still forming is left out) and filled at
+the next bar's open; a stop or target
 fills inside a bar at its level (at the open when the bar opens beyond it; when one bar reaches both,
 the stop is taken: the worse case). A position is a fixed quantity from its entry (equity at entry
 over the entry price), so a trade's return is its side times its exit over its entry, less costs.
@@ -195,7 +196,9 @@ for the day or until cancelled. Each working order is filled from the finest bar
 placed (1-second bars where held, else minutes), the first that reach it: a market order at the next
 bar's open; a buy limit when a bar's low reaches it, at the limit or the open if the bar opened below
 it (a sell limit the mirror); a buy stop when a bar's high reaches it, at the stop or the open if it
-opened above (a sell stop the mirror). A day order not filled by its session's close expires. Orders
+opened above (a sell stop the mirror). A day order not filled by its session's close expires, once
+the stored bars reach that close (bars stored late still count); bars only a partial feed (IEX) holds
+are looked at again for up to 2 days, until the whole-market feeds' bars replace them. Orders
 are matched whenever the Trading view asks (and so after the fact, from the stored bars, when it was
 closed: fills are what the bars allowed, whenever they are looked at). Positions are kept at their
 average cost; realized profit and loss when a position is reduced, unrealized at the last stored price.
