@@ -2330,21 +2330,45 @@ function renderTools() {
     saveDrawings();
   });
   action('trash', 'Delete all drawings on this symbol', () => {
-    if (confirm(`Delete all drawings on ${state.ticker}?`)) { chart.removeOverlay({ groupId: 'user' }); saveDrawings(); }
+    if (confirm(`Delete all drawings on ${state.ticker}?`)) {
+      state.drawingsAside = [];  // those waiting for their indicator's pane too
+      chart.removeOverlay({ groupId: 'user' });
+      saveDrawings();
+    }
   });
   setActiveTool('cursor');
 }
 
+// A drawing on an indicator's pane is kept with that indicator's name (`pane`; pane ids are made
+// afresh each session) and goes back on its pane: every drawing came back on the price pane before.
+// The chart keeps a drawing whose indicator was taken off (undrawn, on a pane that is gone): its
+// pane's name is remembered.
+const paneNames = new Map();  // pane id -> the name of the indicator drawn in it
+
+function paneIndicator(paneId) {
+  if (!paneId || paneId === 'candle_pane') return null;
+  const name = chart.getIndicators({ paneId })[0]?.name;
+  if (name) paneNames.set(paneId, name);
+  return name ?? paneNames.get(paneId) ?? null;
+}
+
+// The pane an indicator is drawn in below the price, or null when it is not on the chart.
+function indicatorPane(name) {
+  return chart.getIndicators({ name }).find((i) => i.paneId !== 'candle_pane')?.paneId ?? null;
+}
+
 // Drawings belong to the current layout, per ticker, as (timestamp, price) points so they
-// line up on every interval.
+// line up on every interval. One whose indicator is not on the chart now waits aside, kept as it was
+// (state.drawingsAside), and comes back with the indicator.
 function saveDrawings() {
   if (!state.ticker || state.restoredFor !== drawingsKey() || !layout.current) return;
   const user = chart.getOverlays({ groupId: 'user' }).filter((o) => o.id !== state.drawingId);
   const drawings = layout.current.data.drawings || (layout.current.data.drawings = {});
-  drawings[drawingsKey()] = user.map((o) => ({
-    name: o.name, lock: o.lock, visible: o.visible, extendData: o.extendData ?? null, styles: o.styles ?? null,
+  drawings[drawingsKey()] = [...user.map((o) => ({
+    name: o.name, pane: paneIndicator(o.paneId) ?? undefined, lock: o.lock, visible: o.visible,
+    extendData: o.extendData ?? null, styles: o.styles ?? null,
     points: o.points.map((p) => ({ timestamp: p.timestamp, value: p.value })),
-  }));
+  })), ...(state.drawingsAside || [])];
   markDirty();
 }
 
@@ -2353,10 +2377,14 @@ function restoreDrawings() {
   chart.removeOverlay({ groupId: 'user' });
   const saved = layout.current?.data.drawings?.[drawingsKey()] || [];
   const lastHighlight = saved.map((d) => d.name).lastIndexOf('measure');  // one highlight at a time
+  state.drawingsAside = [];
   for (const [i, d] of saved.entries()) {
     if (d.name === 'measure' && i !== lastHighlight) continue;
+    const paneId = d.pane ? indicatorPane(d.pane) : undefined;  // undefined: the price pane
+    if (d.pane && !paneId) { state.drawingsAside.push(d); continue; }
+    if (paneId) paneNames.set(paneId, d.pane);
     chart.createOverlay({
-      name: d.name, groupId: 'user', points: d.points, lock: d.lock, visible: d.visible,
+      name: d.name, groupId: 'user', paneId, points: d.points, lock: d.lock, visible: d.visible,
       extendData: d.extendData ?? undefined, styles: d.styles ?? undefined, ...overlayEvents(),
     });
   }
@@ -2373,13 +2401,15 @@ const layout = {
   list: [],
   max: 5,
   dirty: false,
+  generation: 0,  // changes counted by markDirty: a save leaves the layout clean only if none came since
   autosave: prefs.get('autosave', true),
   timer: null,
 };
 
-async function apiWrite(method, path, body) {
+// `keepalive`: the request outlives the page (closing it); the browser takes at most 64 KiB so.
+async function apiWrite(method, path, body, { keepalive = false } = {}) {
   const res = await fetch(path, {
-    method,
+    method, keepalive,
     headers: { 'Content-Type': 'application/json', 'X-Massive-Charts': '1' },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -2482,6 +2512,7 @@ window.switchWorkspace = switchWorkspace;
 function markDirty() {
   if (!layout.current || state.applyingLayout) return;
   layout.dirty = true;
+  layout.generation += 1;
   renderLayoutButton();
   if (layout.autosave) {
     clearTimeout(layout.timer);
@@ -2489,13 +2520,30 @@ function markDirty() {
   }
 }
 
-async function saveLayout() {
-  if (!layout.current) return;
+// The answer is the server's copy of what was sent; the local layout stays as it is (drawings changed
+// while the save was on its way went into it: taking the server's copy lost them), with only the
+// server's name and time taken. It is clean only if nothing changed since the snapshot.
+const KEEPALIVE_MAX = 60 * 1024;  // the browser's 64 KiB for a request that outlives the page, less the headers
+
+async function saveLayout({ leaving = false } = {}) {
+  const target = layout.current;
+  if (!target) return;
   clearTimeout(layout.timer);
-  layout.current.data = snapshot();
-  const saved = await apiWrite('PUT', `/api/layouts/${layout.current.id}`, { data: layout.current.data });
-  layout.current = saved;
-  layout.dirty = false;
+  const gen = layout.generation;
+  target.data = snapshot();
+  const body = { data: target.data };
+  const keepalive = leaving && new TextEncoder().encode(JSON.stringify(body)).length <= KEEPALIVE_MAX;
+  layout.sent = gen;  // on its way: leaving the page does not send it again
+  let saved;
+  try {
+    saved = await apiWrite('PUT', `/api/layouts/${target.id}`, body, { keepalive });
+  } catch (err) {
+    if (layout.sent === gen) layout.sent = null;
+    throw err;
+  }
+  Object.assign(target, { name: saved.name, updated_at: saved.updated_at });
+  if (layout.current === target && layout.generation === gen) layout.dirty = false;
+  renderLayoutButton();
   await refreshLayoutList();
 }
 
@@ -2583,7 +2631,9 @@ async function renameLayout() {
   if (!layout.current) return;
   const name = askName('Rename layout', layout.current.name);
   if (!name) return;
-  layout.current = await apiWrite('PUT', `/api/layouts/${layout.current.id}`, { name });
+  const target = layout.current;
+  const saved = await apiWrite('PUT', `/api/layouts/${target.id}`, { name });
+  Object.assign(target, { name: saved.name, updated_at: saved.updated_at });  // its data stays the local one (saveLayout)
   await refreshLayoutList();
 }
 
@@ -2659,16 +2709,18 @@ $('layoutBtn').addEventListener('click', (e) => {
   }
 });
 document.addEventListener('click', (e) => { if (!$('layoutMenu').contains(e.target)) $('layoutMenu').hidden = true; });
-window.addEventListener('beforeunload', () => {
-  if (layout.dirty && layout.current) {
-    // Best effort: keep the last changes if the window closes before autosave fires.
-    fetch(`/api/layouts/${layout.current.id}`, {
-      method: 'PUT', keepalive: true,
-      headers: { 'Content-Type': 'application/json', 'X-Massive-Charts': '1' },
-      body: JSON.stringify({ data: snapshot() }),
-    });
-  }
-});
+// Best effort: keep the last changes if the window closes before autosave fires. With autosave on,
+// saved as soon as the page is hidden (another tab or window, or closing: hidden comes first); in
+// any case when it goes; once per change. A save that outlives the page may carry at most 64 KiB: a
+// bigger layout goes as an ordinary save, which completes when the page is only hidden and may be cut
+// short when it closes. (The page-close save alone, always outliving the page, failed silently over 64 KiB.)
+function saveOnLeave(closing) {
+  if (!layout.dirty || !layout.current || layout.sent === layout.generation) return;
+  if (!closing && !layout.autosave) return;  // only hidden, and autosave off: the user saves
+  saveLayout({ leaving: true }).catch(() => {});
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveOnLeave(false); });
+window.addEventListener('pagehide', () => saveOnLeave(true));
 
 // First run: create "Default" from what this browser had before layouts existed.
 async function ensureLayout() {

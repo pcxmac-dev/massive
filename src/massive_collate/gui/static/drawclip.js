@@ -28,10 +28,16 @@
   }
 
   const selected = () => (state.selectedOverlay ? chart.getOverlays({ id: state.selectedOverlay })[0] ?? null : null);
+  // `pane`: the indicator a drawing below the price was on (app.js paneIndicator): the pane it pastes
+  // into, in this chart or another tab's (pane ids are each chart's own).
   const snapshot = (o) => ({
-    name: o.name, paneId: o.paneId || 'candle_pane', extendData: o.extendData ?? null, styles: o.styles ?? null,
-    points: o.points.map((p) => ({ timestamp: p.timestamp, value: p.value })),
+    name: o.name, paneId: o.paneId || 'candle_pane', pane: paneIndicator(o.paneId), extendData: o.extendData ?? null,
+    styles: o.styles ?? null, points: o.points.map((p) => ({ timestamp: p.timestamp, value: p.value })),
   });
+  // Where an item pastes: the price pane, its indicator's pane, or (copied before `pane` was kept) the
+  // same pane if this chart has it; null when the chart shows no such pane.
+  const paneFor = (it) => (!it.paneId || it.paneId === 'candle_pane' ? 'candle_pane'
+    : (it.pane && indicatorPane(it.pane)) || (chart.getIndicators({ paneId: it.paneId }).length ? it.paneId : null));
   const NAMES = { measure: 'highlight', simpleAnnotation: 'note' };
   const label = (it) => NAMES[it.name] || it.name.replace(/([A-Z])/g, ' $1').toLowerCase().trim();
 
@@ -71,7 +77,8 @@
   }
 
   // Draws `items` again with their first point at `at` (chart pixels) where it is on the price pane,
-  // else `PASTE_BARS` bars on from where they were.
+  // else `PASTE_BARS` bars on from where they were. An item whose pane this chart does not show is
+  // left out (the chart would put it on the price pane, at an indicator's values). Whether any was drawn.
   function place(items, at) {
     const data = chart.getDataList();
     if (!items?.length || !data.length) return false;
@@ -85,15 +92,20 @@
         price = p.value - first.value;
       }
     }
+    let made = 0;
     for (const it of items) {
+      const paneId = paneFor(it);
+      if (!paneId) continue;
       if (it.name === 'measure') chart.removeOverlay({ groupId: 'user', name: 'measure' });  // one highlight at a time
-      chart.createOverlay({
-        name: it.name, groupId: 'user', paneId: it.paneId, extendData: it.extendData ?? undefined, styles: it.styles ?? undefined,
+      const id = chart.createOverlay({
+        name: it.name, groupId: 'user', paneId, extendData: it.extendData ?? undefined, styles: it.styles ?? undefined,
         points: it.points.map((pt) => ({ timestamp: timeAt(data, indexOf(data, pt.timestamp, step) + bars, step),
                                          value: pt.value + price })),
         ...overlayEvents(),
       });
+      if (id) made++;
     }
+    if (!made) return false;
     saveDrawings();
     if (items.some((it) => it.name === 'measure')) scheduleHighlightPanel();
     return true;
@@ -101,7 +113,12 @@
 
   function paste(at = pointer) {
     const c = clip();
-    if (!place(c?.items, at)) return false;
+    if (!c?.items?.length) return false;
+    if (!place(c.items, at)) {
+      const pane = c.items.find((it) => it.pane)?.pane;
+      if (pane && chart.getDataList().length) toast(`Not pasted: the ${label(c.items[0])} was on ${pane}, not on this chart`);
+      return false;
+    }
     toast(`Pasted the ${label(c.items[0])}`);
     return true;
   }

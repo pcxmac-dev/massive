@@ -76,3 +76,48 @@ def test_the_model_precision_probe_is_dropped_for_another_model():
     probe = _function(_js("app.js"), "reloadWithModelPrecision")
     assert probe.index("const model = JSON.stringify(modelQuery());") < probe.index("api('/api/bars'")
     assert "JSON.stringify(modelQuery()) !== model) return;" in probe
+
+
+# -- 11: a layout save on its way ---------------------------------------------------------------------
+
+def test_a_layout_save_keeps_the_changes_made_while_it_was_on_its_way():
+    app = _js("app.js")
+    save = _function(app, "saveLayout")
+    assert "layout.current = saved" not in save  # the server's copy lacked them
+    assert "Object.assign(target, { name: saved.name, updated_at: saved.updated_at });" in save
+    assert save.index("const gen = layout.generation;") < save.index("target.data = snapshot();")
+    assert "if (layout.current === target && layout.generation === gen) layout.dirty = false;" in save
+    assert "layout.generation += 1;" in _function(app, "markDirty")
+    rename = _function(app, "renameLayout")
+    assert "layout.current = await" not in rename and "Object.assign(target, { name: saved.name" in rename
+
+
+def test_a_layout_is_saved_when_the_page_is_hidden_and_a_big_one_not_only_by_keepalive():
+    app = _js("app.js")
+    assert "beforeunload" not in app
+    assert "document.addEventListener('visibilitychange'" in app and "window.addEventListener('pagehide'" in app
+    assert "const KEEPALIVE_MAX = 60 * 1024;" in app
+    save = _function(app, "saveLayout")
+    assert "leaving && new TextEncoder().encode(JSON.stringify(body)).length <= KEEPALIVE_MAX" in save
+    assert "{ keepalive = false } = {}" in app.split("async function apiWrite(", 1)[1].split(")", 1)[0] + ")"
+    assert "if (!closing && !layout.autosave) return;" in _function(app, "saveOnLeave")
+
+
+# -- 12: drawings on indicator panes -------------------------------------------------------------------
+
+def test_drawings_go_back_on_their_indicators_pane():
+    app = _js("app.js")
+    assert "pane: paneIndicator(o.paneId)" in _function(app, "saveDrawings")  # the indicator's name: pane ids are per session
+    assert "...(state.drawingsAside || [])" in _function(app, "saveDrawings")  # kept while its indicator is off
+    restore = _function(app, "restoreDrawings")
+    assert "const paneId = d.pane ? indicatorPane(d.pane) : undefined;" in restore
+    assert "if (d.pane && !paneId) { state.drawingsAside.push(d); continue; }" in restore  # never onto the price pane
+    assert "groupId: 'user', paneId," in restore
+    assert "chart.getIndicators({ paneId })" in _function(app, "paneIndicator")
+    clip = _js("drawclip.js")
+    assert "pane: paneIndicator(o.paneId)" in clip
+    place = _inner(clip, "place")
+    assert "const paneId = paneFor(it);" in place and "if (!paneId) continue;" in place
+    assert "if (id) made++;" in place and "if (!made) return false;" in place
+    paste = _inner(clip, "paste")
+    assert paste.index("if (!place(c.items, at))") < paste.index("toast(`Pasted the")  # only when one was drawn
