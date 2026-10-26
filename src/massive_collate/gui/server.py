@@ -476,10 +476,14 @@ class ChartApp:
         from . import world
         from .markets import markets
 
+        # The calendars are built outside the shared lock (the official schedules' calendar under the
+        # engine's own, the world's ~70 exchanges' in world.py): layouts, watchlists and the Fetcher
+        # waited behind them. Only the reads of the store take it.
+        cal = self.engine.calendar()
         with self._lock:
-            out = markets(self.engine.calendar(), self.store.exchanges(), self.store.watchlist())
-        with self._lock:
+            exchanges, watch = self.store.exchanges(), self.store.watchlist()
             moves = world.market_moves(self.store)
+        out = markets(cal, exchanges, watch)
         out["world"] = world.world_markets(moves=moves)
         out["sun"] = world.subsolar()
         out["sky"] = astro.sky()
@@ -530,11 +534,16 @@ class ChartApp:
         return {"watched": spec.ticker}
 
     def announcements(self) -> dict:
+        from . import world
         from .announcements import announcements
 
+        now = datetime.now(timezone.utc)
         with self._lock:
             watch = self.store.watchlist()
-            return announcements(self.store, watch)
+            moves = world.market_moves(self.store)
+        markets = world.world_markets(now, moves=moves)  # ~70 exchanges' calendars: outside the shared lock
+        with self._lock:
+            return announcements(self.store, watch, now, markets)
 
     def gov(self) -> dict:
         """The Gov view: the agencies' newest, the current regulatory parameters and each

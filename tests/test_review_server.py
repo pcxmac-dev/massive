@@ -311,6 +311,36 @@ def test_a_day_order_waits_for_the_whole_markets_session_before_it_expires(tmp_p
         assert (row["status"], row["done_at"]) == ("expired", _ms(f"{day2} 16:00"))
 
 
+# -- 35: slow work off the shared lock -------------------------------------------------------------
+def test_paper_and_the_markets_do_their_slow_work_off_the_shared_lock(store, monkeypatch):
+    from massive_collate.gui import world
+
+    app = ChartApp(store)
+
+    def lock_free() -> bool:  # whether another thread could take the shared lock now
+        got = []
+
+        def take():
+            if app._lock.acquire(timeout=1):
+                app._lock.release()
+                got.append(True)
+        t = threading.Thread(target=take)
+        t.start()
+        t.join()
+        return got == [True]
+    seen = []
+    monkeypatch.setattr(world, "world_markets", lambda *a, **k: seen.append(lock_free()) or [])
+    app.markets()
+    app.announcements()
+    assert seen == [True, True]  # ~70 calendars built with the lock free
+    answered = []
+    with app._lock:  # the layouts, watchlists or Fetcher busy with it
+        t = threading.Thread(target=lambda: answered.append(app.trading()))
+        t.start()
+        t.join(20)
+    assert answered and answered[0]["broker"] == "paper"
+
+
 # -- low: an unexpected error is answered, not dropped ------------------------------------------------
 def test_an_unexpected_error_is_answered_not_dropped(served, monkeypatch, capsys):
     app, port = served
