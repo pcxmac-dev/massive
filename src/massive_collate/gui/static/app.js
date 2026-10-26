@@ -2193,11 +2193,13 @@ function overlayEvents() {
     onRemoved: (e) => {
       state.selectedOverlay = null;
       if (e?.overlay?.name === 'measure') scheduleHighlightPanel();
-      saveDrawings();
+      setTimeout(saveDrawings, 0);  // the library calls this before taking it off the chart: saved without it
     },
     onSelected: (e) => { state.selectedOverlay = e.overlay.id; },
     onDeselected: () => { state.selectedOverlay = null; },
-    onRightClick: (e) => { chart.removeOverlay({ id: e.overlay.id }); },
+    // a right-click opens the drawing's menu (copy, cut, paste, duplicate, delete: drawclip.js); the
+    // library would otherwise delete it
+    onRightClick: (e) => { e.preventDefault?.(); window.DrawingClipboard?.rightClick(e.overlay); },
   };
 }
 

@@ -158,6 +158,13 @@ select option { background: var(--panel); }
   background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px;
   box-shadow: 0 6px 24px rgba(0, 0, 0, .35);
 }
+/* Drawings' right-click menu, and the note of what a copy, cut or paste did (drawclip.js) */
+.draw-menu { top: 0; z-index: 25; min-width: 200px; }
+.draw-menu .menu-item:disabled { opacity: .45; cursor: default; }
+.draw-toast { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); z-index: 25; pointer-events: none;
+  padding: 4px 12px; font-size: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .3); }
+.draw-toast[hidden] { display: none; }
 .dropdown h4 { margin: 6px 6px 2px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 .dropdown label { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 4px; cursor: pointer; }
 .dropdown label:hover { background: var(--hover); }

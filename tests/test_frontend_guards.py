@@ -240,3 +240,18 @@ def test_the_fetchers_disk_turns_while_fetching_without_restarting_each_poll():
     css = _js("style.css")
     assert re.search(r"#railFetcher\.busy \.disk-platter \{ animation: spin", css)
     assert re.search(r"#railFetcher\.busy \.disk-arm \{ animation: disk-seek 3\.2s ease-in-out infinite alternate", css)
+
+
+def test_drawings_copy_cut_and_paste_by_keys_and_right_click():
+    clip = _js("drawclip.js")
+    keys = clip.split("document.addEventListener('keydown'", 1)[1].split("});", 1)[0]
+    assert "k === 'c' ? copy() : k === 'x' ? cut() : k === 'v' ? paste()" in keys
+    assert "input, select, textarea" in keys and "if (done) e.preventDefault();" in keys  # typing and text copy untouched
+    assert "localStorage.setItem(KEY" in clip  # pastes into the other views, symbols and tabs
+    assert "chart.convertFromPixel([{ x: at.x, y: at.y }], { paneId: 'candle_pane' })" in clip  # at the pointer
+    for act in ("copy", "cut", "paste", "duplicate", "delete"):
+        assert f"data-act=\"${{act}}\"" in clip or f"item('{act}'" in clip, act
+    events = _function(_js("app.js"), "overlayEvents")
+    assert "e.preventDefault?.(); window.DrawingClipboard?.rightClick(e.overlay);" in events  # not deleted by the library
+    assert "setTimeout(saveDrawings, 0)" in events  # saved once the drawing is off the chart
+    assert 'src="drawclip.js"' in _js("index.html")
