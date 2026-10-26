@@ -234,6 +234,83 @@ def test_the_status_answer_is_kept_once_per_feed_for_known_feeds(store, monkeypa
     assert set(app._activity) == {"massive"}  # the expired one dropped
 
 
+# -- 34: paper day orders wait for their session; a partial feed's bars are looked at again ------
+class Tape:
+    """Minute bars from 09:30 a test lays down, each settled or not (only a feed of one exchange's
+    share holds it); the book reads them as it would the store's."""
+
+    T0 = _ms("2026-10-14 09:30")
+
+    def __init__(self):
+        self.bars: dict[int, tuple] = {}
+
+    def add(self, i: int, low: float, settled: bool = True):
+        self.bars[self.T0 + i * MIN] = (10.0, 10.2, low, 10.0, settled)
+
+    def after(self, source, ticker, at, until):
+        rows = [(t, *b) for t, b in sorted(self.bars.items()) if at <= t < until]
+        return pd.DataFrame(rows, columns=["t", "open", "high", "low", "close", "settled"]), MIN
+
+    def last(self, source, ticker):
+        return 10.0
+
+
+@pytest.fixture
+def tape_book():
+    tape = Tape()
+    book = PaperBook(sqlite3.connect(":memory:"), tape.after, tape.last)  # orders good till cancelled: no close
+    book.tape = tape
+    return book
+
+
+def test_a_partial_feeds_bars_are_looked_at_again_when_the_whole_market_replaces_them(tape_book):
+    book, tape, t0 = tape_book, tape_book.tape, Tape.T0
+    o = book.place("SPCX", "*", "buy", 1, "limit", limit=9.5, tif="gtc", now_ms=t0)
+    for i in range(3):
+        tape.add(i, 9.8)
+    for i in (3, 4):
+        tape.add(i, 9.7, settled=False)  # IEX's share of the session, until a sync stores the whole market's
+    book.match(t0 + 10 * MIN)
+    row = book.order(o["id"])
+    assert row["status"] == "working" and row["looked_to"] == t0 + 3 * MIN  # not past IEX's bars
+    tape.add(3, 9.8)
+    tape.add(4, 9.4)  # the whole market traded lower than IEX did
+    book.match(t0 + 10 * MIN)
+    row = book.order(o["id"])
+    assert (row["status"], row["done_at"], row["fill_px"]) == ("filled", t0 + 4 * MIN, 9.5)
+
+
+def test_a_partial_feeds_bar_that_reaches_the_order_fills_it(tape_book):
+    book, tape, t0 = tape_book, tape_book.tape, Tape.T0
+    o = book.place("SPCX", "*", "buy", 1, "limit", limit=9.5, tif="gtc", now_ms=t0)
+    tape.add(0, 9.8, settled=False)
+    tape.add(1, 9.4, settled=False)  # the read goes on past bars it may look at again
+    book.match(t0 + 10 * MIN)
+    assert book.order(o["id"])["status"] == "filled" and book.order(o["id"])["done_at"] == t0 + MIN
+
+
+def test_a_day_order_waits_for_the_whole_markets_session_before_it_expires(tmp_path, monkeypatch):
+    day1, day2 = "2026-10-19", "2026-10-20"
+    with Store(tmp_path / "m.db", check_same_thread=False) as s:
+        s.upsert_bars("massive", "SPCX", "minute", 1, _minutes(day1, 10.0, "09:30", "19:59", every=1))
+        s.upsert_bars("iex", "SPCX", "minute", 1, _minutes(day2, 10.0, "09:30", "11:00", every=1))  # the live recorder's
+        s.watch("massive", ["SPCX"], "minute")
+        app = ChartApp(s)
+        clock = {"now": _ms(f"{day2} 11:00")}
+        monkeypatch.setattr(paper, "_now", lambda: clock["now"])
+        bars, step = app._fill_bars("*", "SPCX", _ms(f"{day1} 15:00"), clock["now"])
+        settled = dict(zip(bars["t"].tolist(), bars["settled"].tolist()))
+        assert step == MIN and settled[_ms(f"{day1} 15:59")] and not settled[_ms(f"{day2} 10:00")]
+        assert app._stored_to("*", "SPCX") == _ms(f"{day1} 19:59") + MIN  # the whole market's, not IEX's
+        o = app.trade_place({"ticker": "SPCX", "side": "buy", "qty": 1, "type": "limit", "limit": 1.0})
+        clock["now"] = _ms(f"{day2} 18:00")  # past the close; the sync has not stored the session
+        assert next(r for r in app.trading()["orders"] if r["id"] == o["id"])["status"] == "working"
+        s.upsert_bars("massive", "SPCX", "minute", 1, _minutes(day2, 10.0, "09:30", "16:30", every=1))
+        view = app.trading()
+        row = next(r for r in view["orders"] if r["id"] == o["id"])
+        assert (row["status"], row["done_at"]) == ("expired", _ms(f"{day2} 16:00"))
+
+
 # -- low: an unexpected error is answered, not dropped ------------------------------------------------
 def test_an_unexpected_error_is_answered_not_dropped(served, monkeypatch, capsys):
     app, port = served

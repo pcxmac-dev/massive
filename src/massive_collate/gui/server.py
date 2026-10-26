@@ -61,6 +61,9 @@ WRITE_HEADER = "X-Massive-Charts"
 # window's frames, up to MAX_LIMIT bars; the rest wait their turn, then are answered busy.
 HEAVY_REQUESTS = 2
 HEAVY_WAIT_S = 30.0
+# A paper order's bars held only by a feed of one exchange's share (IEX) wait this long for the
+# whole market's to replace them (a sync stores a session within hours), then are taken as they are.
+PARTIAL_SETTLE_MS = 2 * 86_400_000
 
 
 class Busy(RuntimeError):
@@ -126,6 +129,7 @@ class ChartApp:
         self._open_noted: dict[str, int] = {}  # ticker -> ms it was last noted open (note_open)
         self._derive_proc: subprocess.Popen | None = None  # a build started by start_derive
         self._gov_db, self._gov_lock = None, threading.Lock()  # gov/gov.db, opened on first use
+        self._paper, self._paper_lock = None, threading.RLock()  # the paper account (paper), opened on first use
 
     @property
     def settings(self) -> Settings:
@@ -663,19 +667,22 @@ class ChartApp:
     # -- trading (trading/; docs/ARCHITECTURE.md, "Trading"): paper first, live trading off ----------
     @property
     def paper(self):
-        if getattr(self, "_paper", None) is None:
-            from ..trading.paper import PaperBook
+        """The paper account, on a connection and lock of its own (_paper_lock): matching reads bars,
+        and under the shared lock the layouts, watchlists and the Fetcher waited behind it."""
+        with self._paper_lock:
+            if self._paper is None:
+                from ..trading.paper import PaperBook
 
-            self._paper = PaperBook(self.store.conn, self._fill_bars, self._last_price,
-                                    lambda t: self.window.asset(t))
-        return self._paper
+                self._paper_store = self.store.reader()
+                self._paper = PaperBook(self._paper_store.conn, self._fill_bars, self._last_price,
+                                        lambda t: self.window.asset(t), self._stored_to)
+            return self._paper
 
     def _fill_bars(self, source: str, ticker: str, at_ms: int, until_ms: int):
         """The finest bars stored from `at_ms` to `until_ms` (1-second where held, else minutes), in
-        the symbol's regular session (stocks; round the clock for crypto): what a paper order fills from."""
-        import pandas as pd
-
-        from ..trading.paper import MATCH_PAGE
+        the symbol's regular session (stocks; round the clock for crypto): what a paper order fills
+        from; each settled unless only a feed of one exchange's share holds it (_stored_to)."""
+        from ..trading.paper import MATCH_PAGE, _now
         from .bars import epoch_ms
 
         if not self.window.handles(source, ticker):
@@ -683,11 +690,37 @@ class ChartApp:
         s = self.window.series(source, ticker)
         feeds = self.window.feeds(source, ticker)
         fine = "second" if self.window.replay_fine(source, ticker, "minute", at_ms) == "second" else "minute"
+        step = 1000 if fine == "second" else 60_000
         page = self.window._intraday_page(s, feeds, fine, 1, s.session_for("regular"), None, at_ms - 1, None, MATCH_PAGE)
         bars = page["frame"]
-        t = epoch_ms(bars.index) if len(bars) else []
-        out = pd.DataFrame({"t": t, **{k: bars[k].to_numpy() for k in ("open", "high", "low", "close")}}) if len(bars)             else pd.DataFrame(columns=["t", "open", "high", "low", "close"])
-        return out[out["t"] < until_ms], 1000 if fine == "second" else 60_000
+        if not len(bars):
+            return pd.DataFrame(columns=["t", "open", "high", "low", "close", "settled"]), step
+        t = epoch_ms(bars.index)
+        # a bar past the whole market's stored bars may yet be replaced by them, for a while (a sync
+        # stores the session within hours); one older than PARTIAL_SETTLE_MS is taken as it is
+        settled_to = max(self._stored_to(source, ticker) or 0, _now() - PARTIAL_SETTLE_MS)
+        out = pd.DataFrame({"t": t, **{k: bars[k].to_numpy() for k in ("open", "high", "low", "close")},
+                            "settled": t + step <= settled_to})
+        return out[out["t"] < until_ms], step
+
+    def _stored_to(self, source: str, ticker: str) -> int | None:
+        """Where the symbol's stored bars end (ms, any session: its 1-second and minute bars): those
+        of the feeds of the whole market where one holds it, not a feed of one exchange's share
+        (IEX's session, which the whole market's replaces once a sync stores it)."""
+        from ..live import PARTIAL_FEEDS
+
+        if not self.window.handles(source, ticker):
+            return None
+        feeds = self.window.feeds(source, ticker)
+        whole = [f for f in feeds if f not in PARTIAL_FEEDS] or feeds
+        ends = []
+        with self.engine.lock:
+            for f in whole:
+                for base, step in (("second", 1000), ("minute", 60_000)):
+                    e = self.engine.store.bar_edges(f, ticker, base)
+                    if e:
+                        ends.append(e[1] + step)
+        return max(ends, default=None)
 
     def _last_price(self, source: str, ticker: str) -> float | None:
         if not self.window.handles(source, ticker):
@@ -700,23 +733,23 @@ class ChartApp:
         """The Trading view: the brokers, and the paper account (its orders matched first, from bars)."""
         from ..trading.brokers import PLANNED
 
-        with self._lock:
+        with self._paper_lock:
             book = self.paper.summary()
         return {"brokers": [{"key": "paper", "label": self.paper.label, "live": False, "status": "ready"}, *PLANNED],
                 "liveTrading": False, "broker": "paper", **book}
 
     def trade_place(self, body: dict) -> dict:
-        with self._lock:
+        with self._paper_lock:
             return self.paper.place(body.get("ticker", ""), body.get("source") or "*", body.get("side", ""),
                                     body.get("qty", 0), body.get("type", "market"), body.get("limit"), body.get("stop"),
                                     body.get("tif", "day"))
 
     def trade_cancel(self, order_id: int) -> dict:
-        with self._lock:
+        with self._paper_lock:
             return self.paper.cancel(order_id)
 
     def trade_reset(self, body: dict) -> dict:
-        with self._lock:
+        with self._paper_lock:
             return self.paper.reset(body.get("cash", 100_000), body.get("feeBps", 0))
 
     # -- watchlists (the rail's lists of symbols) --------------------------------

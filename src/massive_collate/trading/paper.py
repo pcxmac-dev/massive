@@ -2,8 +2,9 @@
 
 Orders are matched against the finest bars stored after each was placed, the first that reach it,
 by the backtests' rules: a market order at the next bar's open; a limit or stop at its price, or at
-the open when a bar opens beyond it. A day order not filled by its session's close expires. Matching
-runs whenever the account is looked at, from the stored bars, so an order placed while the view was
+the open when a bar opens beyond it. A day order not filled by its session's close expires, once
+the stored bars reach that close (a session not stored yet may still fill it). Matching runs
+whenever the account is looked at, from the stored bars, so an order placed while the view was
 closed fills as the bars since allowed. Its own tables in the main file; a reset starts a new account
 and keeps the old one's record.
 """
@@ -16,6 +17,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Callable
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
 from .brokers import check_order
@@ -54,8 +56,13 @@ CREATE INDEX IF NOT EXISTS paper_orders_account ON paper_orders (account, id);
 """
 
 # (source, ticker, after_ms, until_ms) -> the finest bars stored in [after, until), oldest first, at
-# most MATCH_PAGE: columns t (ms bar start), open, high, low, close; and the step of those bars (ms).
+# most MATCH_PAGE: columns t (ms bar start), open, high, low, close, and optionally settled (False
+# where only a feed of one exchange's share holds the bar, which a feed of the whole market may
+# still replace); and the step of those bars (ms).
 BarsAfter = Callable[[str, str, int, int], tuple[pd.DataFrame, int]]
+# (source, ticker) -> where the symbol's stored bars end (ms, any session; a feed of the whole
+# market's where one holds it), or None: a day order expires once they reach its close.
+StoredTo = Callable[[str, str], int | None]
 
 
 def _now() -> int:
@@ -109,8 +116,10 @@ class PaperBook:
     key, label, live = "paper", "Paper (simulated)", False
 
     def __init__(self, conn: sqlite3.Connection, bars_after: BarsAfter,
-                 last_price: Callable[[str, str], float | None], asset: Callable[[str], str] = lambda _t: "stock"):
+                 last_price: Callable[[str, str], float | None], asset: Callable[[str], str] = lambda _t: "stock",
+                 stored_to: StoredTo = lambda _s, _t: None):
         self.conn, self.bars_after, self.last_price, self.asset = conn, bars_after, last_price, asset
+        self.stored_to = stored_to
         conn.executescript(SCHEMA)
         self._cols = [d[0] for d in conn.execute("SELECT * FROM paper_orders LIMIT 0").description]
 
@@ -182,17 +191,28 @@ class PaperBook:
         for o in working:
             end = day_end(o["placed_at"], self.asset(o["ticker"])) if o["tif"] == "day" else None
             until = min(now, end) if end is not None else now
+            # `at` (looked_to) moves past a bar only when it is over and settled, and only while
+            # every bar before it was: a bar not over yet may still reach the order, and one only a
+            # feed of one exchange's share holds may be replaced by the whole market's (IEX's
+            # session, until the sync stores it). Those are read again next time; the read goes on
+            # past them (`read`) for a fill they already allow.
             at = o["looked_to"] or o["placed_at"]
-            hit = None
-            while at < until and hit is None:
-                bars, step = self.bars_after(o["source"], o["ticker"], at, until)
+            read, steady, hit = at, True, None
+            while read < until and hit is None:
+                bars, step = self.bars_after(o["source"], o["ticker"], read, until)
                 if bars.empty:
                     break
                 hit = fill_in(o, bars)
-                # a bar not over yet may still reach the order: looked at again next time
-                done = bars[bars["t"] + step <= now]
-                was, at = at, (int(done["t"].iloc[-1]) + step if len(done) else at)
-                if len(bars) < MATCH_PAGE or at <= was:
+                t = bars["t"].to_numpy(dtype="int64")
+                final = t + step <= now
+                if "settled" in bars:
+                    final &= bars["settled"].to_numpy(dtype=bool)
+                lead = len(final) if final.all() else int(np.argmin(final))  # the bars over and settled, from the first
+                if steady and lead:
+                    at = int(t[lead - 1]) + step
+                steady = steady and lead == len(final)
+                read = int(t[-1]) + 1
+                if len(bars) < MATCH_PAGE:
                     break
             with self.conn:
                 if hit is not None:
@@ -201,7 +221,9 @@ class PaperBook:
                     self.conn.execute("UPDATE paper_orders SET status='filled', done_at=?, fill_px=?, fee=?, looked_to=? "
                                       "WHERE id=? AND status='working'", (t, px, fee, at, o["id"]))
                     filled += 1
-                elif end is not None and now >= end:
+                elif end is not None and now >= end and (at >= end or (self.stored_to(o["source"], o["ticker"]) or 0) >= end):
+                    # the close has passed and the bars up to it are stored (looked at to the close,
+                    # or the series goes on past it): not before, or a fill they allow would be missed
                     self.conn.execute("UPDATE paper_orders SET status='expired', done_at=?, looked_to=? WHERE id=? "
                                       "AND status='working'", (end, at, o["id"]))
                 else:
