@@ -101,6 +101,14 @@ def test_a_stock_that_moved_exchange_is_followed_when_it_is_the_same_instrument(
     renamed = Stock("KO", name="Coca-Cola Co Common Stock", primary_exchange=NASDAQ)
     assert collector.check_listing(FakeSource(listing=renamed), store, store.watchlist("fake", "KO")[0],
                                    NOW.date(), log=_log).ok
+    # off the exchanges listed here (to OTC, a delisting) it is not followed, whoever it is
+    store.watch("fake", ["OTCX"], "minute", exchange="XNYS")
+    store.set_listing("fake", "OTCX", None, "BBG-OTCX", None, "Otc Co")
+    otc_market = Exchange("fake", -1, "OTC", country("US"), mic="OTCM")
+    otc = Stock("OTCX", name="Otc Co", figi="BBG-OTCX", primary_exchange=otc_market)
+    assert not collector.check_listing(FakeSource(listing=otc), store, store.watchlist("fake", "OTCX")[0],
+                                       NOW.date(), log=_log).ok
+    assert store.watchlist("fake", "OTCX")[0]["exchange"] == "XNYS"
 
 
 def test_a_stock_elsewhere_not_known_to_be_the_same_is_asked_weekly_and_holds_back_no_seconds(store):

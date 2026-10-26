@@ -630,13 +630,15 @@ def check_listing(source: DataSource, store: Store, item: dict, today: date, log
     if item["exchange"] and mic and mic != item["exchange"]:
         # Moved exchange (BCPC: "listed on XNAS, not XNYS"): skipped, it got no data, cost a request
         # per feed per run and, never finishing its minutes, held back every stock's 1-second pass.
+        # Followed to the exchanges the directory lists only: off them (OTC) it is delisted here.
         how = _same_instrument(store, ticker, inst)
-        if how is None:
+        if how is None or mic not in DIRECTORY_EXCHANGES:
             store.set_listing(source.name, ticker, item["listed_from"], item["figi"], today)  # checked: in a week again
             store.kv_update(ELSEWHERE_KEY, lambda m: {**m, ticker: {"mic": mic, "pinned": item["exchange"],
                                                                     "on": today.isoformat()}}, {})
-            log(f"{ticker}: listed on {mic}, not {item['exchange']} as watched, and not known to be the same "
-                "instrument; skipped (checked again in a week)")
+            log(f"{ticker}: listed on {mic}, not {item['exchange']} as watched, and "
+                + ("not known to be the same instrument" if how is None else "not on an exchange collected here")
+                + "; skipped (checked again in a week)")
             return Listing(False)
         store.set_exchange(ticker, mic)
         log(f"{ticker}: moved from {item['exchange']} to {mic} (the same {how}); followed there")
@@ -1419,11 +1421,11 @@ def sync(
         if only is None and not archival and source.serves("stock"):  # placeholders and icons: leftover budget only
             # reckoned now, after the watchlist and audits have spent (reckoned before the run, icons
             # could take the day's reserve, and later runs sent nothing for the rest of the day)
-            allowance = directory_allowance() if callable(directory_allowance) else directory_allowance
-            if allowance > 0:
+            left = directory_allowance() if callable(directory_allowance) else directory_allowance
+            if left > 0:
                 spent = source.requests_made
                 refresh_directory(source, store, today, log)
-                fill_directory_icons(source, store, allowance - (source.requests_made - spent), today, log)
+                fill_directory_icons(source, store, left - (source.requests_made - spent), today, log)
     except StopRun as e:
         result.stopped = str(e)
         log(f"stopped: {e}")

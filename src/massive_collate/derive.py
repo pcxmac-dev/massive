@@ -214,8 +214,8 @@ def mark_dirty(store, source: str, ticker: str, base: str, lo_ms: int, hi_ms: in
 
 def take_dirty(store, source: str, ticker: str, base: str) -> tuple[int, int] | None:
     """The span marked dirty for a build. It stays marked until the build is done (done_dirty):
-    cleared as it was taken, a build that failed lost it, and the frames above stayed built over
-    the pruned bars."""
+    when it was cleared as it was taken, a build that failed lost it, and the frames above stayed
+    built over the pruned bars."""
     held = store.kv_json(DIRTY_KEY.format(source, ticker.upper(), base), None)
     return (int(held[0]), int(held[1])) if held else None
 
