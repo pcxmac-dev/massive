@@ -212,3 +212,24 @@ def test_the_fetch_check_reads_a_chunk_at_a_time_and_only_where_the_finer_frame_
     assert all(hi - lo <= chunk[ts] for ts, lo, hi in judged)  # a chunk at a time, not the year
     assert all(lo >= seconds_from for ts, lo, _ in judged if ts == "minute")  # none where no seconds are held
     assert finer and all(hi - lo <= chunk["day"] + 86_400_000 for _, lo, hi in finer)
+
+
+# -- the audit queue (finding 17) -----------------------------------------------------------------------
+
+def test_the_audit_queue_keeps_one_entry_per_series_and_expires_old_ones_at_once(store):
+    from massive_collate import audit
+    from massive_collate.coverage import FeedProfile
+
+    for run in range(30):  # a month of runs, each queueing what it fetched
+        store.queue_audit("AAA", "minute", 1000 * run, 1000 * run + 500, "fake")
+    store.queue_audit("AAA", "day", 0, 10, "fake")
+    store.queue_audit("AAA", "minute", 0, 10, "other")
+    assert store.audit_queue_count() == 3
+    assert [q["start_ms"] for q in store.audit_queue() if (q["timespan"], q["owner"]) == ("minute", "fake")] == [29_000]
+    assert {q["owner"] for q in store.audit_queue(exclude_owner="fake")} == {"other"}
+    with store.conn:
+        store.conn.execute("UPDATE audit_queue SET queued_at='2020-01-01T00:00:00+00:00' WHERE owner='other'")
+    me = FeedProfile("fake", FREE, frozenset({"stock"}), 0)
+    # expired before any audit, whether or not this run audits anything (it was only while it did)
+    audit.run_audits(FakeSource(), store, me, {"fake": me}, datetime.now(ET), queued=0, random_count=0, log=_log)
+    assert store.audit_queue_count() == 2

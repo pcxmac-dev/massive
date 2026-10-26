@@ -26,7 +26,7 @@ years before the plans reach.
 from __future__ import annotations
 
 import random
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 
 import numpy as np
 
@@ -232,13 +232,11 @@ def run_audits(source, store, me: FeedProfile, feeds: dict[str, FeedProfile], no
     done = 0
     start = source.requests_made
     spent = lambda: requests is not None and source.requests_made - start >= requests  # noqa: E731
+    store.expire_audits(now - QUEUE_MAX_AGE)  # once, whatever this run audits (it was a row at a time, while done < queued)
     for q in store.audit_queue(exclude_owner=me.name):
         if done >= queued or spent():
             break
         w = mine.get(q["ticker"])
-        if datetime.fromisoformat(q["queued_at"]).replace(tzinfo=timezone.utc) < now - QUEUE_MAX_AGE:
-            store.dequeue_audit(q["ticker"], q["timespan"], q["start_ms"], q["owner"])
-            continue
         if w is None or not source.serves(w["asset"]):
             continue
         from .coverage import same_market
