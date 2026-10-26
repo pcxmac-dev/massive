@@ -297,6 +297,14 @@ def old_layout(conn: sqlite3.Connection, path: Path | None) -> list[str]:
     return found
 
 
+def _ascending(rows: list[tuple]) -> list[tuple]:
+    """Bar rows (ticker, timespan, multiplier, ts, ...) oldest first. Feeds send history newest
+    first, and a WITHOUT ROWID table filled from the left splits its pages half empty: the same
+    bars written in descending order took 1.76 times the pages (8,007 against 4,553 for 200,000).
+    The sort is stable: of two rows for one time in a write, the later still wins."""
+    return sorted(rows, key=lambda r: r[3])
+
+
 class _Feed:
     """One feed's files: its bars in this connection's main database and its ticks attached as
     `ticks` once it has any (both in memory when the store is)."""
@@ -436,7 +444,7 @@ class FeedStore:
 
     def upsert_trades(self, source: str, ticker: str, trades: Iterable[dict]) -> int:
         ticker = ticker.upper()
-        rows = [
+        rows = sorted((  # oldest first: see _ascending
             (
                 ticker, int(t["sip_timestamp"]), int(t.get("sequence_number") or 0),
                 t["price"], t["size"], t.get("exchange"),
@@ -444,7 +452,7 @@ class FeedStore:
                 t.get("id"), t.get("tape"),
             )
             for t in trades
-        ]
+        ), key=lambda r: (r[1], r[2]))
         feed = self._feed(source, create=True)
         feed.attach_ticks()
         with feed.conn:
@@ -523,7 +531,7 @@ class FeedStore:
     def upsert_bars(self, source: str, ticker: str, timespan: str, multiplier: int, bars: Iterable[dict]) -> int:
         ticker = ticker.upper()
         stored = _stored_ms()
-        rows = [_bar_row(ticker, timespan, multiplier, b, stored) for b in bars]
+        rows = _ascending([_bar_row(ticker, timespan, multiplier, b, stored) for b in bars])
         conn = self._feed(source, create=True).conn
         with conn:
             conn.executemany(_UPSERT_BAR, rows)
@@ -538,7 +546,7 @@ class FeedStore:
         where the feed sent a bar for that time. Returns bars stored."""
         ticker = ticker.upper()
         stored = _stored_ms()
-        rows = [(*_bar_row(ticker, timespan, multiplier, b, stored)[:11], derivation, stored) for b in bars]
+        rows = _ascending([(*_bar_row(ticker, timespan, multiplier, b, stored)[:11], derivation, stored) for b in bars])
         conn = self._feed(source, create=True).conn
         with conn:  # the statement's own rows (total_changes would count the change log's too)
             n = conn.executemany(
@@ -1042,10 +1050,10 @@ class FeedStore:
             return 0
         ticker = ticker.upper()
         stored = _stored_ms()
-        bars = [_bar_row(ticker, timespan, 1, {
+        bars = _ascending([_bar_row(ticker, timespan, 1, {
             "t": int(t), "o": r.o, "h": r.h, "l": r.l, "c": r.c, "v": r.v,
             "vw": None if pd.isna(r.vw) else r.vw, "n": None if pd.isna(r.n) else int(r.n)}, stored) + (derivation,)
-            for t, r in zip(comp.index, comp.itertuples())]
+            for t, r in zip(comp.index, comp.itertuples())])
         rows = [(ticker, timespan, int(t), int(r.venues), float(r.sd_bps), float(r.range_bps), float(r.env_h),
                  float(r.env_l), r.members, r.outliers, derivation) for t, r in zip(comp.index, comp.itertuples())]
         conn = self._feed(COMPOSITE, create=True).conn

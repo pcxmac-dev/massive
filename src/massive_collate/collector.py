@@ -20,7 +20,7 @@ from .config import UNLIMITED_BACKFILL_YEARS, Tier, asset_tier
 from .errors import BudgetExhausted, NotEntitled, Paused, RateLimited, SourceError
 from . import freshness
 from .futures import candidate_contracts, roll_schedule
-from .coverage import STEP_MS, FeedProfile, frame_key, frame_parts, frontier_ms, has_open_time, ms, plan, second_floor
+from .coverage import STEP_MS, FeedProfile, frame_parts, frontier_ms, has_open_time, ms, plan, second_floor
 from .sources.base import DataSource
 from .symbols import ASSETS
 from .storage import Store
@@ -1291,17 +1291,10 @@ def sync(
                     except NotEntitled:
                         n_day = 0
                     result.rows += n_day
-                    # the source's own candles above a minute (5 min, 1 h), which replace the ones built here
-                    n_frames = 0
-                    for key in (frame_key(t, m) for t, m in source.native_frames(asset)):
-                        try:
-                            n_frames += sync_bars(source, store, ticker, key, item_floor, until, **span)
-                        except NotEntitled:
-                            pass
-                    result.rows += n_frames
-                    log(f"{ticker} {resolution}: {n} rows, daily: {n_day} rows"
-                        + (f", 5 min and hourly: {n_frames} rows" if n_frames else "")
-                        + f" ({source.requests_made - spent} requests)")
+                    # every other frame (30 s, 5 and 30 min, hours, weeks ...) is built here from the
+                    # 1-second, 1-minute and daily bars (derive.py): a feed's own 5-minute and hourly
+                    # candles are not fetched (requests, and the same bars stored twice)
+                    log(f"{ticker} {resolution}: {n} rows, daily: {n_day} rows ({source.requests_made - spent} requests)")
                 else:
                     log(f"{ticker} {resolution}: {n} rows ({source.requests_made - spent} requests)")
                 store.set_synced(source.name, ticker, now)

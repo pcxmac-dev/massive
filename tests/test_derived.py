@@ -163,7 +163,7 @@ def test_a_coarser_frame_is_fetched_only_as_far_as_its_bars_are_complete():
     assert frontier_ms("crypto", tier, now, "hour") == t(7, 0)
 
 
-def test_a_feeds_own_frames_are_collected_and_replace_the_built_ones(store):
+def test_only_seconds_minutes_and_days_are_fetched_every_other_frame_is_built(store):
     from datetime import datetime as dt, timedelta
 
     from massive_collate.collector import ET, sync
@@ -184,10 +184,11 @@ def test_a_feeds_own_frames_are_collected_and_replace_the_built_ones(store):
     sync(src, store, TIERS["free"], now, log=lambda m: None)
     conn = store._bars("fake")
     got = dict(conn.execute("SELECT timespan || multiplier, COUNT(*) FROM bars GROUP BY 1").fetchall())
-    assert got["minute5"] == 1 and got["hour1"] == 1
+    # only 1-second, 1-minute and daily bars are fetched: the feed's own 5-minute and hourly are not
+    assert "minute5" not in got and "hour1" not in got
+    assert {c[3] for c in src.bar_calls} <= {"minute", "day"}
     built = conn.execute("SELECT ts FROM built_bars WHERE timespan='minute' AND multiplier=5").fetchall()
-    assert built == [(t(5),)]  # the feed's 10:00 replaced the built one; 10:05, which it did not send, is built
-    assert store.coverage("SPCX", "minute:5", received_only=True).get("fake")
+    assert (t(0),) in built and (t(5),) in built  # built here from the minutes
 
 
 def test_seconds_can_go_on_past_the_second_layer_interpolated_from_minutes(store, monkeypatch):

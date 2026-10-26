@@ -122,3 +122,22 @@ def test_backup_and_integrity(tmp_path):
         assert len(copy.load_bars(["X"], "minute")) == 1
     with Store(dest, feeds_dir=feeds_backup_dir(dest)) as copy:
         assert len(copy.load_trades("X")) == 1 and len(copy.load_bars(["X"], "minute")) == 1
+
+
+def test_history_written_newest_first_does_not_leave_pages_half_empty():
+    # feeds send history newest first; written in that order a WITHOUT ROWID table split its
+    # pages half full (1.76 times the disk): each write is stored oldest first
+    from massive_collate.storage import Store
+
+    def pages(descending: bool) -> int:
+        s = Store(":memory:")
+        t0 = 1_700_000_000_000
+        for page in range(10):
+            bars = [{"t": t0 + (page * 5000 + i) * 60_000, "o": 1.5, "h": 2.5, "l": 0.5, "c": 1.25, "v": 1234.0}
+                    for i in range(5000)]
+            s.upsert_bars("massive", "AAPL", "minute", 1, bars[::-1] if descending else bars)
+        n = s._bars("massive").execute("PRAGMA page_count").fetchone()[0]
+        s.close()
+        return n
+
+    assert pages(descending=True) <= pages(descending=False) * 1.05
