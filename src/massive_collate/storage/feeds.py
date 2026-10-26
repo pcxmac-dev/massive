@@ -1115,6 +1115,21 @@ class FeedStore:
             return out
         return self._cached(("daily_snapshot", source, sessions), compute)
 
+    def last_days(self, source: str, tickers: list[str], n: int = 2) -> dict[str, list[tuple]]:
+        """{ticker: [(ts, close, volume), ...]}: each ticker's newest `n` daily bars on a feed, newest
+        first (one index seek a ticker: a filter on the date alone scanned every minute and second
+        bar the feed holds)."""
+        conn = self._bars(source)
+        if conn is None:
+            return {}
+        out = {}
+        for t in tickers:
+            rows = conn.execute("SELECT ts, close, volume FROM bars WHERE ticker=? AND timespan='day' AND multiplier=1 "
+                                "ORDER BY ts DESC LIMIT ?", (t.upper(), n)).fetchall()
+            if rows:
+                out[t.upper()] = rows
+        return out
+
     def bar_edges(self, source: str, ticker: str, timespan: str = "minute", multiplier: int = 1,
                   received_only: bool = False) -> tuple | None:
         """(first, last) bar start in ms for one series (with `received_only`, of what the feed sent,

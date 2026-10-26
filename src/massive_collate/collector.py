@@ -961,6 +961,56 @@ def _unserved_request(store: Store, source: str, now: datetime, served: dict | N
     return None
 
 
+# The order a run takes symbols in (after those opened in the chart, which always go first):
+# the user's watchlists, then the last session's big movers, then the initializer's order (most
+# traded first). Big movers: the largest moves from the previous close among stocks that traded at
+# least MOVERS_MIN_DOLLARS, from the daily bars already held (no requests).
+MOVERS = 200
+MOVERS_MIN_DOLLARS = 5_000_000
+MOVERS_TTL_S = 300.0
+_movers_cache: dict[str, tuple[float, list[str]]] = {}
+
+
+def big_movers(store: Store, source: str, tickers: list[str], top: int = MOVERS) -> list[str]:
+    """The `top` stocks that moved most (absolute change from the previous close) in the newest
+    session `source` holds daily bars for, most first; cached MOVERS_TTL_S."""
+    import time as _time
+
+    hit = _movers_cache.get(source)
+    if hit is not None and _time.monotonic() - hit[0] < MOVERS_TTL_S:
+        return hit[1][:top]
+    days = store.last_days(source, tickers, 2)
+    latest = max((r[0][0] for r in days.values()), default=None)
+    moves = []
+    for t, r in days.items():
+        if len(r) == 2 and r[0][0] == latest and r[1][1] and r[0][1] * (r[0][2] or 0) >= MOVERS_MIN_DOLLARS:
+            moves.append((abs(r[0][1] / r[1][1] - 1), t))
+    out = [t for _, t in sorted(moves, reverse=True)]
+    _movers_cache[source] = (_time.monotonic(), out)
+    return out[:top]
+
+
+def watchlist_tickers(store: Store) -> list[str]:
+    """The tickers on the user's watchlists (the rail's lists), in list order."""
+    from .live import WATCHLISTS_KEY
+
+    lists = store.kv_json(WATCHLISTS_KEY, [])
+    return list(dict.fromkeys(str(t).upper() for lst in lists if isinstance(lst, dict) for t in lst.get("tickers") or []))
+
+
+def fetch_order(store: Store, source: str, tickers: list[str]) -> dict[str, int]:
+    """{ticker: rank}, 0 first: watchlists, big movers, then the initializer's order."""
+    from .initializer import load_order
+
+    first = list(dict.fromkeys([*watchlist_tickers(store), *big_movers(store, source, tickers)]))
+    rest = load_order(store)
+    out = {t: i for i, t in enumerate(first)}
+    n = len(out)
+    for t, r in rest.items():
+        out.setdefault(t, n + r)
+    return out
+
+
 def _priority_raw(store: Store) -> dict:
     return store.kv_json(PRIORITY_KEY, {})
 
@@ -1090,13 +1140,12 @@ def sync(
             fetch_news(source, store, now, log)
             from .gui.world import PROXIES
             fetch_market_moves(source, store, now, PROXIES, log)
-        # Keep complete symbols current first; backfills take what budget is left, in the
-        # initializer's order (most traded first; initializer.py), then by ticker.
-        from .initializer import load_order
-
-        order = load_order(store)
+        # Keep complete symbols current first; backfills take what budget is left, in the fetch
+        # order (fetch_order: watchlists, big movers, then most traded), then by ticker.
         refusals = Refusals(store, source.name)
         watched = store.watchlist(source.name)
+        # watchlists, then the last session's big movers, then the most traded (fetch_order)
+        order = fetch_order(store, source.name, [w["ticker"] for w in watched if w["asset"] == "stock"])
         # Two passes: every stock's minute history first, most traded first; then, once none is left
         # to fill, every stock's window of 1-second bars in the same order (SECOND_HISTORY_DAYS).
         filling = _minutes_first(watched, floors, refusals, now)

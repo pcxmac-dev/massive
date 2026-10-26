@@ -194,7 +194,7 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
 
 def ranked(rows: list[dict], order: dict[str, int] | None = None) -> list[int]:
     """Row indexes, most worth seeing first: by state (STATE_RANK), then the initializer's order
-    (initializer.load_order: {ticker: rank})."""
+    (collector.fetch_order: {ticker: rank})."""
     order = order or {}
     return sorted(range(len(rows)), key=lambda i: (STATE_RANK.get(rows[i]["state"], 9),
                                                    order.get(rows[i]["ticker"], len(order)), rows[i]["ticker"]))
@@ -423,7 +423,6 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
     limits, each source's state, live feeds, the log. With `rows_cache`, the symbols' rows (a few
     index seeks a symbol in every feed file) are kept `rows_ttl_s`, built again sooner when the
     symbol being fetched changes."""
-    from ..initializer import load_order
     now = (now or datetime.now(timezone.utc)).astimezone(ET)
     today = now.date()
     settings = settings.for_source(source)  # the feed's own plan, rate and caps
@@ -439,17 +438,18 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
         if r["status"] == "running" and not owner:
             r["status"] = "abandoned"  # the process died; the next run marks it so in the database
 
-    order = load_order(store)
     focus_set = frozenset({focus.upper()}) if focus else frozenset()
     key = (source, current, focus_set)
     hit = rows_cache.get(key) if rows_cache is not None else None
     if hit is not None and _time.monotonic() - hit[0] < rows_ttl_s:
-        every = hit[1]
+        every, order = hit[1], hit[2]
     else:
+        # the run's own order: watchlists, the last session's big movers, then the most traded
+        order = collector.fetch_order(store, source, [w["ticker"] for w in store.watchlist(source) if w["asset"] == "stock"])
         every = symbol_rows(store, settings, source, now, current, detail=DETAIL_ROWS, focus=focus_set, order=order)
         if rows_cache is not None:
             rows_cache.clear()  # one feed, one fetching symbol at a time: only the newest is kept
-            rows_cache[key] = (_time.monotonic(), every)
+            rows_cache[key] = (_time.monotonic(), every, order)
     symbols = [every[i] for i in ranked(every, order) if every[i].get("planned")]
     counts: dict[str, int] = {}
     for s in every:

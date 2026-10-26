@@ -30,6 +30,15 @@ def no_agency_requests(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_cached_movers():
+    """The big movers are cached per process for a few minutes (collector.big_movers): each test
+    starts without another test's."""
+    from massive_collate import collector
+
+    collector._movers_cache.clear()
+
+
+@pytest.fixture(autouse=True)
 def tick_access_restored():
     """cli.main sets the process's tick access from BARS_ONLY (off by default): a test that runs a
     command must not leave the stores of the tests after it unable to open tick files."""
