@@ -13,6 +13,12 @@ class NotEntitled(SourceError):
     """The request is outside what your plan with this source covers."""
 
 
+class Unauthorized(SourceError):
+    """The source refused the key itself (HTTP 401: revoked, mistyped, expired): not one symbol's
+    plan, so not a NotEntitled. Every request would be refused alike, so it ends the run and kills
+    the feed's fetching (killswitch.is_refusal); the client sends nothing more to that host."""
+
+
 class RateLimited(SourceError):
     """Still rate limited after all retries."""
 

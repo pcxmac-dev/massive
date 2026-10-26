@@ -74,6 +74,16 @@ class AlpacaClient(MassiveClient):
                 self._host = host
         return super()._request(path_or_url, params)
 
+    def _unauthorized(self, host: str, message: str):
+        """A 401 from the data API is the keys refused (the run stops). From the trading API it can
+        be the keys of the other kind of account (paper keys on the live API, or the reverse:
+        ALPACA_PAPER), which the data API takes all the same: only the reference record is lost
+        (not asked again this run), the bars still come."""
+        if host == urlparse(self.trading_url).netloc:
+            return NotEntitled(401, f"{message} (the trading API at {host} refused the keys: "
+                                    "paper keys need ALPACA_PAPER=1, live keys ALPACA_PAPER=0)")
+        return super()._unauthorized(host, message)
+
     def pages(self, path: str, params: dict[str, Any], key: str) -> Iterator[dict[str, list[dict]]]:
         """Each page's `key` object ({symbol: [rows]}), following next_page_token."""
         params = dict(params)

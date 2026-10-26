@@ -21,9 +21,14 @@ def rate_window(name: str, settings: Settings) -> tuple[int | None, float]:
     if name == "coinbase":
         return 8, 1.0  # 10 a second per address (public endpoints): a minute's window let 300 go in a burst
     rpm = settings.for_source(name).tier.requests_per_minute
-    # A few a minute (Massive's free classes: 5): a couple of seconds' margin, so jitter between
-    # sending and arriving never puts six in the server's minute.
-    return rpm, 62.0 if rpm and rpm <= 10 else 60.0
+    return rpm, minute_window(rpm)
+
+
+def minute_window(rpm: int | None) -> float:
+    """The seconds a limiter of `rpm` requests a minute keeps them in. A few a minute (Massive's
+    free classes: 5): a couple of seconds' margin, so jitter between sending and arriving never
+    puts six in the server's minute."""
+    return 62.0 if rpm and rpm <= 10 else 60.0
 
 
 def _limiter(name: str, settings: Settings) -> RateLimiter:
@@ -37,8 +42,10 @@ def _build_massive(settings: Settings, request_budget: int | None) -> DataSource
         rate_limiter=_limiter("massive", settings),
         request_budget=request_budget,
     )
-    # Asset classes on another plan keep that plan's rate (the free plan: 5 a minute per class).
-    client.class_limiters = {a: RateLimiter(t.requests_per_minute, 60.0) for a, t in settings.tier.by_asset}
+    # Asset classes on another plan keep that plan's rate (the free plan: 5 a minute per class),
+    # with the same margin as the feed's own window.
+    client.class_limiters = {a: RateLimiter(t.requests_per_minute, minute_window(t.requests_per_minute))
+                             for a, t in settings.tier.by_asset}
     return MassiveSource(client)
 
 
