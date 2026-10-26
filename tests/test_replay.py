@@ -159,10 +159,12 @@ def test_the_routes(store):
         status, body = get("/api/schemes")
         assert status == 200 and [s["key"] for s in body["schemes"]] == list(sc.SCHEMES)
         lo, hi = _ms(f"{DAYS[1]} 09:30"), _ms(f"{DAYS[4]} 15:00")
-        status, body = get(f"/api/scheme?source=*&ticker=SPCX&period=minute&span=15&from={lo}&to={hi}&scheme=cusum")
-        assert status == 200 and body["level"]["label"] == "15 min" and body["equity"]
-        status, body = get(f"/api/scheme?source=*&ticker=SPCX&period=minute&span=15&from={lo}&to={hi}&scheme=nope")
+        status, body = get(f"/api/scheme?source=*&ticker=SPCX&period=minute&span=30&from={lo}&to={hi}&scheme=cusum")
+        assert status == 200 and body["level"]["label"] == "30 min" and body["equity"]
+        status, body = get(f"/api/scheme?source=*&ticker=SPCX&period=minute&span=30&from={lo}&to={hi}&scheme=nope")
         assert status == 400
+        status, body = get(f"/api/scheme?source=*&ticker=SPCX&period=minute&span=15&from={lo}&to={hi}&scheme=cusum")
+        assert status == 400 and "no level 15 minute" in body["error"]  # not a level the chart draws
         status, body = get(f"/api/replay?source=*&ticker=SPCX&period=minute&span=5&from={lo}&limit=10&unfiltered=1")
         assert status == 200 and len(body["bars"]) == 10 and body["more"]
     finally:

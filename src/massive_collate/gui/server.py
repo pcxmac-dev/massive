@@ -316,12 +316,13 @@ class ChartApp:
         to_ms = int(q["to"]) if q.get("to") else None
         after_ms = int(q["after"]) if q.get("after") else None
         since_ms = int(q["since"]) if q.get("since") else None
+        period, span = _level(q)
         if self._auto(q, style.type):
             return self.window.styled_page(
-                q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)), q.get("session", "regular"),
+                q["source"], q["ticker"], period, span, q.get("session", "regular"),
                 style=style, model=_model(q), to_ms=to_ms, after_ms=after_ms, since_ms=since_ms, limit=limit)
         return self.engine.bars(
-            q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
+            q["source"], q["ticker"], period, span,
             q.get("session", "regular"), to_ms=to_ms, since_ms=since_ms, after_ms=after_ms,
             limit=limit, style=style, adjust=_adjust(q.get("adjust")), lod=int(q.get("lod", 1)), model=_model(q),
         )
@@ -332,15 +333,15 @@ class ChartApp:
         step = float(q["step"]) if q.get("step") not in (None, "", "auto") else None
         if step is not None and not 0 < step < 1e9:
             raise ValueError("step must be a positive price")
+        period, span = _level(q)
         if self.window.handles(q["source"], q["ticker"]):  # the one bar's window, not the whole history
             if q.get("from") and q.get("to"):  # the highlight's stretch, with its major prices
-                return self.window.range_profile(q["source"], q["ticker"], q.get("period", "minute"),
-                                                 int(q.get("span", 1)), q.get("session", "regular"), int(q["from"]),
-                                                 int(q["to"]), step=step)
-            return self.window.profile(q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
-                                       q.get("session", "regular"), at_ms=int(q["at"]) if q.get("at") else None, step=step)
+                return self.window.range_profile(q["source"], q["ticker"], period, span, q.get("session", "regular"),
+                                                 int(q["from"]), int(q["to"]), step=step)
+            return self.window.profile(q["source"], q["ticker"], period, span, q.get("session", "regular"),
+                                       at_ms=int(q["at"]) if q.get("at") else None, step=step)
         return self.engine.profile(
-            q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)), q.get("session", "regular"),
+            q["source"], q["ticker"], period, span, q.get("session", "regular"),
             at_ms=int(q["at"]) if q.get("at") else None, step=step, adjust=_adjust(q.get("adjust")))
 
     STREAM_SECONDS = 300  # one stream's life; the page opens the next from where it got to
@@ -567,12 +568,13 @@ class ChartApp:
     @_heavy
     def future(self, q: dict[str, str]) -> dict:
         style = Style(type=q.get("type", "candles"))
+        period, span = _level(q)
         if self._auto(q, style.type):  # projected from the level's newest bar, not the whole history
             from .projection import project
 
             if style.type in PRICE_BASED:  # bricks follow price: no time axis to project
                 return {"timestamps": [], "last": None, "total": 0}
-            period, span, session = q.get("period", "minute"), int(q.get("span", 1)), q.get("session", "regular")
+            session = q.get("session", "regular")
             s = self.window.series(q["source"], q["ticker"])
             model = _model(q)
             # a model's newest value may be bars back (a stretch shorter than its window has none)
@@ -592,18 +594,19 @@ class ChartApp:
                          cache=self.engine._future_cache)
             return {"timestamps": ts, "last": newest[-1]["timestamp"], "total": 1, "lastBar": newest[-1]["timestamp"]}
         return self.engine.future(
-            q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)), q.get("session", "regular"),
+            q["source"], q["ticker"], period, span, q.get("session", "regular"),
             style=style, adjust=_adjust(q.get("adjust")), lod=int(q.get("lod", 1)), model=_model(q),
             offset=max(0, int(q.get("offset", 0))), count=min(int(q.get("count", 500)), 5000),
         )
 
     @_heavy
     def range_stats(self, q: dict[str, str]) -> dict:
+        period, span = _level(q)
         if self._auto({**q, "auto": "1"}):  # its own window only
-            return self.window.range_stats(q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
-                                           q.get("session", "regular"), int(q["from"]), int(q["to"]), model=_model(q))
+            return self.window.range_stats(q["source"], q["ticker"], period, span, q.get("session", "regular"),
+                                           int(q["from"]), int(q["to"]), model=_model(q))
         return self.engine.range_stats(
-            q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
+            q["source"], q["ticker"], period, span,
             q.get("session", "regular"), int(q["from"]), int(q["to"]), adjust=_adjust(q.get("adjust")),
             model=_model(q),
         )
@@ -632,9 +635,9 @@ class ChartApp:
         fee, slip = float(q.get("fee") or 0), float(q.get("slippage") or 0)
         if not (0 <= fee <= 1000 and 0 <= slip <= 1000):
             raise ValueError("fee and slippage: 0 to 1,000 basis points")
-        return self.window.scheme(q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
-                                  q.get("session", "regular"), int(q["from"]), int(q["to"]), q["scheme"], given,
-                                  Costs(fee, slip), q.get("longOnly") == "1")
+        period, span = _level(q)
+        return self.window.scheme(q["source"], q["ticker"], period, span, q.get("session", "regular"), int(q["from"]),
+                                  int(q["to"]), q["scheme"], given, Costs(fee, slip), q.get("longOnly") == "1")
 
     @_heavy
     def replay(self, q: dict[str, str]) -> dict:
@@ -644,8 +647,9 @@ class ChartApp:
         limit = int(q.get("limit") or REPLAY_PAGE)
         if not 1 <= limit <= 20_000:
             raise ValueError("limit: 1 to 20,000 bars")
-        return self.window.replay(q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
-                                  q.get("session", "regular"), int(q["from"]), limit)
+        period, span = _level(q)
+        return self.window.replay(q["source"], q["ticker"], period, span, q.get("session", "regular"), int(q["from"]),
+                                  limit)
 
     # -- trading (trading/; docs/ARCHITECTURE.md, "Trading"): paper first, live trading off ----------
     @property
@@ -1145,6 +1149,14 @@ def _model(q: dict[str, str]) -> Model:
         window=int(q.get("window", 9)), order=int(q.get("order", 3)), reset_gaps=q.get("gaps", "1") != "0",
         causal=q.get("causal", "0") == "1",
     ).validate()
+
+
+def _level(q: dict[str, str]) -> tuple[str, int]:
+    """The chart level a request asks for (period, span): one the chart draws (window.LEVELS, the
+    series path's intervals too), checked before anything is read (ValueError: 400)."""
+    from .window import check_level
+
+    return check_level(q.get("period", "minute"), int(q.get("span", 1)))
 
 
 def _adjust(value: str | None) -> str:

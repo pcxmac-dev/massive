@@ -116,6 +116,15 @@ def level_label(period: str, span: int) -> str:
     return f"{span} {names[period]}"
 
 
+def check_level(period: str, span: int) -> tuple[str, int]:
+    """(period, span) when the chart draws that level (LEVELS, the series path's intervals as well),
+    else ValueError (the request's 400): a span of 0 paged forever and divided by zero, a huge one
+    read years in one go."""
+    if (period, span) not in LEVELS:
+        raise ValueError(f"no level {span} {period}: one of {', '.join(level_label(*lv) for lv in LEVELS)}")
+    return period, span
+
+
 class WindowReader:
     """Pages of bars at a level, for a window of time, from the store (see the module docstring).
     Shares the chart engine's store and lock."""
@@ -220,6 +229,8 @@ class WindowReader:
     def _intraday_page(self, s, feeds, period, span, session, to_ms, after_ms, since_ms, limit) -> dict:
         base = BASE[period]
         step, base_ms = UNIT_MS[period] * span, UNIT_MS[base]
+        if not (step > 0 and limit > 0):  # a window of no width never reaches the data's edge: the loops would not end
+            raise ValueError(f"no level {span} {period}")
         with self.engine.lock:
             edges = [e for e in (self.store.bar_edges(f, s.ticker, base) for f in feeds) if e]
         if not edges:
