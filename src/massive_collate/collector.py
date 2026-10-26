@@ -1211,8 +1211,8 @@ def _next_item(pending: list[dict], store: Store, now: datetime, source: str = "
 def sync(
     source: DataSource, store: Store, tier: Tier, now: datetime | None = None, log: Log = print,
     refresh_hours: float = 0.0, on_item: Callable[[str], None] | None = None, only: set[str] | None = None,
-    directory_allowance: int = 0, feeds: dict[str, FeedProfile] | None = None, audits: tuple[int, int] = (0, 0),
-    tick_min_free_gb: int = 250, published_only: bool = False,
+    directory_allowance: int | Callable[[], int] = 0, feeds: dict[str, FeedProfile] | None = None,
+    audits: tuple[int, int] = (0, 0), tick_min_free_gb: int = 250, published_only: bool = False,
 ) -> SyncResult:
     """One scheduled run over the watchlist for a source.
 
@@ -1228,7 +1228,9 @@ def sync(
 
     `feeds` describes every configured feed, so this one downloads only spans no better-ranked
     feed can serve (see coverage.py); `audits` = (queued, random) audits this run may do for
-    other feeds' data.
+    other feeds' data. `directory_allowance`: requests the directory's placeholders and icons may
+    use once the watchlist and audits are done, or a function giving it then (from what the day
+    has spent by that time).
     """
     now = (now or now_et()).astimezone(ET)
     today = now.date()
@@ -1475,10 +1477,14 @@ def sync(
             from .audit import allowance, run_audits
             run_audits(source, store, me, feeds, now, queued=audits[0], random_count=audits[1], log=log,
                        requests=allowance(source))  # spot checks: 2 % of the run's cap
-        if only is None and directory_allowance > 0 and not archival and source.serves("stock"):  # placeholders and icons: leftover budget only
-            spent = source.requests_made
-            refresh_directory(source, store, today, log)
-            fill_directory_icons(source, store, directory_allowance - (source.requests_made - spent), today, log)
+        if only is None and not archival and source.serves("stock"):  # placeholders and icons: leftover budget only
+            # reckoned now, after the watchlist and audits have spent (reckoned before the run, icons
+            # could take the day's reserve, and later runs sent nothing for the rest of the day)
+            allowance = directory_allowance() if callable(directory_allowance) else directory_allowance
+            if allowance > 0:
+                spent = source.requests_made
+                refresh_directory(source, store, today, log)
+                fill_directory_icons(source, store, allowance - (source.requests_made - spent), today, log)
     except StopRun as e:
         result.stopped = str(e)
         log(f"stopped: {e}")

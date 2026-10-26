@@ -469,15 +469,19 @@ def _sync(args, settings: Settings) -> tuple[int, int]:
                 if source is None:
                     continue
                 # Directory placeholders and icons get only what the watchlist leaves, and never the
-                # last DAILY_RESERVE requests of the day (later runs need them for updates).
+                # last DAILY_RESERVE requests of the day (later runs need them for updates): reckoned
+                # when their turn comes, from what the day has spent by then (this run included).
                 feed = settings.for_source(name)
-                reserve_left = feed.max_requests_per_day - collector.DAILY_RESERVE - store.requests_today(name)
+
+                def reserve_left(store=store, name=name, feed=feed) -> int:
+                    return max(0, feed.max_requests_per_day - collector.DAILY_RESERVE - store.requests_today(name))
+
                 result = collector.sync(source, store, feed.tier, log=log, refresh_hours=settings.refresh_hours,
                                         feeds=feed_profiles(settings), only=tickers, published_only=True,
                                         audits=(settings.audits_per_run, settings.audits_random_per_run),
                                         tick_min_free_gb=settings.tick_min_free_gb,
                                         on_item=lambda t: store.set_run_current(args._run_id, t),
-                                        directory_allowance=max(0, reserve_left))
+                                        directory_allowance=reserve_left)
                 args._rows = result.rows
                 log(f"sync {name}: {result.rows} rows saved"
                     + (f", {result.skipped} symbols refreshed within {settings.refresh_hours:g} h left for later"

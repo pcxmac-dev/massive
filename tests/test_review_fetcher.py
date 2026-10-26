@@ -259,3 +259,17 @@ def test_an_unscheduled_closure_from_the_official_calendar_is_not_asked_for(stor
     finally:
         freshness.CALENDAR.overrides = Overrides()
         freshness.expected.cache_clear()
+
+
+# -- the directory's allowance (finding 16) ------------------------------------------------------------
+
+def test_the_directorys_allowance_is_reckoned_after_the_watchlist_has_spent(store, monkeypatch):
+    left_today = 20  # the day's cap less the reserve, before this run
+    store.watch("fake", ["AAA"], "minute")
+    src = FakeSource(entitled=("minute",), bars={"minute": [_bar(datetime(2026, 10, 20, 10, tzinfo=ET))], "day": []})
+    given = []
+    monkeypatch.setattr(collector, "refresh_directory", lambda *a, **k: 0)
+    monkeypatch.setattr(collector, "fill_directory_icons",
+                        lambda source, store, allowance, today, log: given.append(allowance) or 0)
+    sync(src, store, FREE, NOW, log=_log, directory_allowance=lambda: left_today - src.requests_made)
+    assert src.requests_made > 0 and given == [left_today - src.requests_made]  # what the run left, not the reserve
