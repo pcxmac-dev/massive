@@ -73,3 +73,75 @@ def test_only_a_record_that_says_who_the_instrument_is_retires_a_symbol_and_a_li
     dated = Other(listing=Stock("BBB", active=False, details={"delisted_utc": "2026-10-20T00:00:00Z"}))
     collector.check_listing(dated, store, store.watchlist("other", "BBB")[0], NOW.date(), log=_log)
     assert {w["retired_on"] for w in store.watchlist(ticker="BBB")} == {date(2026, 10, 20)}
+
+
+# -- exchange transfers and reused symbols (findings 5 and 19) ---------------------------------------
+
+def _directory(store, ticker: str, exchange: str, figi: str | None, name: str) -> None:
+    """The directory of listings, where a bulk-watched stock's exchange pin came from."""
+    store.update_directory("fake", "stock", [{"ticker": ticker, "name": name, "exchange": exchange, "type": "CS",
+                                              "figi": figi}], NOW.date() - timedelta(days=3))
+
+
+def test_a_stock_that_moved_exchange_is_followed_when_it_is_the_same_instrument(store):
+    for feed in ("fake", "other"):  # pinned by the initializer from the directory, never checked
+        store.watch(feed, ["BCPC"], "minute", exchange="XNYS")
+    _directory(store, "BCPC", "XNYS", "BBG-BCPC", "Balchem Corp")
+    moved = Stock("BCPC", name="Balchem Corp", primary_exchange=NASDAQ, list_date=date(2020, 1, 2), figi="BBG-BCPC")
+    src = FakeSource(entitled=("minute",), bars={"minute": [_bar(datetime(2026, 10, 20, 10, tzinfo=ET))], "day": []},
+                     listing=moved)
+    logged = []
+    sync(src, store, FREE, NOW, log=logged.append)
+    assert {w["exchange"] for w in store.watchlist(ticker="BCPC")} == {"XNAS"}  # every feed's pin
+    assert any("BCPC: moved from XNYS to XNAS (the same FIGI); followed there" in m for m in logged)
+    assert store.bar_range("fake", "BCPC", "minute") is not None
+    # without FIGIs to compare, the same name (its legal form aside) is the same instrument
+    store.watch("fake", ["KO"], "minute", exchange="XNYS")
+    store.set_listing("fake", "KO", None, None, None, "The Coca-Cola Company")
+    renamed = Stock("KO", name="Coca-Cola Co Common Stock", primary_exchange=NASDAQ)
+    assert collector.check_listing(FakeSource(listing=renamed), store, store.watchlist("fake", "KO")[0],
+                                   NOW.date(), log=_log).ok
+
+
+def test_a_stock_elsewhere_not_known_to_be_the_same_is_asked_weekly_and_holds_back_no_seconds(store):
+    store.watch("fake", ["AAA"], "auto")
+    store.watch("fake", ["ZZZ"], "auto", exchange="XNYS")  # no FIGI or name to compare: skipped
+    listing = Stock("X", name="Some Co", primary_exchange=NASDAQ, list_date=date(2026, 1, 2), figi="BBG-X")
+    src = FakeSource(entitled=("second", "minute"), bars={"minute": [], "second": [], "day": []}, listing=listing)
+    logged = []
+    sync(src, store, FREE, NOW, log=logged.append)
+    assert any("ZZZ: listed on XNAS, not XNYS as watched, and not known to be the same instrument" in m for m in logged)
+    assert store.watchlist("fake", "ZZZ")[0]["checked_at"] == NOW.date()
+    assert src.instrument_calls == 2 and not [c for c in src.bar_calls if c[0] == "ZZZ"]
+    src.bar_calls = []
+    sync(src, store, FREE, NOW + timedelta(days=1), log=_log)
+    assert src.instrument_calls == 2  # not asked again within the week
+    # ZZZ can never finish its minutes: AAA's 1-second window does not wait for it
+    assert [c[0] for c in src.bar_calls if c[3] == "second"] == ["AAA"]
+    sync(src, store, FREE, NOW + timedelta(days=8), log=_log)
+    assert src.instrument_calls == 4  # a week on, both checked again
+
+
+def test_a_reused_symbol_is_cleared_on_every_feed_watching_it(store):
+    old = [_bar(datetime(2026, 9, 1, 10, tzinfo=ET))]
+    for feed in ("fake", "other", "tiingo"):
+        store.watch(feed, ["SPCX"], "minute")
+        store.upsert_bars(feed, "SPCX", "minute", 1, old)
+        store.add_coverage(feed, "SPCX", "minute", old[0]["t"], old[0]["t"] + 60_000)
+        store.set_backfilled(feed, "SPCX", date(2024, 10, 22))
+        store.set_listing(feed, "SPCX", date(2020, 1, 2), "OLD-FIGI", NOW.date() - timedelta(days=30))
+    store.set_closed("tiingo", "SPCX", NOW)  # an archive's history complete
+    new = Stock("SPCX", name="New Co", primary_exchange=NASDAQ, list_date=date(2026, 10, 1), figi="NEW-FIGI")
+    collector.check_listing(FakeSource(listing=new), store, store.watchlist("fake", "SPCX")[0], NOW.date(), log=_log)
+    rows = {w["source"]: w for w in store.watchlist(ticker="SPCX")}
+    for feed in ("fake", "other", "tiingo"):
+        assert store.bar_range(feed, "SPCX", "minute") is None and feed not in store.coverage("SPCX", "minute")
+        assert rows[feed]["backfilled_to"] is None
+        assert rows[feed]["listed_from"] == date(2026, 10, 1) and rows[feed]["figi"] == "NEW-FIGI"
+    assert rows["tiingo"]["closed_at"] is None  # the new issuer's history to fill
+    assert rows["other"]["checked_at"] is None  # checks again (sharing this answer)
+    # rows from before the listing date go on every feed too
+    store.upsert_bars("other", "SPCX", "minute", 1, old + [_bar(datetime(2026, 10, 2, 10, tzinfo=ET))])
+    store.set_listing("fake", "SPCX", date(2026, 10, 1), "NEW-FIGI", None)
+    collector.check_listing(FakeSource(listing=new), store, store.watchlist("fake", "SPCX")[0], NOW.date(), log=_log)
+    assert store.bar_range("other", "SPCX", "minute")[0] >= ms(datetime(2026, 10, 1, tzinfo=ET))

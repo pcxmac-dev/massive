@@ -580,6 +580,9 @@ def sync_future(
 # -- listing / identity --------------------------------------------------------
 
 LISTING_RECHECK_DAYS = 7
+# Stocks a listing check found on another exchange than the one watched, not known to be the same
+# instrument: {ticker: {mic, pinned, on}}. Skipped without a request until checked again a week on.
+ELSEWHERE_KEY = "listing:elsewhere"
 
 
 @dataclass
@@ -588,15 +591,66 @@ class Listing:
     listed_from: date | None = None
 
 
+def listed_elsewhere(store: Store, today: date) -> dict[str, dict]:
+    """The stocks found on another exchange than watched (ELSEWHERE_KEY) and checked within the
+    week: they wait for their next check, and the minute pass does not wait for them (_minutes_first)."""
+    out = {}
+    for ticker, mark in store.kv_json(ELSEWHERE_KEY, {}).items():
+        try:
+            if (today - date.fromisoformat(mark["on"])).days < LISTING_RECHECK_DAYS:
+                out[ticker] = mark
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+_LEGAL_FORMS = {"inc", "incorporated", "corp", "corporation", "co", "company", "ltd", "limited", "plc", "the",
+                "common", "stock", "shares"}
+
+
+def _name_key(name: str) -> str:
+    """A company's name as compared: lower case, words only, its legal form and "common stock" left
+    out (Massive's "Balchem Corp" and Alpaca's "Balchem Corporation Common Stock" compare equal)."""
+    import re
+
+    return " ".join(w for w in re.findall(r"[a-z0-9]+", name.lower()) if w not in _LEGAL_FORMS)
+
+
+def _same_instrument(store: Store, ticker: str, inst) -> str | None:
+    """How the instrument a listing check found is known to be the one watched: "FIGI" (a FIGI the
+    feeds' earlier checks recorded, or the directory's where none did), "name" (no FIGIs to compare:
+    the same name), or None (another instrument, or nothing to compare it with)."""
+    known = [(w["figi"], w["name"]) for w in store.watchlist(ticker=ticker)]
+    if not any(f for f, _ in known):  # never checked with a FIGI here: the directory the pin came from
+        known += store.directory_identity(ticker)
+    figis, names = {f for f, _ in known if f}, {_name_key(n) for _, n in known if n}
+    if inst.figi and figis:
+        return "FIGI" if inst.figi in figis else None
+    if inst.name and _name_key(inst.name) in names - {""}:
+        return "name"
+    return None
+
+
+def _feeds_watching(store: Store, source: str, ticker: str) -> list[str]:
+    """Every feed watching a ticker (so holding its bars and spans), the checking one first."""
+    return list(dict.fromkeys([source, *(w["source"] for w in store.watchlist(ticker=ticker))]))
+
+
 def check_listing(source: DataSource, store: Store, item: dict, today: date, log: Log = print) -> Listing:
     """Make sure the symbol still means the instrument we are collecting.
 
     Symbols get reused, so data is only kept from the current instrument's
     listing date, only active instruments are collected, and a change of FIGI
-    (the symbol now belongs to someone else) clears what was stored for it.
+    (the symbol now belongs to someone else) clears what was stored for it, on
+    every feed. A stock found on another exchange than watched is followed there
+    when it is known to be the same instrument (its FIGI, or without FIGIs its
+    name); otherwise it is skipped until the next week's check.
     Costs one request per ticker per week.
     """
     ticker, checked = item["ticker"], item["checked_at"]
+    away = store.kv_json(ELSEWHERE_KEY, {}).get(ticker)
+    if away and away.get("pinned") == item["exchange"] and ticker in listed_elsewhere(store, today):
+        return Listing(False)  # on another exchange than watched, not known to be the same: asked weekly
     if checked and (today - checked).days < LISTING_RECHECK_DAYS and store.details(source.name, ticker):
         return Listing(True, item["listed_from"])
     # Another feed checked this ticker this week: share its answer instead of asking again, if it
@@ -636,23 +690,45 @@ def check_listing(source: DataSource, store: Store, item: dict, today: date, log
         return Listing(True, item["listed_from"])
     mic = inst.primary_exchange.mic if inst.primary_exchange else None
     if item["exchange"] and mic and mic != item["exchange"]:
-        log(f"{ticker}: listed on {mic}, not {item['exchange']} as watched; skipped")
-        return Listing(False)
+        # Moved exchange (BCPC: "listed on XNAS, not XNYS"): skipped, it got no data, cost a request
+        # per feed per run and, never finishing its minutes, held back every stock's 1-second pass.
+        how = _same_instrument(store, ticker, inst)
+        if how is None:
+            store.set_listing(source.name, ticker, item["listed_from"], item["figi"], today)  # checked: in a week again
+            store.kv_update(ELSEWHERE_KEY, lambda m: {**m, ticker: {"mic": mic, "pinned": item["exchange"],
+                                                                    "on": today.isoformat()}}, {})
+            log(f"{ticker}: listed on {mic}, not {item['exchange']} as watched, and not known to be the same "
+                "instrument; skipped (checked again in a week)")
+            return Listing(False)
+        store.set_exchange(ticker, mic)
+        log(f"{ticker}: moved from {item['exchange']} to {mic} (the same {how}); followed there")
+    if away:  # where it is watched now: no longer skipped
+        store.kv_update(ELSEWHERE_KEY, lambda m: {t: v for t, v in m.items() if t != ticker}, {})
     if item.get("retired_on") and identity and mic:
         store.set_retired(ticker, None)  # listed and active on its exchange: its history goes on again
         log(f"{ticker}: listed on {mic} and active; retired mark ({item['retired_on']}) cleared")
 
+    # The previous issuer's data is on every feed watching the ticker (Tiingo's and Alpaca's too),
+    # not only on the one that checked.
+    feeds = _feeds_watching(store, source.name, ticker)
     if item["figi"] and inst.figi and inst.figi != item["figi"]:
-        n = store.delete_before(source.name, ticker)
-        store.drop_coverage(source.name, ticker)  # what was held is gone: asked for again
-        store.reset_backfill(source.name, ticker)
-        log(f"{ticker}: symbol now belongs to a different instrument ({inst.name}); removed {n} old rows")
+        n = 0
+        for feed in feeds:
+            n += store.delete_before(feed, ticker)
+            store.drop_coverage(feed, ticker)  # what was held is gone: asked for again
+            store.reset_backfill(feed, ticker)
+            if feed != source.name:  # the new listing is theirs too (an archive fills from its own listing date)
+                store.set_listing(feed, ticker, inst.list_date, inst.figi, None, inst.name, inst.kind)  # checked again
+                store.set_closed(feed, ticker, None)  # a closed archive has the new issuer's history to fill
+        log(f"{ticker}: symbol now belongs to a different instrument ({inst.name}); removed {n} old rows"
+            + (f" on {len(feeds)} feeds" if len(feeds) > 1 else ""))
     if inst.list_date:
-        n = store.delete_before(source.name, ticker, _date_ns(inst.list_date))
+        n = sum(store.delete_before(feed, ticker, _date_ns(inst.list_date)) for feed in feeds)
         if n:
             log(f"{ticker}: removed {n} rows from before its {inst.list_date} listing (another instrument)")
-        if item["backfilled_to"] and item["backfilled_to"] < inst.list_date:
-            store.set_backfilled(source.name, ticker, inst.list_date)
+        for w in store.watchlist(ticker=ticker):
+            if w["backfilled_to"] and w["backfilled_to"] < inst.list_date:
+                store.set_backfilled(w["source"], ticker, inst.list_date)
     store.set_listing(source.name, ticker, inst.list_date, inst.figi, today, inst.name, inst.kind, mic)
     store.set_details(source.name, ticker, inst.details or {"unavailable": "no reference record"})
     return Listing(True, inst.list_date)
@@ -911,12 +987,14 @@ def _seconds_pending(item: dict) -> bool:
     return item.get("resolution") == "second" and item.get("seconds_from") is None
 
 
-def _minutes_first(items: list[dict], floors: dict, refusals: "Refusals", now: datetime) -> int:
+def _minutes_first(items: list[dict], floors: dict, refusals: "Refusals", now: datetime,
+                   elsewhere: dict | frozenset = frozenset()) -> int:
     """Stocks still filling their minute history (those refused run after run, which may never
-    finish, aside): while any are, no 1-second window is started, so every stock gets its whole
-    minute history first (tens of requests each) before the 1-second years (a hundred and more)."""
+    finish, and those on another exchange than watched (`elsewhere`), which cannot, aside): while
+    any are, no 1-second window is started, so every stock gets its whole minute history first
+    (tens of requests each) before the 1-second years (a hundred and more)."""
     return sum(1 for w in items if w["asset"] == "stock" and _backfilling(w, floors[w["asset"]])
-               and not refusals.paused(w["ticker"], now))
+               and not refusals.paused(w["ticker"], now) and w["ticker"] not in elsewhere)
 
 
 def _due(asset: str, tier: Tier, synced: datetime, now: datetime, refresh_hours: float) -> bool:
@@ -1195,7 +1273,7 @@ def sync(
         order = fetch_order(store, source.name, [w["ticker"] for w in watched if w["asset"] == "stock"])
         # Two passes: every stock's minute history first, most traded first; then, once none is left
         # to fill, every stock's window of 1-second bars in the same order (SECOND_HISTORY_DAYS).
-        filling = _minutes_first(watched, floors, refusals, now)
+        filling = _minutes_first(watched, floors, refusals, now, listed_elsewhere(store, today))
         if only is None and any(_seconds_pending(w) for w in watched):
             log(f"{source.name}: minute history first ({filling:,} stocks still filling); 1-second bars after"
                 if filling else f"{source.name}: 1-second pass: "
