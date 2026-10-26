@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from time import monotonic
 from typing import Callable, Iterator
 from zoneinfo import ZoneInfo
 
@@ -1171,6 +1172,11 @@ def sync(
     has spent by that time).
     """
     now = (now or now_et()).astimezone(ET)
+    started = monotonic()
+
+    def clock() -> datetime:  # the time now: a run lasts hours, and `now` is when it began
+        return now + timedelta(seconds=monotonic() - started)
+
     today = now.date()
     freshness.use_official(store)  # the official holidays fetched so far: what is published, and when
     floors = {a: history_floor(tier, today, a) for a in ASSETS}  # each asset class on its own plan
@@ -1231,8 +1237,8 @@ def sync(
 
         def sweep() -> None:  # daily bars first (daily_first), until it stops for a symbol opened in the chart
             nonlocal sweep_left
-            done, stopped = daily_first(source, store, me, feeds, watched, floors["stock"], order, refusals, now, log,
-                                        limit=sweep_left, served=served)
+            done, stopped = daily_first(source, store, me, feeds, watched, floors["stock"], order, refusals, clock(),
+                                        log, limit=sweep_left, served=served)
             sweep_left = sweep_left - done if stopped else 0
 
         if sweep_left:
@@ -1244,9 +1250,12 @@ def sync(
         on_lists = set(watchlist_tickers(store))  # updated through the session (history_horizon)
         server_fails = 0  # symbols in a row whose server failed (5xx, no answer): FETCH_FAILURES kill the feed
         while pending:
-            if sweep_left and not _unserved_request(store, source.name, now, served):
+            if sweep_left and not _unserved_request(store, source.name, clock(), served):
                 sweep()  # the symbols opened in the chart are served: back to daily bars first
-            item, urgent = _next_item(pending, store, now, source.name, served)
+            # This symbol's time, not the run's start: a symbol opened hours into a run was fetched
+            # only up to when the run began, and its stamp left its request unmet ("next in line").
+            at = clock()
+            item, urgent = _next_item(pending, store, at, source.name, served)
             try:
                 ticker, asset = item["ticker"], item["asset"]
                 synced = item.get("synced_at")
@@ -1281,13 +1290,13 @@ def sync(
                 # History takes completed sessions only; the session under way is the live feeds'.
                 # A symbol opened in the chart, or on a watchlist, is the exception: the best feed
                 # for its current session is this one (freshness.history_horizon).
-                horizon = now if urgent or only is not None or ticker in on_lists \
-                    else freshness.history_horizon(asset, tier, now)
+                horizon = at if urgent or only is not None or ticker in on_lists \
+                    else freshness.history_horizon(asset, tier, at)
                 if (only is None or published_only) and synced and not backfilling(item) and not _due(
                         asset, tier, synced, horizon, 0.0 if urgent or only is not None else refresh_hours):
                     # nothing new published since its last sync (a symbol still backfilling is never skipped)
                     if urgent or only is not None:  # opened in the chart: checked, nothing new; its request is met
-                        store.set_synced(source.name, ticker, max(now, datetime.now(timezone.utc)))
+                        store.set_synced(source.name, ticker, at)
                     result.skipped += 1
                     continue
                 if (held_back is not None and not urgent and only is None and synced and not backfilling(item)
@@ -1309,7 +1318,7 @@ def sync(
                     refusals.clear(ticker)
                     result.rows += n
                     log(f"{ticker}: {n} rows ({source.requests_made - spent} requests)")
-                    store.set_synced(source.name, ticker, now)
+                    store.set_synced(source.name, ticker, at)
                     continue
                 if asset == "stock" and archival:  # an archive has no reference data: use the other feeds'
                     listing = Listing(True, item["listed_from"] or next(
@@ -1374,7 +1383,7 @@ def sync(
                     log(f"{ticker} {resolution}: {n} rows, daily: {n_day} rows ({source.requests_made - spent} requests)")
                 else:
                     log(f"{ticker} {resolution}: {n} rows ({source.requests_made - spent} requests)")
-                store.set_synced(source.name, ticker, now)
+                store.set_synced(source.name, ticker, at)  # when its fetch began: anything later is asked next time
                 verify_fetched(source, store, ticker, asset, fetch, invert, began, me, feeds, log)
                 _derive_symbol(store, source.name, ticker, asset, log)  # bad data checked first (baddata.py)
                 if archival:
