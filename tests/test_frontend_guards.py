@@ -292,3 +292,21 @@ def test_without_a_highlight_the_level_2_covers_the_bars_in_view():
     assert cover.index("highlightSpan()") < cover.index("chart.getVisibleRange()")  # the highlight first
     assert "over: 'view'" in cover and "rp.lastClosed" in cover  # in a replay, nothing it has not closed
     assert "chart.subscribeAction('onVisibleRangeChange', coverMoved);" in l2  # read again after a scroll or zoom
+
+
+def test_the_gov_view_has_its_rail_button_icon_and_script():
+    html = _js("index.html")
+    assert 'id="railGov"' in html and 'id="viewGov" data-view="gov"' in html and 'src="gov.js"' in html
+    panels = _js("panels.js")
+    assert "gov: 'gov'" in panels and "$('railGov').innerHTML = icon('statehouse', RAIL_ICON);" in panels
+    assert "statehouse:" in _js("icons.js")
+    g = _js("gov.js")
+    assert "api('/api/gov')" in g and "e.detail.view === 'gov'" in g
+
+
+def test_views_restored_on_opening_the_page_load_their_content():
+    # panels.js restores the last view before these scripts listen for its event: each loads itself too
+    order = _js("index.html")
+    for name, view in (("news.js", "news"), ("gov.js", "gov"), ("datasets.js", "datasets")):
+        assert order.index('src="panels.js"') < order.index(f'src="{name}"')
+        assert f"if (document.body.dataset.view === '{view}')" in _js(name).split("massive:view", 1)[1]

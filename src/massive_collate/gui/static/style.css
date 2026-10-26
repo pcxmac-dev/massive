@@ -517,6 +517,22 @@ main > .view[hidden] { display: none; }
 
 /* News view */
 .news-list { display: flex; flex-direction: column; }
+/* the Gov view (gov.js): parameters as cards, the agencies' newest as the News list, sources as a table */
+.gov-h { margin: 14px 0 6px; font-size: 13px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.gov-params { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: var(--gap, 8px); flex: none; }
+.gov-param { background: var(--card, var(--panel)); border: 1px solid var(--border); border-radius: var(--radius, 6px); padding: var(--pad, 10px); }
+.gov-param-name { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.gov-param-value { font-size: 15px; font-weight: 600; margin: 2px 0 4px; font-variant-numeric: tabular-nums; }
+.gov-param-value.long { font-size: 12.5px; font-weight: 500; line-height: 1.35; }
+.gov-levels { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; font-variant-numeric: tabular-nums; margin-bottom: 2px; }
+.gov-list .src.gov-src { color: var(--text); }
+.gov-note { margin: 6px 0; flex: none; }
+table.gov-sources { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.gov-sources th, table.gov-sources td { text-align: left; padding: 3px 8px; border-bottom: 1px solid var(--border); }
+.gov-state { font-weight: 600; }
+.gov-state.ok { color: var(--up); }
+.gov-state.wait { color: var(--st-wait); }
+.gov-state.bad { color: var(--st-blocked); }
 .news-row { display: flex; gap: 10px; align-items: flex-start; padding: 8px 4px; border-bottom: 1px solid var(--border); }
 .news-row .src { flex: none; width: 130px; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: #f0b90b;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-top: 2px; }
@@ -528,7 +544,8 @@ main > .view[hidden] { display: none; }
 .news-main .tk { font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
 #newsSearch { border-color: var(--border); background: var(--bg); cursor: text; }
 
-.scroll-view > .act-status, .scroll-view > .table-wrap, .scroll-view > .news-list, .scroll-view > .tiles, .scroll-view > .filters { flex: none; }
+.scroll-view > .act-status, .scroll-view > .table-wrap, .scroll-view > .news-list, .scroll-view > .tiles, .scroll-view > .filters,
+.scroll-view > .gov-h, .scroll-view > .gov-params { flex: none; }
 
 /* picker scopes and directory placeholders */
 .scope-tabs { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; flex: none; }

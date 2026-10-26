@@ -65,4 +65,5 @@
   });
   window.addEventListener('massive:view', (e) => { if (e.detail.view === 'news') load(); });
   setInterval(() => { if (document.body.dataset.view === 'news') load(); }, 60000);
+  if (document.body.dataset.view === 'news') load();  // the page opened on this view (before this script listened)
 })();

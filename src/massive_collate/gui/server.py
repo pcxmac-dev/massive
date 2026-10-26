@@ -20,8 +20,8 @@ from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
 
-from .. import live
-from ..config import Settings, load_settings, saved_user_keys
+from .. import config, live
+from ..config import Settings, load_settings
 from ..storage import LayoutLimit, Store
 from . import activity, astro
 from .bars import CALENDAR, PRICE_BASED, TIME_TYPES, BarEngine, Style, resample
@@ -84,7 +84,7 @@ class ChartApp:
         # it started (tools/set-key.ps1) counts within SETTINGS_TTL_S: the Fetcher shows each feed
         # as it is now, not as it was when the app started.
         self._reload_settings = reload_settings
-        self._saved_keys = saved_user_keys() if reload_settings else None
+        self._saved_keys = config.saved_user_keys() if reload_settings else None
         self._settings_at = time.monotonic()
         self._settings_lock = threading.Lock()
         # The engine reads bars through connections of its own, under its own lock: loading a
@@ -116,6 +116,7 @@ class ChartApp:
         self._symbols_store, self._symbols_lock = store.reader(), threading.RLock()  # the symbol list
         self._open_noted: dict[str, int] = {}  # ticker -> ms it was last noted open (note_open)
         self._derive_proc: subprocess.Popen | None = None  # a build started by start_derive
+        self._gov_db, self._gov_lock = None, threading.Lock()  # gov/gov.db, opened on first use
 
     @property
     def settings(self) -> Settings:
@@ -125,7 +126,7 @@ class ChartApp:
         with self._settings_lock:
             if time.monotonic() - self._settings_at >= self.SETTINGS_TTL_S:
                 self._settings_at = time.monotonic()
-                saved = saved_user_keys()
+                saved = config.saved_user_keys()
                 if saved != self._saved_keys:
                     self._saved_keys = saved
                     self._settings = self._reload_settings()
@@ -520,6 +521,29 @@ class ChartApp:
         with self._lock:
             watch = self.store.watchlist()
             return announcements(self.store, watch)
+
+    def gov(self) -> dict:
+        """The Gov view: the agencies' newest, the current regulatory parameters and each
+        source's state (gov.py; fetched by the sync, read here from gov/gov.db)."""
+        from .. import gov
+
+        with self._gov_lock:
+            if self._gov_db is None:
+                self._gov_db = gov.GovDB(gov.db_path(self.store.path))
+            return gov.view(self._gov_db, contact_set=bool(self.settings.gov_contact), spx_close=self._spx_close())
+
+    def _spx_close(self) -> tuple[str, float] | None:
+        """The S&P 500's newest daily close held (the circuit breakers' reference), or None."""
+        try:
+            if not self.window.handles("*", "SPX"):
+                return None
+            bars = self.window.page("*", "SPX", "day", 1, "regular", limit=1)["bars"]
+        except (LookupError, KeyError, ValueError):
+            return None
+        if not bars:
+            return None
+        day = datetime.fromtimestamp(bars[-1]["timestamp"] / 1000, timezone.utc).date().isoformat()
+        return day, float(bars[-1]["close"])
 
     def calendar(self, q: dict[str, str]) -> dict:
         """Sessions of a symbol between two times (ms), for annotating the chart."""
@@ -1264,6 +1288,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.directory())
                 if url.path == "/api/announcements":
                     return self._json(app.announcements())
+                if url.path == "/api/gov":
+                    return self._json(app.gov())
                 if url.path == "/api/markets":
                     return self._json(app.markets())
                 if url.path == "/api/calendar":

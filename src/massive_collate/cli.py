@@ -8,12 +8,12 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-from . import analysis, charts, collector
-from .config import ConfigError, Settings, load_settings, saved_user_keys
+from . import analysis, charts, collector, config
+from .config import ConfigError, Settings, load_settings
 from .storage.feeds import TicksBlocked
 from .errors import NotEntitled, SourceError
 from .sessions import ET
@@ -371,9 +371,25 @@ def after_sync(args, settings: Settings) -> bool:
                 from . import datasets
 
                 datasets.fetch(store, log=logger, only_started=True)
+        if args.all_sources and not tickers and not settings.offline:  # the agencies' news and rates, when due
+            _fetch_gov(settings, logger)
     finally:
         proc.release(lock)
     return True
+
+
+def _fetch_gov(settings: Settings, log) -> None:
+    """The Fed's, the SEC's, BLS's, the Federal Register's and the New York Fed's newest (gov.py):
+    each source at most hourly; a failure is logged and never fails the run."""
+    from . import gov
+
+    db = gov.GovDB(gov.db_path(settings.db_path))
+    try:
+        gov.fetch(db, datetime.now(timezone.utc), contact=settings.gov_contact, log=log)
+    except Exception as e:  # noqa: BLE001 - the agencies' feeds are extras: the run's data is in
+        log(f"gov: failed ({type(e).__name__}: {e})")
+    finally:
+        db.close()
 
 
 def _sync(args, settings: Settings) -> tuple[int, int]:
@@ -402,10 +418,10 @@ def _sync(args, settings: Settings) -> tuple[int, int]:
             store.separate_built_bars(log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
             store.kv_set("built-bars:separated:v1", datetime.now().isoformat(timespec="seconds"))
     ran, errors = 0, []
-    saved = saved_user_keys()
+    saved = config.saved_user_keys()
     for name in names:
-        if saved_user_keys() != saved:  # a key or plan saved during the run counts from the next feed
-            saved, settings = saved_user_keys(), load_settings()
+        if config.saved_user_keys() != saved:  # a key or plan saved during the run counts from the next feed
+            saved, settings = config.saved_user_keys(), load_settings()
             Logger(settings.db_path.parent / "logs" / "massive-collate.log")("sync: saved keys or plans changed; read again")
         if args.all_sources and _feed_closed(settings, name):
             continue  # a closed feed: every symbol's archive is complete; not contacted

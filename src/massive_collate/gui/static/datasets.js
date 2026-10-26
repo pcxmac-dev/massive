@@ -990,5 +990,6 @@
   }
 
   window.addEventListener('massive:view', (e) => { if (e.detail.view === 'datasets') open(); });
+  if (document.body.dataset.view === 'datasets') open();  // the page opened on this view (before this script listened)
   window.Datasets = { open, state: st };
 })();

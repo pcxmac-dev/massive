@@ -40,6 +40,10 @@ again): Bitstamp (crypto minute bars from 2011) and Cboe (index daily history) n
     CRYPTO_VENUE_DAYS limit the crypto exchange feeds (Coinbase, Bitfinex) to this many days of history
                       (default: 0, everything they hold: Coinbase from 2015, Bitfinex from 2013)
 
+Government and regulators (gov.py; the Gov view): the Fed, BLS, the Federal Register and the New York
+Fed need nothing. GOV_CONTACT (your name and email) is sent to the agencies that ask automated
+readers to identify themselves (the SEC): their feeds wait until it is set.
+
 Alpaca (second feed; stocks and crypto). Keys are only ever read from the environment:
     ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY   (Alpaca's own APCA_API_KEY_ID / APCA_API_SECRET_KEY
                       also work). Without them only crypto is collected (it needs no key).
@@ -180,6 +184,7 @@ class Settings:
     backups_keep: int = 7
     tick_min_free_gb: int = 250
     tiingo_api_key: str | None = field(default=None, repr=False)
+    gov_contact: str | None = field(default=None, repr=False)  # GOV_CONTACT: sent to agencies that ask (gov.py)
     crypto_venue_days: int = 0  # 0: all the history the exchange feeds hold
     # Coins recorded live from the exchanges' public streams (live.py); LIVE_CRYPTO=off for none.
     live_coins: tuple[str, ...] = ("BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LTC", "LINK")
@@ -288,7 +293,7 @@ KEY_NAMES = ("MASSIVE_API_KEY", "ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY", "A
              "APCA_API_SECRET_KEY", "TIINGO_API_KEY")
 # Changed when a plan is bought (and its caps with it): read the same way.
 PLAN_NAMES = ("MASSIVE_TIER", *MASSIVE_CLASS_TIERS.values(), "MASSIVE_MAX_REQUESTS_PER_RUN",
-              "MASSIVE_MAX_REQUESTS_PER_DAY", "ALPACA_PLAN")
+              "MASSIVE_MAX_REQUESTS_PER_DAY", "ALPACA_PLAN", "GOV_CONTACT")
 
 
 def saved_user_keys() -> dict[str, str]:
@@ -364,6 +369,7 @@ def load_settings(
         backups_keep=_default(_int_setting(merged, "BACKUPS_KEEP"), 7),
         tick_min_free_gb=_default(_int_setting(merged, "TICK_MIN_FREE_GB"), 250),
         tiingo_api_key=merged.get("TIINGO_API_KEY") or None,
+        gov_contact=(merged.get("GOV_CONTACT") or "").strip() or None,
         crypto_venue_days=_default(_int_setting(merged, "CRYPTO_VENUE_DAYS"), 0),
         live_coins=_live_coins(merged.get("LIVE_CRYPTO")),
         live_stocks=str(merged.get("LIVE_STOCKS", "on")).strip().lower() not in ("off", "0", "false", "no", "none"),

@@ -9,6 +9,8 @@
                (trading.js); live trading is off
      Markets   the world's exchanges on a globe turned to where it is noon now (globe.js)
      News      every announcement the globe's ticker shows (news.js)
+     Gov       the government and the regulators: current regulatory parameters, the Fed's, the SEC's,
+               BLS's and the Federal Register's newest (gov.js)
      Datasets  research series drawn on one time axis: factors, CAPE, COT positioning (datasets.js)
      Fetcher   historical data (sessions before the current one); coloured while a run is active
      Live      current-session feeds; a red "recording" dot while live data is being recorded
@@ -20,7 +22,7 @@
   const { symbolIcon, icon } = window.MassiveIcons;
   // The watchlist sits beside whichever chart was showing (it has no chart content of its own).
   const VIEWS = { stock: 'chart', analysis: 'chart', trading: 'chart', watchlist: 'chart', markets: 'markets', news: 'news',
-                  datasets: 'datasets', fetcher: 'fetcher', live: 'live' };
+                  gov: 'gov', datasets: 'datasets', fetcher: 'fetcher', live: 'live' };
 
   // -- rail --------------------------------------------------------------------------------
   function showPane(name, { toggle = true } = {}) {
@@ -71,6 +73,7 @@
     $('railTrading').innerHTML = icon('trading', RAIL_ICON);
     if (!window.GlobeIcon?.update()) $('railMarkets').innerHTML = icon('globe', RAIL_ICON);  // the Earth, once its images are here
     $('railNews').innerHTML = icon('thermometer', RAIL_ICON);
+    $('railGov').innerHTML = icon('statehouse', RAIL_ICON);
     $('railDatasets').innerHTML = icon('scroll', RAIL_ICON);
     const running = !!activity?.running;
     const fresh = activity?.newData || 0;

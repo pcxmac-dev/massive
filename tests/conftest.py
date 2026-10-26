@@ -21,6 +21,15 @@ def no_saved_keys(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_agency_requests(monkeypatch):
+    """Tests never read the agencies' real feeds: a full `sync` ends with the Gov fetch
+    (cli._fetch_gov); test_gov.py drives gov.fetch with fake answers instead."""
+    from massive_collate import cli
+
+    monkeypatch.setattr(cli, "_fetch_gov", lambda settings, log: None)
+
+
+@pytest.fixture(autouse=True)
 def tick_access_restored():
     """cli.main sets the process's tick access from BARS_ONLY (off by default): a test that runs a
     command must not leave the stores of the tests after it unable to open tick files."""
