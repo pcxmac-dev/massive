@@ -367,6 +367,19 @@ def test_a_whole_history_is_read_outside_the_engines_lock_and_once(store, monkey
     assert eng.series("*", "SPCX").ticker == "SPCX"  # a merged chart from parts read that way
 
 
+# -- 37: the level 2 profile of a past bar ------------------------------------------------------------
+@pytest.mark.parametrize("period, span, at", [("hour", 1, f"{DAYS[2]} 10:30"), ("hour", 1, f"{DAYS[2]} 11:47"),
+                                              ("minute", 5, f"{DAYS[2]} 12:35"), ("hour", 4, f"{DAYS[1]} 13:30"),
+                                              ("minute", 30, f"{DAYS[3]} 09:44"), ("day", 1, f"{DAYS[1]} 00:00")])
+def test_the_level_2_profile_of_a_past_bar_is_the_series_paths(store, period, span, at):
+    engine = BarEngine(store)
+    whole = engine.profile("*", "SPCX", period, span, "extended", at_ms=_ms(at))
+    windowed = WindowReader(engine).profile("*", "SPCX", period, span, "extended", at_ms=_ms(at))
+    assert not whole["newest"] and whole["rows"]
+    for k in ("bar", "day", "last", "newest", "rows", "step", "basis"):
+        assert windowed[k] == whole[k], k
+
+
 # -- low: "All data" on the series path -----------------------------------------------------------------
 def test_all_data_reaches_the_series_path_and_its_caches_keep_the_views_apart(tmp_path):
     s = _spiked(tmp_path)

@@ -724,8 +724,16 @@ class WindowReader:
         newest = self.page(source, ticker, period, span, session, limit=1)["bars"]
         if not newest:
             return {"ticker": s.ticker, "rows": []}
-        at = newest[-1] if at_ms is None or at_ms >= newest[-1]["timestamp"] else \
-            (self.page(source, ticker, period, span, session, to_ms=int(at_ms) + 1, limit=1)["bars"] or newest)[-1]
+        at = newest[-1]
+        if at_ms is not None and at_ms < newest[-1]["timestamp"]:
+            # The bar starting at or before `at_ms`, whole: a page up to the end of a bar starting
+            # there (a page up to at_ms + 1 built the bar from its first base bars only: half its
+            # volume in one case), and one bar before it in case `at_ms` falls inside a bar.
+            then = pd.Timestamp(int(at_ms), unit="ms", tz="UTC").tz_convert(ET)
+            to = int(bar_end(then, period, span, utc=utc_days(s)).value // 1_000_000)
+            near = self.page(source, ticker, period, span, session, to_ms=to, limit=2)["bars"]
+            held = [b for b in near if b["timestamp"] <= at_ms]
+            at = held[-1] if held else (near or newest)[0]
         start = pd.Timestamp(at["timestamp"], unit="ms", tz="UTC").tz_convert("America/New_York")
         lo, hi = at["timestamp"], int(bar_end(start, period, span, utc=utc_days(s)).value // 1_000_000)
         d0 = calendar_key(pd.DatetimeIndex([start]), "day", utc=utc_days(s))[0]
