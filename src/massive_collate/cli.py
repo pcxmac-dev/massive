@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Iterator
 
 from . import analysis, charts, collector
-from .config import ConfigError, Settings, load_settings
+from .config import ConfigError, Settings, load_settings, saved_user_keys
 from .storage.feeds import TicksBlocked
 from .errors import NotEntitled, SourceError
 from .sessions import ET
@@ -402,7 +402,11 @@ def _sync(args, settings: Settings) -> tuple[int, int]:
             store.separate_built_bars(log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
             store.kv_set("built-bars:separated:v1", datetime.now().isoformat(timespec="seconds"))
     ran, errors = 0, []
+    saved = saved_user_keys()
     for name in names:
+        if saved_user_keys() != saved:  # a key or plan saved during the run counts from the next feed
+            saved, settings = saved_user_keys(), load_settings()
+            Logger(settings.db_path.parent / "logs" / "massive-collate.log")("sync: saved keys or plans changed; read again")
         if args.all_sources and _feed_closed(settings, name):
             continue  # a closed feed: every symbol's archive is complete; not contacted
         args.source = name
@@ -882,7 +886,7 @@ def cmd_gui(args, settings: Settings) -> int:
     from .gui.server import serve
 
     serve(settings.db_path, port=args.port, open_browser=not args.no_browser,
-          priority=list(settings.source_priority), settings=settings)
+          priority=list(settings.source_priority), settings=settings, reload_settings=load_settings)
     return 0
 
 

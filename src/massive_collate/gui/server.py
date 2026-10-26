@@ -15,12 +15,13 @@ import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
 
 from .. import live
-from ..config import Settings, load_settings
+from ..config import Settings, load_settings, saved_user_keys
 from ..storage import LayoutLimit, Store
 from . import activity, astro
 from .bars import CALENDAR, PRICE_BASED, TIME_TYPES, BarEngine, Style, resample
@@ -73,9 +74,19 @@ def _heavy(method):
 class ChartApp:
     """The API, independent of HTTP so it can be tested directly."""
 
-    def __init__(self, store: Store, priority: list[str] | None = None, settings: Settings | None = None):
+    SETTINGS_TTL_S = 5.0  # the user's saved keys and plans are looked at this often
+
+    def __init__(self, store: Store, priority: list[str] | None = None, settings: Settings | None = None,
+                 reload_settings: Callable[[], Settings] | None = None):
         self.store = store
-        self.settings = settings or load_settings(env={}, env_file=None)
+        self._settings = settings or load_settings(env={}, env_file=None)
+        # With `reload_settings` (the app started from the command line), a key or plan saved after
+        # it started (tools/set-key.ps1) counts within SETTINGS_TTL_S: the Fetcher shows each feed
+        # as it is now, not as it was when the app started.
+        self._reload_settings = reload_settings
+        self._saved_keys = saved_user_keys() if reload_settings else None
+        self._settings_at = time.monotonic()
+        self._settings_lock = threading.Lock()
         # The engine reads bars through connections of its own, under its own lock: loading a
         # long history (twenty years of minutes) held the one shared lock for over a minute, and
         # the symbol list, the Fetcher's poll and the search dialog all waited behind it.
@@ -105,6 +116,23 @@ class ChartApp:
         self._symbols_store, self._symbols_lock = store.reader(), threading.RLock()  # the symbol list
         self._open_noted: dict[str, int] = {}  # ticker -> ms it was last noted open (note_open)
         self._derive_proc: subprocess.Popen | None = None  # a build started by start_derive
+
+    @property
+    def settings(self) -> Settings:
+        """The app's settings, with the user's saved keys and plans as they are now (see __init__)."""
+        if self._reload_settings is None or time.monotonic() - self._settings_at < self.SETTINGS_TTL_S:
+            return self._settings
+        with self._settings_lock:
+            if time.monotonic() - self._settings_at >= self.SETTINGS_TTL_S:
+                self._settings_at = time.monotonic()
+                saved = saved_user_keys()
+                if saved != self._saved_keys:
+                    self._saved_keys = saved
+                    self._settings = self._reload_settings()
+                    # what was worked out from the old keys: the feeds, their states, the checks
+                    self._activity, self._activity_rows = {}, {}
+                    self._feeds_summary = self._deps = None
+        return self._settings
 
     @contextmanager
     def heavy_work(self):
@@ -1304,9 +1332,9 @@ def make_handler(app: ChartApp, port_ref: list[int]):
 
 
 def serve(db_path: Path, port: int = 8765, open_browser: bool = True, priority: list[str] | None = None,
-          settings: Settings | None = None) -> None:
+          settings: Settings | None = None, reload_settings: Callable[[], Settings] | None = None) -> None:
     store = Store(db_path, check_same_thread=False)
-    app = ChartApp(store, priority, settings)
+    app = ChartApp(store, priority, settings, reload_settings=reload_settings)
     from . import world
     threading.Thread(target=world.warm, daemon=True).start()  # world calendars take a few seconds
     port_ref = [port]
