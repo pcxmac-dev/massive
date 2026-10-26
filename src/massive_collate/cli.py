@@ -1007,7 +1007,7 @@ def cmd_info(args, settings: Settings) -> int:
 
 def cmd_status(args, settings: Settings) -> int:
     with Store(settings.db_path) as store:
-        s = store.summary()
+        s = store.summary(counts=args.counts)
         print(f"database: {s['db_path']} ({s['size_bytes'] / 1e6:.1f} MB)")
         print(f"feeds: {s['feeds_dir']} " + ", ".join(f"{k} {v / 1e9:.2f} GB" for k, v in s["feed_bytes"].items()))
         for src in BUILDERS:
@@ -1027,7 +1027,8 @@ def cmd_status(args, settings: Settings) -> int:
             print(f"  {src:8} {t:8} {_ns(lo)} -> {_ns(hi)}")
         print("\nbars:")
         for src, ts, mult, tickers, n, lo, hi in s["bars"]:
-            print(f"  {src:8} {mult}/{ts:7} {tickers:>6} tickers {n:>12,} bars  {_ns(lo * 10**6)} -> {_ns(hi * 10**6)}")
+            bars = f" {n:>12,} bars" if n is not None else ""  # counted with --counts only
+            print(f"  {src:8} {mult}/{ts:7} {tickers:>6} tickers{bars}  {_ns(lo * 10**6)} -> {_ns(hi * 10**6)}")
         print("\nrecent runs:")
         for r in store.recent_runs(args.runs):
             print(f"  #{r[0]} {r[3]} {r[2]:24} {r[7]:7} {r[5]} requests, {r[6]} rows {r[8] or ''}")
@@ -1052,6 +1053,24 @@ def cmd_admin(args, settings: Settings) -> int:
         return 0
     if args.action == "backup" and args.ticks and _ticks_refused("backup --ticks", settings):
         return 2
+    if args.action == "compact":  # by copying (storage/admin.compact_file); this store closed before any swap
+        from .storage.admin import compact_file
+
+        with Store(settings.db_path) as store:
+            files = store.data_files()
+        if args.file:
+            files = [f for f in files if f.resolve() == Path(args.file).resolve()]
+            if not files:
+                raise SystemExit(f"{args.file} is not one of this database's files"
+                                 + (" (tick files only with BARS_ONLY=off)" if settings.bars_only else ""))
+        if args.swap:  # no sync may start while the file is copied and swapped
+            with run_lock(settings.db_path):
+                done = [compact_file(f, swap=True) for f in files]
+        else:
+            done = [compact_file(f) for f in files]
+        print(f"compacted {sum(d is not None for d in done)} of {len(files)} files"
+              + ("" if args.swap else " into copies beside them (--swap puts them in place)"))
+        return 0
     with Store(settings.db_path) as store:
         if args.action == "check":
             print(f"integrity: {store.integrity_check()}")
@@ -1321,15 +1340,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("status", help="what is stored, limits, and recent runs")
     s.add_argument("--runs", type=int, default=10)
+    s.add_argument("--counts", action="store_true", help="also count the bars (reads every bar: hours on a large file)")
     s.set_defaults(func=cmd_status)
 
     s = sub.add_parser("admin", help="database maintenance")
-    s.add_argument("action", choices=["check", "vacuum", "backup", "reset-denied", "split-feeds", "memory"],
-                   help="split-feeds: move every feed's data from the single-file layout to files of its own; "
+    s.add_argument("action", choices=["check", "vacuum", "compact", "backup", "reset-denied", "split-feeds", "memory"],
+                   help="vacuum: compact the files in place (small files only: it holds every writer off); "
+                        "compact: copy each file compacted beside it (VACUUM INTO), swapped in with --swap; "
+                        "split-feeds: move every feed's data from the single-file layout to files of its own; "
                         "memory: each app process's own memory and disk reads, apart from Windows' file cache")
     s.add_argument("--dest")
     s.add_argument("--ticks", action="store_true", help="backup: also copy the tick files (large)")
     s.add_argument("--seconds", type=float, default=5.0, help="memory: how long to watch disk reads (0: not)")
+    s.add_argument("--file", help="compact: only this database file (default: every file)")
+    s.add_argument("--swap", action="store_true",
+                   help="compact: put each copy in the file's place, keeping the old file beside it; only with the "
+                        "chart app, the sync and the live recorder stopped")
     s.set_defaults(func=cmd_admin)
 
     for name, func, helptext in (

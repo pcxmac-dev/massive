@@ -324,7 +324,8 @@ class DatasetStore:
         """Providers with a file."""
         if self.datasets_dir is None or not self.datasets_dir.is_dir():
             return sorted(self._dataset_conns)
-        return sorted({f.stem for f in self.datasets_dir.glob("*.db")} | set(self._dataset_conns))
+        # a compaction's copy or the file it replaced (<provider>.compact.db, ...) is no provider
+        return sorted({f.stem for f in self.datasets_dir.glob("*.db") if _feed_name(f.stem)} | set(self._dataset_conns))
 
     def dataset_bytes(self) -> dict[str, int]:
         """{provider: bytes of its file and write-ahead log}."""
