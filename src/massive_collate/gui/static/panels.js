@@ -71,7 +71,7 @@
     $('railTrading').innerHTML = icon('trading', RAIL_ICON);
     if (!window.GlobeIcon?.update()) $('railMarkets').innerHTML = icon('globe', RAIL_ICON);  // the Earth, once its images are here
     $('railNews').innerHTML = icon('news', RAIL_ICON);
-    $('railDatasets').innerHTML = icon('dataset', RAIL_ICON);
+    $('railDatasets').innerHTML = icon('scroll', RAIL_ICON);
     const running = !!activity?.running;
     const fresh = activity?.newData || 0;
     $('railFetcher').innerHTML = `${icon('database', RAIL_ICON)}${running ? `<span class="rail-badge spin">${icon('sync', RAIL_ICON / 2)}</span>` : ''}`
