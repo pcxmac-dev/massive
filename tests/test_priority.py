@@ -272,3 +272,31 @@ def test_the_chart_halts_and_resumes_and_resuming_starts_a_sync(tmp_path, monkey
         app.start_scan("SPCX")
     out = app.set_fetching({"paused": False})
     assert out["paused"] is None and out["started"] == 4343 and started[-1][-2:] == ["massive_collate", "sync"]
+
+
+def test_opening_an_up_to_date_symbol_asks_for_nothing(tmp_path, monkeypatch):
+    # out of session (Sunday) with its last session stored: nothing new can exist, so no request
+    # and no "next in line" (it read so for hours while a long sync ran)
+    from datetime import datetime as dt
+
+    from massive_collate import collector
+    from massive_collate.collector import ET
+
+    store = Store(tmp_path / "m.db", check_same_thread=False)
+    store.watch("massive", ["SPCX"], "minute", exchange="XNAS")
+    store.set_backfilled("massive", "SPCX", collector.history_floor(TIERS["free"], dt(2026, 10, 25).date(), "stock"))
+    store.set_synced("massive", "SPCX", dt(2026, 10, 24, 9, 0, tzinfo=ET))  # after Friday's session was released
+    monkeypatch.setattr(server.activity, "lock_owner", lambda path: 99)  # a long sync is running
+    monkeypatch.setattr(server.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("started")))
+
+    class Sunday(dt):
+        @classmethod
+        def now(cls, tz=None):
+            return dt(2026, 10, 26, 3, 0, tzinfo=timezone.utc)  # Sunday 23:00 ET
+
+    monkeypatch.setattr(server, "datetime", Sunday)
+    app = ChartApp(store, settings=load_settings(env={"MASSIVE_API_KEY": "k"}, env_file=None))
+    out = app.priority("SPCX")
+    assert out["state"] == "current" and out["nextDue"]
+    assert collector.priority_requests(store, Sunday.now(timezone.utc)) == {}  # nothing asked of the running sync
+    store.close()

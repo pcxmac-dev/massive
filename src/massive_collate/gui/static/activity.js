@@ -186,6 +186,7 @@
           setTimeout(poll, 400);
         } else if (body.state === 'queued') next = { ticker, phase: 'waiting', feeds, since: Date.now() };
         else if (body.state === 'halted') next = { ticker, phase: 'halted', since: Date.now() };
+        else if (body.state === 'current') next = { ticker, phase: 'current', nextDue: body.nextDue, last: standing(ticker)?.last, since: Date.now() };
         else next = standing(ticker);  // a run for it went in the last few minutes
       }
     } catch (e) {
@@ -198,7 +199,9 @@
 
   function advanceJob() {
     if (!job || !data) return;
-    if (job.phase === 'waiting' && !data.running) askFirst(job.ticker, true).then(renderStatusBar);  // the run ended: its turn
+    // waiting for the running sync: asked again every ASK_EVERY_MS, so the line ends once the run has
+    // taken it (the server then says it is current), not only when the whole run ends
+    if (job.phase === 'waiting') askFirst(job.ticker, true).then(renderStatusBar);
   }
 
   function finishJob() {
@@ -220,7 +223,10 @@
     if (job && job.ticker === state.ticker) {
       const t = esc(job.ticker);
       if (job.phase === 'checking') { msg = `${t}: checking…`; busy = true; }
-      else if (job.phase === 'waiting') {
+      else if (job.phase === 'waiting' && data?.live?.current === job.ticker) {
+        msg = `${t}: updating on ${esc(data.live.source)}${waitNote()}`;
+        busy = true;
+      } else if (job.phase === 'waiting') {
         msg = `${t}: next in line · ${data?.live?.source ? `${esc(data.live.source)} is fetching` : 'the fetcher is busy'}${waitNote()}`;
         busy = true;
       } else if (job.phase === 'downloading') {
@@ -231,7 +237,7 @@
         msg = `${t}: +${num(job.rows)} rows from ${job.feedCount} feed${job.feedCount === 1 ? '' : 's'}`;
         cls = 'ok';
       }
-      else if (job.phase === 'current') { msg = `${t} ✓ to ${short(job.last)} · next ${short(job.nextDue)}`; }
+      else if (job.phase === 'current') { msg = job.last ? `${t} ✓ to ${short(job.last)} · next ${short(job.nextDue)}` : `${t} ✓ up to date · next data ${short(job.nextDue)}`; }
       else if (job.phase === 'backfilling') { msg = `${t}: backfill ${Math.round((job.progress || 0) * 100)}%`; progress = job.progress || 0; }
       else if (job.phase === 'queued') { msg = `${t}: queued`; }
       else if (job.phase === 'halted') { msg = `${t}: fetching halted (Resume to fetch it)`; }

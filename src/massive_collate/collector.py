@@ -753,10 +753,12 @@ DAILY_FIRST_PER_RUN = 2000
 
 def daily_first(source: DataSource, store: Store, me: FeedProfile, feeds: dict[str, FeedProfile], watched: list[dict],
                 floor: date, order: dict, refusals: "Refusals", now: datetime, log: Log = print,
-                limit: int = DAILY_FIRST_PER_RUN) -> int:
+                limit: int = DAILY_FIRST_PER_RUN, served: dict | None = None) -> tuple[int, str | None]:
     """The daily bars of the stocks no feed holds any of yet, most traded first: the listing
     check (its date bounds what is kept), then the spans coverage.plan leaves this feed. A stock
-    a better-placed feed should take costs no request here. Returns the stocks filled."""
+    a better-placed feed should take costs no request here. It stops for a symbol opened in the
+    chart (the run takes that first, then comes back here). Returns (stocks filled, the symbol it
+    stopped for or None)."""
     held = store.daily_from()
     todo = sorted((w for w in watched if w["asset"] == "stock" and w["ticker"] not in held and not w.get("closed_at")),
                   key=lambda w: (order.get(w["ticker"], len(order)), w["ticker"]))
@@ -764,8 +766,8 @@ def daily_first(source: DataSource, store: Store, me: FeedProfile, feeds: dict[s
     for item in todo:
         if done >= limit:
             break
-        stopped = _unserved_request(store, source.name, now)
-        if stopped:  # opened in the chart: the run's own pass takes it now, this sweep goes on next run
+        stopped = _unserved_request(store, source.name, now, served)
+        if stopped:  # opened in the chart: the run's own pass takes it now, then this sweep goes on
             break
         ticker, listed = item["ticker"], item["listed_from"]
         if refusals.paused(ticker, now):
@@ -795,9 +797,9 @@ def daily_first(source: DataSource, store: Store, me: FeedProfile, feeds: dict[s
         log(f"{ticker} day: {n} rows (daily bars first)")
     if done or stopped:
         log(f"{source.name}: daily bars first: {done:,} stocks"
-            + (f", stopped for {stopped} (opened in the chart)" if stopped else "")
-            + (f" ({len(todo) - done:,} without any daily bars yet, next runs)" if len(todo) > done else ""))
-    return done
+            + (f", stopped for {stopped} (opened in the chart; goes on after it)" if stopped else "")
+            + (f" ({len(todo) - done:,} without any daily bars yet)" if len(todo) > done else ""))
+    return done, stopped
 
 
 def _derive_symbol(store: Store, feed: str, ticker: str, asset: str, log) -> int:
@@ -883,6 +885,24 @@ def _due(asset: str, tier: Tier, synced: datetime, now: datetime, refresh_hours:
     return freshness.expected(asset, tier, now).latest != freshness.expected(asset, tier, synced).latest
 
 
+def needs_fetch(store: Store, ticker: str, tiers: dict[str, Tier], now: datetime) -> list[str]:
+    """The feeds (of `tiers`: the ones set up here) with something to fetch for `ticker` now:
+    history it still lacks, or data its plan has published since its last sync (the same rule
+    the sync skips by: nothing new can exist out of session, or before an end-of-day plan's
+    release). Empty: every feed holding it is up to date, and opening it asks for nothing."""
+    today = now.astimezone(ET).date()
+    out = []
+    for row in store.watchlist(ticker=ticker):
+        tier = tiers.get(row["source"])
+        if tier is None or row.get("closed_at"):
+            continue
+        synced = row.get("synced_at")
+        if (synced is None or _backfilling(row, history_floor(tier, today, row["asset"]))
+                or _due(row["asset"], tier, synced, now, 0.0)):
+            out.append(row["source"])
+    return out
+
+
 # -- the symbol open in the chart goes first ------------------------------------------------
 PRIORITY_KEY = "fetch:priority"
 PRIORITY_HOURS = 6  # a request older than this has been dealt with (or given up on)
@@ -929,10 +949,12 @@ def picked_symbols(store: Store, now: datetime | None = None) -> set[str]:
     return on_lists | set(priority_requests(store, now))
 
 
-def _unserved_request(store: Store, source: str, now: datetime) -> str | None:
-    """A symbol opened in the chart that this feed has not synced since: it goes before anything
-    else (the daily-first sweep stops for it)."""
+def _unserved_request(store: Store, source: str, now: datetime, served: dict | None = None) -> str | None:
+    """A symbol opened in the chart that this feed has not synced since (nor taken this run:
+    `served`): it goes before anything else (the daily-first sweep stops for it)."""
     for ticker, req in priority_requests(store, now).items():
+        if served and served.get(ticker) == req["at"]:
+            continue
         row = next(iter(store.watchlist(source, ticker)), None)
         if row is not None and (row.get("synced_at") is None or row["synced_at"] < req["at"]):
             return ticker
@@ -1086,16 +1108,25 @@ def sync(
         def backfilling(w: dict) -> bool:
             return _backfilling(w, floors[w["asset"]]) or (not filling and _seconds_pending(w))
 
-        if only is None and not archival and source.serves("stock"):
-            daily_first(source, store, me, feeds, watched, floors["stock"], order, refusals, now, log,
-                        limit=DAILY_FIRST_PER_RUN)
+        served: dict = {}  # priority requests taken this run (each once)
+        sweep_left = DAILY_FIRST_PER_RUN if only is None and not archival and source.serves("stock") else 0
+
+        def sweep() -> None:  # daily bars first (daily_first), until it stops for a symbol opened in the chart
+            nonlocal sweep_left
+            done, stopped = daily_first(source, store, me, feeds, watched, floors["stock"], order, refusals, now, log,
+                                        limit=sweep_left, served=served)
+            sweep_left = sweep_left - done if stopped else 0
+
+        if sweep_left:
+            sweep()
         pending = sorted(watched, key=lambda w: (backfilling(w), order.get(w["ticker"], len(order)), w["ticker"]))
         paused_updates = updates_pause(store, now) if not archival else None
         held_back = 0 if paused_updates else None  # symbols whose update the pause left for later
         picked = picked_symbols(store, now) if paused_updates else set()
         server_fails = 0  # symbols in a row whose server failed (5xx, no answer): FETCH_FAILURES kill the feed
-        served: dict = {}  # priority requests taken this run (each once)
         while pending:
+            if sweep_left and not _unserved_request(store, source.name, now, served):
+                sweep()  # the symbols opened in the chart are served: back to daily bars first
             item, urgent = _next_item(pending, store, now, source.name, served)
             try:
                 ticker, asset = item["ticker"], item["asset"]
@@ -1131,6 +1162,8 @@ def sync(
                 if (only is None or published_only) and synced and not backfilling(item) and not _due(
                         asset, tier, synced, now, 0.0 if urgent or only is not None else refresh_hours):
                     # nothing new published since its last sync (a symbol still backfilling is never skipped)
+                    if urgent or only is not None:  # opened in the chart: checked, nothing new; its request is met
+                        store.set_synced(source.name, ticker, now)
                     result.skipped += 1
                     continue
                 if (held_back is not None and not urgent and only is None and synced and not backfilling(item)

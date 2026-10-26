@@ -1036,12 +1036,23 @@ class ChartApp:
         run lock), and limiters that share their window across runs."""
         from .. import collector
 
+        from ..freshness import expected
+        from ..sources import feed_profiles
+
         ticker = ticker.upper()
         now = datetime.now(timezone.utc)
         with self._lock:
-            feeds = sorted({w["source"] for w in self.store.watchlist(ticker=ticker)})
+            rows = self.store.watchlist(ticker=ticker)
+            feeds = sorted({w["source"] for w in rows})
             if not feeds:
                 raise LookupError(f"{ticker} is not on the watchlist")
+            tiers = {name: self.settings.for_source(name).tier for name in feed_profiles(self.settings) if name in feeds}
+            if tiers and not self.settings.offline and not self._halted()                     and not collector.needs_fetch(self.store, ticker, tiers, now):
+                # up to date on every feed: nothing new can exist yet (out of session, or not released)
+                due = [e.next_due for e in (expected(r["asset"], tiers[r["source"]], now) for r in rows
+                                            if r["source"] in tiers) if e.next_due]
+                return {"ticker": ticker, "feeds": feeds, "state": "current",
+                        "nextDue": min(due).isoformat() if due else None}
             asked = collector.priority_requests(self.store, now).get(ticker)
             if asked is None or (now - asked["at"]).total_seconds() > self.PRIORITY_COOLDOWN:
                 collector.request_priority(self.store, ticker, now)

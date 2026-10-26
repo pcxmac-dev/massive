@@ -69,9 +69,12 @@ def test_the_daily_first_sweep_stops_for_a_symbol_opened_in_the_chart(store):
     src = FakeSource(entitled=("minute",), bars={"day": [], "minute": []})
     logged = []
     sync(src, store, FREE, NOW, log=logged.append)
-    calls = [c[0] for c in src.bar_calls]
-    assert calls[0] == "OPEN"  # before the sweep's first stock
-    assert any("stopped for OPEN (opened in the chart)" in m for m in logged)
+    calls = [(c[0], c[3]) for c in src.bar_calls]
+    assert calls[0][0] == "OPEN"  # before the sweep's first stock
+    assert any("stopped for OPEN (opened in the chart; goes on after it)" in m for m in logged)
+    # and once it is served, the run goes back to daily bars first before its own backfill
+    after = calls[next(i for i, c in enumerate(calls) if c[0] != "OPEN"):]
+    assert after[:2] == [("AAA", "day"), ("BBB", "day")]
 
 
 def test_the_fetcher_lists_an_opened_symbol_as_next_and_says_why_others_wait(store):
@@ -95,3 +98,16 @@ def test_the_updates_command_pauses_and_resumes(tmp_path, monkeypatch, capsys):
     assert "updates paused until" in capsys.readouterr().out
     assert cli.main(["updates", "resume"]) == 0
     assert "not paused" in capsys.readouterr().out
+
+
+def test_an_opened_symbol_found_up_to_date_has_its_request_met(store):
+    # the run takes it, finds nothing new published since its last sync: the check is recorded,
+    # so it is not "next" for ever (nor stops the next run's daily sweep)
+    store.watch("fake", ["OPEN"], "minute")
+    store.set_backfilled("fake", "OPEN", date(2020, 1, 1))
+    store.set_synced("fake", "OPEN", NOW - timedelta(hours=1))
+    store.add_coverage("fake", "OPEN", "day", _ms(date(2020, 1, 1)), _ms(NOW.date()))
+    collector.request_priority(store, "OPEN", NOW - timedelta(minutes=5))
+    assert collector._unserved_request(store, "fake", NOW) == "OPEN"
+    sync(FakeSource(entitled=("minute",), bars={"day": [], "minute": []}), store, FREE, NOW, log=lambda *_: None)
+    assert collector._unserved_request(store, "fake", NOW) is None

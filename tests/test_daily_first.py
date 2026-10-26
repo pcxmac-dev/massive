@@ -60,7 +60,7 @@ def test_stocks_without_daily_bars_get_them_first_most_traded_first(store, monke
     # the two most traded without dailies, before any minute request; HELD has its own already
     assert calls[:2] == [("CCC", "day"), ("BBB", "day")]
     assert "HELD" not in days[:2]
-    assert any("daily bars first: 2 stocks (1 without any daily bars yet, next runs)" in m for m in logged)
+    assert any("daily bars first: 2 stocks (1 without any daily bars yet)" in m for m in logged)
     assert src.instrument_calls == 4  # each stock's listing checked once in the run, not again by the backfill
 
 
