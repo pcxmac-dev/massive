@@ -137,6 +137,9 @@ def test_the_time_zone_switch_sits_on_the_date_row_centred_on_the_dates():
     place = _function(_js("app.js"), "placeTimezone")
     assert "const mid = (text.marginStart ?? 4) + (text.size ?? 12) / 2;" in place  # where the axis draws its dates
     assert "height = 2 * (mid - PANE_GAP)" in place and "top: `${axis.top + PANE_GAP}px`" in place
+    assert "lineHeight: `${height}px`" in place  # the text on the dates' row ...
+    assert "corner = Math.max(height, axis.height - PANE_GAP)" in place and "height: `${corner}px`" in place  # ... the corner filled
+    assert "width: `${Y_AXIS_WIDTH - TZ_INSET}px`" in place  # set in from the plot
 
 
 def test_a_roll_marker_names_only_the_contract_it_becomes():
@@ -144,8 +147,9 @@ def test_a_roll_marker_names_only_the_contract_it_becomes():
     assert "text: r.to," in marker and "gap" not in marker and "r.from" not in marker
 
 
-def test_the_plot_info_box_stays_on_the_right_of_the_first_indicator():
+def test_the_plot_info_box_is_in_the_price_windows_upper_right_corner():
     render = _js("panels.js").split("function renderCursor()", 1)[1].split("box.innerHTML", 1)[0]
+    assert "chart.getSize('candle_pane', 'main')" in render and "volumePane()" not in render
     assert "box.style.right = " in render and "box.style.left" not in render
     assert re.search(r"\.cursor-box \{[^}]*text-align: right", _js("style.css"))
 

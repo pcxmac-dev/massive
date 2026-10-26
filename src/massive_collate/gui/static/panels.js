@@ -14,7 +14,7 @@
      Live      current-session feeds; a red "recording" dot while live data is being recorded
 
    Clicking Stock or Analysis again while it is showing hides or shows its side panel.
-   Also: the cursor statistics box in the volume pane (on-screen max/min and the bar under the
+   Also: the cursor statistics box in the price window's upper right (on-screen max/min and the bar under the
    cursor). */
 (() => {
   const { symbolIcon, icon } = window.MassiveIcons;
@@ -113,7 +113,7 @@
 
   // -- cursor statistics ---------------------------------------------------------------
   // The bar under the crosshair (or the newest bar) and the high/low of what is on screen:
-  // shown in a box in the volume pane and in the Analysis panel.
+  // shown in a box in the price window's upper right and in the Analysis panel.
   const box = document.createElement('div');
   box.id = 'cursorBox';
   box.className = 'cursor-box';
@@ -153,25 +153,19 @@
     return [...new Set(spans.filter(([s, e]) => s < b && e > a).map((x) => x[2]))];
   }
 
-  function volumePane() {
-    const ind = (chart.getIndicators?.({ name: 'VOL' }) || [])[0];
-    if (!ind) return null;
-    const size = chart.getSize(ind.paneId, 'main');
-    return size ? { id: ind.paneId, ...size } : null;
-  }
-
   const t = (ms) => fmtTime(ms);
   const isPrice = () => state.model.kind === 'price';
   const e = window.MassiveIcons.esc;
+  // The box sits in the price window's upper right corner, below the roll labels of continuous futures.
   function renderCursor() {
     const s = cursorStats();
-    const pane = volumePane();
+    const pane = chart.getSize('candle_pane', 'main');
     if (!s) { box.hidden = true; $('pCursor').innerHTML = ''; return; }
     const b = s.bar;
     const chg = `<span class="${cls(s.change)}">${signedPx(s.change)}${isPrice() && s.changePct != null ? ` (${pct(s.changePct)})` : ''}</span>`;
     if (pane) {
       box.hidden = false;
-      box.style.top = `${pane.top + 2}px`;
+      box.style.top = `${pane.top + (state.meta?.rolls?.length ? 26 : 6)}px`;
       box.style.right = `${(chart.getSize('candle_pane', 'yAxis')?.width || 92) + 6}px`;
       box.innerHTML = `
         <div><span class="p-muted">Max</span> ${priceText(s.hi?.high)} <span class="p-muted">${s.hi ? e(t(s.hi.timestamp)) : ''}</span>

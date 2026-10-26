@@ -175,6 +175,7 @@ ON CONFLICT (ticker, timespan, multiplier, ts) DO UPDATE SET
 BAR_COLUMNS = ["open", "high", "low", "close", "volume", "vwap", "transactions"]
 
 MISSING_RECHECK_S = 5.0  # a feed found without files is looked for again after this long
+STORED_SERIES_S = 60.0  # another process's writes show in stored_series() within this
 
 # Only a bar whose values changed is rewritten (and so revised); the same values leave it as stored.
 _UPSERT_BAR = """
@@ -945,8 +946,26 @@ class FeedStore:
 
     def stored_series(self) -> list[tuple]:
         """(source, ticker, kind) for every series with data, kind = trades | second | minute | ...
-        Scans the tables only after the database has changed."""
-        return self._cached("stored_series", self._stored_series)
+        Listed again at once after this store's own writes; after another process's, at most once
+        a STORED_SERIES_S (a new series is rare): a listing is a seek per series, some 200 MB of
+        index pages for a large feed, and the sync and the live recorder write every few seconds
+        (the chart app's status poll relisted them every two seconds, reading 110 MB/s)."""
+        self._scan_feeds()  # one stat: a feed's first file (another process wrote it) is listed at once
+        with self._feeds_lock:
+            feeds = tuple(sorted(self._feeds))
+        hit = self._cache.get("stored_series")
+        now = time.monotonic()
+        if hit is not None and hit[0][-1] == self._writes and hit[3] == feeds:
+            if now - hit[2] < STORED_SERIES_S:
+                return hit[1]
+            version = self._version()
+            if version == hit[0]:
+                self._cache["stored_series"] = (version, hit[1], now, feeds)
+                return hit[1]
+        version = self._version()
+        value = self._stored_series()
+        self._cache["stored_series"] = (version, value, now, feeds)
+        return value
 
     def _stored_series(self) -> list[tuple]:
         # Loose index scans: one primary-key seek per distinct series instead of reading every row.

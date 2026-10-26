@@ -1147,15 +1147,20 @@ function zoneName(z) {
 // The switch sits on the time axis's date row, as tall as it and centred on the dates' line (the
 // axis draws its dates from the top of their margin, in its tick-text font): below the gap band,
 // under the price axis. Its list opens upward from it.
+const TZ_INSET = 8;  // px between the plot and the time zone switch
+
 function placeTimezone() {
   const axis = chart.getSize('x_axis_pane');
   if (!axis) return;
   const text = chart.getStyles().xAxis.tickText;
   const mid = (text.marginStart ?? 4) + (text.size ?? 12) / 2;  // the dates' centre, from the axis's top
   const height = 2 * (mid - PANE_GAP);
-  Object.assign(tzBtn.style, { width: `${Y_AXIS_WIDTH}px`, top: `${axis.top + PANE_GAP}px`, bottom: 'auto',
-                               height: `${height}px`, lineHeight: `${height}px`, fontSize: `${text.size ?? 12}px`,
-                               color: text.color });
+  // The whole corner under the price axis, below the gap band (its highlight fills it), set in from the
+  // plot by TZ_INSET; its text on the dates' row.
+  const corner = Math.max(height, axis.height - PANE_GAP);
+  Object.assign(tzBtn.style, { width: `${Y_AXIS_WIDTH - TZ_INSET}px`, top: `${axis.top + PANE_GAP}px`, bottom: 'auto',
+                               height: `${corner}px`, lineHeight: `${height}px`, paddingBottom: `${corner - height}px`,
+                               fontSize: `${text.size ?? 12}px`, color: text.color });
   tzMenu.style.bottom = `${$('chart').clientHeight - (axis.top + PANE_GAP) + 4}px`;
 }
 

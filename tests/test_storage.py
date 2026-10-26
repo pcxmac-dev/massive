@@ -83,17 +83,22 @@ def test_client_reports_every_request():
     assert seen == [1, 2, 3]
 
 
-def test_series_caches_refresh_on_own_and_other_writes(tmp_path):
+def test_series_caches_refresh_on_own_and_other_writes(tmp_path, monkeypatch):
+    from massive_collate.storage import feeds
+
     a = Store(tmp_path / "m.db")
     b = Store(tmp_path / "m.db")  # e.g. the collector, writing while the chart app reads
     assert a.stored_series() == []
     a.upsert_trades("s", "X", [_trade(1)])
-    assert a.stored_series() == [("s", "X", "trades")]  # own write seen
+    assert a.stored_series() == [("s", "X", "trades")]  # own write seen at once
     fp = a.series_fingerprint("s", "X")
     b.upsert_bars("s", "Y", "minute", 1, [{"t": 60_000, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}])
     b.upsert_trades("s", "X", [_trade(2)])
-    assert ("s", "Y", "minute") in a.stored_series()  # other connection's commit seen
-    assert a.series_fingerprint("s", "X") != fp
+    assert a.series_fingerprint("s", "X") != fp  # a change to a series shows at once
+    # another connection's new series: listed within STORED_SERIES_S (a listing reads every series' index)
+    assert ("s", "Y", "minute") not in a.stored_series()
+    monkeypatch.setattr(feeds, "STORED_SERIES_S", 0.0)
+    assert ("s", "Y", "minute") in a.stored_series()
     a.close(); b.close()
 
 
