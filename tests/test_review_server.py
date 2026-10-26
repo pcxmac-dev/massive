@@ -442,6 +442,22 @@ def test_crypto_hours_are_binned_on_utc_hours_as_derive_builds_them(tmp_path):
             assert len(fut["timestamps"]) == 20 and all(t % step == 0 for t in fut["timestamps"])
 
 
+# -- low: key statistics of a market open every day -------------------------------------------------
+def test_key_statistics_of_crypto_count_calendar_days_and_utc_years():
+    idx = pd.date_range("2025-01-01", periods=400, freq="D", tz="UTC").tz_convert(ET)  # UTC days, as crypto's are
+    c = np.arange(400, dtype=float) + 100
+    d = pd.DataFrame({"open": c - 1, "high": c + 2, "low": c - 2, "close": c, "volume": 10.0}, index=idx)
+    s = key_stats(d, "crypto")
+    assert s["range52w"]["sessions"] == 365 and s["range52w"]["low"] == c[-365] - 2
+    assert s["performance"]["1W"] == pytest.approx((c[-1] / c[-8] - 1) * 100)
+    assert s["performance"]["1Y"] == pytest.approx((c[-1] / c[-366] - 1) * 100)
+    # 2026-01-01 00:00 UTC is 2025-12-31 19:00 in New York: still the new year's first day
+    assert s["performance"]["YTD"] == pytest.approx((c[-1] / c[364] - 1) * 100)
+    rets = np.diff(np.log(c[-31:]))
+    assert s["volatility30"] == pytest.approx(np.std(rets, ddof=1) * math.sqrt(365) * 100)
+    assert key_stats(d)["range52w"]["sessions"] == 252  # a stock's year as before
+
+
 # -- low: an unexpected error is answered, not dropped ------------------------------------------------
 def test_an_unexpected_error_is_answered_not_dropped(served, monkeypatch, capsys):
     app, port = served

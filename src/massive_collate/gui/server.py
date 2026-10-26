@@ -421,7 +421,7 @@ class ChartApp:
             },
             "details": details_subset(details),
             "detailsUpdated": (details or {}).get("_updated_at"),
-            "stats": key_stats(daily),
+            "stats": key_stats(daily, s.asset),
             "attribution": self.attribution(s.ticker, s.kind, s.asset),
             "audits": self.audit_summary(s.ticker),
             "data": {
@@ -461,7 +461,7 @@ class ChartApp:
             },
             "details": details_subset(details),
             "detailsUpdated": (details or {}).get("_updated_at"),
-            "stats": key_stats(daily),
+            "stats": key_stats(daily, s.asset),
             "attribution": self.attribution(s.ticker, "minute" if base["type"] != "day" else "day", s.asset),
             "audits": self.audit_summary(s.ticker),
             "data": {
