@@ -311,7 +311,7 @@
         .map((c) => `<option${c === v ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select></label>`;
     }
     return `<label title="${esc(p.about)}">${esc(p.label)} <input type="number" data-param="${esc(p.key)}" value="${esc(String(v))}"
-      min="${p.lo}" max="${p.hi}" step="${p.step}"></label>`;
+      min="${esc(p.lo)}" max="${esc(p.hi)}" step="${esc(p.step)}"></label>`;
   }
 
   function render() {
@@ -328,8 +328,8 @@
       <select id="schKey" aria-label="Scheme">${S.list.map((x) => `<option value="${esc(x.key)}"${x.key === s.key ? ' selected' : ''}>${esc(x.label)}</option>`).join('')}</select>
       <div class="p-muted small sch-about">${esc(s.about)}</div>
       <div class="sch-params">${s.params.map(paramInput).join('')}
-        <label title="Fee charged at every entry and exit, basis points of what is traded">Fee bps <input type="number" id="schFee" value="${cfg.fee}" min="0" max="1000" step="0.5"></label>
-        <label title="Slippage charged at every entry and exit, basis points">Slippage bps <input type="number" id="schSlip" value="${cfg.slippage}" min="0" max="1000" step="0.5"></label>
+        <label title="Fee charged at every entry and exit, basis points of what is traded">Fee bps <input type="number" id="schFee" value="${esc(cfg.fee)}" min="0" max="1000" step="0.5"></label>
+        <label title="Slippage charged at every entry and exit, basis points">Slippage bps <input type="number" id="schSlip" value="${esc(cfg.slippage)}" min="0" max="1000" step="0.5"></label>
         <label title="Short decisions only close a long"><input type="checkbox" id="schLong"${cfg.longOnly ? ' checked' : ''}> long only</label>
       </div>
       <div class="p-muted small">Over ${esc(range?.over || '–')}${range ? `: ${when(range.from)} → ${when(range.to)}` : ''} · ${esc(state.period ? `${state.period.span} ${state.period.type}` : '')} bars · backtest, not orders</div>

@@ -30,11 +30,21 @@
     render();
   }
 
-  async function save() {
-    try {
-      lists = (await apiWrite('PUT', '/api/watchlists', { lists })).lists;
-    } catch (err) { showError(err); }
-    render();
+  // One save at a time, each sending the lists as they are when it goes: two at once could reach the
+  // server in either order, the older undoing the newer. The server's copy is taken only from the last
+  // save waiting (an earlier answer lacks the changes still to go).
+  let saving = Promise.resolve();
+  let waiting = 0;
+  function save() {
+    waiting += 1;
+    saving = saving.then(async () => {
+      try {
+        const res = await apiWrite('PUT', '/api/watchlists', { lists });
+        if (waiting === 1) lists = res.lists;
+      } catch (err) { showError(err); } finally { waiting -= 1; }
+      render();
+    });
+    return saving;
   }
 
   // Live price where the symbol is streaming; otherwise the last session's close and change.

@@ -19,7 +19,7 @@
    Also: the cursor statistics box in the price window's upper right (on-screen max/min and the bar under the
    cursor). */
 (() => {
-  const { symbolIcon, icon } = window.MassiveIcons;
+  const { symbolIcon, icon, esc } = window.MassiveIcons;
   // The watchlist sits beside whichever chart was showing (it has no chart content of its own).
   const VIEWS = { stock: 'chart', analysis: 'chart', trading: 'chart', watchlist: 'chart', markets: 'markets', news: 'news',
                   gov: 'gov', datasets: 'datasets', fetcher: 'fetcher', live: 'live' };
@@ -81,7 +81,7 @@
     // its platter turns while a run fetches (.busy): redrawn only when it changes, or each poll would
     // restart the turn from the top
     const fetcherIcon = icon('disk', RAIL_ICON)
-      + (!running && fresh ? `<span class="rail-count" title="${fresh} symbols should have new data">${fresh}</span>` : '');
+      + (!running && fresh ? `<span class="rail-count" title="${esc(fresh)} symbols should have new data">${esc(fresh)}</span>` : '');
     if ($('railFetcher').dataset.drawn !== fetcherIcon) {
       $('railFetcher').innerHTML = fetcherIcon;
       $('railFetcher').dataset.drawn = fetcherIcon;

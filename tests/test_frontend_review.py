@@ -207,3 +207,57 @@ def test_the_highlight_panel_is_rebuilt_when_the_highlight_changes_only():
     assert "$('pHighlight').addEventListener('click'" in app and "e.target.closest('#hlRemove')" in app
     # level 2 still hears of each change (level2.js coverMoved)
     assert "window.dispatchEvent(new Event('massive:highlight'))" in _function(app, "scheduleHighlightPanel")
+
+
+# -- the low ones ----------------------------------------------------------------------------------------------------
+
+def test_the_activity_poll_backs_off_while_the_app_does_not_answer():
+    act = _js("activity.js")
+    assert "const POLL_FAIL_MAX_MS = 60000;" in act
+    once = act.split("async function pollOnce()", 1)[1].split("\n  }\n", 1)[0]
+    assert "failedPolls = 0;" in once and "failedPolls += 1;" in once
+    assert "Math.min(POLL_FAIL_MAX_MS, every * 2 ** failedPolls)" in once
+
+
+def test_projected_times_move_on_with_a_new_bar_instead_of_being_asked_again():
+    axis = _js("timeaxis.js")
+    assert "last.timestamp" not in _inner(axis, "futureKey")
+    current = _inner(axis, "current")
+    assert "const k = fut.stamps.indexOf(last.timestamp);" in current and "fut.stamps = fut.stamps.slice(k + 1);" in current
+    assert "} else if (last && last.timestamp !== fut.lastBar?.timestamp) {" in current  # no data: no bar to compare
+    assert "if (fut.ask !== ask) return;" in _inner(axis, "ensure")  # a page counted from the bar before is dropped
+
+
+def test_filter_boxes_keep_the_caret_where_it_was():
+    for name in ("news.js", "gov.js"):
+        src = _js(name)
+        assert "const { selectionStart: from, selectionEnd: to } = e.target;" in src, name
+        assert "box.setSelectionRange(from, to);" in src, name
+
+
+def test_a_dataset_picked_meanwhile_keeps_its_own_series_list():
+    pick = _inner(_js("datasets.js"), "selectDataset")
+    assert pick.index("if (st.name !== name) return;") < pick.index("st.catalog = catalog;")
+
+
+def test_the_now_handle_drag_ends_however_the_pointer_goes():
+    drag = _js("app.js").split("nowHandle.addEventListener('pointerdown'", 1)[1].split("\n});\n", 1)[0]
+    assert "const ENDS = ['pointerup', 'pointercancel', 'lostpointercapture'];" in drag
+    assert "for (const ev of ENDS) nowHandle.removeEventListener(ev, up);" in drag
+
+
+def test_values_reaching_html_are_escaped():
+    assert '<span class="state ${esc(s.state)}">' in _js("activity.js")
+    assert "${esc(o.status)} ${esc(fmtTime(o.done_at))}" in _js("trading.js")
+    schemes = _js("schemes.js")
+    assert 'min="${esc(p.lo)}" max="${esc(p.hi)}" step="${esc(p.step)}"' in schemes
+    assert 'value="${esc(cfg.fee)}"' in schemes and 'value="${esc(cfg.slippage)}"' in schemes
+    assert "`Paste the ${esc(label(clip().items[0]))}`" in _js("drawclip.js")
+    assert 'title="${esc(fresh)} symbols should have new data">${esc(fresh)}</span>' in _js("panels.js")
+    assert "list.querySelector(`[data-code=\"${CSS.escape(String(hover.code))}\"]`)" in _js("globe.js")
+
+
+def test_watchlist_saves_go_one_at_a_time():
+    wl = _js("watchlist.js")
+    assert "saving = saving.then(async () => {" in wl
+    assert "if (waiting === 1) lists = res.lists;" in wl  # an earlier answer lacks the changes still to go

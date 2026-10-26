@@ -596,12 +596,16 @@ nowHandle.addEventListener('pointerdown', (e) => {
     chart.setOffsetRightDistance(w - x);
     placeNowHandle();
   };
+  // The drag ends however the pointer goes: let go, taken by the browser (a touch turned into a
+  // scroll) or its capture lost. Ended on pointerup alone, a cancelled drag kept its listeners.
+  const ENDS = ['pointerup', 'pointercancel', 'lostpointercapture'];
   const up = () => {
     nowHandle.removeEventListener('pointermove', move);
+    for (const ev of ENDS) nowHandle.removeEventListener(ev, up);
     prefs.set('nowAt', state.nowAt);
   };
   nowHandle.addEventListener('pointermove', move);
-  nowHandle.addEventListener('pointerup', up, { once: true });
+  for (const ev of ENDS) nowHandle.addEventListener(ev, up);
 });
 nowHandle.addEventListener('dblclick', () => {
   state.nowAt = null;

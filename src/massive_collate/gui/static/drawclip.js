@@ -141,7 +141,7 @@
     menu.innerHTML = (o
       ? item('copy', 'Copy', 'Ctrl+C') + item('cut', 'Cut', 'Ctrl+X') + item('paste', 'Paste', 'Ctrl+V', can)
         + '<hr class="menu-sep">' + item('duplicate', 'Duplicate', '') + item('delete', 'Delete', 'Del')
-      : item('paste', can ? `Paste the ${label(clip().items[0])}` : 'Paste (nothing copied)', 'Ctrl+V', can));
+      : item('paste', can ? `Paste the ${esc(label(clip().items[0]))}` : 'Paste (nothing copied)', 'Ctrl+V', can));
     menu.hidden = false;
     const w = chartEl.clientWidth, h = chartEl.clientHeight;
     menu.style.left = `${Math.min(at.x, w - menu.offsetWidth - 4)}px`;

@@ -1088,7 +1088,7 @@
     if (justDragged) { justDragged = false; return; }
     if (sunHit(e)) { recentre(); return; }
     if (!hover) return;
-    const row = list.querySelector(`[data-code="${hover.code}"]`);
+    const row = list.querySelector(`[data-code="${CSS.escape(String(hover.code))}"]`);
     if (row) { row.scrollIntoView({ block: 'center', behavior: 'smooth' }); row.classList.add('flash'); setTimeout(() => row.classList.remove('flash'), 1200); }
   });
   info.addEventListener('click', (e) => {

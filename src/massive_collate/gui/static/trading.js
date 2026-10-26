@@ -55,7 +55,7 @@
       : '<tr><td colspan="5" class="p-muted">No positions.</td></tr>';
     $('trOrders').innerHTML = d.orders.length ? d.orders.map((o) => {
       const price = o.type === 'limit' ? ` @ ${px(o.limit_px)}` : o.type === 'stop' ? ` stop ${px(o.stop_px)}` : '';
-      return `<tr title="${o.tif === 'gtc' ? 'until cancelled' : 'day'}${o.done_at ? ` · ${o.status} ${esc(fmtTime(o.done_at))}` : ''}">
+      return `<tr title="${o.tif === 'gtc' ? 'until cancelled' : 'day'}${o.done_at ? ` · ${esc(o.status)} ${esc(fmtTime(o.done_at))}` : ''}">
         <td>${when(o.placed_at)}</td>
         <td><span class="${o.side === 'buy' ? 'up' : 'down'}">${esc(o.side)}</span> ${o.qty.toLocaleString('en-US')} ${esc(o.ticker)} ${esc(o.type)}${price}</td>
         <td class="tr-${esc(o.status)}">${esc(o.status)}${o.fill_px != null ? ` ${px(o.fill_px)}` : ''}</td>
