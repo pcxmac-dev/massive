@@ -15,6 +15,8 @@
 body.light {
   --bg: #e4e7ed;
   --panel: #eef0f4;
+  --frame: #cdd3dd;
+  --card: #f3f4f7;
   --field: #f5f6f9;
   --border: #bfc5d1;
   --text: #0f1219;
@@ -27,6 +29,7 @@ body.light {
 /* More themes (app.js THEMES): Midnight and Graphite are dark-based, Paper is light-based (it also
    gets body.light, whose rules it overrides colour by colour). */
 body[data-theme="midnight"] {
+  --frame: #1f2a44;
   --bg: #0b1020;
   --panel: #131b31;
   --border: #1f2a44;
@@ -38,6 +41,7 @@ body[data-theme="midnight"] {
   --down: #f46a67;
 }
 body[data-theme="graphite"] {
+  --frame: #353940;
   --bg: #1c1e22;
   --panel: #25282d;
   --border: #353940;
@@ -51,6 +55,8 @@ body[data-theme="graphite"] {
 body.light[data-theme="paper"] {
   --bg: #efe8da;
   --panel: #f7f2e7;
+  --frame: #dcd2bd;
+  --card: #f9f5ec;
   --field: #fbf8f1;
   --border: #cbbfa8;
   --text: #241e14;
@@ -98,9 +104,14 @@ dialog.switcher.map-view #symbolList { max-height: calc(92vh - 60px); }
 .map-pick .primary { margin: 0; }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
+/* Panels: everything the page holds (a strip of the top bar's tools, the drawing tools, the chart and
+   its plots, each side-panel section, the rail, the status line, the other views) sits on a panel of
+   --card, --pad inside and as large as what it holds, on the page's lighter grey (--frame), --gap
+   apart. The chart's own plots are kept PANE_GAP apart in the same grey (app.js gapColor). */
 body {
+  --frame: #2a2e39; --card: var(--bg); --gap: 6px; --pad: 6px; --radius: 6px;
   display: flex; flex-direction: column;
-  background: var(--bg); color: var(--text);
+  background: var(--frame); color: var(--text);
   font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 button, select, input {
@@ -114,11 +125,13 @@ select { border-color: var(--border); background: var(--panel); }
 select option { background: var(--panel); }
 
 #topbar {
-  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
-  padding: 4px 8px; border-bottom: 1px solid var(--border); background: var(--panel);
+  display: flex; align-items: stretch; gap: var(--gap); flex-wrap: wrap; padding: var(--gap) var(--gap) 0;  /* strips one height a row */
 }
+.strip { display: flex; align-items: center; gap: 4px; padding: 3px var(--pad); background: var(--card);
+  border-radius: var(--radius); }
+.strip:not(:has(> :not([hidden]))) { display: none; }  /* every tool in it hidden: no empty panel */
 #topbar .symbol { font-weight: 600; border-color: var(--border); min-width: 120px; text-align: left; }
-.group { display: flex; gap: 1px; padding: 0 6px; border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
+.group { display: flex; gap: 1px; }
 .group button { padding: 4px 6px; }
 .spacer { flex: 1; }
 .dropdown.right { left: auto; right: 0; min-width: 260px; }
@@ -149,26 +162,29 @@ select option { background: var(--panel); }
 .dropdown label { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 4px; cursor: pointer; }
 .dropdown label:hover { background: var(--hover); }
 
-main { flex: 1; display: flex; min-height: 0; }
-#tools {
-  display: flex; flex-direction: column; gap: 2px; padding: 6px 4px;
-  border-right: 1px solid var(--border); background: var(--panel); overflow-y: auto;
+main { flex: 1; display: flex; min-height: 0; gap: var(--gap); padding: var(--gap); }
+#tools {  /* as tall as its tools, not the page */
+  display: flex; flex-direction: column; gap: 2px; padding: var(--pad) 4px; align-self: flex-start; max-height: 100%;
+  background: var(--card); border-radius: var(--radius); overflow-y: auto;
 }
 #tools button { width: 34px; height: 34px; padding: 6px; display: grid; place-items: center; }
 #tools svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 1.5; stroke-linecap: round; }
 #tools hr { width: 70%; border: 0; border-top: 1px solid var(--border); margin: 4px auto; }
-#chart { flex: 1; min-width: 0; }
+#chart { flex: 1; min-width: 0; background: var(--card); border-radius: var(--radius); overflow: hidden; }
 .gpu-layer { position: absolute; left: 0; top: 0; pointer-events: none; }
 
 /* Right-hand info panel (resizable) */
-#panelResizer { width: 5px; cursor: col-resize; background: var(--border); flex: none; }
+/* the handle is the gap between the chart and the panel */
+#panelResizer { width: var(--gap); margin: 0 calc(-1 * var(--gap)); cursor: col-resize; background: transparent; flex: none;
+  border-radius: 3px; position: relative; z-index: 2; }
 #panelResizer:hover, #panelResizer.dragging, #panelResizer:focus-visible { background: var(--accent); outline: none; }
-#sidePanel {
-  width: var(--panel-w, 320px); flex: none; overflow-y: auto; background: var(--panel);
-  font-size: 12px; line-height: 1.45;
+#sidePanel {  /* its sections are the panels */
+  width: var(--panel-w, 320px); flex: none; overflow-y: auto; font-size: 12px; line-height: 1.45;
 }
+#sidePanel .pane { display: flex; flex-direction: column; gap: var(--gap); }
+#sidePanel .pane[hidden] { display: none; }
 body.panel-hidden #sidePanel, body.panel-hidden #panelResizer { display: none; }
-#sidePanel section { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+#sidePanel section { padding: 10px 12px; background: var(--card); border-radius: var(--radius); }
 #sidePanel section:empty { display: none; }
 #sidePanel h3 { margin: 0 0 6px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em;
   display: flex; justify-content: space-between; align-items: center; }
@@ -215,8 +231,8 @@ body.panel-hidden #sidePanel, body.panel-hidden #panelResizer { display: none; }
 
 #status {
   display: flex; gap: 12px; justify-content: space-between; align-items: center; flex: none;
-  height: 18px; padding: 0 8px; border-top: 1px solid var(--border); background: var(--panel); color: var(--muted);
-  font-size: 11px; line-height: 18px; white-space: nowrap; overflow: hidden;
+  height: 22px; margin: 0 var(--gap) var(--gap); padding: 0 var(--pad); background: var(--card); border-radius: var(--radius);
+  color: var(--muted); font-size: 11px; line-height: 22px; white-space: nowrap; overflow: hidden;
 }
 #error { color: var(--down); overflow: hidden; text-overflow: ellipsis; }
 
@@ -251,8 +267,8 @@ dialog::backdrop { background: rgba(0, 0, 0, .5); }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .ico.spin, .spin .ico, .dot.on, .rec.on { animation: none; } }
 
-#rail { display: flex; flex-direction: column; gap: 2px; padding: 6px 4px; border-left: 1px solid var(--border);
-  background: var(--panel); flex: none; }
+#rail { display: flex; flex-direction: column; gap: 2px; padding: var(--pad) 4px; align-self: flex-start; max-height: 100%;
+  background: var(--card); border-radius: var(--radius); flex: none; overflow-y: auto; }
 #rail button { position: relative; width: 46px; height: 46px; padding: 0; display: grid; place-items: center;
   color: var(--muted); border-radius: 7px; }
 #rail button:hover { color: var(--text); }
@@ -382,7 +398,8 @@ dialog.wide { width: min(1100px, 96vw); max-height: 90vh; }
 }
 
 /* main-window views (switched by the rail) */
-main > .view { flex: 1; min-width: 0; min-height: 0; display: flex; }
+main > .view { flex: 1; min-width: 0; min-height: 0; display: flex; gap: var(--gap); }
+main > .view:not(#viewChart) { background: var(--card); border-radius: var(--radius); }
 main > .view[hidden] { display: none; }
 .scroll-view { flex-direction: column; overflow-y: auto; padding: 12px 18px 18px; }
 .view-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; margin-bottom: 6px; }

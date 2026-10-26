@@ -130,7 +130,7 @@ def test_the_gaps_between_panes_are_the_windows_grey_and_hold_no_crosshair_line(
     spacing = _function(app, "applyPaneSpacing")
     assert "separator: { size: PANE_GAP, color: gapColor() }" in spacing and "placeAxisGap();" in spacing
     assert "crosshair" not in spacing  # the library's dashed line, drawn in the panes only
-    assert "getPropertyValue('--panel')" in app.split("const gapColor", 1)[1].splitlines()[0]  # the window's grey
+    assert "getPropertyValue('--frame')" in app.split("const gapColor", 1)[1].splitlines()[0]  # the page's grey, between panels
     assert "applyPaneSpacing();" in _function(app, "applyChartType")  # after every theme
 
 def test_the_time_zone_switch_sits_on_the_date_row_centred_on_the_dates():
@@ -192,3 +192,18 @@ def test_the_trading_view_is_on_the_rail_and_writes_paper_orders_only():
     trading = _js("trading.js")
     assert "apiWrite('POST', '/api/trading/orders'" in trading  # the write header: no other page can place one
     assert "Live trading is off" in trading
+
+
+def test_panels_sit_on_the_lighter_grey_as_large_as_what_they_hold():
+    css = _js("style.css")
+    body = re.search(r"\nbody \{[^}]*\}", css).group(0)
+    assert "--frame:" in body and "background: var(--frame)" in body  # the page is the grey
+    for theme in ("body.light {", 'body[data-theme="midnight"] {', 'body[data-theme="graphite"] {',
+                  'body.light[data-theme="paper"] {'):
+        assert "--frame:" in css.split(theme, 1)[1].split("}", 1)[0], theme
+    for panel in ("#tools", "#rail"):  # as tall as their tools, not the page
+        rule = re.search(re.escape(panel) + r" \{[^}]*\}", css).group(0)
+        assert "align-self: flex-start" in rule and "background: var(--card)" in rule, panel
+    assert re.search(r"#sidePanel section \{[^}]*background: var\(--card\)", css)  # each section a panel
+    assert re.search(r"\.strip \{[^}]*background: var\(--card\)", css) and _js("index.html").count('class="strip"') >= 6
+    assert re.search(r"main \{[^}]*gap: var\(--gap\)", css)

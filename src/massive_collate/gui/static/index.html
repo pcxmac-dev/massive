@@ -8,8 +8,12 @@
 </head>
 <body>
   <header id="topbar">
+    <!-- The top bar's tools in strips, each a panel on the page's lighter grey (style.css, "Panels") -->
+    <div class="strip">
     <button id="symbolBtn" class="symbol" title="Switch symbol (/)"><span id="symbolLabel">Select symbol</span></button>
     <select id="feedSelect" title="Data feed"></select>
+    </div>
+    <div class="strip">
     <div id="periods" class="group" role="toolbar" aria-label="Interval"></div>
     <select id="typeSelect" title="Chart type">
       <optgroup label="Time based">
@@ -37,6 +41,8 @@
       </optgroup>
     </select>
     <span id="typeParams" class="params"></span>
+    </div>
+    <div class="strip">
     <select id="modelSelect" title="Model: the price, its derivatives, its integral, or its slower Fourier cycles">
       <option value="price">Price</option>
       <option value="d1">1st derivative (slope)</option>
@@ -64,23 +70,31 @@
       <option value="difference">Back-adjusted (difference)</option>
       <option value="ratio">Back-adjusted (ratio)</option>
     </select>
+    </div>
+    <div class="strip">
     <button id="ethBtn" class="toggle" title="Extended hours: pre-market, after-hours and overnight">ETH</button>
     <button id="unfilteredBtn" class="toggle" title="Unfiltered: all data, bad data included. Off: filtered, the target data (bad data is on each feed's pruned list, in the Data panel)">All data</button>
     <div class="menu">
       <button id="indBtn" aria-haspopup="true">Indicators</button>
       <div id="indMenu" class="dropdown" hidden></div>
     </div>
+    </div>
     <span class="spacer"></span>
+    <div class="strip">
     <div class="menu layout-menu">
       <button id="layoutBtn" aria-haspopup="true" title="Layouts: saved markups">
         <span id="layoutName">Layout</span> <span id="layoutDirty" class="dirty" title="Unsaved changes" hidden>●</span> ▾
       </button>
       <div id="layoutMenu" class="dropdown right" hidden></div>
     </div>
+    </div>
+    <div class="strip">
     <button id="zoomOut" title="Zoom out (-)">&minus;</button>
     <button id="zoomIn" title="Zoom in (+)">+</button>
     <button id="latestBtn" title="Jump to latest bar (End)">Latest</button>
     <button id="replayBtn" class="toggle analysis-only" title="Replay (Analysis view): click a bar to start from, then play the bars after it as if live">Replay</button>
+    </div>
+    <div class="strip">
     <button id="gpuBtn" class="toggle" title="GPU rendering (WebGL2 / OpenGL ES 3)">GPU</button>
     <button id="shotBtn" title="Save a PNG of the chart">PNG</button>
     <select id="themeSelect" title="Theme" aria-label="Theme">
@@ -90,6 +104,7 @@
       <option value="light">Light</option>
       <option value="paper">Paper</option>
     </select>
+    </div>
   </header>
   <main>
     <div class="view" id="viewChart" data-view="chart">

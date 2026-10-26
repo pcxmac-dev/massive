@@ -1115,7 +1115,7 @@ const PANE_GAP = 14;
 const axisGap = Object.assign(document.createElement('div'), { className: 'axis-gap' });
 $('chart').append(axisGap);
 
-const gapColor = () => getComputedStyle(document.body).getPropertyValue('--panel').trim() || '#1e222d';
+const gapColor = () => getComputedStyle(document.body).getPropertyValue('--frame').trim() || '#2a2e39';  // the page's grey (style.css, "Panels")
 
 function applyPaneSpacing() {
   chart.setStyles({ separator: { size: PANE_GAP, color: gapColor() }, xAxis: { tickText: { marginStart: PANE_GAP + 4 } } });
