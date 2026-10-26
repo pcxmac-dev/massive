@@ -4,7 +4,8 @@ A feed sends some time frames itself (most send 1-minute and daily bars). Every 
 frame (STANDARD) is built here from the finest data the feed holds, kept in the feed's own
 database apart from what it sent (built_bars, under a derivation record) and read as derived. A
 bar the feed sends for the same time replaces the built one (storage: bars_replace_built), and a
-built bar is never stored where the feed's own exists, so history fetched later takes over.
+built bar is never stored where the feed's own exists, so history fetched later takes over, except
+where the feed's own is pruned: there the built bar takes its place in the filtered view.
 
 Frames are only ever built upward, from finer data (CHAINS); nothing finer is made from coarser
 bars, so a gap in the finer data stays a gap.

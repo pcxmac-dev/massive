@@ -37,7 +37,10 @@ The **pruned list** holds the bad data, one per feed and symbol (the `pruned` ta
 file): each entry is a bar as it was when taken out of the filtered view, the rule below that caught
 it, the evidence (the numbers the rule compared, and for a spike the trades inside it priced outside
 its neighbours' range), when it was pruned and by which code. A feed's own bar stays where it is,
-only left out of filtered reads; a bar built here that a rebuild replaced lives on in the list alone.
+only left out of filtered reads, and a bar built here from the feed's finer data takes its place there
+(unfiltered and `as_of` reads still give the feed's own); a bar built here that a rebuild replaced
+lives on in the list alone, each rebuild's version kept. Pruning and releasing are changes like any
+write: the frames built above the bar are rebuilt and the chart's caches see it.
 An entry can be released (put back) without losing the record that it was pruned, and a released
 entry is not pruned again. Pruning never mixes feeds: a feed's series is judged on its own. Reads of
 a series as it stood at a past moment (`as_of`) include bad data: it was there. (`baddata.py`;

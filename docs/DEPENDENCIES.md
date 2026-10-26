@@ -16,7 +16,9 @@ Status: ✅ handled · ⚠️ partly handled (see notes) · ❌ gap (not handled
 
 Plan: free (5 requests/min, 2 years of history, end-of-day stocks/indices, currencies and crypto through the previous UTC day, futures 8 h delayed).
 Hard caps: 250 requests per run, 2,000 per day (`MASSIVE_MAX_REQUESTS_PER_RUN/DAY`). Every request,
-retries included, counts.
+retries included, counts. The rate windows and the daily caps hold per key on this machine
+(`ratelimit.MachineLedger`, beside the live recorder's machine lock), whichever database a process
+uses: a second copy of the app cannot double them.
 
 | Data | Endpoint | Fetched by | When | Cost | Status |
 |---|---|---|---|---|---|
