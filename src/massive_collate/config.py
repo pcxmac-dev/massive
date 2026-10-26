@@ -166,7 +166,7 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True)
 class Settings:
-    api_key: str | None
+    api_key: str | None = field(repr=False)  # never in a repr (a log line, a traceback's locals)
     tier: Tier
     db_path: Path
     base_url: str = DEFAULT_BASE_URL
@@ -271,7 +271,9 @@ def _alpaca(merged: Mapping[str, str]) -> AlpacaSettings:
 
 
 def read_env_file(path: Path) -> dict[str, str]:
-    """Parse a simple KEY=VALUE .env file. Blank lines and # comments are ignored."""
+    """Parse a simple KEY=VALUE .env file. Blank lines and # comments are ignored, also one after
+    a value (`MASSIVE_TIER=starter  # my plan`: a '#' after a space or tab); a quoted value is
+    taken whole, '#' included."""
     values: dict[str, str] = {}
     if not path.is_file():
         return values
@@ -281,8 +283,12 @@ def read_env_file(path: Path) -> dict[str, str]:
             continue
         key, _, value = line.partition("=")
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
+        if value[:1] in ("'", '"') and value.find(value[0], 1) > 0:
+            value = value[1:value.find(value[0], 1)]  # what follows the closing quote is a comment
+        else:
+            for mark in (" #", "\t#"):
+                value = value.split(mark, 1)[0]
+            value = value.strip()
         values[key.strip()] = value
     return values
 
@@ -329,7 +335,7 @@ def load_settings(
         merged.update(saved_user_keys())  # the process's own environment still wins
     merged.update(os.environ if env is None else env)
 
-    tier_name = merged.get("MASSIVE_TIER", "free").strip().lower()
+    tier_name = (merged.get("MASSIVE_TIER") or "").strip().lower() or "free"  # set but empty: the default
     if tier_name not in TIERS:
         raise ConfigError(f"Unknown MASSIVE_TIER {tier_name!r}; choose one of {', '.join(TIERS)}")
     tier = TIERS[tier_name]
@@ -348,7 +354,7 @@ def load_settings(
 
     per_run = _int_setting(merged, "MASSIVE_MAX_REQUESTS_PER_RUN")
     per_day = _int_setting(merged, "MASSIVE_MAX_REQUESTS_PER_DAY")
-    refresh = _int_setting(merged, "MASSIVE_REFRESH_HOURS")
+    refresh = _float_setting(merged, "MASSIVE_REFRESH_HOURS")  # hours, fractions too (0.5)
 
     return Settings(
         api_key=merged.get("MASSIVE_API_KEY") or None,
@@ -408,5 +414,18 @@ def _int_setting(values: Mapping[str, str], name: str) -> int | None:
     except ValueError as e:
         raise ConfigError(f"{name} must be a whole number, got {raw!r}") from e
     if value < 0:
+        raise ConfigError(f"{name} must not be negative")
+    return value
+
+
+def _float_setting(values: Mapping[str, str], name: str) -> float | None:
+    raw = values.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError as e:
+        raise ConfigError(f"{name} must be a number, got {raw!r}") from e
+    if not value >= 0:  # negative, or not a number at all (nan)
         raise ConfigError(f"{name} must not be negative")
     return value
