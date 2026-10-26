@@ -10,7 +10,8 @@ its trades go in a feed of their own ("iex", one of PARTIAL_FEEDS) that a chart 
 only where no feed of the whole market (SIP) has bars yet: the current session, until a sync
 downloads it.
 
-A thread per stream keeps one connection and reconnects with backoff. While it is connected, its
+A thread per stream keeps one connection and reconnects with backoff; a thread that ends anyway is
+started again by the recorder (Recorder._supervise). While it is connected, its
 span is entered in the coverage ledger for every symbol it streams: a connected span without trades
 had none. The heartbeat (kv `live-recorder`) and each stream's state per symbol (kv `live:status`)
 feed the Live view and the rail icon. One recorder runs at a time (a lock file beside the data).
@@ -55,10 +56,19 @@ LOCK_CHECK_SECONDS = 30.0  # how often the recorder makes sure it still holds it
 # limit reached") is otherwise asked again every second, forever.
 # Past that, the kill policy (killswitch.py): a refusal, or FLAP_LIMIT connections dropped within
 # STABLE_SECONDS of connecting, kills the stream for 30 min and up; it is not tried while killed.
+# A connection that could not be made at all (no network, DNS) is not the server dropping it: it
+# only waits longer each time.
 MAX_BACKOFF = 300.0
 STABLE_SECONDS = 60.0
 KILL_CHECK_SECONDS = 30.0  # while a stream is killed: how often it looks whether the kill ended (or was lifted)
+# A stream thread that ended while the recorder runs (an error got out of its loop) is started again
+# after this, the wait doubling up to MAX_BACKOFF while it keeps ending (run, _supervise).
+RESTART_SECONDS = 5.0
 REAP_SECONDS = 300.0  # how often the recorder looks for other recorder processes (and ends them)
+# The first look comes once the lock check has run twice: of two recorders that took the machine's
+# lock at the same moment (a dead one's, taken over), the one that lost it has seen so and stopped,
+# rather than ending the one that holds it.
+FIRST_REAP_SECONDS = 2 * LOCK_CHECK_SECONDS
 # Trades held in memory while the database refuses writes (locked, full disk): past this many
 # bytes the oldest go, and the time they cover is no longer claimed as recorded (the sync
 # downloads it). A waiting trade is a dict of about TRADE_BYTES (its keys shared): some 110,000.
@@ -95,6 +105,23 @@ def _ns(iso: str) -> int:
 def _trade(ts_ns: int, seq: int, price, size, trade_id) -> dict:
     return {"sip_timestamp": ts_ns, "sequence_number": seq, "price": float(price), "size": float(size),
             "exchange": None, "conditions": [], "id": str(trade_id), "tape": None}
+
+
+def _settle(trades: list[dict]) -> tuple[list[dict], list[int]]:
+    """A batch of one symbol's trades, in the order they came, as it stands at its end: (the trades
+    standing, the sequence numbers withdrawn). A withdrawal takes out the trades before it with its
+    sequence number (in the batch here, in the store by the caller, before the standing ones are
+    stored), never one after it: a correction that keeps its trade's id keeps its sequence number."""
+    standing: dict[int, list[dict]] = {}
+    gone: list[int] = []
+    for t in trades:
+        seq = int(t.get("sequence_number") or 0)
+        if t.get("withdrawn"):
+            standing.pop(seq, None)
+            gone.append(seq)
+        else:
+            standing.setdefault(seq, []).append(t)
+    return [t for kept in standing.values() for t in kept], gone
 
 
 @dataclass
@@ -259,8 +286,8 @@ class Recorder:
         self._status: dict[str, dict] = {s.source: {"connected": False, "pairs": {}} for s in self.streams}
         self._wanted: tuple[str, ...] = ()  # stock symbols to stream (wanted_stocks)
         self._subs: dict[str, dict[str, int]] = {s.source: {} for s in self.streams}  # symbol -> asked for since (ms)
-        self._rules: dict[str, tuple[float, dict]] = {}  # feed -> (read at, its condition rules)
-        self._derivations: dict[tuple[str, str, int], int] = {}
+        self._rules: dict[str, tuple[float, dict, str]] = {}  # feed -> (read at, its condition rules, their digest)
+        self._derivations: dict[tuple[str, str, int, str | None], int] = {}  # (feed, symbol, day, rules digest) -> id
         self._built: dict[int, int] = defaultdict(int)
         if self.connect is None:
             from .wsclient import WebSocket
@@ -289,12 +316,62 @@ class Recorder:
     def _run_stream(self, stream) -> None:
         from .storage import Store
 
-        with Store(self.db_path) as store:  # kills are read and written from this thread: its own connection
-            self._stream_loop(stream, store)
+        try:
+            with Store(self.db_path) as store:  # kills are read and written from this thread: its own connection
+                self._stream_loop(stream, store)
+        except Exception as e:  # noqa: BLE001 - shown down, not left "connected"; run() starts it again
+            with self._lock:
+                self._since.pop(stream.source, None)
+                self._subs[stream.source] = {}
+                self._status[stream.source].update(connected=False,
+                                                   error=f"stream stopped: {type(e).__name__}: {e}"[:200])
+            self.log(f"live: the {stream.source} stream stopped ({type(e).__name__}: {e})")
+
+    def _start_stream(self, stream) -> threading.Thread:
+        t = threading.Thread(target=self._run_stream, args=(stream,), daemon=True, name=f"live-{stream.source}")
+        t.start()
+        return t
+
+    def _supervise(self, threads: dict, restarts: dict, now: float) -> None:
+        """Start again each stream thread that ended while the recorder runs (an error got out of
+        its loop: it had stopped recording while its status still said connected). Not at once:
+        RESTART_SECONDS after it is found ended, doubling up to MAX_BACKOFF while it keeps ending,
+        and from RESTART_SECONDS again after one that ran STABLE_SECONDS: a thread that ends as it
+        starts must not become a reconnect storm. `restarts`: {source: {wait, at, started}}."""
+        for s in self.streams:
+            if self.stop.is_set() or threads[s.source].is_alive():
+                continue
+            r = restarts.setdefault(s.source, {"wait": RESTART_SECONDS, "at": None, "started": now})
+            if r["at"] is None:  # just found ended
+                if now - r["started"] >= STABLE_SECONDS:
+                    r["wait"] = RESTART_SECONDS  # it had run a while: a new failure, not more of the same
+                r["at"] = now + r["wait"]
+                self.log(f"live: the {s.source} stream ended; started again in {r['wait']:.0f} s")
+            elif now >= r["at"]:
+                threads[s.source] = self._start_stream(s)
+                r.update(at=None, started=now, wait=min(MAX_BACKOFF, r["wait"] * 2))
+
+    def _record(self, write, *args, **kwargs):
+        """A stream thread's write (an outcome, a kill): a database that refuses it (locked, full)
+        is logged and the stream goes on; it must not end the thread. Returns what the write
+        returned, or None when it failed."""
+        try:
+            return write(*args, **kwargs)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"live: not recorded ({type(e).__name__}: {e})")
+            return None
 
     def _killed(self, stream, store) -> bool:
-        """Whether the stream is killed (killswitch): then it is shown so and waited on, a while."""
-        k = killswitch.killed(store, stream.source, "live")
+        """Whether the stream is killed (killswitch): then it is shown so and waited on, a while.
+        A kill that cannot be read (the database refused) counts as one until it can be."""
+        try:
+            k = killswitch.killed(store, stream.source, "live")
+        except Exception as e:  # noqa: BLE001
+            with self._lock:
+                self._status[stream.source].update(connected=False, error=f"kill state not read: {e}"[:200])
+            self.log(f"live: {stream.source}: its kill state could not be read ({type(e).__name__}: {e}); not connected")
+            self.stop.wait(KILL_CHECK_SECONDS)
+            return True
         with self._lock:
             self._status[stream.source]["killed"] = k
             if k:
@@ -318,6 +395,7 @@ class Recorder:
             ws, connected_at = None, None
             try:
                 ws = self.connect(stream.url)
+                connected_at = time.monotonic()  # the server took the connection: a drop from here on can flap
                 for m in stream.subscribe(() if dynamic else self.coins):
                     ws.send(m)
                 with self._lock:
@@ -325,8 +403,8 @@ class Recorder:
                     self._status[stream.source].update(connected=True, since=datetime.now(timezone.utc).isoformat(),
                                                        error=None)
                 self.log(f"live: {stream.source} connected ({'stocks' if dynamic else f'{len(self.coins)} coins'})")
-                store.feed_event(stream.source, "live", "connected")
-                connected_at, misses, pongs = time.monotonic(), 0, 0
+                self._record(store.feed_event, stream.source, "live", "connected")
+                misses, pongs = 0, 0
                 self._heard[stream.source] = int(time.time() * 1000)
                 while not self.stop.is_set():
                     if dynamic and not self._follow(stream, ws):
@@ -368,18 +446,25 @@ class Recorder:
                 failures += 1
                 refused = killswitch.is_refusal(e)
                 if connected_at is not None or refused:
-                    store.feed_event(stream.source, "live", "refused" if refused else "dropped",
-                                     seconds=round(time.monotonic() - connected_at, 1) if connected_at is not None else None,
-                                     detail=str(e))
-                if not self.stop.is_set() and (refused or not held and flaps.drop(time.monotonic())):
+                    self._record(store.feed_event, stream.source, "live", "refused" if refused else "dropped",
+                                 seconds=round(time.monotonic() - connected_at, 1) if connected_at is not None else None,
+                                 detail=str(e))
+                # A flap is a connection the server took and then dropped; one never made (no network,
+                # DNS) is not the server saying no: it only waits longer each time (backoff below).
+                flapped = connected_at is not None and not held and flaps.drop(time.monotonic())
+                if not self.stop.is_set() and (refused or flapped):
                     why = str(e) if refused else (f"{killswitch.FLAP_LIMIT} connections dropped within "
                                                   f"{STABLE_SECONDS:.0f} s of connecting, the last: {e}")
-                    killswitch.strike(store, stream.source, "live", why, log=self.log)
+                    kill = self._record(killswitch.strike, store, stream.source, "live", why, log=self.log)
                     with self._lock:
                         self._since.pop(stream.source, None)
                         self._subs[stream.source] = {}
                     flaps.clear()
                     backoff, failures = 1.0, 0
+                    if kill is None:  # the kill could not be written: this stream stays off all the same
+                        with self._lock:
+                            self._status[stream.source].update(connected=False, error=f"off (kill not recorded): {why}"[:200])
+                        self.stop.wait(killswitch.KILL_MINUTES[0] * 60)
                     continue  # the top of the loop waits the kill out
                 with self._lock:
                     self._since.pop(stream.source, None)
@@ -403,27 +488,33 @@ class Recorder:
             self._wanted = tuple(tickers)[:MAX_STOCKS]
 
     # -- storing ---------------------------------------------------------------------------
-    def _derivation(self, store, stream, ticker: str, day: int, rules: dict) -> int:
+    def _derivation(self, store, stream, ticker: str, day: int, rules: dict, digest: str | None) -> int:
+        """The derivation record of a symbol's bars built on one UTC day (`day`: the bars' own, not
+        the flush's) by one set of condition rules (`digest`; None for a stream without them)."""
         from . import provenance
 
-        key = (stream.source, ticker, day)
+        key = (stream.source, ticker, day, digest)
         if key not in self._derivations:
             settings = {"steps": ["second", "minute"], "live": True, "flush_seconds": FLUSH_SECONDS,
                         "method": getattr(stream, "method", "trades from the exchange's public stream; bars rebuilt "
                                           "as trades arrive (a forming bar changes until it closes)")}
-            if getattr(stream, "tape_rules", False):
-                settings |= {"rules": provenance.digest(sorted(rules.items())), "rule_count": len(rules)}
+            if digest is not None:
+                settings |= {"rules": digest, "rule_count": len(rules)}
             self._derivations[key] = provenance.record(store, "bars-from-ticks", f"{stream.source}:{ticker}", settings,
                                                        {"stream": stream.url, "ticks": f"{stream.source}:{ticker}"},
                                                        (day * DAY_MS, (day + 1) * DAY_MS))
         return self._derivations[key]
 
-    def _tape_rules(self, store, feed: str) -> dict:
-        """The trade condition rules (ticks.py) a feed's stock bars are built by, reread hourly."""
-        at, rules = self._rules.get(feed, (0.0, {}))
+    def _tape_rules(self, store, feed: str) -> tuple[dict, str]:
+        """The trade condition rules (ticks.py) a feed's stock bars are built by, reread hourly, and
+        their digest (what a derivation records of them)."""
+        from . import provenance
+
+        at, rules, digest = self._rules.get(feed, (0.0, {}, ""))
         if not at or time.monotonic() - at > RULES_SECONDS:
-            self._rules[feed] = (time.monotonic(), store.condition_rules(feed))
-        return self._rules[feed][1]
+            rules = store.condition_rules(feed)
+            self._rules[feed] = (time.monotonic(), rules, provenance.digest(sorted(rules.items())))
+        return self._rules[feed][1], self._rules[feed][2]
 
     def _streamed(self, stream, since_ms: int, subs: dict[str, int]) -> dict[str, int]:
         """{symbol: streamed since (ms)} of a connected stream."""
@@ -481,10 +572,14 @@ class Recorder:
 
         stored = 0
         streams = {s.source: s for s in self.streams}
+        withdrawn: dict[tuple[str, str], list[int]] = {}  # the times (ns) of the stored trades taken out
         for (source, ticker), trades in batch.items():
-            kept = [t for t in trades if not t.get("withdrawn")]
-            if kept:
-                stored += store.upsert_trades(source, ticker, kept)
+            standing, gone = _settle(trades)
+            if gone:  # first: a correction that keeps its trade's id must not go with the original
+                since_ns = min(t["sip_timestamp"] for t in trades) - DAY_MS * 1_000_000
+                withdrawn[(source, ticker)] = store.withdraw_trades(source, ticker, gone, since_ns)
+            if standing:
+                stored += store.upsert_trades(source, ticker, standing)
         for source, start in since.items():
             end = min(now_ms, heard.get(source, start) + HEARD_SLACK_MS)  # not past the last time it was heard
             for ticker, t0 in self._streamed(streams[source], start, subs.get(source, {})).items():
@@ -492,10 +587,8 @@ class Recorder:
                     store.add_coverage(source, ticker, "trades", t0, end)
         for (source, ticker), trades in batch.items():
             stream = streams[source]
-            lo_ns = min(t["sip_timestamp"] for t in trades)
-            gone = [t["sequence_number"] for t in trades if t.get("withdrawn")]
-            if gone:
-                lo_ns = min([lo_ns, *store.withdraw_trades(source, ticker, gone, lo_ns - DAY_MS * 1_000_000)])
+            lo_ns = min([t["sip_timestamp"] for t in trades] + withdrawn.get((source, ticker), []))
+            gone = sum(1 for t in trades if t.get("withdrawn"))
             lo = lo_ns // 1_000_000 // 60_000 * 60_000  # the minute it starts in
             if gone:  # a bar whose only trades were withdrawn must go
                 store.drop_built_between(source, ticker, ("second", "minute"), lo, now_ms)
@@ -503,18 +596,25 @@ class Recorder:
             # leave a trade out of its minute (the next flush starts at its own first trade's minute)
             hi_ns = max(now_ms * 1_000_000, max(t["sip_timestamp"] for t in trades) + 1)
             ticks = store.trades_between(source, ticker, lo * 1_000_000, hi_ns)
-            rules = self._tape_rules(store, source) if getattr(stream, "tape_rules", False) else {}
-            did = self._derivation(store, stream, ticker, now_ms // DAY_MS, rules)
+            rules, digest = self._tape_rules(store, source) if getattr(stream, "tape_rules", False) else ({}, None)
             prior = store.close_before(source, ticker, "minute", lo)  # an odd-lot-only first minute keeps it
+            dids = set()
             for step, timespan in ((1_000_000_000, "second"), (60_000_000_000, "minute")):
                 bars, _ = build_bars(ticks, step, rules, prior_close=prior)
-                self._built[did] += store.upsert_built_bars(source, ticker, timespan, 1, bars, did)
+                days: dict[int, list[dict]] = defaultdict(list)  # a batch over midnight (UTC): each day's record
+                for b in bars:
+                    days[b["t"] // DAY_MS].append(b)
+                for day, part in days.items():
+                    did = self._derivation(store, stream, ticker, day, rules, digest)
+                    self._built[did] += store.upsert_built_bars(source, ticker, timespan, 1, part, did)
+                    dids.add(did)
                 store.add_coverage(source, ticker, timespan, lo, now_ms, origin="ticks")
-            store.set_derivation_rows(did, self._built[did])
+            for did in dids:
+                store.set_derivation_rows(did, self._built[did])
             last = next((t for t in reversed(trades) if not t.get("withdrawn")), None)
             with self._lock:
                 pair = self._status[source]["pairs"].setdefault(ticker, {"trades": 0})
-                pair["trades"] += len(trades) - 2 * len(gone)
+                pair["trades"] += len(trades) - 2 * gone
                 if last:
                     pair["last"] = last["sip_timestamp"] // 1_000_000
                     pair["price"] = last["price"]
@@ -532,25 +632,25 @@ class Recorder:
     def run(self) -> None:
         from .storage import Store
 
-        threads = [threading.Thread(target=self._run_stream, args=(s,), daemon=True, name=f"live-{s.source}")
-                   for s in self.streams]
-        for t in threads:
-            t.start()
+        threads = {s.source: self._start_stream(s) for s in self.streams}
+        restarts = {s.source: {"wait": RESTART_SECONDS, "at": None, "started": time.monotonic()} for s in self.streams}
         stocks = any(getattr(s, "dynamic", False) for s in self.streams)
         # the one process that opens tick files in bars-only mode: it records the streams' trades
         with Store(self.db_path, ticks=True) as store:
             total, last_log, last_derive, last_want, last_lock = 0, time.time(), time.time(), 0.0, time.time()
-            last_reap = 0.0
+            next_reap = time.time() + FIRST_REAP_SECONDS
             while True:
-                if self.locks and time.time() - last_reap > REAP_SECONDS:  # the lock holder: one recorder, strictly
-                    last_reap = time.time()
-                    reap_strays(self.log)
+                if self.locks and time.time() >= next_reap:  # the lock holder: one recorder, strictly
+                    next_reap = time.time() + REAP_SECONDS
+                    if self.holds_locks():  # one that lost its lock ends nobody: it stops (below)
+                        reap_strays(self.log)
                 if self.locks and time.time() - last_lock > LOCK_CHECK_SECONDS:
                     last_lock = time.time()
                     if not self.holds_locks():
                         self.log("live: another recorder holds this one's lock now; stopping")
                         self.stop.set()
                 try:
+                    self._supervise(threads, restarts, time.monotonic())  # a stream thread that ended: again
                     if stocks and time.time() - last_want > WANT_SECONDS:
                         self.set_wanted(wanted_stocks(store, int(time.time() * 1000)))
                         last_want = time.time()

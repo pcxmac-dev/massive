@@ -3,12 +3,14 @@ waits and redirects, the live streams' failures, the shared request window, clos
 the continuous futures roll."""
 from __future__ import annotations
 
+import json
+import sqlite3
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
 import requests
 
-from massive_collate import cli, killswitch
+from massive_collate import cli, killswitch, live
 from massive_collate.errors import NotEntitled, Paused, RateLimited, SourceError, Unauthorized
 from massive_collate.sources.alpaca import AlpacaClient
 from massive_collate.sources.massive import RETRY_WAIT_MAX, MassiveClient, MassiveSource, SameHostSession, _retry_delay
@@ -143,3 +145,239 @@ def test_the_futures_day_window_ends_with_the_last_days_session():
     # the session settling on the 19th opened on the 18th's evening; the one opening on the 23rd's
     # evening settles on the 26th: not asked for
     assert params["window_start.gte"] == "2026-10-18" and params["window_start.lt"] == "2026-10-23"
+
+
+# -- the live streams (findings 3 and 25; lows) ------------------------------------------------------
+
+class _WS:
+    def __init__(self, msgs=()):
+        self.msgs = list(msgs)
+
+    def send(self, m):
+        pass
+
+    def recv(self):
+        if self.msgs:
+            return self.msgs.pop(0)
+        raise ConnectionError("closed by the server (1000)")
+
+    def close(self):
+        pass
+
+
+def _recorder(tmp_path, connect, until):
+    """A coinbase recorder whose waits are recorded, not slept; it stops once `until(waits)`."""
+    rec = live.Recorder(tmp_path / "m.db", coins=("BTC",), sources=("coinbase",), log=lambda *_: None,
+                        connect=connect)
+    waits = []
+
+    def wait(timeout=None):
+        waits.append(timeout)
+        if until(waits) or rec._status["coinbase"].get("killed"):
+            rec.stop.set()
+        return rec.stop.is_set()
+
+    rec.stop.wait = wait
+    return rec, waits
+
+
+def test_a_network_that_is_down_does_not_kill_the_stream(tmp_path):
+    def connect(url):
+        raise OSError("[Errno 11001] getaddrinfo failed")  # no connection made at all
+
+    rec, waits = _recorder(tmp_path, connect, until=lambda w: len(w) >= 2 * killswitch.FLAP_LIMIT)
+    rec._run_stream(rec.streams[0])
+    assert waits == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]  # backoff only, on its way to MAX_BACKOFF
+    with Store(tmp_path / "m.db") as s:
+        assert killswitch.killed(s, "coinbase", "live") is None and s.feed_events("coinbase") == []
+    assert rec._status["coinbase"]["failures"] == len(waits)
+
+
+def test_a_server_that_takes_the_connection_and_drops_it_still_flaps(tmp_path):
+    calls = []
+
+    def connect(url):
+        calls.append(url)
+        return _WS()  # dropped as soon as it connects
+
+    rec, _ = _recorder(tmp_path, connect, until=lambda w: False)
+    rec._run_stream(rec.streams[0])
+    assert len(calls) == killswitch.FLAP_LIMIT
+    with Store(tmp_path / "m.db") as s:
+        assert "dropped within" in killswitch.killed(s, "coinbase", "live")["why"]
+
+
+def test_a_database_error_in_the_reconnect_handler_does_not_end_the_stream(tmp_path, monkeypatch):
+    def locked(self, feed, kind, outcome, *a, **k):
+        if outcome != "connected":  # connected, then the drop cannot be written
+            raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(Store, "feed_event", locked)
+    calls = []
+    rec, waits = _recorder(tmp_path, lambda url: calls.append(url) or _WS(), until=lambda w: len(w) >= 2)
+    rec._run_stream(rec.streams[0])
+    assert len(calls) == 2 and waits == [1.0, 2.0]  # tried again: the thread went on
+    assert rec._status["coinbase"]["connected"] is False
+
+
+def test_a_kill_that_cannot_be_written_still_keeps_the_stream_off(tmp_path, monkeypatch):
+    def unwritable(*a, **k):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(live.killswitch, "strike", unwritable)
+    calls = []
+    refusal = json.dumps({"type": "error", "message": "Failed to subscribe", "reason": "subscription limit reached"})
+    rec, waits = _recorder(tmp_path, lambda url: calls.append(url) or _WS([refusal]), until=lambda w: True)
+    rec._run_stream(rec.streams[0])
+    assert len(calls) == 1 and waits == [killswitch.KILL_MINUTES[0] * 60]  # off as long as a kill, not a second
+    assert "kill not recorded" in rec._status["coinbase"]["error"]
+
+
+class _Thread:
+    def __init__(self, alive):
+        self.alive = alive
+
+    def is_alive(self):
+        return self.alive
+
+
+def test_a_stream_thread_that_ended_is_started_again_with_growing_waits(tmp_path):
+    rec = live.Recorder(tmp_path / "m.db", coins=("BTC",), sources=("coinbase",), log=lambda *_: None,
+                        connect=lambda url: None)
+    started = []
+    rec._start_stream = lambda s: started.append(s.source) or _Thread(False)  # each ends at once
+    threads, restarts = {"coinbase": _Thread(False)}, {}
+    for now in (0.0, 4.0, 5.0, 6.0, 15.0, 16.0, 17.0, 36.0):
+        rec._supervise(threads, restarts, now)
+    # found ended at 0: started at 5; found ended at 6: started at 16 (10 s); at 17: again at 37 (20 s)
+    assert started == ["coinbase"] * 2 and restarts["coinbase"]["at"] == 37.0
+    threads["coinbase"] = _Thread(True)
+    rec._supervise(threads, restarts, 40.0)
+    assert len(started) == 2  # alive: left alone
+    threads["coinbase"] = _Thread(False)
+    restarts["coinbase"].update(at=None, started=40.0)
+    rec._supervise(threads, restarts, 40.0 + live.STABLE_SECONDS)  # it had run a while: the short wait again
+    assert restarts["coinbase"]["wait"] == live.RESTART_SECONDS
+
+
+def test_an_unexpected_error_out_of_the_stream_loop_marks_it_down(tmp_path, monkeypatch):
+    logged = []
+    rec = live.Recorder(tmp_path / "m.db", coins=("BTC",), sources=("coinbase",), log=logged.append,
+                        connect=lambda url: None)
+    rec._status["coinbase"]["connected"] = True
+
+    def escaped(stream, store):
+        raise RuntimeError("escaped")
+
+    monkeypatch.setattr(rec, "_stream_loop", escaped)
+    rec._run_stream(rec.streams[0])  # returns: the supervisor starts it again
+    assert rec._status["coinbase"]["connected"] is False and "escaped" in rec._status["coinbase"]["error"]
+    assert any("stream stopped" in line for line in logged)
+
+
+def test_the_recorder_ends_other_recorders_only_later_and_only_holding_its_lock(tmp_path, monkeypatch):
+    import threading
+
+    monkeypatch.setattr(live, "FLUSH_SECONDS", 0.01)
+    reaped = []
+    monkeypatch.setattr(live, "reap_strays", lambda log: reaped.append(1))
+    locks = live.take_locks(tmp_path / "m.db")
+
+    def run_briefly():
+        rec = live.Recorder(tmp_path / "m.db", coins=(), sources=(), log=lambda *_: None, connect=lambda url: None,
+                            locks=locks)
+        threading.Timer(0.2, rec.stop.set).start()
+        rec.run()
+
+    try:
+        run_briefly()
+        assert reaped == []  # not as it starts: its lock check has not looked yet
+        monkeypatch.setattr(live, "FIRST_REAP_SECONDS", 0)
+        run_briefly()
+        assert reaped == [1]
+        live.machine_lock().write_text("4242 7")  # another recorder holds the machine's lock now
+        run_briefly()
+        assert reaped == [1]  # it ends nobody: it is the one to stop
+    finally:
+        live.release_locks(locks)
+
+
+def test_a_lock_is_never_seen_empty_and_one_being_written_is_held(tmp_path):
+    import os
+    import time
+
+    from massive_collate import proc
+
+    lock = tmp_path / "run.lock"
+    assert proc.acquire(lock) and lock.read_text().split()[0] == str(os.getpid())
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["run.lock"]  # written whole elsewhere, then linked
+    lock.unlink()
+    lock.write_text("")  # another process created it and has not written its id yet
+    assert not proc.acquire(lock) and lock.read_text() == ""
+    old = time.time() - 2 * proc.FRESH_SECONDS  # left empty long ago: its owner died writing it
+    os.utime(lock, (old, old))
+    assert proc.acquire(lock) and proc.owns(lock)
+    proc.release(lock)
+
+
+T0 = 1_792_764_000_000  # 2026-10-23 14:00 UTC, ms
+
+
+def test_an_iex_correction_that_keeps_its_trade_id_is_not_deleted_with_the_original(tmp_path):
+    rec = live.Recorder(tmp_path / "m.db", coins=(), stock_keys=("PKTESTKEY", "test-secret"), log=lambda *_: None,
+                        connect=lambda url: None)
+    iex = rec.streams[0]
+    iex.confirmed = frozenset({"AAPL"})
+    rec._since["iex"] = T0
+    rec._subs["iex"] = {"AAPL": T0}
+
+    def receive(msgs):
+        for ticker, t in iex.parse(msgs):
+            rec._buffer[("iex", ticker)].append(t)
+
+    trade = {"T": "t", "S": "AAPL", "i": 7, "x": "V", "p": 230.0, "s": 100, "c": ["@"], "t": "2026-10-23T14:00:01Z",
+             "z": "C"}
+    correction = {"T": "c", "S": "AAPL", "x": "V", "oi": 7, "op": 230.0, "os": 100, "oc": ["@"], "ci": 7, "cp": 231.0,
+                  "cs": 100, "cc": ["@"], "t": "2026-10-23T14:00:01Z", "z": "C"}
+    close = "SELECT close FROM built_bars WHERE timespan='minute'"
+    receive([trade])
+    with Store(tmp_path / "m.db") as store:
+        rec.flush(store, now_ms=T0 + 5_000)
+        receive(correction)  # in a later flush: the stored original goes, the correction stays
+        rec.flush(store, now_ms=T0 + 7_000)
+        assert store.trade_edges("iex", "AAPL") == ((T0 + 1000) * 1_000_000,) * 2
+        assert store._bars("iex").execute(close).fetchone() == (231.0,)
+        receive([{**trade, "i": 8, "t": "2026-10-23T14:00:02Z"}])
+        receive({**correction, "oi": 8, "ci": 8, "cp": 232.0, "t": "2026-10-23T14:00:02Z"})  # both in one flush
+        rec.flush(store, now_ms=T0 + 9_000)
+        assert store.trade_edges("iex", "AAPL") == ((T0 + 1000) * 1_000_000, (T0 + 2000) * 1_000_000)
+        assert store._bars("iex").execute(close).fetchone() == (232.0,)  # the correction stands
+        assert json.loads(store.kv_get(live.STATUS_KEY))["streams"]["iex"]["pairs"]["AAPL"]["trades"] == 2
+
+
+def test_live_derivations_are_kept_per_day_of_the_bars_and_per_rules(tmp_path):
+    rec = live.Recorder(tmp_path / "m.db", coins=("BTC",), sources=("coinbase",), log=lambda *_: None,
+                        connect=lambda url: None)
+    midnight = 1_792_800_000_000  # 2026-10-24 00:00 UTC
+    rec._since["coinbase"] = midnight - 10_000
+    for i, ms in enumerate((midnight - 2_000, midnight + 1_000)):  # one batch over midnight
+        rec._buffer[("coinbase", "BTCUSD")].append(live._trade(ms * 1_000_000, i, 81000 + i, 0.1, i))
+    with Store(tmp_path / "m.db") as store:
+        rec.flush(store, now_ms=midnight + 5_000)
+        (d,) = store.derivations(kind="bars-from-ticks")  # the same settings: one record, as wide as its bars
+        assert (d["span_lo"], d["span_hi"]) == (midnight - live.DAY_MS, midnight + live.DAY_MS)  # not the flush's day
+        assert d["rows"] == 4  # a second and a minute bar on each side of midnight
+
+    stocks = live.Recorder(tmp_path / "m.db", coins=(), stock_keys=("K", "S"), log=lambda *_: None,
+                           connect=lambda url: None)
+    held = [{1: (True, True, True)}, {1: (False, True, True)}]
+
+    class Rules:
+        def condition_rules(self, feed):
+            return held[0]
+
+    first = stocks._tape_rules(Rules(), "iex")
+    held.pop(0)
+    stocks._rules["iex"] = (1.0, *stocks._rules["iex"][1:])  # read long ago: read again
+    second = stocks._tape_rules(Rules(), "iex")
+    assert first[1] != second[1]  # other rules, another digest: another derivation record

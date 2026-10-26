@@ -4,16 +4,22 @@ recorder per database and per machine).
 A lock file names its owner by process id and the time that process started: the system reuses
 process ids quickly (on Windows especially), so an id alone would make a lock left by a crashed
 or rebooted process look held by whatever process has that id now. A lock is taken atomically,
+with its owner written in it (a file written whole, then linked in place: never seen empty),
 taken over only when its owner is gone (dead, or its id now belongs to another process), never
 on age alone (a process that slept through the night still holds it), and removed only by its
-owner. Two processes taking over the same dead lock at the same instant can still both win; that
-needs two crashes' worth of coincidence and a lock left behind, and is accepted.
+owner. A lock that is empty or unreadable but only seconds old is held (one being written where
+links are not available). Two processes taking over the same dead lock at the same instant can
+still both win; that needs two crashes' worth of coincidence and a lock left behind, and is
+accepted (the live recorder checks its lock before it ends other recorders).
 """
 from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
+
+FRESH_SECONDS = 10.0  # an empty or unreadable lock younger than this is being written: held
 
 
 def pid_alive(pid: int) -> bool:
@@ -92,20 +98,55 @@ def acquire(path: Path) -> bool:
     """Take a lock file, unless a live owner holds it (a gone owner's lock is taken over)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     for _ in range(2):
+        if _create(path, stamp()):
+            return True
+        if holder(path) is not None or _being_written(path):
+            return False
         try:
-            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            if holder(path) is not None:
-                return False
-            try:
-                path.unlink()  # its owner is gone
-            except FileNotFoundError:
-                pass
-            continue
-        with os.fdopen(fd, "w") as f:
-            f.write(stamp())
-        return True
+            path.unlink()  # its owner is gone
+        except FileNotFoundError:
+            pass
     return False
+
+
+def _create(path: Path, text: str) -> bool:
+    """Create `path` holding `text`, atomically; False when it exists. The text is written to a
+    file of this process's own, then linked in place (the link fails if the lock exists), so no
+    other process can read the lock before its owner is in it. Where hard links are not available
+    (a FAT drive): created exclusively, then written (_being_written covers the moment between)."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.new")
+    try:
+        tmp.write_text(text)
+        try:
+            os.link(tmp, path)
+            return True
+        except FileExistsError:
+            return False
+        except OSError:
+            pass  # no links here
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    return True
+
+
+def _being_written(path: Path) -> bool:
+    """Whether a lock that names no owner (empty, unreadable) is only seconds old: its owner is
+    writing it, so it is held, not left behind."""
+    try:
+        if path.read_text().split():
+            return False  # it names its owner: holder() judged that
+        return time.time() - path.stat().st_mtime < FRESH_SECONDS
+    except OSError:
+        return False  # gone meanwhile
 
 
 def owns(path: Path) -> bool:
