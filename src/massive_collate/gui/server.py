@@ -46,6 +46,8 @@ CALENDAR_MAX_DAYS = 3700  # the widest /api/calendar range (timeaxis.js asks for
 ROW_COUNTS_TTL_S = 600  # a symbol's bar counts (the Data panel) are counted again after this
 PRUNED_COUNTS_TTL_S = 300  # a symbol's pruned-list counts by rule (an index scan of up to millions)
 ACTIVITY_TTL_S = 2.0  # the status answer shared by polls this close together
+SYMBOL_ROWS_TTL_S = 10.0  # its symbols' rows (index seeks in every feed file) kept this long
+FEEDS_TTL_S = 60.0  # the feeds' summary (configuration and the watchlist) kept this long
 DEPS_TTL_S = 60.0  # the dependency checks' answer is kept this long
 MAX_BODY = 5 * 1024 * 1024
 WRITE_HEADER = "X-Massive-Charts"
@@ -95,6 +97,8 @@ class ChartApp:
         self._pruned_counts: dict[str, tuple[float, dict]] = {}  # ticker -> (counted at, by feed and rule)
         self._status_store, self._status_lock = store.reader(), threading.Lock()  # the Fetcher view and status bar
         self._activity: dict[tuple, tuple[float, dict]] = {}
+        self._activity_rows: dict = {}  # activity.activity's symbol rows (SYMBOL_ROWS_TTL_S)
+        self._feeds_summary: tuple[float, list] | None = None
         self._deps_store, self._deps_lock = store.reader(), threading.Lock()  # dependency checks
         self._deps: tuple[float, dict] | None = None
         self._datasets_store, self._datasets_lock = store.reader(), threading.Lock()  # the datasets list
@@ -749,7 +753,8 @@ class ChartApp:
             hit = self._activity.get(key)
             if hit is None or time.monotonic() - hit[0] > ACTIVITY_TTL_S:
                 hit = self._activity[key] = (time.monotonic(), activity.activity(
-                    self._status_store, self.settings, self.store.path, key[0], log_lines=key[1], focus=key[2]))
+                    self._status_store, self.settings, self.store.path, key[0], log_lines=key[1], focus=key[2],
+                    rows_cache=self._activity_rows, rows_ttl_s=SYMBOL_ROWS_TTL_S))
             out = dict(hit[1])
         out["feeds"] = self.feeds()
         return out
@@ -795,6 +800,15 @@ class ChartApp:
                     "quality": self.store.qualities()}
 
     def feeds(self) -> list[dict]:
+        """The feeds' summary, kept FEEDS_TTL_S (every status poll carries it)."""
+        hit = self._feeds_summary
+        if hit is not None and time.monotonic() - hit[0] < FEEDS_TTL_S:
+            return hit[1]
+        out = self._feeds()
+        self._feeds_summary = (time.monotonic(), out)
+        return out
+
+    def _feeds(self) -> list[dict]:
         from ..sources import ARCHIVAL, BUILDERS, feed_profiles
 
         profiles = feed_profiles(self.settings)

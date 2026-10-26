@@ -5,6 +5,7 @@ Everything here is read from the local database and log file; nothing calls the 
 from __future__ import annotations
 
 import math
+import time as _time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -399,10 +400,13 @@ def derive_progress(store: Store, now: datetime) -> dict | None:
 
 
 def activity(store: Store, settings: Settings, db_path: Path, source: str = "massive",
-             now: datetime | None = None, log_lines: int = 200, focus: str | None = None) -> dict:
+             now: datetime | None = None, log_lines: int = 200, focus: str | None = None,
+             rows_cache: dict | None = None, rows_ttl_s: float = 0.0) -> dict:
     """The Fetcher view and the status bar: runs, the feed's symbols (the DETAIL_ROWS most worth
     seeing, with `focus` (the open symbol) always among them; every symbol counted by state),
-    limits, each source's state, live feeds, the log."""
+    limits, each source's state, live feeds, the log. With `rows_cache`, the symbols' rows (a few
+    index seeks a symbol in every feed file) are kept `rows_ttl_s`, built again sooner when the
+    symbol being fetched changes."""
     from ..initializer import load_order
     now = (now or datetime.now(timezone.utc)).astimezone(ET)
     today = now.date()
@@ -421,7 +425,15 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
 
     order = load_order(store)
     focus_set = frozenset({focus.upper()}) if focus else frozenset()
-    every = symbol_rows(store, settings, source, now, current, detail=DETAIL_ROWS, focus=focus_set, order=order)
+    key = (source, current, focus_set)
+    hit = rows_cache.get(key) if rows_cache is not None else None
+    if hit is not None and _time.monotonic() - hit[0] < rows_ttl_s:
+        every = hit[1]
+    else:
+        every = symbol_rows(store, settings, source, now, current, detail=DETAIL_ROWS, focus=focus_set, order=order)
+        if rows_cache is not None:
+            rows_cache.clear()  # one feed, one fetching symbol at a time: only the newest is kept
+            rows_cache[key] = (_time.monotonic(), every)
     symbols = [every[i] for i in ranked(every, order) if every[i].get("planned")]
     counts: dict[str, int] = {}
     for s in every:

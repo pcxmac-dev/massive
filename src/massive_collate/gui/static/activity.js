@@ -10,7 +10,8 @@
   'use strict';
 
   const { dataIcon, symbolIcon, DATA_LABEL } = window.MassiveIcons;
-  const POLL_FAST_MS = 1500;   // while a run is going or the Fetcher / Live view is open
+  const POLL_FAST_MS = 1500;   // while the Fetcher or Live view is open, or a fetch asked for here waits
+  const POLL_RUN_MS = 5000;    // while a run is going, for the status line (each answer is work for the server)
   const POLL_SLOW_MS = 10000;
   // As the server ranks them (gui/activity.py STATE_RANK): a blocked symbol needs attention before current ones.
   const STATE_ORDER = { fetching: 0, new: 1, backfilling: 2, queued: 3, blocked: 4, current: 5, retired: 6, closed: 7 };
@@ -85,8 +86,8 @@
       pollFailed = true;
       render();
     }
-    const fast = (data && data.running) || job?.phase === 'waiting' || viewOpen('fetcher') || viewOpen('live');
-    timer = setTimeout(poll, fast ? POLL_FAST_MS : POLL_SLOW_MS);
+    const fast = job?.phase === 'waiting' || viewOpen('fetcher') || viewOpen('live');
+    timer = setTimeout(poll, fast ? POLL_FAST_MS : data?.running ? POLL_RUN_MS : POLL_SLOW_MS);
   }
 
   function render() {

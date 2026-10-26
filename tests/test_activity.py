@@ -161,3 +161,24 @@ def test_the_fetcher_shows_the_rows_most_worth_seeing_and_counts_the_rest(tmp_pa
     assert len(shown) == 301 and "T0350" in shown  # 300 by relevance, and the open symbol beyond them
     assert shown[:2] == ["T0399", "T0398"]  # within a state, the initializer's order
     assert out["backfill"]["total"] == 400  # tiles count every symbol
+
+
+def test_the_status_keeps_its_symbol_rows_a_while_and_rebuilds_them_when_another_symbol_is_fetched(tmp_path, monkeypatch):
+    db = tmp_path / "massive.db"
+    settings = load_settings(env={"MASSIVE_DB": str(db)}, env_file=None)
+    built = []
+    real = act.symbol_rows
+    monkeypatch.setattr(act, "symbol_rows", lambda *a, **k: built.append(a[4]) or real(*a, **k))
+    with Store(db, check_same_thread=False) as s:
+        s.watch_spec("massive", resolve("AAPL"))
+        cache: dict = {}
+        first = act.activity(s, settings, db, rows_cache=cache, rows_ttl_s=60)
+        again = act.activity(s, settings, db, rows_cache=cache, rows_ttl_s=60)
+        assert len(built) == 1 and again["symbols"] == first["symbols"]  # kept: each build seeks every feed file
+        monkeypatch.setattr(act, "lock_owner", lambda _db: 1234)  # a run fetching AAPL now
+        run = s.start_run("massive", "sync")
+        s.set_run_current(run, "AAPL")
+        act.activity(s, settings, db, rows_cache=cache, rows_ttl_s=60)
+        assert built == [None, "AAPL"]  # another symbol being fetched: built again at once
+        act.activity(s, settings, db)  # no cache: built every time (tests, the command line)
+        assert len(built) == 3

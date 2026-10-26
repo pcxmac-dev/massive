@@ -207,3 +207,10 @@ def test_panels_sit_on_the_lighter_grey_as_large_as_what_they_hold():
     assert re.search(r"#sidePanel section \{[^}]*background: var\(--card\)", css)  # each section a panel
     assert re.search(r"\.strip \{[^}]*background: var\(--card\)", css) and _js("index.html").count('class="strip"') >= 6
     assert re.search(r"main \{[^}]*gap: var\(--gap\)", css)
+
+
+def test_the_status_is_polled_fast_only_while_its_views_are_open():
+    act = _js("activity.js")
+    rule = act.split("const fast = ", 1)[1].split(";", 1)[0]
+    assert "viewOpen('fetcher')" in rule and "viewOpen('live')" in rule and "running" not in rule
+    assert "data?.running ? POLL_RUN_MS : POLL_SLOW_MS" in act and "const POLL_RUN_MS = 5000;" in act

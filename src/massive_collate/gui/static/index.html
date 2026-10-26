@@ -151,6 +151,8 @@
         <div><h2>Fetcher</h2><div class="p-muted small">Each span of a symbol is downloaded by one feed only, within that feed's caps.</div></div>
         <div id="actFeeds" class="scope-tabs" role="tablist" aria-label="Feed"></div>
         <div class="view-actions">
+          <button type="button" id="netPause" class="net-pause" title="Pause background fetching (up to two hours): the open symbol's own fetches go on">Pause fetching</button>
+          <button type="button" id="netHalt" class="net-pause" title="Halt all fetching until you resume it, the open symbol's too (the live streams go on)">Halt</button>
           <button id="scanBtn" class="primary" title="Check which symbols should have new data (free), confirm each with Massive (1 request) and download what is there">Scan for new data</button>
         </div>
       </div>
@@ -214,9 +216,7 @@
   <footer id="status">
     <span id="statusText">Loading…</span>
     <span id="error" role="alert"></span>
-    <span id="netStatus" class="net-status" aria-live="polite"><span id="netText"></span><span id="netBar" class="net-bar" hidden><span></span></span>
-      <button type="button" id="netPause" class="net-pause" title="Pause background fetching (up to two hours): the open symbol's own fetches go on">Pause fetching</button>
-      <button type="button" id="netHalt" class="net-pause" title="Halt all fetching until you resume it, the open symbol's too (the live streams go on)">Halt</button></span>
+    <span id="netStatus" class="net-status" aria-live="polite"><span id="netText"></span><span id="netBar" class="net-bar" hidden><span></span></span></span>
   </footer>
 
   <dialog id="symbolDialog" class="switcher" aria-label="Switch symbol">
