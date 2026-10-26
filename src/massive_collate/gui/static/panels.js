@@ -211,8 +211,7 @@
     cursorFrame = requestAnimationFrame(() => { cursorFrame = 0; renderCursor(); });
   }
   chart.subscribeAction('onCrosshairChange', (c) => {
-    const n = chart.getDataList().length;
-    cursorIndex = c && Number.isFinite(c.dataIndex) && c.dataIndex < n && c.kLineData ? c.dataIndex : null;
+    cursorIndex = crosshairBar(c)?.index ?? null;  // the bar under the cursor (app.js)
     scheduleCursor();
   });
   chart.subscribeAction('onVisibleRangeChange', scheduleCursor);

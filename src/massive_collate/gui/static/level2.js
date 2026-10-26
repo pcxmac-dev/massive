@@ -9,6 +9,7 @@
   const $ = (id) => document.getElementById(id);
   const esc = window.MassiveIcons.esc;
   const STEPS = ['auto', '0.01', '0.05', '0.1', '0.25', '0.5', '1', '5', '10', '50', '100', '500'];
+  const FOLLOW_MS = 120;  // the cursor resting this long on a bar asks for its profile
   const LIVE_MS = 3000;   // the newest bar of a live symbol is read again this often
   const IDLE_MS = 30000;  // otherwise
   let step = STEPS.includes(prefs.get('l2Step', 'auto')) ? prefs.get('l2Step', 'auto') : 'auto';
@@ -101,9 +102,9 @@
     prefs.set('l2Step', step);
     load();
   });
-  chart.subscribeAction('onCrosshairChange', (c) => {
-    const t = c?.kLineData?.timestamp ?? null;
-    if (t !== at && t != null) { at = t; schedule(); }
+  chart.subscribeAction('onCrosshairChange', (c) => {  // follows the bar under the cursor
+    const t = crosshairBar(c)?.bar.timestamp ?? null;
+    if (t !== at && t != null) { at = t; schedule(FOLLOW_MS); }
   });
   $('chart').addEventListener('mouseleave', () => { if (at != null) { at = null; schedule(); } });
   window.addEventListener('massive:symbol', () => { at = null; schedule(50); });

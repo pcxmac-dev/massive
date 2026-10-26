@@ -3055,6 +3055,16 @@ function highlightSpan() {
   return { from: Math.min(a, b), to: Math.max(a, b) };
 }
 
+// The bar under the crosshair: {index, bar} in the loaded data, or null. This chart's crosshair
+// event carries the pointer's x and y only (no bar of its own), so the bar comes from the x.
+function crosshairBar(c) {
+  if (!c || !Number.isFinite(c.x)) return null;
+  const data = chart.getDataList();
+  const [p] = chart.convertFromPixel([{ x: c.x, y: Number.isFinite(c.y) ? c.y : 0 }], { paneId: 'candle_pane' });
+  const i = p?.dataIndex;
+  return Number.isInteger(i) && i >= 0 && i < data.length ? { index: i, bar: data[i] } : null;
+}
+
 // The first bar at or after `ts` in the loaded data (its length when none is).
 function barIndexAt(data, ts) {
   let lo = 0, hi = data.length;
