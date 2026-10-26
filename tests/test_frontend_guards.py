@@ -148,3 +148,43 @@ def test_the_plot_info_box_stays_on_the_right_of_the_first_indicator():
     render = _js("panels.js").split("function renderCursor()", 1)[1].split("box.innerHTML", 1)[0]
     assert "box.style.right = " in render and "box.style.left" not in render
     assert re.search(r"\.cursor-box \{[^}]*text-align: right", _js("style.css"))
+
+
+def test_replay_plays_at_the_six_speeds_and_skips_closed_markets():
+    replay = _js("replay.js")
+    assert "const SPEEDS = [1, 2, 4, 8, 16, 32];" in replay
+    assert "const GAP_SKIP_MS = 15 * 60_000;" in replay
+    tick = _function(replay, "tick")
+    assert "r.clock += (now - r.last) * r.speed" in tick and "if (f.timestamp - r.clock > GAP_SKIP_MS) r.clock = f.timestamp;" in tick
+    assert "> r.clock) break;" in tick  # a finer bar shows once its own time has passed
+
+
+def test_a_replay_shows_nothing_newer_than_it_has_played():
+    app = _js("app.js")
+    loader = app.split("chart.setDataLoader(", 1)[1]
+    assert "if (type === 'backward' && state.replay) { callback([], { backward: false }); return; }" in loader
+    assert "if (type === 'init' && state.replay) params.to = state.replay.start;" in loader
+    assert "if (state.replay) { closeStream(); return; }" in loader  # no polls or live stream while replaying
+    assert "if (state.replay) return;" in _function(app, "checkLod")  # the level holds
+    closing = _function(_js("replay.js"), "closeForming")
+    assert "r.complete.get(r.forming.timestamp)" in closing  # a closed bar becomes the chart's own
+
+
+def test_schemes_show_what_the_replay_has_reached_only():
+    schemes = _js("schemes.js")
+    assert "const seen = (t) => S.shownTo == null || t <= S.shownTo;" in schemes
+    for name in ("SCHEME_EQUITY", "SCHEME_CUSUM"):
+        calc = schemes.split(f"name: '{name}'", 1)[1].split("calc:", 1)[1].split("}),", 1)[0]
+        assert "!seen(d.timestamp)" in calc, name
+    assert "seen(p.known)" in schemes  # a swing point once the bar that confirmed it closed
+    html = _js("index.html")
+    assert 'id="pSchemes"' in html and 'src="schemes.js"' in html and 'src="replay.js"' in html and 'id="replayBtn"' in html
+
+
+def test_the_trading_view_is_on_the_rail_and_writes_paper_orders_only():
+    assert 'id="railTrading"' in _js("index.html") and 'id="paneTrading"' in _js("index.html")
+    assert "trading: 'chart'" in _js("panels.js")  # the chart in the main area, the account beside it
+    assert "const WORKSPACES = ['stock', 'analysis', 'trading'];" in _js("app.js")  # its own indicators and interval
+    trading = _js("trading.js")
+    assert "apiWrite('POST', '/api/trading/orders'" in trading  # the write header: no other page can place one
+    assert "Live trading is off" in trading

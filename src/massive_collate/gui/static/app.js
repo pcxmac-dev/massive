@@ -304,6 +304,9 @@ const chart = kc.init('chart', {
 chart.setDataLoader({
   getBars: async ({ type, timestamp, symbol, period, callback }) => {
     if (type === 'update') { callback([], { backward: false }); return; }
+    // A replay (replay.js) shows the bars before its start and plays the rest in: nothing newer here.
+    if (type === 'init' && state.replay && window.Replay?.keyChanged()) window.Replay.stop(false);
+    if (type === 'backward' && state.replay) { callback([], { backward: false }); return; }
     const token = type === 'init' ? ++state.loadToken : state.loadToken;
     const params = {
       source: symbol.source, ticker: symbol.ticker, period: period.type, span: period.span,
@@ -313,13 +316,16 @@ chart.setDataLoader({
     if (type === 'forward' && timestamp) params.to = timestamp;
     if (type === 'backward' && timestamp) params.after = timestamp;  // newer bars, after the newest loaded
     if (type === 'init' && state.lodSwitch?.to) params.to = state.lodSwitch.to;  // a level change keeps its window
+    if (type === 'init' && state.replay) params.to = state.replay.start;
     try {
       const res = await api('/api/bars', params);
       if (token !== state.loadToken) return; // a newer symbol/interval was chosen meanwhile
       const zone = labelZone(period);  // the time axis and crosshair read the bars' own days
       if (chart.getTimezone() !== zone) chart.setTimezone(zone);
+      const replaying = !!state.replay;
       callback(res.bars, { forward: type === 'backward' ? undefined : res.more,
-                           backward: type === 'forward' ? undefined : !!res.newer });
+                           backward: type === 'forward' ? undefined : !replaying && !!res.newer });
+      if (type === 'init' && replaying) requestAnimationFrame(() => window.Replay?.loaded());  // then it plays on
       if (type === 'init' && res.level?.fixed && (res.level.type !== period.type || res.level.span !== period.span)) {
         // a price-based chart is built from a level of its own (gui/window.py bricks): its times, once more
         state.period = { type: res.level.type, span: res.level.span };
@@ -363,6 +369,7 @@ chart.setDataLoader({
   },
   subscribeBar: ({ symbol, period, callback }) => {
     clearInterval(state.poll);
+    state.barCallback = callback;  // a replay plays its bars in through it (replay.js)
     // Each subscription is one load of the chart: a poll still in flight when the symbol, interval,
     // model or chart type changes belongs to the old one and must not add its bars to the new data.
     const sub = state.subscription = (state.subscription || 0) + 1;
@@ -417,6 +424,7 @@ chart.setDataLoader({
     };
     state.lastPoll = Date.now();
     state.poll = setInterval(() => {
+      if (state.replay) { closeStream(); return; }  // the replay is the chart's only source of new bars
       const live = isLive();
       if (live && !state.stream && !state.streamFailed) openStream();
       if (!live && state.stream) closeStream();
@@ -659,6 +667,7 @@ function visibleWindow() {
 }
 
 function checkLod() {
+  if (state.replay) return;  // a replay keeps its level: zoom only widens or narrows the candles
   if (state.lodSwitch || !state.meta || !chart.getDataList().length) return;
   if (!chartShown()) return;  // a hidden chart: decided when it is shown (showPane calls this)
   if (state.fitPending) {  // opened while hidden: its whole history now that it has a width
@@ -809,7 +818,7 @@ state.model = { ...MODEL_DEFAULTS, ...prefs.get('model', {}) };
 // each has its own chart content: interval, chart type and settings, model, indicators and their
 // pane heights, zoom and position, and drawings. The active one lives in `state`; the other waits
 // in state.workspaces until its view is shown (see switchWorkspace).
-const WORKSPACES = ['stock', 'analysis'];
+const WORKSPACES = ['stock', 'analysis', 'trading'];
 state.workspace = WORKSPACES.includes(prefs.get('workspace')) ? prefs.get('workspace') : 'stock';
 state.workspaces = prefs.get('workspaces', {});
 // Chart types that only make sense for prices (bricks, Heikin Ashi, Kagi, P&F).

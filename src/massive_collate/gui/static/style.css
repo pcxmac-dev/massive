@@ -656,3 +656,57 @@ table.l2 tr.at td { background: color-mix(in srgb, var(--accent, #2962ff) 18%, t
 .w-table tr:hover .w-x button { visibility: visible; }
 .w-empty { padding: 8px 4px; white-space: normal; }
 .derived-tag.interp { color: #b07cff; border-color: #b07cff; }
+/* Schemes (Analysis view): settings, statistics and trades of a backtest (schemes.js) */
+#pSchemes h3 { display: flex; align-items: center; gap: 6px; }
+#pSchemes h3 #schClear { margin-left: auto; }
+#pSchemes h3 #schRun { margin-left: auto; }
+#pSchemes h3 #schClear + #schRun { margin-left: 0; }
+#pSchemes > select { width: 100%; margin: 4px 0; }
+.sch-about { margin: 2px 0 6px; }
+.sch-params { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; margin: 6px 0; font-size: 12px; }
+.sch-params label { display: flex; flex-direction: column; gap: 2px; color: var(--muted); }
+.sch-params label:has(input[type="checkbox"]) { flex-direction: row; align-items: center; }
+.sch-params input[type="number"], .sch-params select { width: 100%; }
+.sch-error { color: var(--down, #ef5350); margin: 6px 0; }
+.sch-trades { max-height: 260px; overflow: auto; margin-top: 6px; }
+.sch-trades tr[data-time] { cursor: pointer; }
+.sch-trades tr[data-time]:hover td { background: var(--hover); }
+/* Replay (Analysis view): its button shows there only; the controls float above the time axis */
+body:not([data-pane="analysis"]) .analysis-only { display: none; }
+#chart.picking { cursor: crosshair; }
+.replay-hint { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 6; pointer-events: none;
+  background: var(--panel); border: 1px solid var(--accent); border-radius: 4px; padding: 4px 10px; font-size: 12px; }
+.replay-hint[hidden] { display: none; }
+.replay-bar { position: absolute; bottom: 44px; left: 50%; transform: translateX(-50%); z-index: 6; display: flex;
+  align-items: center; gap: 4px; padding: 4px 6px; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 6px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35); font-size: 12px; white-space: nowrap; }
+.replay-bar[hidden] { display: none; }
+.replay-bar button { min-width: 26px; }
+.replay-bar .replay-speeds { display: inline-flex; gap: 1px; margin: 0 4px; }
+.replay-bar .replay-speeds button.on { color: var(--accent); background: var(--hover); }
+.replay-bar .replay-clock { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 150px; text-align: center; }
+/* Trading (side panel beside its chart): the paper account (trading.js) */
+#pTrading h3 { display: flex; align-items: center; gap: 6px; }
+#pTrading h3 button { margin-left: auto; }
+.tr-brokers { display: flex; gap: 4px; margin: 4px 0; }
+.tr-brokers button { flex: 1; font-size: 11px; }
+.tr-brokers button.active { color: var(--accent); background: var(--hover); }
+.tr-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 8px 0; }
+.tr-tiles .tile { padding: 6px 8px; }
+.tr-big { font-size: 15px; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.tr-ticket { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 8px; margin: 6px 0; }
+.tr-ticket label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--muted); }
+.tr-ticket label[hidden] { display: none; }
+.tr-ticket input, .tr-ticket select { width: 100%; }
+.tr-ticket #trSym { text-transform: uppercase; }
+.tr-sides { grid-column: 1 / -1; display: flex; gap: 6px; }
+.tr-sides button { flex: 1; font-weight: 600; color: #fff; border: none; padding: 6px; }
+.tr-buy { background: #26a69a; }
+.tr-sell { background: #ef5350; }
+#trMsg { grid-column: 1 / -1; }
+.tr-table { font-size: 12px; }
+.tr-table tr[data-ticker] { cursor: pointer; }
+.tr-orders { max-height: 280px; overflow: auto; }
+.tr-filled { color: var(--up, #26a69a); }
+.tr-working { color: var(--accent); }
+.tr-cancelled, .tr-expired { color: var(--muted); }

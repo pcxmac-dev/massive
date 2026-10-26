@@ -33,8 +33,8 @@ import pandas as pd
 
 from ..calc.derivatives import Model, apply_model, segments
 from .bars import (CALENDAR, COLUMNS, MERGED, MODEL_SOURCES, PERIOD_SECONDS, PRICE_BASED, TIME_TYPES, Series, Style,
-                   _aggregate, _regular_close, _SizedCache, calendar_key, decimals, epoch_ms, frame_from_bars,
-                   merge_frames, model_info, resample, session_hours, style_used, to_records, transformed, utc_days)
+                   _aggregate, _regular_close, _SizedCache, bin_keys, calendar_key, decimals, epoch_ms, frame_from_bars,
+                   merge_frames, model_info, resample, session_hours, style_used, to_records, transformed, utc_days, ET)
 
 # Every level the chart moves through, finest first.
 LEVELS = (("second", 1), ("second", 30), ("minute", 1), ("minute", 5), ("minute", 30), ("hour", 1), ("hour", 2),
@@ -61,6 +61,10 @@ HALF_HOUR_MS = 1_800_000  # the hour levels and 30 minutes are built from 30-min
 ROLLUP_TTL_S = 300.0  # a month of them is read again after this: a correction or backfill shows within it
 # The bricks and the 30-minute bins each keep to a share of the chart app's caches (bars.CACHE_SHARES:
 # 150 MB of the default gigabyte; twenty years of a stock's bins is about 15 MB).
+# Schemes (calc/schemes.py) run over a stretch at its level, plus the warm-up their settings need: a
+# stretch of more bars than this asks for a coarser level (a year of seconds is 6 million bars).
+SCHEME_MAX_BARS = 250_000
+REPLAY_PAGE = 3000  # finer bars a replay page holds (about 50 minutes of seconds, 8 sessions of minutes)
 
 
 # The view a request reads (server.ChartApp._view): filtered, bad data left out (the pruned list,
@@ -572,6 +576,103 @@ class WindowReader:
             ts = epoch_ms(bars.index)
             bars, _ = self._modelled(s, feeds, period, span, session, bars[(ts >= lo) & (ts <= hi)], model)
         return summarize_range(bars, lo, hi, model)
+
+    # -- schemes and replay (docs/ARCHITECTURE.md, "Schemes and replay") ---------------------------
+    def scheme(self, source: str, ticker: str, period: str, span: int, session: str, from_ms: int, to_ms: int,
+               key: str, given: dict | None = None, costs=None, long_only: bool = False) -> dict:
+        """A scheme over the bars at the level starting from `from_ms` to `to_ms` (both included),
+        with the warm-up bars before them its settings need, and nothing further back."""
+        from ..calc import schemes as sc
+
+        scheme = sc.SCHEMES.get(key)
+        if scheme is None:
+            raise ValueError(f"no scheme {key!r}: one of {', '.join(sc.SCHEMES)}")
+        warm = scheme.warmup(scheme.settings(given or {}))
+        s = self.series(source, ticker)
+        session = s.session_for(session)
+        feeds = self.feeds(source, ticker)
+        lo, hi = sorted((int(from_ms), int(to_ms)))
+        if period in CALENDAR:  # few: the level whole
+            every = self._calendar_bars(s, feeds, period)
+            ts = epoch_ms(every.index)
+            first, last = int(ts.searchsorted(lo)), int(ts.searchsorted(hi, side="right"))
+            frame, start = every.iloc[max(0, first - warm):last], first - max(0, first - warm)
+        else:
+            step = UNIT_MS[period] * span
+            if per_day(s.asset, period, span, session) * (hi - lo) / 86_400_000 > 2 * SCHEME_MAX_BARS:  # before reading
+                raise ValueError(f"too many {level_label(period, span)} bars for a scheme: choose a coarser level")
+            inside = self._built(s, feeds, BASE[period], period, span, session, lo, hi + step)
+            ts = epoch_ms(inside.index)
+            inside = inside[(ts >= lo) & (ts <= hi)]
+            if len(inside) > SCHEME_MAX_BARS:
+                raise ValueError(f"{len(inside):,} {level_label(period, span)} bars: a scheme runs over at most "
+                                 f"{SCHEME_MAX_BARS:,}; choose a coarser level")
+            before = _empty()
+            if len(inside) and warm:
+                first = int(epoch_ms(inside.index[:1])[0])
+                before = self._frame_page(s, feeds, period, span, session, first, None, None, warm)["frame"]
+            frame, start = (pd.concat([before, inside]) if len(before) else inside), len(before)
+        out = sc.run(key, frame[["open", "high", "low", "close"]], start, given, costs or sc.Costs(), long_only)
+        out.update(level={"type": period, "span": span, "label": level_label(period, span)}, warmup=int(start),
+                   view="filtered" if _filtered() else "unfiltered",
+                   note="Backtest: each decision at a bar's close, filled at the next bar's open; stops and targets "
+                        "inside a bar at their level, the stop first when a bar reaches both. Not an order.")
+        return out
+
+    def replay_fine(self, source: str, ticker: str, period: str, from_ms: int) -> str:
+        """The finer bars a replay builds the level's bars from: seconds where the series holds
+        them at `from_ms` (for levels up to hours), else minutes, else days."""
+        held = {lv["type"]: lv for lv in self.levels(source, ticker)}
+        sec = held.get("second")
+        if period == "second" or (sec and period in ("minute", "hour") and sec["first"] <= from_ms <= sec["last"]):
+            return "second"
+        return "minute" if "minute" in held else "day"
+
+    def replay(self, source: str, ticker: str, period: str, span: int, session: str, from_ms: int,
+               limit: int = REPLAY_PAGE) -> dict:
+        """A page of a replay from `from_ms` on: the finer bars (oldest first), each with the
+        start of the chart bar it belongs to (`bin`, binned as the chart's bars are), and the
+        chart's own bars for every bin the page completes (a forming bar becomes the chart's bar
+        exactly when it closes). The next page starts after `next`."""
+        s = self.series(source, ticker)
+        session = s.session_for(session)
+        feeds = self.feeds(source, ticker)
+        fine = self.replay_fine(source, ticker, period, int(from_ms))
+        fine_level = {"type": fine, "span": 1, "label": level_label(fine, 1)}
+        if fine == "day":
+            page = self._calendar_page(s, feeds, "day", 1, session, None, int(from_ms) - 1, None, limit)
+        else:
+            page = self._intraday_page(s, feeds, fine, 1, session, None, int(from_ms) - 1, None, limit)
+        bars = page["frame"]
+
+        def bins_of(index: pd.DatetimeIndex):
+            if period in CALENDAR:
+                days = index if fine == "day" else calendar_key(index, "day", utc=utc_days(s),
+                                                                session_hours=session_hours(s))
+                return epoch_ms(pd.DatetimeIndex(days if period == "day" else calendar_key(days, period, utc=utc_days(s))))
+            return epoch_ms(pd.DatetimeIndex(bin_keys(index, period, span, align_hours_to_open=s.asset in ("stock", "index"),
+                                                      utc_days=utc_days(s), session_hours=session_hours(s))))
+
+        # The bins this page completes: from the one `from_ms` is in (the page before left it out,
+        # unsure it had all of it) to the last, which may go on in the next page.
+        first_bin = int(bins_of(pd.DatetimeIndex([pd.Timestamp(int(from_ms), unit="ms", tz="UTC")]).tz_convert(ET))[0])
+        more = bool(page["newer"]) and len(bars) > 0
+        bin_ms = bins_of(bars.index) if len(bars) else None
+        last_bin = int(bin_ms[-1]) if len(bars) else first_bin
+        # up to the last bin's start, or through its end (its base bars read whole) when nothing follows
+        done_to = last_bin if more else last_bin + (1 if period in CALENDAR else UNIT_MS[period] * span)
+        if period in CALENDAR:
+            every = self._calendar_bars(s, feeds, period)
+            ts = epoch_ms(every.index)
+            complete = every[(ts >= first_bin) & (ts < done_to)]
+        else:
+            complete = self._built(s, feeds, BASE[period], period, span, session, first_bin, done_to)
+        records = to_records(bars)
+        for r, b in zip(records, bin_ms.tolist() if len(bars) else []):
+            r["bin"] = b
+        return {"fine": fine_level, "level": {"type": period, "span": span, "label": level_label(period, span)},
+                "bars": records, "complete": to_records(complete), "more": more,
+                "next": int(epoch_ms(bars.index[-1:])[0]) if len(bars) else None}
 
     # -- the virtual level 2: what traded at each price in one bar ------------------------------
     PROFILE_TICK_MS = 86_400_000  # bars up to a day read the feeds' ticks; longer ones their finer bars
