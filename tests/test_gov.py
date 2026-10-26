@@ -97,11 +97,13 @@ def test_a_fetch_reads_every_source_once_the_sec_waits_for_a_contact():
     assert {i["source"] for i in db.items()} >= {"fed-press", "fedreg", "bls-cpi"}
     # within the hour nothing is asked again
     assert gov.fetch(db, NOW + timedelta(minutes=30), log=lambda *_: None, session=http) == 0
-    # a contact set: the SEC is read too, with it in the User-Agent
+    # a contact set: the SEC is read too, with it in the User-Agent; the agencies that do not ask
+    # for one never get it
     http2 = Agencies()
     gov.fetch(db, NOW + timedelta(minutes=61), contact="Pat Example pat@example.com", log=lambda *_: None, session=http2)
     sec = [h for u, h in http2.calls if "sec.gov" in u]
     assert len(sec) == 2 and all(h["User-Agent"].endswith("Pat Example pat@example.com") for h in sec)
+    assert all(h["User-Agent"] == gov.USER_AGENT for u, h in http2.calls if "sec.gov" not in u)
 
 
 def test_requests_are_conditional_and_an_unchanged_feed_keeps_its_items():
@@ -183,3 +185,25 @@ def test_a_dropped_connection_is_tried_once_more_and_a_failure_again_in_ten_minu
     assert {s.key for s in gov.due(db, NOW + timedelta(minutes=11))} == {k for k, f in states.items()
                                                                         if f["status"] in ("failed", "waiting")} - {
         k for k, f in states.items() if f["status"] == "waiting"}  # only the failed ones, after ten minutes
+
+
+
+def test_a_refusal_is_not_asked_again_for_hours():
+    class Refusing(Agencies):
+        def get(self, url, headers=None, timeout=None):
+            if "bls.gov" in url:
+                self.calls.append((url, dict(headers or {})))
+                return Resp(403)
+            if "federalregister" in url:
+                self.calls.append((url, dict(headers or {})))
+                return Resp(429, headers={"Retry-After": str(12 * 3600)})
+            return super().get(url, headers, timeout)
+
+    db = GovDB(None)
+    gov.fetch(db, NOW, log=lambda *_: None, session=Refusing())
+    states = db.fetched()
+    assert states["bls-cpi"]["status"] == "refused" and states["fedreg"]["status"] == "refused"
+    later = {s.key for s in gov.due(db, NOW + timedelta(hours=2))}
+    assert "bls-cpi" not in later and "fed-press" in later  # an hour's wait for the others, hours for a refusal
+    assert "bls-cpi" in {s.key for s in gov.due(db, NOW + timedelta(hours=7))}
+    assert "fedreg" not in {s.key for s in gov.due(db, NOW + timedelta(hours=7))}  # its Retry-After: 12 h

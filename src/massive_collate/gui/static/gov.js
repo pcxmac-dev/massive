@@ -9,7 +9,7 @@
   const { esc, safeUrl } = window.MassiveIcons;
   const FILTERS = [['all', 'All'], ['Fed', 'Fed'], ['SEC', 'SEC'], ['FINRA', 'FINRA'], ['BLS', 'BLS'],
                    ['CFTC', 'CFTC'], ['Treasury', 'Treasury'], ['rules', 'Federal Register']];
-  const STATE_CLASS = { ok: 'ok', unchanged: 'ok', waiting: 'wait', failed: 'bad' };
+  const STATE_CLASS = { ok: 'ok', unchanged: 'ok', waiting: 'wait', failed: 'bad', refused: 'bad' };
   let data = null, fetchedAt = 0, filter = 'all', query = '';
 
   async function load(force = false) {

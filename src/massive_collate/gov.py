@@ -25,6 +25,7 @@ document for that rule.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 import xml.etree.ElementTree as ET_XML
@@ -39,6 +40,7 @@ import requests
 USER_AGENT = "massive-collate/1 (personal research)"
 REFRESH_MINUTES = 60  # each source at most this often
 FAILED_RETRY_MINUTES = 10  # a source that failed (no answer, an error) is asked again sooner
+REFUSED_MINUTES = 6 * 60  # a source that refused (401, 403, 429) waits this long, or its Retry-After if longer
 RETRY_WAIT_S = 2.0  # a dropped connection is tried once more after this
 KEEP = 200  # items kept per source, newest first
 TIMEOUT_S = 20
@@ -270,11 +272,27 @@ def parse_nyfed(data: dict) -> dict | None:
 
 
 # -- fetching ----------------------------------------------------------------------------------
+def _retry_after_minutes(value: str | None) -> float:
+    """A Retry-After header in minutes (seconds or an HTTP date); 0 when absent or unreadable."""
+    if not value:
+        return 0.0
+    try:
+        return max(0.0, float(value) / 60)
+    except ValueError:
+        try:
+            return max(0.0, (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds() / 60)
+        except (TypeError, ValueError):
+            return 0.0
+
+
 def due(db: GovDB, now: datetime, minutes: int = REFRESH_MINUTES) -> list[Source]:
     """The sources not asked within `minutes` (FAILED_RETRY_MINUTES for one whose last try failed)."""
     seen = db.fetched()
 
     def wait(f: dict) -> timedelta:
+        if f["status"] == "refused":  # held off: the agency said no (or slow down), as long as it asked
+            held = re.search(r"wait (\d+) min", f.get("message") or "")
+            return timedelta(minutes=max(minutes, float(held.group(1)) if held else REFUSED_MINUTES))
         return timedelta(minutes=min(minutes, FAILED_RETRY_MINUTES) if f["status"] == "failed" else minutes)
     return [s for s in SOURCES if s.key not in seen or now - datetime.fromisoformat(seen[s.key]["at"]) >= wait(seen[s.key])]
 
@@ -290,7 +308,8 @@ def fetch(db: GovDB, now: datetime, contact: str | None = None, log: Callable[[s
         if s.contact and not contact:
             db.note(s.key, now, "waiting", f"{s.agency} {WAITING}")
             continue
-        headers = {"User-Agent": f"{USER_AGENT} {contact}" if contact else USER_AGENT,
+        # the contact goes only to the agencies that ask automated readers for one
+        headers = {"User-Agent": f"{USER_AGENT} {contact}" if contact and s.contact else USER_AGENT,
                    "Accept-Encoding": "gzip, deflate"}
         prev = seen.get(s.key, {})
         if prev.get("etag"):
@@ -315,6 +334,11 @@ def fetch(db: GovDB, now: datetime, contact: str | None = None, log: Callable[[s
             continue
         if r.status_code == 304:
             db.note(s.key, now, "unchanged")
+            continue
+        if r.status_code in (401, 403, 429):  # a refusal: not asked again for hours, never every few minutes
+            after = _retry_after_minutes(r.headers.get("Retry-After"))
+            db.note(s.key, now, "refused", f"HTTP {r.status_code}; wait {max(after, REFUSED_MINUTES):.0f} min")
+            log(f"gov: {s.agency} {s.title}: refused (HTTP {r.status_code}); asked again in {max(after, REFUSED_MINUTES) / 60:.0f} h")
             continue
         if r.status_code != 200:
             db.note(s.key, now, "failed", f"HTTP {r.status_code}")
