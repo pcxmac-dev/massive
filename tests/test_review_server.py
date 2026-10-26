@@ -417,6 +417,31 @@ def test_all_data_reaches_the_series_path_and_its_caches_keep_the_views_apart(tm
         s.close()
 
 
+# -- low: crypto and forex hours on UTC hours ---------------------------------------------------------
+def test_crypto_hours_are_binned_on_utc_hours_as_derive_builds_them(tmp_path):
+    with Store(tmp_path / "m.db", check_same_thread=False) as s:
+        t0 = _ms("2026-01-15 00:00", tz="UTC")  # winter: New York's midnight is 05:00 UTC
+        s.upsert_bars("coinbase", "BTCUSD", "minute", 1, [
+            {"t": t0 + i * 10 * MIN, "o": 100.0 + i, "h": 101.0 + i, "l": 99.0 + i, "c": 100.5 + i, "v": 1.0, "n": 1}
+            for i in range(2 * 144)])
+        s.watch("coinbase", ["BTCUSD"], "minute", asset="crypto")
+        derive.run(s, log=lambda *_: None)
+        engine = BarEngine(s)
+        app = ChartApp(s)
+        for span in (2, 4):
+            step = span * 3_600_000
+            whole = engine.bars("coinbase", "BTCUSD", "hour", span, "extended", limit=1000)["bars"]
+            paged = WindowReader(engine).page("coinbase", "BTCUSD", "hour", span, "extended", limit=1000)["bars"]
+            built = s.load_bars(["BTCUSD"], "hour", span, source="coinbase")
+            assert whole and all(b["timestamp"] % step == 0 for b in whole)  # from UTC midnight, as its days
+            assert [b["timestamp"] for b in paged] == [b["timestamp"] for b in whole]
+            built = sorted(pd.DatetimeIndex(built["time"]).as_unit("ms").asi8.tolist())
+            assert built == [b["timestamp"] for b in whole]  # derive.py's, on the same times
+            fut = app.future({"source": "coinbase", "ticker": "BTCUSD", "period": "hour", "span": str(span),
+                              "auto": "1", "count": "20"})
+            assert len(fut["timestamps"]) == 20 and all(t % step == 0 for t in fut["timestamps"])
+
+
 # -- low: an unexpected error is answered, not dropped ------------------------------------------------
 def test_an_unexpected_error_is_answered_not_dropped(served, monkeypatch, capsys):
     app, port = served

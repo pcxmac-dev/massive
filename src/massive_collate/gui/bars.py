@@ -205,9 +205,11 @@ def bin_keys(index: pd.DatetimeIndex, period: str, span: int = 1, align_hours_to
     """The start of the bar each timestamp falls in (what `resample` groups by)."""
     if period in INTRADAY:
         # US equities: hour bars line up with the 09:30 open, like TradingView. Around-the-clock
-        # markets (fx, futures) use clock hours.
+        # markets (fx, futures) use clock hours; crypto and forex, whose days are UTC days, UTC
+        # clock hours (2 and 4 hours from New York's midnight split their days, and derive.py
+        # builds them from UTC midnight).
         offset = 570 * 60 if period == "hour" and align_hours_to_open else 0
-        return wall_clock_bins(index, period, span, offset)
+        return wall_clock_bins(index, period, span, offset, zone="UTC" if utc_days else ET)
     return calendar_key(index, period, utc=utc_days, session_hours=session_hours)
 
 
@@ -229,16 +231,22 @@ _ET_ZONE = ZoneInfo(ET)
 _ET_STANDARD_NS = int(_ET_ZONE.utcoffset(datetime(2001, 1, 15)).total_seconds() * 1e9)
 
 
-def wall_clock_bins(index: pd.DatetimeIndex, period: str, span: int, offset_seconds: int = 0) -> pd.DatetimeIndex:
+def wall_clock_bins(index: pd.DatetimeIndex, period: str, span: int, offset_seconds: int = 0,
+                    zone: str = ET) -> pd.DatetimeIndex:
     """Start of each timestamp's bar: every `span` units of New York wall-clock time from
     midnight (+ offset), the same on every day of the year whatever the daylight-saving
     change and however much data is loaded. The repeated hour when clocks go back keeps its
-    two halves apart (they are different moments)."""
+    two halves apart (they are different moments). With `zone` UTC (crypto and forex), of UTC
+    time from midnight; given in New York time either way."""
+    step = span * _UNIT_SECONDS[period]
+    if zone == "UTC":  # no clock changes: the epoch's own steps
+        secs = index.as_unit("ns").asi8 // 1_000_000_000
+        start = (secs - offset_seconds) // step * step + offset_seconds
+        return pd.DatetimeIndex(start * 1_000_000_000, dtype="datetime64[ns, UTC]").tz_convert(ET)
     local = index.tz_convert(ET)
     naive = local.tz_localize(None).as_unit("ns")
     day = naive.normalize()
     secs = (naive.asi8 - day.asi8) // 1_000_000_000
-    step = span * _UNIT_SECONDS[period]
     start = (secs - offset_seconds) // step * step + offset_seconds
     bins = pd.DatetimeIndex(day.asi8 + start * 1_000_000_000).as_unit("ns")
     utc_offset = naive.asi8 - local.tz_convert("UTC").tz_localize(None).as_unit("ns").asi8

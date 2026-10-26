@@ -78,7 +78,7 @@ def future_bar_starts_reference(cal: MarketCalendar, s: Series, product: str | N
             idx = calendar_key(minutes, period, utc=utc_days(s)).unique()
         else:
             offset = 570 * 60 if period == "hour" and s.asset in ("stock", "index") else 0
-            idx = wall_clock_bins(minutes, period, span, offset).unique()
+            idx = wall_clock_bins(minutes, period, span, offset, zone="UTC" if utc_days(s) else ET).unique()
     return idx[idx > last]
 
 
@@ -107,10 +107,11 @@ class SessionBins:
         self.unit_ns = (1 if period == "second" else 60) * 1_000_000_000
         self.bin_ns = span * _STEP_SECONDS[period] * 1_000_000_000
         self.offset = 570 * 60 if period == "hour" and s.asset in ("stock", "index") else 0
+        self.zone = "UTC" if utc_days(s) else ET  # the engine's bins: UTC hours where days are UTC days
         self.regular = session == "regular" and s.asset in ("stock", "index")
         self.last_ns = int(last.value)
         # The first bar that can follow: the bin after the one holding the last real bar.
-        own = wall_clock_bins(pd.DatetimeIndex([last]), period, span, self.offset)[0]
+        own = wall_clock_bins(pd.DatetimeIndex([last]), period, span, self.offset, zone=self.zone)[0]
         self.after_ns = int(own.value) + self.bin_ns
         self.first: list[int] = []  # first future bar start (ns) in each session
         self.count: list[int] = []
@@ -137,7 +138,7 @@ class SessionBins:
                 continue
             last_unit = (b_ns - 1) // self.unit_ns * self.unit_ns
             edges = wall_clock_bins(pd.DatetimeIndex([a_ns, last_unit]).tz_localize("UTC"),
-                                    self.period, self.span, self.offset)
+                                    self.period, self.span, self.offset, zone=self.zone)
             first_bin, last_bin = int(edges[0].value), int(edges[1].value)
             if self.prev_last_bin is not None and first_bin <= self.prev_last_bin:
                 first_bin = self.prev_last_bin + self.bin_ns
