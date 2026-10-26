@@ -31,20 +31,38 @@
   hint.textContent = 'Replay: click the bar to start from · Esc to cancel';
   $('chart').append(hint);
 
+  // The controls are built again only when one of them changes (playing, speed, the finer bars, the
+  // end); while playing only the clock's text moves, at most every CLOCK_MS. Built every tick, a
+  // button pressed while playing was gone before it was let go: the click was lost.
+  const CLOCK_MS = 250;
+  let built = '';  // the controls' state as last built
+
   function renderBar() {
     const r = state.replay;
     bar.hidden = !r;
     btn.classList.toggle('on', !!r || picking);
-    if (!r) return;
-    const clock = r.clock != null ? fmtTime(r.clock) : '';
-    bar.innerHTML = `
-      <button data-act="restart" title="Back to the start point">⏮</button>
-      <button data-act="play" class="primary" title="${r.playing ? 'Pause (space)' : 'Play (space)'}">${r.playing ? '❚❚' : '▶'}</button>
-      <button data-act="fine" title="One ${esc(r.fine?.label || 'finer bar')} on">›</button>
-      <button data-act="bar" title="To the close of the forming bar">»</button>
-      <span class="replay-speeds">${SPEEDS.map((s) => `<button data-speed="${s}" class="${s === r.speed ? 'on' : ''}">${s}×</button>`).join('')}</span>
-      <span class="replay-clock" title="The replay's time${r.fine ? `, built from ${esc(r.fine.label)} bars` : ''}">${esc(clock)}${r.done ? ' · end of the data' : ''}</span>
-      <button data-act="stop" title="Leave the replay: back to the chart as it is now">✕</button>`;
+    if (!r) { built = ''; return; }
+    const shape = [r.playing, r.speed, r.fine?.label, r.done].join('|');
+    if (shape !== built) {
+      built = shape;
+      bar.innerHTML = `
+        <button data-act="restart" title="Back to the start point">⏮</button>
+        <button data-act="play" class="primary" title="${r.playing ? 'Pause (space)' : 'Play (space)'}">${r.playing ? '❚❚' : '▶'}</button>
+        <button data-act="fine" title="One ${esc(r.fine?.label || 'finer bar')} on">›</button>
+        <button data-act="bar" title="To the close of the forming bar">»</button>
+        <span class="replay-speeds">${SPEEDS.map((s) => `<button data-speed="${s}" class="${s === r.speed ? 'on' : ''}">${s}×</button>`).join('')}</span>
+        <span class="replay-clock" title="The replay's time${r.fine ? `, built from ${esc(r.fine.label)} bars` : ''}"></span>
+        <button data-act="stop" title="Leave the replay: back to the chart as it is now">✕</button>`;
+    }
+    renderClock();
+  }
+
+  function renderClock() {
+    const r = state.replay;
+    const el = r && bar.querySelector('.replay-clock');
+    if (!el) return;
+    const text = `${r.clock != null ? fmtTime(r.clock) : ''}${r.done ? ' · end of the data' : ''}`;
+    if (el.textContent !== text) el.textContent = text;
   }
 
   bar.addEventListener('click', (e) => {
@@ -55,10 +73,14 @@
        stop: () => stop() })[b.dataset.act]?.();
   });
 
+  // A replay plays plain price bars in: not into a model, nor a chart type the server builds (Heikin
+  // Ashi, bricks, box plots ...), whose bars it would mix with plain ones.
+  const playable = () => !SERVER_TYPES.has(state.chartType) && state.model.kind === 'price';
+
   btn.addEventListener('click', () => {
     if (state.replay) { stop(); return; }
-    if (PRICE_BASED.has(state.chartType) || state.model.kind !== 'price') {
-      showError(new Error('Replay draws prices: choose Price and a time-based chart type (candles, bars, lines ...)'));
+    if (!playable()) {
+      showError(new Error('Replay draws prices: choose Price and a chart type of plain bars (candles, bars, lines ...)'));
       return;
     }
     picking = !picking;
@@ -83,7 +105,8 @@
     picking = false;
     hint.hidden = true;
     $('chart').classList.remove('picking');
-    begin(ts);
+    if (playable()) begin(ts);  // the type or model may have changed while picking
+    else renderBar();
   }, true);
   window.addEventListener('keydown', (e) => {
     if (e.target.closest?.('input, select, textarea')) return;
@@ -98,7 +121,7 @@
     state.replay = {
       start, clock: start, speed: old?.speed ?? prefs.get('replaySpeed', 1), playing: false,
       queue: [], next: start, more: true, loading: null, complete: new Map(), forming: null, fine: null, done: false,
-      key: `${state.source}:${state.ticker}|${state.period.type}:${state.period.span}|${state.session}|${state.unfiltered}`,
+      key: replayKey(),
     };
     window.Schemes?.reveal(start - 1, null);
     renderBar();
@@ -172,7 +195,8 @@
     }
     if (r.queue.length < AHEAD) loadAhead();
     if (!r.queue.length && !r.more && !r.loading) finish();
-    renderBar();
+    if (!r.playing) renderBar();  // it ended: the controls change
+    else if (now - (r.clockAt || 0) >= CLOCK_MS) { r.clockAt = now; renderClock(); }
   }
 
   function step(what) {
@@ -264,9 +288,17 @@
     if (r && window.Schemes) window.Schemes.reveal(r.lastClosed ?? chart.getDataList().at(-1)?.timestamp ?? r.start - 1,
                                                    r.forming?.timestamp ?? null);
   });
+  // What the replay's bars are for: a chart loaded for anything else ends it (app.js getBars). The
+  // model, a chart type the server builds and the futures adjustment too: a switch to a model or to
+  // Heikin Ashi went on appending price bars into it. (Between types of plain bars, candles to a line,
+  // the same bars are drawn: it plays on.)
+  function replayKey() {
+    return `${state.source}:${state.ticker}|${state.period.type}:${state.period.span}|${state.session}|${state.unfiltered}`
+      + `|${state.model.kind}|${SERVER_TYPES.has(state.chartType) ? state.chartType : 'plain'}|${state.adjust}`;
+  }
   R.keyChanged = () => {
     const r = state.replay;
-    return r && r.key !== `${state.source}:${state.ticker}|${state.period.type}:${state.period.span}|${state.session}|${state.unfiltered}`;
+    return r && r.key !== replayKey();
   };
   renderBar();
 })();

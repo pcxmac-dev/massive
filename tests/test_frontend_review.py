@@ -121,3 +121,42 @@ def test_drawings_go_back_on_their_indicators_pane():
     assert "if (id) made++;" in place and "if (!made) return false;" in place
     paste = _inner(clip, "paste")
     assert paste.index("if (!place(c.items, at))") < paste.index("toast(`Pasted the")  # only when one was drawn
+
+
+# -- 13: the replay's controls ----------------------------------------------------------------------------
+
+def test_the_replays_controls_are_built_when_they_change_only():
+    replay = _js("replay.js")
+    bar = _inner(replay, "renderBar")
+    assert "if (shape !== built) {" in bar and bar.index("if (shape !== built) {") < bar.index("bar.innerHTML")
+    assert "const CLOCK_MS = 250;" in replay
+    tick = _inner(replay, "tick")
+    assert "if (!r.playing) renderBar();" in tick and tick.count("renderBar()") == 1  # not every 50 ms
+    assert "else if (now - (r.clockAt || 0) >= CLOCK_MS) { r.clockAt = now; renderClock(); }" in tick
+    assert "el.textContent = text" in _inner(replay, "renderClock")
+
+
+# -- 39: a replay and a switch to a model or a server-built type -------------------------------------------
+
+def test_a_replay_ends_on_a_model_or_a_server_built_chart_type():
+    replay = _js("replay.js")
+    key = _inner(replay, "replayKey")
+    for part in ("state.model.kind", "SERVER_TYPES.has(state.chartType)", "state.adjust", "state.unfiltered"):
+        assert part in key, part
+    assert "return r && r.key !== replayKey();" in replay and "key: replayKey()," in replay
+    assert "const playable = () => !SERVER_TYPES.has(state.chartType) && state.model.kind === 'price';" in replay
+    assert "if (!playable()) {" in replay and "if (playable()) begin(ts);" in replay  # Heikin Ashi and box plots too
+    assert "window.Replay?.keyChanged()" in _loader(_js("app.js"))  # checked on every load of the chart
+
+
+# -- 40: a scheme's answer -----------------------------------------------------------------------------------
+
+def test_a_scheme_answer_is_drawn_for_the_symbol_it_was_asked_for_only():
+    schemes = _js("schemes.js")
+    run = _inner(schemes, "run")
+    assert "res.ticker = state.ticker" not in run and "res.ticker = ask.ticker;" in run and "res.source = ask.source;" in run
+    assert run.index("const ask = {") < run.index("api('/api/scheme'")
+    assert "ask.ticker !== state.ticker || ask.source !== state.source" in run
+    on_symbol = schemes.split("window.addEventListener('massive:symbol'", 1)[1].split("});", 1)[0]
+    assert "S.token = (S.token || 0) + 1;" in on_symbol  # a run still on its way is dropped
+    assert "S.result.source === state.source" in schemes.split("const current = ", 1)[1].split(";", 1)[0]
