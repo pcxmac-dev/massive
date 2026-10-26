@@ -66,7 +66,7 @@
 
   function renderRailIcons(activity) {
     $('railStock').innerHTML = state.ticker ? symbolIcon(symbolInfo(state.ticker), RAIL_ICON + 4) : icon('analysis', RAIL_ICON);
-    $('railAnalysis').innerHTML = icon('abacus', RAIL_ICON);
+    $('railAnalysis').innerHTML = icon('integral', RAIL_ICON);
     $('railWatch').innerHTML = icon('watchlist', RAIL_ICON);
     $('railTrading').innerHTML = icon('trading', RAIL_ICON);
     if (!window.GlobeIcon?.update()) $('railMarkets').innerHTML = icon('globe', RAIL_ICON);  // the Earth, once its images are here
