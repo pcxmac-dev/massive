@@ -2,9 +2,36 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import date, datetime
 
-from .common import _ET
+from .common import _ET, write_transaction
+from .schema import COVERAGE_TABLE
+
+
+def _key_columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    return [r[1] for r in sorted(conn.execute(f"PRAGMA table_info({table})"), key=lambda r: r[5]) if r[5]]
+
+
+def key_coverage_by_origin(conn: sqlite3.Connection) -> bool:
+    """A ledger from before origin was part of its key (a 'ticks' span and a 'download' span of a
+    series starting at the same ms replaced each other, and the lost one was fetched again) is
+    rebuilt with it: a new table, every span copied, the old table dropped and the new one renamed,
+    all in one transaction (a failure leaves the old ledger as it was). The ledger holds a few rows
+    per series: well under a second. Returns whether it ran."""
+    if "origin" in _key_columns(conn, "coverage"):
+        return False
+    with write_transaction(conn):
+        if "origin" in _key_columns(conn, "coverage"):  # another process upgraded it meanwhile
+            return False
+        conn.execute("DROP TABLE IF EXISTS coverage_keyed")  # a leftover cannot exist (one transaction); to be sure
+        conn.execute(COVERAGE_TABLE.format(name="coverage_keyed"))
+        conn.execute("INSERT INTO coverage_keyed (source, ticker, timespan, start_ms, end_ms, origin) "
+                     "SELECT source, ticker, timespan, start_ms, end_ms, origin FROM coverage")
+        conn.execute("DROP TABLE coverage")
+        conn.execute("ALTER TABLE coverage_keyed RENAME TO coverage")
+        conn.execute("CREATE INDEX IF NOT EXISTS coverage_series ON coverage (ticker, timespan)")
+    return True
 
 
 class LedgerStore:
@@ -17,21 +44,25 @@ class LedgerStore:
     def add_coverage(self, source: str, ticker: str, timespan: str, start_ms: int, end_ms: int,
                      origin: str = "download") -> None:
         """Record that `source` holds [start, end) of a series, merged with its touching spans of
-        the same origin (downloaded, or built here from its stored ticks)."""
+        the same origin (downloaded, or built here from its stored ticks). Read and written in one
+        write transaction: the sync and the live recorder record spans of the same series."""
         if end_ms <= start_ms:
             return
-        ticker = ticker.upper()
-        key = (source, ticker, timespan)
-        with self.conn:
-            rows = self.conn.execute(
-                "SELECT start_ms, end_ms FROM coverage WHERE source=? AND ticker=? AND timespan=? AND origin=? "
-                "AND end_ms >= ? AND start_ms <= ?", (*key, origin, start_ms, end_ms)).fetchall()
-            lo = min([start_ms] + [r[0] for r in rows])
-            hi = max([end_ms] + [r[1] for r in rows])
-            self.conn.executemany("DELETE FROM coverage WHERE source=? AND ticker=? AND timespan=? AND start_ms=?",
-                                  [(*key, r[0]) for r in rows])
-            self.conn.execute("INSERT OR REPLACE INTO coverage (source, ticker, timespan, start_ms, end_ms, origin) "
-                              "VALUES (?, ?, ?, ?, ?, ?)", (*key, lo, hi, origin))
+        with write_transaction(self.conn):
+            self._add_coverage(source, ticker.upper(), timespan, start_ms, end_ms, origin)
+
+    def _add_coverage(self, source: str, ticker: str, timespan: str, start_ms: int, end_ms: int, origin: str) -> None:
+        """add_coverage inside the caller's write transaction."""
+        key = (source, ticker, timespan, origin)
+        rows = self.conn.execute(
+            "SELECT start_ms, end_ms FROM coverage WHERE source=? AND ticker=? AND timespan=? AND origin=? "
+            "AND end_ms >= ? AND start_ms <= ?", (*key, start_ms, end_ms)).fetchall()
+        lo = min([start_ms] + [r[0] for r in rows])
+        hi = max([end_ms] + [r[1] for r in rows])
+        self.conn.executemany("DELETE FROM coverage WHERE source=? AND ticker=? AND timespan=? AND origin=? "
+                              "AND start_ms=?", [(*key, r[0]) for r in rows])
+        self.conn.execute("INSERT OR REPLACE INTO coverage (source, ticker, timespan, origin, start_ms, end_ms) "
+                          "VALUES (?, ?, ?, ?, ?, ?)", (*key, lo, hi))
 
     def drop_coverage(self, source: str, ticker: str, before_ms: int | None = None) -> int:
         """Forget a feed's spans of a ticker (those starting before `before_ms`, or all), after its
@@ -60,12 +91,18 @@ class LedgerStore:
             head_end = first if first is not None else b
             if head_end - a < min_ms:
                 continue
-            with self.conn:
-                self.conn.execute("DELETE FROM coverage WHERE source=? AND ticker=? AND timespan=? AND start_ms=?",
-                                  (src, ticker, ts, a))
-            self.add_coverage(src, ticker, ts, a, head_end, origin="none")
-            if first is not None:
-                self.add_coverage(src, ticker, ts, first, b)
+            # The span split in one transaction (it was three: a failure between them lost the span,
+            # and its history was asked for again); only if no one changed it since it was read.
+            with write_transaction(self.conn):
+                key = (src, ticker, ts, a)
+                if self.conn.execute("SELECT 1 FROM coverage WHERE source=? AND ticker=? AND timespan=? AND "
+                                     "origin='download' AND start_ms=? AND end_ms=?", (*key, b)).fetchone() is None:
+                    continue
+                self.conn.execute("DELETE FROM coverage WHERE source=? AND ticker=? AND timespan=? AND "
+                                  "origin='download' AND start_ms=?", key)
+                self._add_coverage(src, ticker, ts, a, head_end, "none")
+                if first is not None:
+                    self._add_coverage(src, ticker, ts, first, b, "download")
             changed += 1
         return changed
 

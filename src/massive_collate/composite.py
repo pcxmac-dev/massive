@@ -207,8 +207,9 @@ def refresh(store, feeds: dict, now: datetime, log=print, rebuild_days: int = 2)
                 comp = combine(_venue_bars(store, feed_of, ticker, timespan, lo, hi), weights)
                 if not comp.empty:
                     comp = comp[comp["venues"] >= 2]  # one exchange alone is that exchange, not a composite
-                if not comp.empty:
-                    made += store.save_composite(ticker, timespan, comp, derivation)
+                # the whole chunk is built again: a composite bar it no longer makes (an exchange's bar
+                # since removed or pruned, fewer than two left) goes, not only those it makes anew
+                made += store.save_composite(ticker, timespan, comp, derivation, span=(lo, hi))
                 lo = hi
             store.set_derivation_rows(derivation, made)
             built += made

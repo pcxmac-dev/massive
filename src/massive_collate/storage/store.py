@@ -10,11 +10,11 @@ from pathlib import Path
 from .admin import AdminStore
 from .appstate import AppStateStore
 from .audits import AuditStore
-from .common import BUSY_TIMEOUT_S
+from .common import BUSY_TIMEOUT_S, add_column, write_transaction
 from .datasets import DatasetStore
 from .directory import DirectoryStore
 from .feeds import FeedStore, OldLayout, _Feed, old_layout, tick_access
-from .ledger import LedgerStore
+from .ledger import LedgerStore, key_coverage_by_origin
 from .markets import MarketsStore
 from .provenance import ProvenanceStore
 from .pruned import PrunedStore
@@ -85,11 +85,16 @@ class Store(ProvenanceStore, AdminStore, FeedStore, PrunedStore, DatasetStore, D
         self._writes += 1
 
     def _migrate(self) -> None:
-        with self.conn:
-            for table, column, kind in MIGRATIONS:
-                existing = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})")}
-                if column not in existing:
-                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+        # Looked at without a lock (every store opened takes this path; almost always nothing is
+        # missing), then changed under the write lock and looked at again there: on the day of an
+        # upgrade the chart app, the sync and the live recorder open the file at once.
+        existing = {t: {r[1] for r in self.conn.execute(f"PRAGMA table_info({t})")} for t, _, _ in MIGRATIONS}
+        missing = [m for m in MIGRATIONS if m[1] not in existing[m[0]]]
+        if missing:
+            with write_transaction(self.conn):
+                for table, column, kind in missing:
+                    add_column(self.conn, table, column, kind)
+        key_coverage_by_origin(self.conn)
 
     def close(self) -> None:
         for feed in self._feeds.values():

@@ -3,6 +3,22 @@
 from __future__ import annotations
 
 
+# Which feed holds which span of a series. Each span [start, end) of a ticker's series was asked
+# for by exactly one feed, which stored whatever exists in it: other feeds never download it again
+# (only an audit may, without storing). Spans of one feed and origin are kept merged; spans of
+# different origins may start at the same time (a 'ticks' span and a 'download' span replaced
+# each other while origin was not part of the key: ledger.key_coverage_by_origin).
+COVERAGE_TABLE = """
+CREATE TABLE IF NOT EXISTS {name} (
+    source    TEXT    NOT NULL,
+    ticker    TEXT    NOT NULL,
+    timespan  TEXT    NOT NULL,   -- trades | second | minute | day
+    start_ms  INTEGER NOT NULL,
+    end_ms    INTEGER NOT NULL,
+    origin    TEXT    NOT NULL DEFAULT 'download',  -- download | ticks (built here from its ticks) | none (asked: this feed has nothing there)
+    PRIMARY KEY (source, ticker, timespan, origin, start_ms)
+)"""
+
 SCHEMA = """
 -- SIP trade conditions and which bar fields each may update (consolidated rules), from the
 -- source's reference data: bars built from ticks follow the same rules as the feeds' own bars.
@@ -205,19 +221,7 @@ CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
-
--- Which feed holds which span of a series. Each span [start, end) of a ticker's series was asked
--- for by exactly one feed, which stored whatever exists in it: other feeds never download it again
--- (only an audit may, without storing). Spans of one feed are kept merged.
-CREATE TABLE IF NOT EXISTS coverage (
-    source    TEXT    NOT NULL,
-    ticker    TEXT    NOT NULL,
-    timespan  TEXT    NOT NULL,   -- trades | second | minute | day
-    start_ms  INTEGER NOT NULL,
-    end_ms    INTEGER NOT NULL,
-    origin    TEXT    NOT NULL DEFAULT 'download',  -- download | ticks (built here from its ticks) | none (asked: this feed has nothing there)
-    PRIMARY KEY (source, ticker, timespan, start_ms)
-);
+""" + COVERAGE_TABLE.format(name="coverage") + """;
 CREATE INDEX IF NOT EXISTS coverage_series ON coverage (ticker, timespan);
 CREATE INDEX IF NOT EXISTS watchlist_ticker ON watchlist (ticker);
 
