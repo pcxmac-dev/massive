@@ -219,3 +219,15 @@ def test_the_status_is_polled_fast_only_while_its_views_are_open():
     assert "if (!polling) polling = pollOnce()" in once  # a poll while one is on its way joins it: one loop
     tail = act.split("async function pollOnce()", 1)[1].split("\n  }\n", 1)[0]
     assert tail.index("clearTimeout(timer);") < tail.index("timer = setTimeout(poll,")  # one timer, never two
+
+
+def test_the_stored_bar_shows_what_is_held_and_what_is_still_to_fetch():
+    act = _js("activity.js")
+    bar = act.split("function storedBar(s) {", 1)[1].split("\n  }\n", 1)[0]
+    assert "seg('older'" in bar and "seg('held'" in bar and "seg('newer'" in bar
+    assert "s.expectedThrough" in bar  # newer data only up to what the plan should have published
+    assert "Math.max(w, SPAN_MIN_PCT)" in bar  # a day to fetch shows on a twenty-year line
+    assert "${storedBar(s)}" in act
+    css = _js("style.css")
+    for part, colour in (("held", "--up"), ("older", "--st-wait"), ("newer", "--st-new")):
+        assert re.search(r"\.meter\.span > \." + part + r" \{ background: var\(" + colour + r"\)", css), part

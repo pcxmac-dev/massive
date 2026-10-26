@@ -369,6 +369,14 @@ dialog.wide { width: min(1100px, 96vw); max-height: 90vh; }
 .meter > span { display: block; height: 100%; background: var(--accent); }
 .meter.good > span { background: var(--up); }
 .meter.warn > span { background: #f0a020; }
+/* The Fetcher's Stored bar (activity.js storedBar): stored, and what is still to fetch either side of it */
+.meter.span { display: flex; }
+.meter.span > span { flex: none; }
+.meter.span > .held { background: var(--up); }
+.meter.span > .older { background: var(--st-wait); }
+.meter.span > .newer { background: var(--st-new); }
+.span-legend { font-size: 11px; color: var(--muted); text-transform: none; letter-spacing: 0; font-weight: normal; margin-left: 10px; }
+.span-legend i { display: inline-block; width: 10px; height: 6px; border-radius: 2px; margin: 0 4px 1px 8px; vertical-align: middle; }
 .filters { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 6px; }
 .filters button { border-color: var(--border); }
 .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }

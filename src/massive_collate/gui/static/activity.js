@@ -60,6 +60,31 @@
     return `<span class="meter ${cls}"><span style="width:${pct.toFixed(1)}%"></span></span>`;
   }
 
+  // A symbol's stored span on its own time line, from where its history should start (`target`) to
+  // the newest bar its plan should have published by now (`expectedThrough`): stored in green, older
+  // history still to fetch in amber, newer data still to fetch in cyan. Holes inside the stored span
+  // are not shown (the row knows its edges only).
+  const SPAN_MIN_PCT = 4;
+  function storedBar(s) {
+    const t = (v) => (v ? Date.parse(v) : null);
+    const first = t(s.first), last = t(s.last), due = t(s.expectedThrough);
+    const start = Math.min(...[t(s.target), first].filter((v) => v != null));
+    const end = Math.max(...[last, due].filter((v) => v != null));
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      return first ? '<span class="meter span"><span class="held" style="width:100%"></span></span>'
+        : '<span class="meter span"><span class="older" style="width:100%"></span></span>';
+    }
+    const part = (a, b) => Math.max(0, (Math.min(b, end) - Math.max(a, start)) / (end - start) * 100);
+    // what is still to fetch shows however small (a day of new data is 0.01 % of twenty years)
+    const seen = (w) => (w > 0 ? Math.max(w, SPAN_MIN_PCT) : 0);
+    const older = first == null ? 100 : seen(part(start, first));
+    const newer = last == null || due == null ? 0 : seen(part(last, due));
+    const held = first == null ? 0 : Math.max(0, 100 - older - newer);
+    const seg = (cls, w, what) => (w > 0.05 ? `<span class="${cls}" style="width:${w.toFixed(1)}%" title="${what}"></span>` : '');
+    return `<span class="meter span">${seg('older', older, 'Older history to fetch')}${seg('held', held, 'Stored')}`
+      + `${seg('newer', newer, 'Newer data to fetch')}</span>`;
+  }
+
   // The Fetcher view shows one feed at a time; the choice is remembered on this machine.
   let feed = 'massive';
   try { feed = localStorage.getItem('fetcherFeed') || 'massive'; } catch { /* private window */ }
@@ -369,7 +394,7 @@
         <td><span class="sym-cell">${symbolIcon(s, 20)}<span><b>${esc(s.exchange ? `${s.ticker}::${s.exchange}` : s.ticker)}</b>
           <div class="sub">${esc(s.name || s.asset)}</div></span></span></td>
         <td>${dataIcon(s, 14)} <span class="state ${s.state}">${esc(DATA_LABEL[s.state])}</span>${s.note ? `<div class="sub">${esc(s.note)}</div>` : ''}</td>
-        <td class="prog">${meter(s.progress, s.progress >= 1 ? 'good' : '')}
+        <td class="prog">${storedBar(s)}
           <div class="sub">${s.first ? `${day(s.first)} → ${day(s.last)}` : 'nothing stored yet'}${s.progress < 1 ? ` · target ${day(s.target)}` : ''}</div></td>
         <td>${esc(s.resolution)}</td>
         <td class="num">${s.requestsLeft ? `≈${num(s.requestsLeft)}` : '–'}</td>
