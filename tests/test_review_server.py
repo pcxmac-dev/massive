@@ -458,6 +458,27 @@ def test_key_statistics_of_crypto_count_calendar_days_and_utc_years():
     assert key_stats(d)["range52w"]["sessions"] == 252  # a stock's year as before
 
 
+# -- low: a scheme leaves out the bar still forming ---------------------------------------------------
+def test_a_scheme_leaves_out_the_bar_still_forming(tmp_path, monkeypatch):
+    day = "2026-10-20"
+    with Store(tmp_path / "m.db", check_same_thread=False) as s:
+        s.upsert_bars("massive", "SPCX", "minute", 1, _minutes(day, 10.0, "09:30", "10:57", every=1))
+        s.watch("massive", ["SPCX"], "minute")
+        app = ChartApp(s)
+        q = {"source": "massive", "ticker": "SPCX", "period": "minute", "span": "5", "session": "regular",
+             "from": str(_ms(f"{day} 09:30")), "to": str(_ms(f"{day} 10:55")), "scheme": "cusum"}
+        monkeypatch.setattr(window_module, "_now_ms", lambda: _ms(f"{day} 10:57") + 30_000)
+        assert app.scheme(q)["equity"][-1][0] == _ms(f"{day} 10:50")  # 10:55's bar runs to 11:00: not closed
+        s.upsert_bars("massive", "SPCX", "minute", 1, _minutes(day, 10.0, "10:58", "10:59", every=1))
+        monkeypatch.setattr(window_module, "_now_ms", lambda: _ms(f"{day} 11:00") + 5_000)
+        assert app.scheme(q)["equity"][-1][0] == _ms(f"{day} 10:55")
+        derive.run(s, log=lambda *_: None)  # the day so far, built from its minutes
+        today = {**q, "period": "day", "span": "1", "from": str(_ms(f"{day} 00:00")), "to": str(_ms(f"{day} 00:00"))}
+        assert app.scheme(today)["equity"] == []  # the day is not over
+        monkeypatch.setattr(window_module, "_now_ms", lambda: _ms("2026-10-21 05:00"))
+        assert [e[0] for e in app.scheme(today)["equity"]] == [_ms(f"{day} 00:00")]  # over
+
+
 # -- low: an unexpected error is answered, not dropped ------------------------------------------------
 def test_an_unexpected_error_is_answered_not_dropped(served, monkeypatch, capsys):
     app, port = served

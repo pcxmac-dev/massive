@@ -624,7 +624,7 @@ class WindowReader:
         feeds = self.feeds(source, ticker)
         lo, hi = sorted((int(from_ms), int(to_ms)))
         if period in CALENDAR:  # few: the level whole
-            every = self._calendar_bars(s, feeds, period)
+            every = self._closed(s, feeds, period, span, self._calendar_bars(s, feeds, period))
             ts = epoch_ms(every.index)
             first, last = int(ts.searchsorted(lo)), int(ts.searchsorted(hi, side="right"))
             frame, start = every.iloc[max(0, first - warm):last], first - max(0, first - warm)
@@ -635,7 +635,7 @@ class WindowReader:
             check_stretch(s.asset, period, span, lo, hi + step, "the stretch")
             inside = self._built(s, feeds, BASE[period], period, span, session, lo, hi + step)
             ts = epoch_ms(inside.index)
-            inside = inside[(ts >= lo) & (ts <= hi)]
+            inside = self._closed(s, feeds, period, span, inside[(ts >= lo) & (ts <= hi)])
             if len(inside) > SCHEME_MAX_BARS:
                 raise ValueError(f"{len(inside):,} {level_label(period, span)} bars: a scheme runs over at most "
                                  f"{SCHEME_MAX_BARS:,}; choose a coarser level")
@@ -650,6 +650,21 @@ class WindowReader:
                    note="Backtest: each decision at a bar's close, filled at the next bar's open; stops and targets "
                         "inside a bar at their level, the stop first when a bar reaches both. Not an order.")
         return out
+
+    def _closed(self, s, feeds, period, span, bars: pd.DataFrame) -> pd.DataFrame:
+        """`bars` up to the last that has closed: a bar ending after now, or after the newest base
+        bar stored (the rest of it is not stored yet), may still change, so its close decides
+        nothing yet (a scheme took the forming bar's close as final)."""
+        if not len(bars):
+            return bars
+        base = BASE.get(period, "day")
+        with self.engine.lock:
+            edges = [e for e in (self.store.bar_edges(f, s.ticker, base) for f in feeds) if e]
+        closed_to = min(_now_ms(), max((e[1] for e in edges), default=0) + UNIT_MS[base])
+        n = len(bars)
+        while n and int(bar_end(bars.index[n - 1], period, span, utc=utc_days(s)).value // 1_000_000) > closed_to:
+            n -= 1
+        return bars.iloc[:n]
 
     def replay_fine(self, source: str, ticker: str, period: str, from_ms: int) -> str:
         """The finer bars a replay builds the level's bars from: seconds where the series holds
