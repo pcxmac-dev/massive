@@ -213,6 +213,27 @@ def test_row_counts_are_made_a_few_at_a_time_and_a_bounded_number_kept(store, mo
     assert set(started) == set(tickers) and len(app._row_counts) == 3  # the symbols counted last
 
 
+# -- 33: the status answer, once per feed ------------------------------------------------------------
+def test_the_status_answer_is_kept_once_per_feed_for_known_feeds(store, monkeypatch):
+    made = []
+
+    def answer(store, settings, path, source, log_lines=200, focus=None, **_k):
+        made.append((source, log_lines, focus))
+        return {"source": source}
+    monkeypatch.setattr(server_module.activity, "activity", answer)
+    app = ChartApp(store)
+    monkeypatch.setattr(app, "feeds", lambda: [])
+    for source in ("massive", "x" * 60, "nope", "alpaca"):
+        for lines in ("10", "-5", "999999"):
+            assert app.activity({"source": source, "lines": lines})["source"] in ("massive", "alpaca")
+    assert set(app._activity) == {"massive", "alpaca"}  # free text made no entries of its own
+    assert {s for s, _, _ in made} == {"massive", "alpaca"} and all(1 <= n <= 1000 for _, n, _ in made)
+    monkeypatch.setattr(server_module, "ACTIVITY_TTL_S", 0.0)
+    time.sleep(0.01)
+    app.activity({"source": "massive"})
+    assert set(app._activity) == {"massive"}  # the expired one dropped
+
+
 # -- low: an unexpected error is answered, not dropped ------------------------------------------------
 def test_an_unexpected_error_is_answered_not_dropped(served, monkeypatch, capsys):
     app, port = served

@@ -116,7 +116,7 @@ class ChartApp:
         # ticker -> (counted at, by feed and rule) for the ROW_COUNTS_KEPT symbols counted last: under _panel_lock
         self._pruned_counts: OrderedDict[str, tuple[float, dict]] = _BoundedCache(ROW_COUNTS_KEPT)
         self._status_store, self._status_lock = store.reader(), threading.Lock()  # the Fetcher view and status bar
-        self._activity: dict[tuple, tuple[float, dict]] = {}
+        self._activity: dict[str, tuple[float, tuple, dict]] = {}  # feed -> (made at, (lines, open symbol), answer)
         self._activity_rows: dict = {}  # activity.activity's symbol rows (SYMBOL_ROWS_TTL_S)
         self._feeds_summary: tuple[float, list] | None = None
         self._deps_store, self._deps_lock = store.reader(), threading.Lock()  # dependency checks
@@ -816,15 +816,25 @@ class ChartApp:
             self.note_open(q["open"])
         # On connections and a lock of its own (it took 1 to 3 s under the shared lock, polled by every
         # open page, and the symbol list and watchlists waited 17 s behind it), and one answer for the
-        # polls that arrive within ACTIVITY_TTL_S of each other.
-        key = (q.get("source", "massive"), min(int(q.get("lines", 200)), 1000), q.get("open"))
+        # polls that arrive within ACTIVITY_TTL_S of each other: one kept per feed, for the lines and
+        # open symbol it was made for (free text in the key kept an answer for every value sent).
+        from ..sources import BUILDERS
+
+        source = q.get("source") or "massive"
+        source = source if source in BUILDERS else "massive"  # a feed this app has (a page may remember an old one)
+        lines = max(1, min(int(q.get("lines", 200)), 1000))
+        focus = (q.get("open") or "").strip()
+        focus = focus if 0 < len(focus) <= 32 else None
         with self._status_lock:
-            hit = self._activity.get(key)
-            if hit is None or time.monotonic() - hit[0] > ACTIVITY_TTL_S:
-                hit = self._activity[key] = (time.monotonic(), activity.activity(
-                    self._status_store, self.settings, self.store.path, key[0], log_lines=key[1], focus=key[2],
+            now = time.monotonic()
+            for k in [k for k, v in self._activity.items() if now - v[0] > ACTIVITY_TTL_S]:
+                del self._activity[k]  # expired: made again when asked
+            hit = self._activity.get(source)
+            if hit is None or hit[1] != (lines, focus):
+                hit = self._activity[source] = (now, (lines, focus), activity.activity(
+                    self._status_store, self.settings, self.store.path, source, log_lines=lines, focus=focus,
                     rows_cache=self._activity_rows, rows_ttl_s=SYMBOL_ROWS_TTL_S))
-            out = dict(hit[1])
+            out = dict(hit[2])
         out["feeds"] = self.feeds()
         return out
 
