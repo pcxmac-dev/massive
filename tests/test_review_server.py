@@ -128,3 +128,31 @@ def test_a_window_of_no_width_is_refused_not_paged_forever(store):
     t.start()
     t.join(10)
     assert done and "no level" in str(done[0].value)
+
+
+# -- 7: a stretch's read is estimated, and capped, before it is read -------------------------------
+def test_a_stretch_too_long_for_its_level_is_refused_before_it_is_read(store, monkeypatch):
+    app = ChartApp(store)
+    monkeypatch.setattr(app.window, "_built", _raise(AssertionError("the stretch was read")))
+    # a highlight drawn over ten years, then zoomed to seconds
+    q = {"source": "*", "ticker": "SPCX", "period": "second", "span": "1", "session": "regular",
+         "from": str(_ms("2016-10-12 09:30")), "to": str(_ms(f"{DAYS[-1]} 16:00"))}
+    with pytest.raises(ValueError, match="the highlight is too long for 1 sec bars .* zoom out to a coarser level"):
+        app.range_stats(q)
+    with pytest.raises(ValueError, match="this stretch is too long for 1 sec bars"):
+        app.profile(q)  # the highlight's profile
+    with pytest.raises(ValueError, match="coarser level"):
+        app.scheme({**q, "scheme": "cusum"})
+    # 30-second bars read thirty times their number in seconds: refused at a thirtieth of the stretch
+    days = window_module.STRETCH_READ / window_module.per_day("stock", "second", 1, "extended")
+    lo = _ms(f"{DAYS[0]} 09:30")
+    with pytest.raises(ValueError, match="30 sec"):
+        app.range_stats({**q, "span": "30", "from": str(lo), "to": str(lo + int(1.2 * days * 86_400_000))})
+    assert window_module.read_estimate("stock", "hour", 1, 0, 20 * 365 * 86_400_000) < window_module.STRETCH_READ
+
+
+def test_a_stretch_within_the_cap_still_answers(served):
+    _, port = served
+    lo, hi = _ms(f"{DAYS[1]} 10:00"), _ms(f"{DAYS[2]} 15:00")
+    status, body = _call(port, f"/api/range?source=*&ticker=SPCX&period=minute&span=5&session=regular&from={lo}&to={hi}")
+    assert status == 200 and body["bars"]

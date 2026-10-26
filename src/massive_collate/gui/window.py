@@ -64,6 +64,10 @@ ROLLUP_TTL_S = 300.0  # a month of them is read again after this: a correction o
 # Schemes (calc/schemes.py) run over a stretch at its level, plus the warm-up their settings need: a
 # stretch of more bars than this asks for a coarser level (a year of seconds is 6 million bars).
 SCHEME_MAX_BARS = 250_000
+# A stretch (the highlight's statistics and profile, a scheme) is built at the chart's level from at
+# most this many base bars, estimated before reading (read_estimate): a highlight drawn over years
+# and then zoomed to seconds read years of seconds into RAM under the engine's lock.
+STRETCH_READ = BRICK_READ
 REPLAY_PAGE = 3000  # finer bars a replay page holds (about 50 minutes of seconds, 8 sessions of minutes)
 
 
@@ -103,6 +107,26 @@ def per_day(asset: str, period: str, span: int, session: str) -> float:
             if asset in ("stock", "index") else {"day": 1, "week": 1 / 7, "month": 1 / 30.44, "year": 1 / 365.25}[period] / span
     minutes = {"stock": 390 if session == "regular" else 960, "index": 390}.get(asset, 1440 if asset == "crypto" else 1380)
     return trading_days * minutes * 60_000 / (UNIT_MS[period] * span)
+
+
+def read_estimate(asset: str, period: str, span: int, lo: int, hi: int) -> int:
+    """About how many base bars building a level's bars over [lo, hi) reads, every hour of the
+    market (the base is read whole, the session filtered after): the seconds for the second levels,
+    the minutes up to 5 minutes, the 30-minute bins for 30 minutes and the hours (each month of
+    minutes read once and let go, _half_hours). Days and longer are few and read whole: none."""
+    if period in CALENDAR:
+        return 0
+    unit, n = ("minute", 30) if period == "hour" or (period, span) == ("minute", 30) else (BASE[period], 1)
+    return round(per_day(asset, unit, n, "extended") * max(0, hi - lo) / 86_400_000)
+
+
+def check_stretch(asset: str, period: str, span: int, lo: int, hi: int, what: str) -> None:
+    """ValueError (the request's 400) for a stretch whose bars at the level would read more than
+    STRETCH_READ base bars."""
+    n = read_estimate(asset, period, span, lo, hi)
+    if n > STRETCH_READ:
+        raise ValueError(f"{what} is too long for {level_label(period, span)} bars (about {n:,} bars to read, at most "
+                         f"{STRETCH_READ:,}): zoom out to a coarser level")
 
 
 def estimated_rows(level: dict, session: str = "extended") -> int:
@@ -580,6 +604,7 @@ class WindowReader:
             bars = self._calendar_bars(s, feeds, period)
         else:
             step = UNIT_MS[period] * span
+            check_stretch(s.asset, period, span, lo - step, hi + step, "the highlight")  # before reading
             bars = self._built(s, feeds, BASE[period], period, span, session, lo - step, hi + step)
         if not model.validate().is_price:
             if model.kind == "integral" and period not in CALENDAR:
@@ -612,6 +637,7 @@ class WindowReader:
             step = UNIT_MS[period] * span
             if per_day(s.asset, period, span, session) * (hi - lo) / 86_400_000 > 2 * SCHEME_MAX_BARS:  # before reading
                 raise ValueError(f"too many {level_label(period, span)} bars for a scheme: choose a coarser level")
+            check_stretch(s.asset, period, span, lo, hi + step, "the stretch")
             inside = self._built(s, feeds, BASE[period], period, span, session, lo, hi + step)
             ts = epoch_ms(inside.index)
             inside = inside[(ts >= lo) & (ts <= hi)]
@@ -777,6 +803,7 @@ class WindowReader:
             level = every[(ts >= lo) & (ts <= hi)]
         else:
             step_ms = UNIT_MS[period] * span
+            check_stretch(s.asset, period, span, lo, hi + step_ms, "this stretch")  # before reading
             level = self._built(s, feeds, BASE[period], period, span, session, lo, hi + step_ms)
             ts = epoch_ms(level.index)
             level = level[(ts >= lo) & (ts <= hi)]
