@@ -70,12 +70,18 @@
     $('railWatch').innerHTML = icon('watchlist', RAIL_ICON);
     $('railTrading').innerHTML = icon('trading', RAIL_ICON);
     if (!window.GlobeIcon?.update()) $('railMarkets').innerHTML = icon('globe', RAIL_ICON);  // the Earth, once its images are here
-    $('railNews').innerHTML = icon('news', RAIL_ICON);
+    $('railNews').innerHTML = icon('thermometer', RAIL_ICON);
     $('railDatasets').innerHTML = icon('scroll', RAIL_ICON);
     const running = !!activity?.running;
     const fresh = activity?.newData || 0;
-    $('railFetcher').innerHTML = `${icon('database', RAIL_ICON)}${running ? `<span class="rail-badge spin">${icon('sync', RAIL_ICON / 2)}</span>` : ''}`
+    // its platter turns while a run fetches (.busy): redrawn only when it changes, or each poll would
+    // restart the turn from the top
+    const fetcherIcon = icon('disk', RAIL_ICON)
       + (!running && fresh ? `<span class="rail-count" title="${fresh} symbols should have new data">${fresh}</span>` : '');
+    if ($('railFetcher').dataset.drawn !== fetcherIcon) {
+      $('railFetcher').innerHTML = fetcherIcon;
+      $('railFetcher').dataset.drawn = fetcherIcon;
+    }
     $('railFetcher').classList.toggle('busy', running);
     $('railFetcher').title = running
       ? `Fetcher: running${activity.live?.current ? `, fetching ${activity.live.current}` : ''}`

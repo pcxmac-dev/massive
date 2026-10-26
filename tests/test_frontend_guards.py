@@ -231,3 +231,10 @@ def test_the_stored_bar_shows_what_is_held_and_what_is_still_to_fetch():
     css = _js("style.css")
     for part, colour in (("held", "--up"), ("older", "--st-wait"), ("newer", "--st-new")):
         assert re.search(r"\.meter\.span > \." + part + r" \{ background: var\(" + colour + r"\)", css), part
+
+
+def test_the_fetchers_disk_turns_while_fetching_without_restarting_each_poll():
+    panels = _js("panels.js")
+    assert "icon('disk', RAIL_ICON)" in panels and "dataset.drawn !== fetcherIcon" in panels  # redrawn on change only
+    assert "class=\"disk-platter\"" in _js("icons.js") and "class=\"disk-arm\"" in _js("icons.js")
+    assert re.search(r"#railFetcher\.busy \.disk-platter \{ animation: spin", _js("style.css"))
