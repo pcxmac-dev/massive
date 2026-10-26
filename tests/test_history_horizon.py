@@ -18,12 +18,13 @@ ADV, FREE = TIERS["advanced"], TIERS["free"]
 
 
 def test_the_horizon_is_the_last_completed_session_on_a_plan_that_publishes_as_it_trades():
+    # real time: a session's end plus the time its last minutes take to settle (freshness.SETTLE)
     wed_noon = datetime(2026, 10, 21, 12, 0, tzinfo=ET)
-    assert freshness.history_horizon("stock", ADV, wed_noon) == datetime(2026, 10, 20, 20, 0, tzinfo=ET)  # Tuesday's end
+    assert freshness.history_horizon("stock", ADV, wed_noon) == datetime(2026, 10, 20, 20, 3, tzinfo=ET)  # Tuesday's end
     wed_night = datetime(2026, 10, 21, 20, 30, tzinfo=ET)
-    assert freshness.history_horizon("stock", ADV, wed_night) == datetime(2026, 10, 21, 20, 0, tzinfo=ET)
+    assert freshness.history_horizon("stock", ADV, wed_night) == datetime(2026, 10, 21, 20, 3, tzinfo=ET)
     sunday = datetime(2026, 10, 25, 23, 0, tzinfo=ET)
-    assert freshness.history_horizon("stock", ADV, sunday) == datetime(2026, 10, 23, 20, 0, tzinfo=ET)  # Friday's end
+    assert freshness.history_horizon("stock", ADV, sunday) == datetime(2026, 10, 23, 20, 3, tzinfo=ET)  # Friday's end
     # a delayed plan: the session's end plus its delay
     delayed = TIERS["starter"]
     at_2010 = datetime(2026, 10, 21, 20, 10, tzinfo=ET)

@@ -1,5 +1,5 @@
 """Fetching when things go wrong: one symbol's error, no answer at all, a pause during a wait,
-a cap between tick pages, plans that have not released a day yet, venues' own symbol rules,
+plans that have not released a day yet, venues' own symbol rules,
 pairs listed later than the history asked for, delisted symbols, per-month symbol limits."""
 from __future__ import annotations
 
@@ -91,22 +91,6 @@ def test_too_many_pages_is_a_source_error_not_a_type_error():
         list(client.pages("/v3/reference/tickers", {}, max_pages=2))
 
 
-def test_a_cap_between_tick_pages_asks_for_the_boundary_millisecond_again(store):
-    ns = int(datetime(2026, 10, 20, 10, 0, tzinfo=ET).timestamp()) * 10**9 + 5_000_000  # one millisecond ...
-    trades = [{"sip_timestamp": ns + i, "sequence_number": i, "price": 10.0 + i, "size": 1, "exchange": 4}
-              for i in range(4)]  # ... four trades in it
-    a = ns // 1_000_000 - 60_000
-    b = ns // 1_000_000 + 60_000
-    src = FakeSource(trades=trades, budget=1)  # one page of two, then the cap
-    with pytest.raises(collector.StopRun):
-        collector._fill_ticks(src, store, "SPCX", a, b, "SPCX", "stock", False, {}, lambda *_: None)
-    held = store.coverage("SPCX", "trades")["fake"]
-    assert held[0][0] == ns // 1_000_000 + 1  # not the millisecond whose other trades are still to come
-    src2 = FakeSource(trades=trades)
-    collector._fill_ticks(src2, store, "SPCX", a, held[0][0], "SPCX", "stock", False, {}, lambda *_: None)
-    assert len(store.trades_between("fake", "SPCX", a * 10**6, b * 10**6)) == 4
-
-
 def test_a_day_the_plan_has_not_released_is_not_a_refusal_of_history(store):
     class Evening(FakeSource):
         def market_daily(self, day):
@@ -155,7 +139,8 @@ def test_a_delisted_symbol_is_checked_weekly_not_every_sync(store):
         def instrument(self, ticker, resolve_exchange=True):
             self._spend()
             self.instrument_calls += 1
-            return Instrument(ticker, active=False, details={})
+            # a record that says who the instrument is (a FIGI): a feed's own status alone retires nothing
+            return Instrument(ticker, active=False, figi="BBG-OLD", details={})
 
     src = Gone(entitled=("minute",))
     store.watch("fake", ["OLD"], "minute")

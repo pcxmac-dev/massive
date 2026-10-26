@@ -75,15 +75,32 @@ class AuditStore:
         return out
 
     def queue_audit(self, ticker: str, timespan: str, start_ms: int, end_ms: int, owner: str) -> None:
+        """Queue [start, end) of a series for another feed's audit. One entry per series and owner
+        waits at a time, the newest (it replaces one still waiting): a row added per fetch per symbol
+        grew the queue to a week of backlog, some 10^5 rows, read whole on every audit pass."""
         with self.conn:
-            self.conn.execute("INSERT OR IGNORE INTO audit_queue VALUES (?, ?, ?, ?, ?, ?)",
+            self.conn.execute("DELETE FROM audit_queue WHERE ticker=? AND timespan=? AND owner=?",
+                              (ticker.upper(), timespan, owner))
+            self.conn.execute("INSERT OR REPLACE INTO audit_queue VALUES (?, ?, ?, ?, ?, ?)",
                               (ticker.upper(), timespan, start_ms, end_ms, owner, _now()))
 
     def audit_queue(self, exclude_owner: str | None = None) -> list[dict]:
-        rows = self.conn.execute("SELECT ticker, timespan, start_ms, end_ms, owner, queued_at FROM audit_queue "
-                                 "ORDER BY queued_at").fetchall()
+        sql = "SELECT ticker, timespan, start_ms, end_ms, owner, queued_at FROM audit_queue"
+        args: tuple = ()
+        if exclude_owner is not None:
+            sql, args = sql + " WHERE owner != ?", (exclude_owner,)
         cols = ("ticker", "timespan", "start_ms", "end_ms", "owner", "queued_at")
-        return [dict(zip(cols, r)) for r in rows if r[4] != exclude_owner]
+        return [dict(zip(cols, r)) for r in self.conn.execute(sql + " ORDER BY queued_at", args)]
+
+    def audit_queue_count(self) -> int:
+        """Entries waiting in the audit queue (a count, not the rows)."""
+        return self.conn.execute("SELECT COUNT(*) FROM audit_queue").fetchone()[0]
+
+    def expire_audits(self, before: datetime) -> int:
+        """Drop queued audits older than `before` (one statement). Returns entries dropped."""
+        with self.conn:
+            return self.conn.execute("DELETE FROM audit_queue WHERE queued_at < ?",
+                                     (before.astimezone(timezone.utc).isoformat(timespec="seconds"),)).rowcount
 
     def dequeue_audit(self, ticker: str, timespan: str, start_ms: int, owner: str) -> None:
         with self.conn:

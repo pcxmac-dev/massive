@@ -90,6 +90,19 @@ class WatchlistStore:
                  exchange, source, ticker.upper()),
             )
 
+    def set_exchange(self, ticker: str, mic: str) -> int:
+        """Pin a stock's primary exchange anew on every feed watching it (the same instrument moved:
+        a listing check found it on `mic`). Returns rows changed."""
+        with self.conn:
+            return self.conn.execute("UPDATE watchlist SET exchange=? WHERE ticker=? AND asset='stock' "
+                                     "AND exchange IS NOT NULL AND exchange != ?", (mic, ticker.upper(), mic)).rowcount
+
+    def directory_identity(self, ticker: str) -> list[tuple[str | None, str | None]]:
+        """(FIGI, name) of a stock in the directory of listings (where a bulk-watched stock's exchange
+        pin came from): what a listing check compares with when no feed has checked it yet."""
+        return [tuple(r) for r in self.conn.execute(
+            "SELECT figi, name FROM directory WHERE ticker=? AND kind='stock'", (ticker.upper(),))]
+
     def unwatch(self, source: str, tickers: Iterable[str]) -> None:
         with self.conn:
             self.conn.executemany(

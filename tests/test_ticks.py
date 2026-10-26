@@ -1,13 +1,12 @@
 """Ticks: the consolidated tape's bar rules, the tick window, bars built here from ticks, and no
 bar downloads where ticks are (or will be) held."""
-from collections import namedtuple
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 
 import pandas as pd
 import pytest
 
 from massive_collate import collector
-from massive_collate.collector import ET, build_from_ticks, sync, tick_space
+from massive_collate.collector import ET, build_from_ticks, sync
 from massive_collate.config import ALPACA_TIERS, TIERS
 from massive_collate.coverage import FeedProfile, ms, plan
 from massive_collate.symbols import resolve
@@ -112,18 +111,6 @@ def test_a_minute_cut_by_a_stopped_run_is_built_when_its_ticks_are_complete(stor
     build_from_ticks(store, "alpaca", "SPCX", ms(t0), ticks[90]["sip_timestamp"] // 1_000_000, {}, _log)
     mins = store.load_bars(["SPCX"], "minute", source="alpaca")
     assert list(mins["transactions"]) == [60, 60]  # both minutes whole, nothing counted twice
-
-
-def test_disk_guard(store, monkeypatch):
-    import shutil
-
-    usage = namedtuple("usage", "total used free")
-    monkeypatch.setattr(shutil, "disk_usage", lambda p: usage(0, 0, 100e9))
-    assert tick_space(store, 250) == "no-backfill" and store.kv_get("ticks:backfill-paused") == "100 GB free"
-    monkeypatch.setattr(shutil, "disk_usage", lambda p: usage(0, 0, 40e9))
-    assert tick_space(store, 250) == "stop"
-    monkeypatch.setattr(shutil, "disk_usage", lambda p: usage(0, 0, 900e9))
-    assert tick_space(store, 250) == "ok" and not store.kv_get("ticks:backfill-paused")
 
 
 def test_alpaca_crypto_ticks_need_no_key():

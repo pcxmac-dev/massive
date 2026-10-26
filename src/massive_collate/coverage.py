@@ -51,7 +51,7 @@ class FeedProfile:
     tier: Tier
     assets: frozenset = field(default_factory=frozenset)
     priority: int = 99  # position in SOURCE_PRIORITY (lower first)
-    tick_days: int = 365  # ticks are backfilled this far where the feed collects them
+    tick_days: int = 365  # (unused: ticks are no longer fetched for history)
     second_days: int = 365  # 1-second bars are backfilled this far (minutes cover all the history)
     venues: dict = field(default_factory=dict)  # asset class -> the market its data is ('sip', 'coinbase', ...)
 
@@ -74,7 +74,9 @@ def day_start_ms(d: date) -> int:
 
 def frontier_ms(asset: str, tier: Tier, now: datetime, timespan: str) -> int:
     """End (exclusive) of what a plan has published by `now`: up to its newest expected bar; for
-    day bars only days whose session is over (a day bar of a session still trading would change)."""
+    day bars only days whose session is over (a day bar of a session still trading would change).
+    A real-time plan's newest minutes are left to settle first (freshness.settle)."""
+    now = now - freshness.settle(tier, asset)
     exp = freshness.expected(asset, tier, now)
     if exp.latest is None:
         return ms(now)
@@ -118,16 +120,6 @@ def has_open_time(asset: str, a: int, b: int) -> bool:
         if s.open < hi and s.close > lo:
             return True
     return False
-
-
-def tick_floor(store, profile: FeedProfile, ticker: str, today: date, floor: date) -> date:
-    """Oldest day a feed backfills ticks to: TICK_HISTORY_DAYS back (not before its plan floor),
-    or, while backfill is paused for disk space, no further back than the ticks it already holds."""
-    lo = max(floor, today - timedelta(days=profile.tick_days))
-    if store.kv_get("ticks:backfill-paused"):
-        held = [a for a, _ in store.coverage(ticker, "trades").get(profile.name, [])]
-        lo = max(lo, datetime.fromtimestamp(min(held) / 1000, ET).date()) if held else today
-    return lo
 
 
 def second_floor(profile: FeedProfile, today: date, floor: date) -> date:
@@ -174,24 +166,13 @@ def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, ass
         return subtract(nothing.get(feed, []), holds.get(feed, []))
     watch = {(w["source"], w["ticker"]): w for w in store.watchlist(ticker=ticker)}
     if gaps and timespan in ("minute", "second"):
-        # Bars are built here from ticks: the window another feed collects ticks for is left to it
-        # (even before the ticks arrive). The tick feed itself still downloads its own bars there,
-        # which replace the ones built from its ticks.
+        # Bars are built here from ticks: where another feed holds ticks, the span is left to it. The
+        # tick feed itself still downloads its own bars there, which replace the ones built from its
+        # ticks. (Ticks are no longer fetched for history: a watch row still at 'trades' from before
+        # reserves no window of ticks to come.)
         held_ticks = [s for src, spans in store.coverage(ticker, "trades").items()
                       if src != me.name and same_market(feeds, src, me.name, asset) for s in spans]
         gaps = subtract(gaps, held_ticks)
-        for f in feeds.values():
-            row = watch.get((f.name, ticker.upper()))
-            if f.name != me.name and row and row.get("resolution") == "trades" and asset in f.assets \
-                    and same_market(feeds, f.name, me.name, asset):
-                f_floor = history_floor(f.tier, today, asset)
-                if listed_from:
-                    f_floor = max(f_floor, listed_from)
-                t_lo = tick_floor(store, f, ticker, today, f_floor)
-                window = [(day_start_ms(t_lo), frontier_ms(asset, f.tier, now, "minute"))]
-                ticks_none = store.coverage(ticker, "trades", source=f.name, include_none=True).get(f.name, [])
-                ticks_held = store.coverage(ticker, "trades").get(f.name, [])
-                gaps = subtract(gaps, subtract(window, subtract(ticks_none, ticks_held)))
     if gaps:
         scores = store.audit_scores()
         from .composite import quality_of

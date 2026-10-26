@@ -73,6 +73,19 @@ def plan_delay(tier: Tier, asset: str) -> Delay:
     return PLAN_DELAYS.get(tier.name, PLAN_DELAYS["free"]).get(asset, Delay("eod"))
 
 
+# A plan that publishes as it trades may not have sent its newest minute yet, and late prints still
+# change it: history counts that plan's data held only once it is this far behind real time (a
+# minute recorded held the moment it ended stayed missing for good when it came late).
+SETTLE = timedelta(minutes=3)
+
+
+def settle(tier: Tier, asset: str) -> timedelta:
+    """How much later than its stated delay a plan's newest data counts as final: what SETTLE
+    exceeds a delay by (a real-time plan: SETTLE; 15 minutes delayed: nothing)."""
+    d = plan_delay(tier, asset)
+    return max(SETTLE - d.lag, timedelta(0)) if d.kind == "delay" else timedelta(0)
+
+
 SPAN_MS = {"second": 1_000, "minute": 60_000, "hour": 3_600_000, "day": 86_400_000}
 
 
@@ -98,6 +111,21 @@ def published_at(ts_ms, timespan: str, asset: str, tier: Tier):
 # -- calendar (one source of truth: sessions.MarketCalendar) ---------------------------
 
 CALENDAR = MarketCalendar()
+
+
+def use_official(store, source: str = "massive") -> bool:
+    """Give CALENDAR the official schedules a source sent (upcoming holidays and early closes,
+    futures sessions: collector.refresh_calendars), as the chart's calendar has them
+    (gui/bars.BarEngine.calendar). Without them an unscheduled closure was a trading day here, and
+    every symbol's newest session was asked for all day. Returns whether they changed."""
+    from .sessions import overrides_from_store
+
+    official = overrides_from_store(store, source)
+    if official == CALENDAR.overrides:
+        return False
+    CALENDAR.overrides = official
+    expected.cache_clear()  # its answers came from the calendar as it was
+    return True
 
 
 def is_trading_day(d: date) -> bool:
@@ -127,18 +155,19 @@ def next_session(d: date) -> date:
 def history_horizon(asset: str, tier: Tier, now: datetime) -> datetime:
     """The moment a history fetch looks from: `now`, except for a stock or index on a plan that
     publishes as it trades (real time or delayed): the moment its last completed session was fully
-    published (that session's end, extended hours included, plus the plan's delay). The session
-    under way belongs to the live feeds; history takes completed sessions only (an end-of-day plan
-    has only those anyway). Other assets trade around the clock: `now`."""
+    published and settled (that session's end, extended hours included, plus the plan's delay and
+    `settle`). The session under way belongs to the live feeds; history takes completed sessions
+    only (an end-of-day plan has only those anyway). Other assets trade around the clock: `now`."""
     delay = plan_delay(tier, asset)
     if asset not in ("stock", "index") or delay.kind != "delay":
         return now
     t = now.astimezone(ET)
+    lag = delay.lag + settle(tier, asset)
     d = t.date() if is_trading_day(t.date()) else previous_session(t.date())
     for _ in range(15):  # a holiday week at most
         hours = session_hours(asset, d)
-        if hours and hours[1] + delay.lag <= t:
-            return hours[1] + delay.lag
+        if hours and hours[1] + lag <= t:
+            return hours[1] + lag
         d = previous_session(d)
     return now
 
