@@ -380,6 +380,26 @@ def test_the_level_2_profile_of_a_past_bar_is_the_series_paths(store, period, sp
         assert windowed[k] == whole[k], k
 
 
+# -- 39: a replay reads the view it is asked for ------------------------------------------------------
+def test_a_replay_reads_the_view_it_is_asked_for(tmp_path):
+    s = _spiked(tmp_path)
+    try:
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(ChartApp(s), [0]))
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        port = httpd.server_address[1]
+        try:
+            for view, name in (("0", "filtered"), ("1", "unfiltered")):
+                status, body = _call(port, f"/api/replay?source=massive&ticker=SPCX&period=minute&span=5&session=extended"
+                                           f"&from={_ms('2026-10-19 17:00')}&limit=30&unfiltered={view}")
+                assert status == 200 and body["view"] == name
+                assert (max(b["high"] for b in body["bars"]) == 75.0) == (view == "1")
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+    finally:
+        s.close()
+
+
 # -- low: "All data" on the series path -----------------------------------------------------------------
 def test_all_data_reaches_the_series_path_and_its_caches_keep_the_views_apart(tmp_path):
     s = _spiked(tmp_path)

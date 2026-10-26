@@ -704,7 +704,8 @@ class WindowReader:
             r["bin"] = b
         return {"fine": fine_level, "level": {"type": period, "span": span, "label": level_label(period, span)},
                 "bars": records, "complete": to_records(complete), "more": more,
-                "next": int(epoch_ms(bars.index[-1:])[0]) if len(bars) else None}
+                "next": int(epoch_ms(bars.index[-1:])[0]) if len(bars) else None,
+                "view": "filtered" if _filtered() else "unfiltered"}
 
     # -- the virtual level 2: what traded at each price in one bar ------------------------------
     PROFILE_TICK_MS = 86_400_000  # bars up to a day read the feeds' ticks; longer ones their finer bars
