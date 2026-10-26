@@ -155,7 +155,8 @@ def test_a_delisted_symbol_is_checked_weekly_not_every_sync(store):
         def instrument(self, ticker, resolve_exchange=True):
             self._spend()
             self.instrument_calls += 1
-            return Instrument(ticker, active=False, details={})
+            # a record that says who the instrument is (a FIGI): a feed's own status alone retires nothing
+            return Instrument(ticker, active=False, figi="BBG-OLD", details={})
 
     src = Gone(entitled=("minute",))
     store.watch("fake", ["OLD"], "minute")
