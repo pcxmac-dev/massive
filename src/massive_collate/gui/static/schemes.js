@@ -49,16 +49,23 @@
     S.running = true;
     if (!quiet) render();
     const my = S.token = (S.token || 0) + 1;
+    // The answer is for the symbol, feed and level asked: one for the previous symbol (answered after a
+    // switch) was drawn as the new one's. Another symbol bumps the token (below); anything else asked
+    // differently is dropped here.
+    const ask = { ticker: state.ticker, source: state.source, type: state.period.type, span: state.period.span };
     try {
       const res = await api('/api/scheme', {
-        source: state.source, ticker: state.ticker, period: state.period.type, span: state.period.span,
+        source: ask.source, ticker: ask.ticker, period: ask.type, span: ask.span,
         session: state.session, from: range.from, to: range.to, scheme: s.key, params: JSON.stringify(cfg.params),
         fee: cfg.fee, slippage: cfg.slippage, ...(cfg.longOnly ? { longOnly: 1 } : {}),
         ...(state.unfiltered ? { unfiltered: 1 } : {}),
       });
       if (my !== S.token) return;
+      if (ask.ticker !== state.ticker || ask.source !== state.source || ask.type !== state.period?.type
+          || ask.span !== state.period?.span) return;  // the chart moved on meanwhile (the run ends below)
       res.over = range.over;
-      res.ticker = state.ticker;
+      res.ticker = ask.ticker;
+      res.source = ask.source;
       setResult(res);
       S.error = null;
     } catch (err) {
@@ -87,9 +94,9 @@
     render();
   }
 
-  // The result belongs to the chart as it is: the same symbol and level.
-  const current = () => S.result && S.result.ticker === state.ticker && S.result.level.type === state.period?.type
-    && S.result.level.span === state.period?.span;
+  // The result belongs to the chart as it is: the same symbol, feed and level.
+  const current = () => S.result && S.result.ticker === state.ticker && S.result.source === state.source
+    && S.result.level.type === state.period?.type && S.result.level.span === state.period?.span;
 
   // -- the chart: marks on the price pane, equity and CUSUM panes ------------------------------
   function drawPanes() {
@@ -304,7 +311,7 @@
         .map((c) => `<option${c === v ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select></label>`;
     }
     return `<label title="${esc(p.about)}">${esc(p.label)} <input type="number" data-param="${esc(p.key)}" value="${esc(String(v))}"
-      min="${p.lo}" max="${p.hi}" step="${p.step}"></label>`;
+      min="${esc(p.lo)}" max="${esc(p.hi)}" step="${esc(p.step)}"></label>`;
   }
 
   function render() {
@@ -321,8 +328,8 @@
       <select id="schKey" aria-label="Scheme">${S.list.map((x) => `<option value="${esc(x.key)}"${x.key === s.key ? ' selected' : ''}>${esc(x.label)}</option>`).join('')}</select>
       <div class="p-muted small sch-about">${esc(s.about)}</div>
       <div class="sch-params">${s.params.map(paramInput).join('')}
-        <label title="Fee charged at every entry and exit, basis points of what is traded">Fee bps <input type="number" id="schFee" value="${cfg.fee}" min="0" max="1000" step="0.5"></label>
-        <label title="Slippage charged at every entry and exit, basis points">Slippage bps <input type="number" id="schSlip" value="${cfg.slippage}" min="0" max="1000" step="0.5"></label>
+        <label title="Fee charged at every entry and exit, basis points of what is traded">Fee bps <input type="number" id="schFee" value="${esc(cfg.fee)}" min="0" max="1000" step="0.5"></label>
+        <label title="Slippage charged at every entry and exit, basis points">Slippage bps <input type="number" id="schSlip" value="${esc(cfg.slippage)}" min="0" max="1000" step="0.5"></label>
         <label title="Short decisions only close a long"><input type="checkbox" id="schLong"${cfg.longOnly ? ' checked' : ''}> long only</label>
       </div>
       <div class="p-muted small">Over ${esc(range?.over || '–')}${range ? `: ${when(range.from)} → ${when(range.to)}` : ''} · ${esc(state.period ? `${state.period.span} ${state.period.type}` : '')} bars · backtest, not orders</div>
@@ -373,7 +380,11 @@
   };
   chart.subscribeAction('onVisibleRangeChange', () => { if (!S.result) schedule(); });  // "over" follows the view
   window.addEventListener('massive:view', (e) => { if (e.detail.pane === 'analysis') render(); });
-  window.addEventListener('massive:symbol', () => { if (S.result && S.result.ticker !== state.ticker) clear(); });
+  window.addEventListener('massive:symbol', () => {
+    if (S.result && (S.result.ticker !== state.ticker || S.result.source !== state.source)) { clear(); return; }  // a new token too
+    S.token = (S.token || 0) + 1;  // a run still on its way was for the symbol before
+    if (S.running) { S.running = false; render(); }
+  });
 
   api('/api/schemes').then((res) => { S.list = res.schemes; render(); }).catch((err) => { S.error = err.message; render(); });
 })();

@@ -736,12 +736,15 @@
     st.catalog = null;
     renderControls();
     renderPicker();
+    let catalog;
     try {
-      st.catalog = await getJSON(`/api/dataset/series?name=${encodeURIComponent(name)}`);
+      catalog = await getJSON(`/api/dataset/series?name=${encodeURIComponent(name)}`);
     } catch (e) {
-      $('dsError').textContent = String(e.message || e);
+      if (st.name === name) $('dsError').textContent = String(e.message || e);
       return;
     }
+    if (st.name !== name) return;  // another dataset was picked meanwhile: its own list, not this one's
+    st.catalog = catalog;
     if (!isCot() && !st.picked[name]) {
       const have = new Set(st.catalog.series.map((s) => s.series));
       st.picked[name] = (PRESETS[name] || []).filter((s) => have.has(s));

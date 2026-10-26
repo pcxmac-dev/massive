@@ -19,25 +19,40 @@
   const libToIndex = store.timestampToDataIndex.bind(store);
   const PAGE_SLOTS = 2000;
 
-  const fut = { key: null, stamps: [], pending: null, exhausted: false, lastBar: null };
+  const fut = { key: null, stamps: [], pending: null, exhausted: false, lastBar: null, ask: 0 };
 
   function lastBar() {
     const list = store.getDataList();
     return list.length ? list[list.length - 1] : null;
   }
 
+  // What the projection is for. Not the last bar's time: each new bar of a live chart asked for the
+  // projection again, page by page; the projection moves on instead (current).
   function futureKey(last) {
     if (!last || !state.ticker) return null;
     return [state.source, state.ticker, state.period.type, state.period.span, state.session, lodFor(),
-            state.chartType, state.adjust, JSON.stringify(typeQuery()), JSON.stringify(modelQuery()),
-            last.timestamp].join('|');
+            state.chartType, state.adjust, JSON.stringify(typeQuery()), JSON.stringify(modelQuery())].join('|');
+  }
+
+  function reset(key, last) {
+    fut.key = key; fut.stamps = []; fut.pending = null; fut.exhausted = false; fut.lastBar = last;
+    fut.ask += 1;  // a page on its way was for what is gone
   }
 
   function current() {
     const last = lastBar();
     const key = futureKey(last);
     if (key !== fut.key) {
-      fut.key = key; fut.stamps = []; fut.pending = null; fut.exhausted = false; fut.lastBar = last;
+      reset(key, last);
+    } else if (last && last.timestamp !== fut.lastBar?.timestamp) {
+      // A new bar took the first projected slot (or slots): the rest move up. A bar that was not
+      // projected (the chart loaded again elsewhere, a gap) starts the projection again.
+      const k = fut.stamps.indexOf(last.timestamp);
+      if (k < 0) { reset(key, last); return last; }
+      fut.stamps = fut.stamps.slice(k + 1);
+      fut.lastBar = last;
+      fut.pending = null;
+      fut.ask += 1;  // a page on its way counted its offset from the bar before
     }
     return last;
   }
@@ -47,18 +62,18 @@
     if (!Number.isFinite(lodFor())) return;
     const last = current();
     if (!last || fut.pending || fut.exhausted || fut.stamps.length >= n) return;
-    const key = fut.key;
+    const ask = fut.ask;
     const count = Math.max(PAGE_SLOTS, Math.ceil((n - fut.stamps.length) / PAGE_SLOTS) * PAGE_SLOTS);
     fut.pending = api('/api/future', {
       source: state.source, ticker: state.ticker, period: state.period.type, span: state.period.span,
       session: state.session, adjust: state.adjust, lod: lodFor(), offset: fut.stamps.length, count,
       ...typeQuery(), ...modelQuery(),
     }).then((res) => {
-      if (fut.key !== key) return;
+      if (fut.ask !== ask) return;
       fut.stamps.push(...res.timestamps);
       if (res.timestamps.length < count) fut.exhausted = true;  // not projectable (e.g. Renko) or the end of time
-    }).catch(() => { fut.exhausted = true; })
-      .finally(() => { if (fut.key === key) fut.pending = null; redraw(); });
+    }).catch(() => { if (fut.ask === ask) fut.exhausted = true; })
+      .finally(() => { if (fut.ask === ask) fut.pending = null; redraw(); });
   }
 
   let redrawQueued = false;

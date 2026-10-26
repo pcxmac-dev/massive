@@ -106,6 +106,7 @@ const UP = '#26a69a';
 const DOWN = '#ef5350';
 const MID = '#f0b90b';
 const statsTimers = new Map();
+let highlightShown = '';  // what the Highlight panel was last scheduled for (the measure overlay)
 
 function signed(v, digits) { return `${v >= 0 ? '+' : ''}${v.toFixed(digits)}`; }
 
@@ -234,7 +235,11 @@ kc.registerOverlay({
     const key = statsKey(pa, pb);
     const ext = overlay.extendData || {};
     if (ext.key !== key) requestRangeStats(overlay, key, pa, pb);
-    scheduleHighlightPanel();  // the panel follows live while the highlight is drawn or dragged
+    // The panel follows live while the highlight is drawn or dragged: rebuilt when what it shows
+    // changed, not on every redraw (each crosshair move redraws the chart, and the rebuilt panel lost
+    // clicks on its Remove button).
+    const shown = `${overlay.id}|${pa.value}|${pb.value}|${key}|${ext.key === key && !!ext.stats}|${state.timezone}|${prec()}`;
+    if (shown !== highlightShown) { highlightShown = shown; scheduleHighlightPanel(); }
     const up = pb.value >= pa.value;
     return [
       { type: 'rect', attrs: { x: left, y: top, width: right - left, height: Math.max(1, bottom - top) },
@@ -304,6 +309,10 @@ const chart = kc.init('chart', {
 chart.setDataLoader({
   getBars: async ({ type, timestamp, symbol, period, callback }) => {
     if (type === 'update') { callback([], { backward: false }); return; }
+    // A symbol pick sets the interval, then the symbol, and each loads the chart again: the first would
+    // be the old symbol's at the new interval, a heavy request whose answer is dropped. Only the
+    // symbol's own load goes (the chart's next reset starts it).
+    if (type === 'init' && (state.settingPeriod || symbol.ticker !== state.ticker || symbol.source !== state.source)) return;
     // A replay (replay.js) shows the bars before its start and plays the rest in: nothing newer here.
     if (type === 'init' && state.replay && window.Replay?.keyChanged()) window.Replay.stop(false);
     if (type === 'backward' && state.replay) { callback([], { backward: false }); return; }
@@ -362,9 +371,19 @@ chart.setDataLoader({
         updateStatus(res.bars.length);
       }
     } catch (err) {
+      if (token !== state.loadToken) return;  // a newer symbol/interval's load fills the chart: not blanked
       showError(err);
-      callback([], { forward: false, backward: false });
-      if (type === 'init') retryLoad(token);
+      if (type === 'init') {
+        callback([], { forward: false, backward: false });
+        retryLoad(token);
+        return;
+      }
+      // A page of history (older, or newer after a window in the past) that failed because the app was
+      // busy or out of reach is still there: the chart keeps asking for it (the next scroll to that edge,
+      // or retryPage once the pause is over). A refusal would be the same answer again: no more there.
+      const failing = apiFailing.has('/api/bars');
+      callback([], type === 'forward' ? { forward: failing } : { backward: failing });
+      if (failing) retryPage(token);
     }
   },
   subscribeBar: ({ symbol, period, callback }) => {
@@ -397,6 +416,7 @@ chart.setDataLoader({
     // every 2 s, the rest every minute.
     closeStream();
     state.streamFailed = false;
+    if (state.modelDue) { clearTimeout(state.modelDue.timer); Object.assign(state.modelDue, { timer: 0, stale: false }); }
     const openStream = () => {
       const list = chart.getDataList();
       if (!list.length || PRICE_BASED.has(state.chartType) || state.hasNewer) return;
@@ -410,7 +430,7 @@ chart.setDataLoader({
       es.onmessage = (e) => {
         if (sub !== state.subscription || kind !== state.model.kind) return;
         const msg = JSON.parse(e.data);
-        if (msg.reload) { chart.resetData(); return; }  // a model: its values moved back in time
+        if (msg.reload) { modelMoved(); return; }  // a model: its values moved back in time
         if ((msg.model || 'price') !== kind) return;
         const last = chart.getDataList().at(-1)?.timestamp ?? 0;
         const bars = msg.bars.filter((b) => b.timestamp >= last);
@@ -446,6 +466,17 @@ function retryLoad(token) {
   }, Math.max(1_000, f.until - Date.now() + 50));
 }
 
+// A page of history that failed the same way is asked for again when the pause is over, if the chart
+// is still at that edge: a scroll by nothing makes the chart look at its edges (and load what is
+// beyond one it shows) without moving.
+function retryPage(token) {
+  const f = apiFailing.get('/api/bars');
+  if (!f) return;
+  clearTimeout(state.pageRetry);  // one at a time: a scroll along the edge during the pause asks every frame
+  state.pageRetry = setTimeout(() => { if (token === state.loadToken) chart.scrollByDistance(0); },
+                               Math.max(1_000, f.until - Date.now() + 50));
+}
+
 // Whether the newest bar is on screen (the chart then follows it): only then may a resize put it
 // back where the "now" handle was left; a chart scrolled into history stays where it is.
 function atNewest() {
@@ -463,6 +494,38 @@ function closeStream() {
   state.stream?.close();
   state.stream = null;
 }
+
+// A model's values move back in time as bars are stored (a centred window; a Fourier fit, all of
+// it), and the stream says so with every write of a live symbol, every couple of seconds. The chart
+// loads again at most once a bar of its level, and never sooner than MODEL_RELOAD_MS[0] nor later
+// than MODEL_RELOAD_MS[1] after the last, keeping its zoom as a model switch does. Scrolled back into
+// history (or hidden behind another view) it waits until the newest bar is in view again. Reloading on
+// every write held a heavy request every 2 s and jumped the view back to now.
+const MODEL_RELOAD_MS = [10_000, 60_000];
+
+function modelMoved() {
+  const due = state.modelDue ??= { at: 0, timer: 0, stale: false };  // at: the last reload
+  due.stale = true;
+  if (due.timer) return;
+  const bar = (LEVEL_MS[state.period.type] || 6e4) * (state.period.span || 1);
+  const every = Math.min(MODEL_RELOAD_MS[1], Math.max(MODEL_RELOAD_MS[0], bar));
+  due.timer = setTimeout(reloadMovedModel, Math.max(0, due.at + every - Date.now()));
+}
+
+function reloadMovedModel() {
+  const due = state.modelDue;
+  due.timer = 0;
+  if (!due.stale || state.model.kind === 'price' || state.replay || state.lodSwitch) return;
+  if (!atNewest() || !chartShown()) return;  // asked again when the newest bar is back in view
+  due.stale = false;
+  due.at = Date.now();
+  state.lodSwitch = { barSpace: chart.getBarSpace().bar, anchor: null, anchorX: null, atLatest: true };  // the same zoom
+  chart.resetData();
+}
+
+const modelBackInView = () => { if (state.modelDue?.stale && !state.modelDue.timer && atNewest()) modelMoved(); };
+chart.subscribeAction('onVisibleRangeChange', modelBackInView);
+window.addEventListener('massive:view', () => requestAnimationFrame(modelBackInView));
 
 // Whether the open symbol is streaming live right now (the activity poll's live tickers).
 function isLive() {
@@ -533,12 +596,16 @@ nowHandle.addEventListener('pointerdown', (e) => {
     chart.setOffsetRightDistance(w - x);
     placeNowHandle();
   };
+  // The drag ends however the pointer goes: let go, taken by the browser (a touch turned into a
+  // scroll) or its capture lost. Ended on pointerup alone, a cancelled drag kept its listeners.
+  const ENDS = ['pointerup', 'pointercancel', 'lostpointercapture'];
   const up = () => {
     nowHandle.removeEventListener('pointermove', move);
+    for (const ev of ENDS) nowHandle.removeEventListener(ev, up);
     prefs.set('nowAt', state.nowAt);
   };
   nowHandle.addEventListener('pointermove', move);
-  nowHandle.addEventListener('pointerup', up, { once: true });
+  for (const ev of ENDS) nowHandle.addEventListener(ev, up);
 });
 nowHandle.addEventListener('dblclick', () => {
   state.nowAt = null;
@@ -915,10 +982,12 @@ async function reloadWithModelPrecision() {
   if (sym && state.model.kind !== 'price') {
     try {
       const p = chart.getPeriod();
+      const model = JSON.stringify(modelQuery());
       const res = await api('/api/bars', { source: sym.source, ticker: sym.ticker, period: p.type, span: p.span,
                                            session: state.session, limit: 1, adjust: state.adjust, ...modelQuery() });
       const now = chart.getSymbol();
-      if (now?.ticker !== sym.ticker || now?.source !== sym.source) return;  // another symbol meanwhile: its own load
+      // another symbol or model meanwhile (the slider dragged on): its own load, with its own decimals
+      if (now?.ticker !== sym.ticker || now?.source !== sym.source || JSON.stringify(modelQuery()) !== model) return;
       want = res.model?.precision ?? want;
       state.modelUnit = res.model?.unit ?? null;
       state.modelHidden = res.model?.hidden ?? 0;
@@ -1003,13 +1072,16 @@ let gpuBars = null;
 state.gpuFrameMs = null;
 
 function gpuActive() {
-  return state.gpu && GPU_TYPES.has(state.chartType);
+  return state.gpu && GPU_TYPES.has(state.chartType) && !gpuBars?.lost;
 }
 
+// A lost GPU context (a driver reset, the GPU process restarting) took every candle with it, for
+// good: the chart's own candles come back meanwhile (applyChartType draws on the CPU while it is
+// lost), and the GPU's again once the browser restores the context.
 function ensureGpu() {
   if (gpuBars) return gpuBars;
   try {
-    gpuBars = new window.GpuBars();
+    gpuBars = new window.GpuBars({ onLost: applyChartType, onRestored: applyChartType });
   } catch (err) {
     state.gpu = false;
     showError(`GPU rendering unavailable: ${err.message}`);
@@ -1073,12 +1145,13 @@ kc.registerIndicator({
 function renderGpuButton() {
   const b = $('gpuBtn');
   b.classList.toggle('on', state.gpu && GPU_INFO.supported);
-  b.classList.toggle('partial', state.gpu && !GPU_TYPES.has(state.chartType));
+  b.classList.toggle('partial', state.gpu && (!GPU_TYPES.has(state.chartType) || !!gpuBars?.lost));
   b.setAttribute('aria-pressed', String(!!state.gpu));
   b.disabled = !GPU_INFO.supported;
   b.title = !GPU_INFO.supported ? 'GPU rendering not available in this browser (no WebGL2)'
     : `GPU rendering ${state.gpu ? 'on' : 'off'} — ${GPU_INFO.renderer}${GPU_INFO.software ? ' (software, no hardware acceleration)' : ''}`
-      + (state.gpu && !GPU_TYPES.has(state.chartType) ? '. This chart type is drawn on the CPU.' : '');
+      + (state.gpu && !GPU_TYPES.has(state.chartType) ? '. This chart type is drawn on the CPU.' : '')
+      + (state.gpu && gpuBars?.lost ? '. The GPU context was lost: drawn on the CPU until the browser gives it back.' : '');
 }
 
 $('gpuBtn').addEventListener('click', () => {
@@ -1576,7 +1649,8 @@ async function selectSymbol(ticker, source = null) {
   renderFeeds(info);
   renderPeriods();
   chart.removeOverlay({ groupId: 'user' });
-  chart.setPeriod(state.period);
+  state.settingPeriod = true;  // its load is skipped (getBars): the symbol's, next, is the one wanted
+  try { chart.setPeriod(state.period); } finally { state.settingPeriod = false; }
   chart.setSymbol({
     ticker: meta.ticker, source, name: info.name || meta.ticker,
     pricePrecision: meta.pricePrecision, volumePrecision: meta.volumePrecision,
@@ -2269,21 +2343,45 @@ function renderTools() {
     saveDrawings();
   });
   action('trash', 'Delete all drawings on this symbol', () => {
-    if (confirm(`Delete all drawings on ${state.ticker}?`)) { chart.removeOverlay({ groupId: 'user' }); saveDrawings(); }
+    if (confirm(`Delete all drawings on ${state.ticker}?`)) {
+      state.drawingsAside = [];  // those waiting for their indicator's pane too
+      chart.removeOverlay({ groupId: 'user' });
+      saveDrawings();
+    }
   });
   setActiveTool('cursor');
 }
 
+// A drawing on an indicator's pane is kept with that indicator's name (`pane`; pane ids are made
+// afresh each session) and goes back on its pane: every drawing came back on the price pane before.
+// The chart keeps a drawing whose indicator was taken off (undrawn, on a pane that is gone): its
+// pane's name is remembered.
+const paneNames = new Map();  // pane id -> the name of the indicator drawn in it
+
+function paneIndicator(paneId) {
+  if (!paneId || paneId === 'candle_pane') return null;
+  const name = chart.getIndicators({ paneId })[0]?.name;
+  if (name) paneNames.set(paneId, name);
+  return name ?? paneNames.get(paneId) ?? null;
+}
+
+// The pane an indicator is drawn in below the price, or null when it is not on the chart.
+function indicatorPane(name) {
+  return chart.getIndicators({ name }).find((i) => i.paneId !== 'candle_pane')?.paneId ?? null;
+}
+
 // Drawings belong to the current layout, per ticker, as (timestamp, price) points so they
-// line up on every interval.
+// line up on every interval. One whose indicator is not on the chart now waits aside, kept as it was
+// (state.drawingsAside), and comes back with the indicator.
 function saveDrawings() {
   if (!state.ticker || state.restoredFor !== drawingsKey() || !layout.current) return;
   const user = chart.getOverlays({ groupId: 'user' }).filter((o) => o.id !== state.drawingId);
   const drawings = layout.current.data.drawings || (layout.current.data.drawings = {});
-  drawings[drawingsKey()] = user.map((o) => ({
-    name: o.name, lock: o.lock, visible: o.visible, extendData: o.extendData ?? null, styles: o.styles ?? null,
+  drawings[drawingsKey()] = [...user.map((o) => ({
+    name: o.name, pane: paneIndicator(o.paneId) ?? undefined, lock: o.lock, visible: o.visible,
+    extendData: o.extendData ?? null, styles: o.styles ?? null,
     points: o.points.map((p) => ({ timestamp: p.timestamp, value: p.value })),
-  }));
+  })), ...(state.drawingsAside || [])];
   markDirty();
 }
 
@@ -2292,10 +2390,14 @@ function restoreDrawings() {
   chart.removeOverlay({ groupId: 'user' });
   const saved = layout.current?.data.drawings?.[drawingsKey()] || [];
   const lastHighlight = saved.map((d) => d.name).lastIndexOf('measure');  // one highlight at a time
+  state.drawingsAside = [];
   for (const [i, d] of saved.entries()) {
     if (d.name === 'measure' && i !== lastHighlight) continue;
+    const paneId = d.pane ? indicatorPane(d.pane) : undefined;  // undefined: the price pane
+    if (d.pane && !paneId) { state.drawingsAside.push(d); continue; }
+    if (paneId) paneNames.set(paneId, d.pane);
     chart.createOverlay({
-      name: d.name, groupId: 'user', points: d.points, lock: d.lock, visible: d.visible,
+      name: d.name, groupId: 'user', paneId, points: d.points, lock: d.lock, visible: d.visible,
       extendData: d.extendData ?? undefined, styles: d.styles ?? undefined, ...overlayEvents(),
     });
   }
@@ -2312,13 +2414,15 @@ const layout = {
   list: [],
   max: 5,
   dirty: false,
+  generation: 0,  // changes counted by markDirty: a save leaves the layout clean only if none came since
   autosave: prefs.get('autosave', true),
   timer: null,
 };
 
-async function apiWrite(method, path, body) {
+// `keepalive`: the request outlives the page (closing it); the browser takes at most 64 KiB so.
+async function apiWrite(method, path, body, { keepalive = false } = {}) {
   const res = await fetch(path, {
-    method,
+    method, keepalive,
     headers: { 'Content-Type': 'application/json', 'X-Massive-Charts': '1' },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -2421,6 +2525,7 @@ window.switchWorkspace = switchWorkspace;
 function markDirty() {
   if (!layout.current || state.applyingLayout) return;
   layout.dirty = true;
+  layout.generation += 1;
   renderLayoutButton();
   if (layout.autosave) {
     clearTimeout(layout.timer);
@@ -2428,13 +2533,30 @@ function markDirty() {
   }
 }
 
-async function saveLayout() {
-  if (!layout.current) return;
+// The answer is the server's copy of what was sent; the local layout stays as it is (drawings changed
+// while the save was on its way went into it: taking the server's copy lost them), with only the
+// server's name and time taken. It is clean only if nothing changed since the snapshot.
+const KEEPALIVE_MAX = 60 * 1024;  // the browser's 64 KiB for a request that outlives the page, less the headers
+
+async function saveLayout({ leaving = false } = {}) {
+  const target = layout.current;
+  if (!target) return;
   clearTimeout(layout.timer);
-  layout.current.data = snapshot();
-  const saved = await apiWrite('PUT', `/api/layouts/${layout.current.id}`, { data: layout.current.data });
-  layout.current = saved;
-  layout.dirty = false;
+  const gen = layout.generation;
+  target.data = snapshot();
+  const body = { data: target.data };
+  const keepalive = leaving && new TextEncoder().encode(JSON.stringify(body)).length <= KEEPALIVE_MAX;
+  layout.sent = gen;  // on its way: leaving the page does not send it again
+  let saved;
+  try {
+    saved = await apiWrite('PUT', `/api/layouts/${target.id}`, body, { keepalive });
+  } catch (err) {
+    if (layout.sent === gen) layout.sent = null;
+    throw err;
+  }
+  Object.assign(target, { name: saved.name, updated_at: saved.updated_at });
+  if (layout.current === target && layout.generation === gen) layout.dirty = false;
+  renderLayoutButton();
   await refreshLayoutList();
 }
 
@@ -2522,7 +2644,9 @@ async function renameLayout() {
   if (!layout.current) return;
   const name = askName('Rename layout', layout.current.name);
   if (!name) return;
-  layout.current = await apiWrite('PUT', `/api/layouts/${layout.current.id}`, { name });
+  const target = layout.current;
+  const saved = await apiWrite('PUT', `/api/layouts/${target.id}`, { name });
+  Object.assign(target, { name: saved.name, updated_at: saved.updated_at });  // its data stays the local one (saveLayout)
   await refreshLayoutList();
 }
 
@@ -2598,16 +2722,18 @@ $('layoutBtn').addEventListener('click', (e) => {
   }
 });
 document.addEventListener('click', (e) => { if (!$('layoutMenu').contains(e.target)) $('layoutMenu').hidden = true; });
-window.addEventListener('beforeunload', () => {
-  if (layout.dirty && layout.current) {
-    // Best effort: keep the last changes if the window closes before autosave fires.
-    fetch(`/api/layouts/${layout.current.id}`, {
-      method: 'PUT', keepalive: true,
-      headers: { 'Content-Type': 'application/json', 'X-Massive-Charts': '1' },
-      body: JSON.stringify({ data: snapshot() }),
-    });
-  }
-});
+// Best effort: keep the last changes if the window closes before autosave fires. With autosave on,
+// saved as soon as the page is hidden (another tab or window, or closing: hidden comes first); in
+// any case when it goes; once per change. A save that outlives the page may carry at most 64 KiB: a
+// bigger layout goes as an ordinary save, which completes when the page is only hidden and may be cut
+// short when it closes. (The page-close save alone, always outliving the page, failed silently over 64 KiB.)
+function saveOnLeave(closing) {
+  if (!layout.dirty || !layout.current || layout.sent === layout.generation) return;
+  if (!closing && !layout.autosave) return;  // only hidden, and autosave off: the user saves
+  saveLayout({ leaving: true }).catch(() => {});
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveOnLeave(false); });
+window.addEventListener('pagehide', () => saveOnLeave(true));
 
 // First run: create "Default" from what this browser had before layouts existed.
 async function ensureLayout() {
@@ -2661,8 +2787,8 @@ document.addEventListener('keydown', (e) => {
   if (e.target.matches('input, select, textarea') || document.querySelector('dialog[open]')) return;
   if (e.key === 'Escape') { cancelDrawing(); setActiveTool('cursor'); }
   else if (e.key === 'h' && e.altKey) { e.preventDefault(); startDrawing('measure'); }
-  else if ((e.key === 'Delete' || e.key === 'Backspace') && state.selectedOverlay) {
-    chart.removeOverlay({ id: state.selectedOverlay });
+  else if ((e.key === 'Delete' || e.key === 'Backspace') && state.selectedOverlay && document.body.dataset.view === 'chart') {
+    chart.removeOverlay({ id: state.selectedOverlay });  // only the chart on screen: not a hidden one's drawing
   } else if (e.key === '/' || (e.key.length === 1 && /[a-z]/i.test(e.key) && !e.ctrlKey && !e.metaKey)) {
     e.preventDefault();
     openSymbolDialog();
@@ -3131,8 +3257,11 @@ function renderHighlightPanel() {
       isPrice && ['VWAP', priceText(st.vwap)],
       ['Trades', big(st.trades)],
     ]) : ''}`;
-  $('hlRemove')?.addEventListener('click', () => chart.removeOverlay({ groupId: 'user', name: 'measure' }));
 }
+// one listener for the section, whatever it holds when clicked
+$('pHighlight').addEventListener('click', (e) => {
+  if (e.target.closest('#hlRemove')) chart.removeOverlay({ groupId: 'user', name: 'measure' });
+});
 
 // -- start -------------------------------------------------------------------------
 (async function start() {

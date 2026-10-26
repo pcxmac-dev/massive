@@ -115,12 +115,36 @@
       }
     }
 
-    constructor() {
+    /**
+     * `onLost` / `onRestored`: called when the browser takes the GPU context away (a driver reset, a
+     * GPU process crash, too many contexts) and when it gives it back. Everything on the GPU is gone
+     * with the context: the chart draws its candles on the CPU meanwhile, and the programs and
+     * buffers are made again on the restored context (the bars uploaded with the next frame).
+     */
+    constructor({ onLost = null, onRestored = null } = {}) {
       this.canvas = document.createElement('canvas');
       this.canvas.className = 'gpu-layer';
       const gl = this.canvas.getContext('webgl2', { alpha: true, antialias: false, premultipliedAlpha: false });
       if (!gl) throw new Error('WebGL2 not available');
       this.gl = gl;
+      this.lost = false;
+      this.canvas.addEventListener('webglcontextlost', (e) => {
+        e.preventDefault();  // or the browser never restores it
+        this.lost = true;
+        onLost?.();
+      });
+      this.canvas.addEventListener('webglcontextrestored', () => {
+        try {
+          this._setup();
+          this.lost = false;
+          onRestored?.();
+        } catch { /* stays lost: the CPU draws */ }
+      });
+      this._setup();
+    }
+
+    _setup() {
+      const gl = this.gl;
       const prog = gl.createProgram();
       gl.attachShader(prog, compile(gl, gl.VERTEX_SHADER, VS));
       gl.attachShader(prog, compile(gl, gl.FRAGMENT_SHADER, FS));
@@ -138,7 +162,7 @@
       gl.enableVertexAttribArray(0);
       gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
       this.inst = gl.createBuffer();
-      this.key = null;
+      this.key = null;  // nothing uploaded on this context yet
       this.count = 0;
       this.refPrice = 0;
     }
@@ -153,6 +177,7 @@
 
     /** Upload bars when the data list changes (new symbol, interval or older page). */
     upload(bars) {
+      if (this.lost) return;
       const key = bars.length ? `${bars.length}:${bars[0].timestamp}:${bars[bars.length - 1].timestamp}:${bars[bars.length - 1].close}` : '0';
       if (key === this.key) return;
       this.key = key;
@@ -175,6 +200,7 @@
      * x = x0 + i * barSpace, y = y0 + price * yScale (css px).
      */
     render({ width, height, from, to, xMap, yMap, bodyWidth, style, upColor, downColor, lineColor = '#2962ff' }) {
+      if (this.lost) return 0;
       const gl = this.gl, dpr = window.devicePixelRatio || 1;
       const W = Math.max(1, Math.round(width * dpr)), H = Math.max(1, Math.round(height * dpr));
       if (this.canvas.width !== W || this.canvas.height !== H) {

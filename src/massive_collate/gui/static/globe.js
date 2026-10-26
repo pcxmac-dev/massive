@@ -17,9 +17,31 @@
   // GPU renderer (globe-gl.js) for the sky, sphere, shading, lines and Moon; the 2D canvas above
   // keeps markers and labels. Without WebGL2 everything is drawn on the 2D canvas as before.
   let glr = null;
-  try { glr = window.GlobeGL ? new window.GlobeGL(document.getElementById('globeGL')) : null; } catch (err) {
+  const glCanvas = document.getElementById('globeGL');
+  try { glr = window.GlobeGL ? new window.GlobeGL(glCanvas) : null; } catch (err) {
     console.warn('globe: GPU renderer unavailable, drawing on the CPU', err);
   }
+  // A lost GPU context (a driver reset, the GPU process restarting) takes everything uploaded with
+  // it: the 2D canvas draws the globe meanwhile (zoomed out to its 12x at most), and once the browser
+  // restores the context a new renderer gets the zones, outlines and sky again (the fine coastline
+  // tiles load again as they are needed).
+  glCanvas?.addEventListener('webglcontextlost', (e) => {
+    if (!glr) return;
+    e.preventDefault();  // or the browser never restores it
+    glr = null;
+    tiles.clear();
+    zoom = Math.min(zoom, 12);
+    nightCache = null; zoneCache = null;
+  });
+  glCanvas?.addEventListener('webglcontextrestored', () => {
+    try { glr = new window.GlobeGL(glCanvas); } catch { return; }  // stays on the 2D canvas
+    if (tz) { glr.setZones(tz.width, tz.height, tz.grid, tz.res); glr.setZoneOffsets(tz.offsets); }
+    if (topo) glr.setLines('o110', topo);
+    if (topo50) glr.setLines('o50', topo50);
+    if (topo10) glr.setLines('o10', topo10);
+    if (skyData) glr.setSky(skyData.stars, skyData.lines);
+    if (!hires) loadHiresIndex();
+  });
   const list = document.getElementById('marketsList');
   const info = document.getElementById('globeInfo');
   const esc = window.MassiveIcons.esc;
@@ -193,6 +215,7 @@
       fetch(`vendor/world/coast-h/${name}.bin`).then((r) => (r.ok ? r.arrayBuffer() : null)).then((buf) => {
         if (!buf) { failed(name); return; }
         tileFailed.delete(name);
+        if (!glr) { tiles.delete(name); return; }  // the GPU context was lost meanwhile
         glr.setLines(`hires:${name}`, decodeTile(buf, name));
         tiles.set(name, 'ready');
         while (tiles.size > MAX_TILES) {  // evict the least recently used
@@ -1065,7 +1088,7 @@
     if (justDragged) { justDragged = false; return; }
     if (sunHit(e)) { recentre(); return; }
     if (!hover) return;
-    const row = list.querySelector(`[data-code="${hover.code}"]`);
+    const row = list.querySelector(`[data-code="${CSS.escape(String(hover.code))}"]`);
     if (row) { row.scrollIntoView({ block: 'center', behavior: 'smooth' }); row.classList.add('flash'); setTimeout(() => row.classList.remove('flash'), 1200); }
   });
   info.addEventListener('click', (e) => {

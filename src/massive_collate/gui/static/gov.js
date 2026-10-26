@@ -75,7 +75,13 @@
       <div class="p-muted small gov-note">To read at the agencies (FINRA's site is not read by the app: its terms bar automated readers):
         ${data.links.map((l) => link(l.title, l.url)).join(' · ')}</div>`;
     document.getElementById('govSearch').addEventListener('input', (e) => {
-      query = e.target.value; render(); document.getElementById('govSearch').focus();
+      // drawn again as typed: the new box gets the caret (or selection) where it was, not at the start
+      const { selectionStart: from, selectionEnd: to } = e.target;
+      query = e.target.value;
+      render();
+      const box = document.getElementById('govSearch');
+      box.focus();
+      box.setSelectionRange(from, to);
     });
   }
 

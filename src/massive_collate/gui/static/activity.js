@@ -14,6 +14,7 @@
   const POLL_RUN_MS = 5000;    // while a run is going, or the open symbol's fetch waits for it to end (each
                                // answer is work for the server, and the sync runs nearly all the time)
   const POLL_SLOW_MS = 10000;
+  const POLL_FAIL_MAX_MS = 60000;  // no answer: each poll waits twice as long as the one before, up to this
   // As the server ranks them (gui/activity.py STATE_RANK): a blocked symbol needs attention before current ones.
   const STATE_ORDER = { fetching: 0, next: 1, new: 2, backfilling: 3, queued: 4, held: 5, blocked: 6, current: 7, retired: 8, closed: 9 };
   const el = (id) => document.getElementById(id);
@@ -31,6 +32,7 @@
   let job = null;
   let openTicker = null;  // the symbol open on the chart (sent with each poll for the live recorder)
   let pollFailed = false;  // the last poll got no answer
+  let failedPolls = 0;  // in a row
 
   function dur(s) {
     if (s == null) return '–';
@@ -115,14 +117,19 @@
       advanceJob();
       render();
       pollFailed = false;
+      failedPolls = 0;
     } catch {
       data = null;
       pollFailed = true;
+      failedPolls += 1;
       render();
     }
     const fast = viewOpen('fetcher') || viewOpen('live');
+    const every = fast ? POLL_FAST_MS : data?.running || job?.phase === 'waiting' ? POLL_RUN_MS : POLL_SLOW_MS;
+    // The app not answering (stopped, restarting): asked again later each time, back to the usual pace
+    // with its next answer. It was asked at the usual pace (every 1.5 s with the Fetcher open) all the while.
     clearTimeout(timer);
-    timer = setTimeout(poll, fast ? POLL_FAST_MS : data?.running || job?.phase === 'waiting' ? POLL_RUN_MS : POLL_SLOW_MS);
+    timer = setTimeout(poll, failedPolls ? Math.min(POLL_FAIL_MAX_MS, every * 2 ** failedPolls) : every);
   }
 
   function render() {
@@ -410,7 +417,7 @@
       <tr data-ticker="${esc(s.ticker)}" class="${s.first ? 'has-data' : ''}" title="${s.first ? 'Open in the chart' : 'No data stored yet'}">
         <td><span class="sym-cell">${symbolIcon(s, 20)}<span><b>${esc(s.exchange ? `${s.ticker}::${s.exchange}` : s.ticker)}</b>
           <div class="sub">${esc(s.name || s.asset)}</div></span></span></td>
-        <td>${dataIcon(s, 14)} <span class="state ${s.state}">${esc(DATA_LABEL[s.state])}</span>${s.note ? `<div class="sub">${esc(s.note)}</div>` : ''}</td>
+        <td>${dataIcon(s, 14)} <span class="state ${esc(s.state)}">${esc(DATA_LABEL[s.state])}</span>${s.note ? `<div class="sub">${esc(s.note)}</div>` : ''}</td>
         <td class="prog">${storedBar(s)}
           <div class="sub">${s.first ? `${day(s.first)} → ${day(s.last)}` : 'nothing stored yet'}${s.progress < 1 ? ` · target ${day(s.target)}` : ''}</div></td>
         <td>${esc(s.resolution)}</td>

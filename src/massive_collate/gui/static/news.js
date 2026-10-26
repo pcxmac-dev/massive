@@ -52,7 +52,15 @@
           </div>
         </div>`).join('') : '<div class="empty">Nothing yet. Headlines arrive with the fetcher\'s next run.</div>'}</div>`;
     const input = document.getElementById('newsSearch');
-    input.addEventListener('input', (e) => { query = e.target.value; render(); document.getElementById('newsSearch').focus(); });
+    input.addEventListener('input', (e) => {
+      // drawn again as typed: the new box gets the caret (or selection) where it was, not at the start
+      const { selectionStart: from, selectionEnd: to } = e.target;
+      query = e.target.value;
+      render();
+      const box = document.getElementById('newsSearch');
+      box.focus();
+      box.setSelectionRange(from, to);
+    });
   }
 
   box.addEventListener('click', (e) => {
