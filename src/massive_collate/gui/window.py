@@ -23,7 +23,6 @@ and paged. Box plots keep the series path.
 """
 from __future__ import annotations
 
-import contextvars
 import json
 import threading
 import time
@@ -33,8 +32,9 @@ import pandas as pd
 
 from ..calc.derivatives import Model, apply_model, segments
 from .bars import (CALENDAR, COLUMNS, MERGED, MODEL_SOURCES, PERIOD_SECONDS, PRICE_BASED, TIME_TYPES, Series, Style,
-                   _aggregate, _regular_close, _SizedCache, bin_keys, calendar_key, decimals, epoch_ms, frame_from_bars,
-                   merge_frames, model_info, resample, session_hours, style_used, to_records, transformed, utc_days, ET)
+                   _aggregate, _filtered, _regular_close, _SizedCache, bar_end, bin_keys, calendar_key, decimals, epoch_ms,
+                   frame_from_bars, merge_frames, model_info, resample, session_hours, style_used, to_records,
+                   transformed, utc_days, ET)
 
 # Every level the chart moves through, finest first.
 LEVELS = (("second", 1), ("second", 30), ("minute", 1), ("minute", 5), ("minute", 30), ("hour", 1), ("hour", 2),
@@ -64,16 +64,15 @@ ROLLUP_TTL_S = 300.0  # a month of them is read again after this: a correction o
 # Schemes (calc/schemes.py) run over a stretch at its level, plus the warm-up their settings need: a
 # stretch of more bars than this asks for a coarser level (a year of seconds is 6 million bars).
 SCHEME_MAX_BARS = 250_000
+# A stretch (the highlight's statistics and profile, a scheme) is built at the chart's level from at
+# most this many base bars, estimated before reading (read_estimate): a highlight drawn over years
+# and then zoomed to seconds read years of seconds into RAM under the engine's lock.
+STRETCH_READ = BRICK_READ
 REPLAY_PAGE = 3000  # finer bars a replay page holds (about 50 minutes of seconds, 8 sessions of minutes)
 
 
-# The view a request reads (server.ChartApp._view): filtered, bad data left out (the pruned list,
-# baddata.py), unless it asks for all of it (unfiltered). Per request thread; caches key on it.
-UNFILTERED = contextvars.ContextVar("unfiltered", default=False)
-
-
-def _filtered() -> bool:
-    return not UNFILTERED.get()
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 def _empty() -> pd.DataFrame:
@@ -105,6 +104,26 @@ def per_day(asset: str, period: str, span: int, session: str) -> float:
     return trading_days * minutes * 60_000 / (UNIT_MS[period] * span)
 
 
+def read_estimate(asset: str, period: str, span: int, lo: int, hi: int) -> int:
+    """About how many base bars building a level's bars over [lo, hi) reads, every hour of the
+    market (the base is read whole, the session filtered after): the seconds for the second levels,
+    the minutes up to 5 minutes, the 30-minute bins for 30 minutes and the hours (each month of
+    minutes read once and let go, _half_hours). Days and longer are few and read whole: none."""
+    if period in CALENDAR:
+        return 0
+    unit, n = ("minute", 30) if period == "hour" or (period, span) == ("minute", 30) else (BASE[period], 1)
+    return round(per_day(asset, unit, n, "extended") * max(0, hi - lo) / 86_400_000)
+
+
+def check_stretch(asset: str, period: str, span: int, lo: int, hi: int, what: str) -> None:
+    """ValueError (the request's 400) for a stretch whose bars at the level would read more than
+    STRETCH_READ base bars."""
+    n = read_estimate(asset, period, span, lo, hi)
+    if n > STRETCH_READ:
+        raise ValueError(f"{what} is too long for {level_label(period, span)} bars (about {n:,} bars to read, at most "
+                         f"{STRETCH_READ:,}): zoom out to a coarser level")
+
+
 def estimated_rows(level: dict, session: str = "extended") -> int:
     """About how many bars a level holds from its first to its last (from its bars a day)."""
     return max(1, round(level["perDay"][session] * (level["last"] - level["first"]) / 86_400_000))
@@ -114,6 +133,15 @@ def level_label(period: str, span: int) -> str:
     names = {"second": "sec", "minute": "min", "hour": "hour", "day": "day", "week": "week", "month": "month",
              "year": "year"}
     return f"{span} {names[period]}"
+
+
+def check_level(period: str, span: int) -> tuple[str, int]:
+    """(period, span) when the chart draws that level (LEVELS, the series path's intervals as well),
+    else ValueError (the request's 400): a span of 0 paged forever and divided by zero, a huge one
+    read years in one go."""
+    if (period, span) not in LEVELS:
+        raise ValueError(f"no level {span} {period}: one of {', '.join(level_label(*lv) for lv in LEVELS)}")
+    return period, span
 
 
 class WindowReader:
@@ -220,6 +248,8 @@ class WindowReader:
     def _intraday_page(self, s, feeds, period, span, session, to_ms, after_ms, since_ms, limit) -> dict:
         base = BASE[period]
         step, base_ms = UNIT_MS[period] * span, UNIT_MS[base]
+        if not (step > 0 and limit > 0):  # a window of no width never reaches the data's edge: the loops would not end
+            raise ValueError(f"no level {span} {period}")
         with self.engine.lock:
             edges = [e for e in (self.store.bar_edges(f, s.ticker, base) for f in feeds) if e]
         if not edges:
@@ -569,6 +599,7 @@ class WindowReader:
             bars = self._calendar_bars(s, feeds, period)
         else:
             step = UNIT_MS[period] * span
+            check_stretch(s.asset, period, span, lo - step, hi + step, "the highlight")  # before reading
             bars = self._built(s, feeds, BASE[period], period, span, session, lo - step, hi + step)
         if not model.validate().is_price:
             if model.kind == "integral" and period not in CALENDAR:
@@ -593,7 +624,7 @@ class WindowReader:
         feeds = self.feeds(source, ticker)
         lo, hi = sorted((int(from_ms), int(to_ms)))
         if period in CALENDAR:  # few: the level whole
-            every = self._calendar_bars(s, feeds, period)
+            every = self._closed(s, feeds, period, span, self._calendar_bars(s, feeds, period))
             ts = epoch_ms(every.index)
             first, last = int(ts.searchsorted(lo)), int(ts.searchsorted(hi, side="right"))
             frame, start = every.iloc[max(0, first - warm):last], first - max(0, first - warm)
@@ -601,9 +632,10 @@ class WindowReader:
             step = UNIT_MS[period] * span
             if per_day(s.asset, period, span, session) * (hi - lo) / 86_400_000 > 2 * SCHEME_MAX_BARS:  # before reading
                 raise ValueError(f"too many {level_label(period, span)} bars for a scheme: choose a coarser level")
+            check_stretch(s.asset, period, span, lo, hi + step, "the stretch")
             inside = self._built(s, feeds, BASE[period], period, span, session, lo, hi + step)
             ts = epoch_ms(inside.index)
-            inside = inside[(ts >= lo) & (ts <= hi)]
+            inside = self._closed(s, feeds, period, span, inside[(ts >= lo) & (ts <= hi)])
             if len(inside) > SCHEME_MAX_BARS:
                 raise ValueError(f"{len(inside):,} {level_label(period, span)} bars: a scheme runs over at most "
                                  f"{SCHEME_MAX_BARS:,}; choose a coarser level")
@@ -618,6 +650,21 @@ class WindowReader:
                    note="Backtest: each decision at a bar's close, filled at the next bar's open; stops and targets "
                         "inside a bar at their level, the stop first when a bar reaches both. Not an order.")
         return out
+
+    def _closed(self, s, feeds, period, span, bars: pd.DataFrame) -> pd.DataFrame:
+        """`bars` up to the last that has closed: a bar ending after now, or after the newest base
+        bar stored (the rest of it is not stored yet), may still change, so its close decides
+        nothing yet (a scheme took the forming bar's close as final)."""
+        if not len(bars):
+            return bars
+        base = BASE.get(period, "day")
+        with self.engine.lock:
+            edges = [e for e in (self.store.bar_edges(f, s.ticker, base) for f in feeds) if e]
+        closed_to = min(_now_ms(), max((e[1] for e in edges), default=0) + UNIT_MS[base])
+        n = len(bars)
+        while n and int(bar_end(bars.index[n - 1], period, span, utc=utc_days(s)).value // 1_000_000) > closed_to:
+            n -= 1
+        return bars.iloc[:n]
 
     def replay_fine(self, source: str, ticker: str, period: str, from_ms: int) -> str:
         """The finer bars a replay builds the level's bars from: seconds where the series holds
@@ -672,7 +719,8 @@ class WindowReader:
             r["bin"] = b
         return {"fine": fine_level, "level": {"type": period, "span": span, "label": level_label(period, span)},
                 "bars": records, "complete": to_records(complete), "more": more,
-                "next": int(epoch_ms(bars.index[-1:])[0]) if len(bars) else None}
+                "next": int(epoch_ms(bars.index[-1:])[0]) if len(bars) else None,
+                "view": "filtered" if _filtered() else "unfiltered"}
 
     # -- the virtual level 2: what traded at each price in one bar ------------------------------
     PROFILE_TICK_MS = 86_400_000  # bars up to a day read the feeds' ticks; longer ones their finer bars
@@ -692,8 +740,16 @@ class WindowReader:
         newest = self.page(source, ticker, period, span, session, limit=1)["bars"]
         if not newest:
             return {"ticker": s.ticker, "rows": []}
-        at = newest[-1] if at_ms is None or at_ms >= newest[-1]["timestamp"] else \
-            (self.page(source, ticker, period, span, session, to_ms=int(at_ms) + 1, limit=1)["bars"] or newest)[-1]
+        at = newest[-1]
+        if at_ms is not None and at_ms < newest[-1]["timestamp"]:
+            # The bar starting at or before `at_ms`, whole: a page up to the end of a bar starting
+            # there (a page up to at_ms + 1 built the bar from its first base bars only: half its
+            # volume in one case), and one bar before it in case `at_ms` falls inside a bar.
+            then = pd.Timestamp(int(at_ms), unit="ms", tz="UTC").tz_convert(ET)
+            to = int(bar_end(then, period, span, utc=utc_days(s)).value // 1_000_000)
+            near = self.page(source, ticker, period, span, session, to_ms=to, limit=2)["bars"]
+            held = [b for b in near if b["timestamp"] <= at_ms]
+            at = held[-1] if held else (near or newest)[0]
         start = pd.Timestamp(at["timestamp"], unit="ms", tz="UTC").tz_convert("America/New_York")
         lo, hi = at["timestamp"], int(bar_end(start, period, span, utc=utc_days(s)).value // 1_000_000)
         d0 = calendar_key(pd.DatetimeIndex([start]), "day", utc=utc_days(s))[0]
@@ -766,6 +822,7 @@ class WindowReader:
             level = every[(ts >= lo) & (ts <= hi)]
         else:
             step_ms = UNIT_MS[period] * span
+            check_stretch(s.asset, period, span, lo, hi + step_ms, "this stretch")  # before reading
             level = self._built(s, feeds, BASE[period], period, span, session, lo, hi + step_ms)
             ts = epoch_ms(level.index)
             level = level[(ts >= lo) & (ts <= hi)]

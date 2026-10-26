@@ -4,6 +4,9 @@ from __future__ import annotations
 import functools
 import json
 import math
+import sqlite3
+import traceback
+from collections import OrderedDict
 from contextlib import contextmanager
 import mimetypes
 import subprocess
@@ -24,7 +27,7 @@ from .. import config, live
 from ..config import Settings, load_settings
 from ..storage import LayoutLimit, Store
 from . import activity, astro
-from .bars import CALENDAR, PRICE_BASED, TIME_TYPES, BarEngine, Style, resample
+from .bars import CALENDAR, PRICE_BASED, TIME_TYPES, BarEngine, Style, _BoundedCache, resample
 from ..calc.derivatives import Model
 from .stats import details_subset, key_stats
 
@@ -45,6 +48,8 @@ def finite(data):
 MAX_LIMIT = 20000
 CALENDAR_MAX_DAYS = 3700  # the widest /api/calendar range (timeaxis.js asks for at most CALENDAR_DAYS)
 ROW_COUNTS_TTL_S = 600  # a symbol's bar counts (the Data panel) are counted again after this
+ROW_COUNTS_KEPT = 64  # the symbols whose counts are kept (the ones counted last)
+COUNTING_AT_ONCE = 2  # counts made at once, each on a thread and connections of its own
 PRUNED_COUNTS_TTL_S = 300  # a symbol's pruned-list counts by rule (an index scan of up to millions)
 ACTIVITY_TTL_S = 2.0  # the status answer shared by polls this close together
 SYMBOL_ROWS_TTL_S = 10.0  # its symbols' rows (index seeks in every feed file) kept this long
@@ -56,6 +61,9 @@ WRITE_HEADER = "X-Massive-Charts"
 # window's frames, up to MAX_LIMIT bars; the rest wait their turn, then are answered busy.
 HEAVY_REQUESTS = 2
 HEAVY_WAIT_S = 30.0
+# A paper order's bars held only by a feed of one exchange's share (IEX) wait this long for the
+# whole market's to replace them (a sync stores a session within hours), then are taken as they are.
+PARTIAL_SETTLE_MS = 2 * 86_400_000
 
 
 class Busy(RuntimeError):
@@ -103,11 +111,15 @@ class ChartApp:
         # shared lock, and the symbol list for the picker's map, the calendar and the side panel
         # all waited behind it).
         self._panel_store, self._panel_lock = store.reader(), threading.Lock()
-        self._row_counts: dict[str, tuple[float, dict]] = {}  # ticker -> (counted at, row_counts)
+        # ticker -> (counted at, row_counts) for the ROW_COUNTS_KEPT symbols counted last, and the
+        # tickers being counted (at most COUNTING_AT_ONCE): under _counts_lock (_counts)
+        self._row_counts: OrderedDict[str, tuple[float, dict]] = _BoundedCache(ROW_COUNTS_KEPT)
         self._counting: set[str] = set()
-        self._pruned_counts: dict[str, tuple[float, dict]] = {}  # ticker -> (counted at, by feed and rule)
+        self._counts_lock = threading.Lock()
+        # ticker -> (counted at, by feed and rule) for the ROW_COUNTS_KEPT symbols counted last: under _panel_lock
+        self._pruned_counts: OrderedDict[str, tuple[float, dict]] = _BoundedCache(ROW_COUNTS_KEPT)
         self._status_store, self._status_lock = store.reader(), threading.Lock()  # the Fetcher view and status bar
-        self._activity: dict[tuple, tuple[float, dict]] = {}
+        self._activity: dict[str, tuple[float, tuple, dict]] = {}  # feed -> (made at, (lines, open symbol), answer)
         self._activity_rows: dict = {}  # activity.activity's symbol rows (SYMBOL_ROWS_TTL_S)
         self._feeds_summary: tuple[float, list] | None = None
         self._deps_store, self._deps_lock = store.reader(), threading.Lock()  # dependency checks
@@ -117,6 +129,7 @@ class ChartApp:
         self._open_noted: dict[str, int] = {}  # ticker -> ms it was last noted open (note_open)
         self._derive_proc: subprocess.Popen | None = None  # a build started by start_derive
         self._gov_db, self._gov_lock = None, threading.Lock()  # gov/gov.db, opened on first use
+        self._paper, self._paper_lock = None, threading.RLock()  # the paper account (paper), opened on first use
 
     @property
     def settings(self) -> Settings:
@@ -316,12 +329,13 @@ class ChartApp:
         to_ms = int(q["to"]) if q.get("to") else None
         after_ms = int(q["after"]) if q.get("after") else None
         since_ms = int(q["since"]) if q.get("since") else None
+        period, span = _level(q)
         if self._auto(q, style.type):
             return self.window.styled_page(
-                q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)), q.get("session", "regular"),
+                q["source"], q["ticker"], period, span, q.get("session", "regular"),
                 style=style, model=_model(q), to_ms=to_ms, after_ms=after_ms, since_ms=since_ms, limit=limit)
         return self.engine.bars(
-            q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
+            q["source"], q["ticker"], period, span,
             q.get("session", "regular"), to_ms=to_ms, since_ms=since_ms, after_ms=after_ms,
             limit=limit, style=style, adjust=_adjust(q.get("adjust")), lod=int(q.get("lod", 1)), model=_model(q),
         )
@@ -332,15 +346,15 @@ class ChartApp:
         step = float(q["step"]) if q.get("step") not in (None, "", "auto") else None
         if step is not None and not 0 < step < 1e9:
             raise ValueError("step must be a positive price")
+        period, span = _level(q)
         if self.window.handles(q["source"], q["ticker"]):  # the one bar's window, not the whole history
             if q.get("from") and q.get("to"):  # the highlight's stretch, with its major prices
-                return self.window.range_profile(q["source"], q["ticker"], q.get("period", "minute"),
-                                                 int(q.get("span", 1)), q.get("session", "regular"), int(q["from"]),
-                                                 int(q["to"]), step=step)
-            return self.window.profile(q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
-                                       q.get("session", "regular"), at_ms=int(q["at"]) if q.get("at") else None, step=step)
+                return self.window.range_profile(q["source"], q["ticker"], period, span, q.get("session", "regular"),
+                                                 int(q["from"]), int(q["to"]), step=step)
+            return self.window.profile(q["source"], q["ticker"], period, span, q.get("session", "regular"),
+                                       at_ms=int(q["at"]) if q.get("at") else None, step=step)
         return self.engine.profile(
-            q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)), q.get("session", "regular"),
+            q["source"], q["ticker"], period, span, q.get("session", "regular"),
             at_ms=int(q["at"]) if q.get("at") else None, step=step, adjust=_adjust(q.get("adjust")))
 
     STREAM_SECONDS = 300  # one stream's life; the page opens the next from where it got to
@@ -407,7 +421,7 @@ class ChartApp:
             },
             "details": details_subset(details),
             "detailsUpdated": (details or {}).get("_updated_at"),
-            "stats": key_stats(daily),
+            "stats": key_stats(daily, s.asset),
             "attribution": self.attribution(s.ticker, s.kind, s.asset),
             "audits": self.audit_summary(s.ticker),
             "data": {
@@ -447,7 +461,7 @@ class ChartApp:
             },
             "details": details_subset(details),
             "detailsUpdated": (details or {}).get("_updated_at"),
-            "stats": key_stats(daily),
+            "stats": key_stats(daily, s.asset),
             "attribution": self.attribution(s.ticker, "minute" if base["type"] != "day" else "day", s.asset),
             "audits": self.audit_summary(s.ticker),
             "data": {
@@ -462,10 +476,14 @@ class ChartApp:
         from . import world
         from .markets import markets
 
+        # The calendars are built outside the shared lock (the official schedules' calendar under the
+        # engine's own, the world's ~70 exchanges' in world.py): layouts, watchlists and the Fetcher
+        # waited behind them. Only the reads of the store take it.
+        cal = self.engine.calendar()
         with self._lock:
-            out = markets(self.engine.calendar(), self.store.exchanges(), self.store.watchlist())
-        with self._lock:
+            exchanges, watch = self.store.exchanges(), self.store.watchlist()
             moves = world.market_moves(self.store)
+        out = markets(cal, exchanges, watch)
         out["world"] = world.world_markets(moves=moves)
         out["sun"] = world.subsolar()
         out["sky"] = astro.sky()
@@ -516,11 +534,16 @@ class ChartApp:
         return {"watched": spec.ticker}
 
     def announcements(self) -> dict:
+        from . import world
         from .announcements import announcements
 
+        now = datetime.now(timezone.utc)
         with self._lock:
             watch = self.store.watchlist()
-            return announcements(self.store, watch)
+            moves = world.market_moves(self.store)
+        markets = world.world_markets(now, moves=moves)  # ~70 exchanges' calendars: outside the shared lock
+        with self._lock:
+            return announcements(self.store, watch, now, markets)
 
     def gov(self) -> dict:
         """The Gov view: the agencies' newest, the current regulatory parameters and each
@@ -567,12 +590,13 @@ class ChartApp:
     @_heavy
     def future(self, q: dict[str, str]) -> dict:
         style = Style(type=q.get("type", "candles"))
+        period, span = _level(q)
         if self._auto(q, style.type):  # projected from the level's newest bar, not the whole history
             from .projection import project
 
             if style.type in PRICE_BASED:  # bricks follow price: no time axis to project
                 return {"timestamps": [], "last": None, "total": 0}
-            period, span, session = q.get("period", "minute"), int(q.get("span", 1)), q.get("session", "regular")
+            session = q.get("session", "regular")
             s = self.window.series(q["source"], q["ticker"])
             model = _model(q)
             # a model's newest value may be bars back (a stretch shorter than its window has none)
@@ -592,18 +616,19 @@ class ChartApp:
                          cache=self.engine._future_cache)
             return {"timestamps": ts, "last": newest[-1]["timestamp"], "total": 1, "lastBar": newest[-1]["timestamp"]}
         return self.engine.future(
-            q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)), q.get("session", "regular"),
+            q["source"], q["ticker"], period, span, q.get("session", "regular"),
             style=style, adjust=_adjust(q.get("adjust")), lod=int(q.get("lod", 1)), model=_model(q),
             offset=max(0, int(q.get("offset", 0))), count=min(int(q.get("count", 500)), 5000),
         )
 
     @_heavy
     def range_stats(self, q: dict[str, str]) -> dict:
+        period, span = _level(q)
         if self._auto({**q, "auto": "1"}):  # its own window only
-            return self.window.range_stats(q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
-                                           q.get("session", "regular"), int(q["from"]), int(q["to"]), model=_model(q))
+            return self.window.range_stats(q["source"], q["ticker"], period, span, q.get("session", "regular"),
+                                           int(q["from"]), int(q["to"]), model=_model(q))
         return self.engine.range_stats(
-            q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
+            q["source"], q["ticker"], period, span,
             q.get("session", "regular"), int(q["from"]), int(q["to"]), adjust=_adjust(q.get("adjust")),
             model=_model(q),
         )
@@ -632,9 +657,9 @@ class ChartApp:
         fee, slip = float(q.get("fee") or 0), float(q.get("slippage") or 0)
         if not (0 <= fee <= 1000 and 0 <= slip <= 1000):
             raise ValueError("fee and slippage: 0 to 1,000 basis points")
-        return self.window.scheme(q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
-                                  q.get("session", "regular"), int(q["from"]), int(q["to"]), q["scheme"], given,
-                                  Costs(fee, slip), q.get("longOnly") == "1")
+        period, span = _level(q)
+        return self.window.scheme(q["source"], q["ticker"], period, span, q.get("session", "regular"), int(q["from"]),
+                                  int(q["to"]), q["scheme"], given, Costs(fee, slip), q.get("longOnly") == "1")
 
     @_heavy
     def replay(self, q: dict[str, str]) -> dict:
@@ -644,25 +669,29 @@ class ChartApp:
         limit = int(q.get("limit") or REPLAY_PAGE)
         if not 1 <= limit <= 20_000:
             raise ValueError("limit: 1 to 20,000 bars")
-        return self.window.replay(q["source"], q["ticker"], q.get("period", "minute"), int(q.get("span", 1)),
-                                  q.get("session", "regular"), int(q["from"]), limit)
+        period, span = _level(q)
+        return self.window.replay(q["source"], q["ticker"], period, span, q.get("session", "regular"), int(q["from"]),
+                                  limit)
 
     # -- trading (trading/; docs/ARCHITECTURE.md, "Trading"): paper first, live trading off ----------
     @property
     def paper(self):
-        if getattr(self, "_paper", None) is None:
-            from ..trading.paper import PaperBook
+        """The paper account, on a connection and lock of its own (_paper_lock): matching reads bars,
+        and under the shared lock the layouts, watchlists and the Fetcher waited behind it."""
+        with self._paper_lock:
+            if self._paper is None:
+                from ..trading.paper import PaperBook
 
-            self._paper = PaperBook(self.store.conn, self._fill_bars, self._last_price,
-                                    lambda t: self.window.asset(t))
-        return self._paper
+                self._paper_store = self.store.reader()
+                self._paper = PaperBook(self._paper_store.conn, self._fill_bars, self._last_price,
+                                        lambda t: self.window.asset(t), self._stored_to)
+            return self._paper
 
     def _fill_bars(self, source: str, ticker: str, at_ms: int, until_ms: int):
         """The finest bars stored from `at_ms` to `until_ms` (1-second where held, else minutes), in
-        the symbol's regular session (stocks; round the clock for crypto): what a paper order fills from."""
-        import pandas as pd
-
-        from ..trading.paper import MATCH_PAGE
+        the symbol's regular session (stocks; round the clock for crypto): what a paper order fills
+        from; each settled unless only a feed of one exchange's share holds it (_stored_to)."""
+        from ..trading.paper import MATCH_PAGE, _now
         from .bars import epoch_ms
 
         if not self.window.handles(source, ticker):
@@ -670,11 +699,37 @@ class ChartApp:
         s = self.window.series(source, ticker)
         feeds = self.window.feeds(source, ticker)
         fine = "second" if self.window.replay_fine(source, ticker, "minute", at_ms) == "second" else "minute"
+        step = 1000 if fine == "second" else 60_000
         page = self.window._intraday_page(s, feeds, fine, 1, s.session_for("regular"), None, at_ms - 1, None, MATCH_PAGE)
         bars = page["frame"]
-        t = epoch_ms(bars.index) if len(bars) else []
-        out = pd.DataFrame({"t": t, **{k: bars[k].to_numpy() for k in ("open", "high", "low", "close")}}) if len(bars)             else pd.DataFrame(columns=["t", "open", "high", "low", "close"])
-        return out[out["t"] < until_ms], 1000 if fine == "second" else 60_000
+        if not len(bars):
+            return pd.DataFrame(columns=["t", "open", "high", "low", "close", "settled"]), step
+        t = epoch_ms(bars.index)
+        # a bar past the whole market's stored bars may yet be replaced by them, for a while (a sync
+        # stores the session within hours); one older than PARTIAL_SETTLE_MS is taken as it is
+        settled_to = max(self._stored_to(source, ticker) or 0, _now() - PARTIAL_SETTLE_MS)
+        out = pd.DataFrame({"t": t, **{k: bars[k].to_numpy() for k in ("open", "high", "low", "close")},
+                            "settled": t + step <= settled_to})
+        return out[out["t"] < until_ms], step
+
+    def _stored_to(self, source: str, ticker: str) -> int | None:
+        """Where the symbol's stored bars end (ms, any session: its 1-second and minute bars): those
+        of the feeds of the whole market where one holds it, not a feed of one exchange's share
+        (IEX's session, which the whole market's replaces once a sync stores it)."""
+        from ..live import PARTIAL_FEEDS
+
+        if not self.window.handles(source, ticker):
+            return None
+        feeds = self.window.feeds(source, ticker)
+        whole = [f for f in feeds if f not in PARTIAL_FEEDS] or feeds
+        ends = []
+        with self.engine.lock:
+            for f in whole:
+                for base, step in (("second", 1000), ("minute", 60_000)):
+                    e = self.engine.store.bar_edges(f, ticker, base)
+                    if e:
+                        ends.append(e[1] + step)
+        return max(ends, default=None)
 
     def _last_price(self, source: str, ticker: str) -> float | None:
         if not self.window.handles(source, ticker):
@@ -687,23 +742,23 @@ class ChartApp:
         """The Trading view: the brokers, and the paper account (its orders matched first, from bars)."""
         from ..trading.brokers import PLANNED
 
-        with self._lock:
+        with self._paper_lock:
             book = self.paper.summary()
         return {"brokers": [{"key": "paper", "label": self.paper.label, "live": False, "status": "ready"}, *PLANNED],
                 "liveTrading": False, "broker": "paper", **book}
 
     def trade_place(self, body: dict) -> dict:
-        with self._lock:
+        with self._paper_lock:
             return self.paper.place(body.get("ticker", ""), body.get("source") or "*", body.get("side", ""),
                                     body.get("qty", 0), body.get("type", "market"), body.get("limit"), body.get("stop"),
                                     body.get("tif", "day"))
 
     def trade_cancel(self, order_id: int) -> dict:
-        with self._lock:
+        with self._paper_lock:
             return self.paper.cancel(order_id)
 
     def trade_reset(self, body: dict) -> dict:
-        with self._lock:
+        with self._paper_lock:
             return self.paper.reset(body.get("cash", 100_000), body.get("feeBps", 0))
 
     # -- watchlists (the rail's lists of symbols) --------------------------------
@@ -803,15 +858,25 @@ class ChartApp:
             self.note_open(q["open"])
         # On connections and a lock of its own (it took 1 to 3 s under the shared lock, polled by every
         # open page, and the symbol list and watchlists waited 17 s behind it), and one answer for the
-        # polls that arrive within ACTIVITY_TTL_S of each other.
-        key = (q.get("source", "massive"), min(int(q.get("lines", 200)), 1000), q.get("open"))
+        # polls that arrive within ACTIVITY_TTL_S of each other: one kept per feed, for the lines and
+        # open symbol it was made for (free text in the key kept an answer for every value sent).
+        from ..sources import BUILDERS
+
+        source = q.get("source") or "massive"
+        source = source if source in BUILDERS else "massive"  # a feed this app has (a page may remember an old one)
+        lines = max(1, min(int(q.get("lines", 200)), 1000))
+        focus = (q.get("open") or "").strip()
+        focus = focus if 0 < len(focus) <= 32 else None
         with self._status_lock:
-            hit = self._activity.get(key)
-            if hit is None or time.monotonic() - hit[0] > ACTIVITY_TTL_S:
-                hit = self._activity[key] = (time.monotonic(), activity.activity(
-                    self._status_store, self.settings, self.store.path, key[0], log_lines=key[1], focus=key[2],
+            now = time.monotonic()
+            for k in [k for k, v in self._activity.items() if now - v[0] > ACTIVITY_TTL_S]:
+                del self._activity[k]  # expired: made again when asked
+            hit = self._activity.get(source)
+            if hit is None or hit[1] != (lines, focus):
+                hit = self._activity[source] = (now, (lines, focus), activity.activity(
+                    self._status_store, self.settings, self.store.path, source, log_lines=lines, focus=focus,
                     rows_cache=self._activity_rows, rows_ttl_s=SYMBOL_ROWS_TTL_S))
-            out = dict(hit[1])
+            out = dict(hit[2])
         out["feeds"] = self.feeds()
         return out
 
@@ -915,25 +980,33 @@ class ChartApp:
 
         t = ticker.upper()
         rank = self.engine.sources_for(t)
-        counted = self._row_counts.get(t)
+        counted = self._counts(t)  # the counts follow on the panel's next read
         with self._panel_lock:
             out = inventory.symbol_inventory(self._panel_store, t, rank, counts=counted[1] if counted else {})
-        if (counted is None or time.monotonic() - counted[0] > ROW_COUNTS_TTL_S) and t not in self._counting:
-            self._counting.add(t)  # the counts follow on the panel's next read
-            threading.Thread(target=self._count_rows, args=(t,), daemon=True, name=f"count-{t}").start()
         return out
 
     def _base_rows(self, ticker: str, feeds: list[str], base: str) -> int | None:
         """The bars a series holds at its base level (the feed holding most, its own and built), from
         the background counts (None until they are made; asked for here)."""
-        counted = self._row_counts.get(ticker)
-        if (counted is None or time.monotonic() - counted[0] > ROW_COUNTS_TTL_S) and ticker not in self._counting:
-            self._counting.add(ticker)
-            threading.Thread(target=self._count_rows, args=(ticker,), daemon=True, name=f"count-{ticker}").start()
+        counted = self._counts(ticker)
         if counted is None:
             return None
         rows = counted[1]
         return max((rows.get((f, "bars", base, 1), 0) + rows.get((f, "built_bars", base, 1), 0) for f in feeds), default=0)
+
+    def _counts(self, ticker: str) -> tuple[float, dict] | None:
+        """A symbol's bar counts frame by frame as last made (counted at, counts), or None; made again
+        in the background when missing or older than ROW_COUNTS_TTL_S. At most COUNTING_AT_ONCE at
+        once (each a thread and connections of its own: a page asking for one ticker after another
+        started one each), and the ROW_COUNTS_KEPT symbols counted last are kept; the rest are
+        counted when asked again."""
+        with self._counts_lock:
+            counted = self._row_counts.get(ticker)
+            stale = counted is None or time.monotonic() - counted[0] > ROW_COUNTS_TTL_S
+            if stale and ticker not in self._counting and len(self._counting) < COUNTING_AT_ONCE:
+                self._counting.add(ticker)
+                threading.Thread(target=self._count_rows, args=(ticker,), daemon=True, name=f"count-{ticker}").start()
+        return counted
 
     def _count_rows(self, ticker: str) -> None:
         """Count a symbol's bars frame by frame (inventory.row_counts) on connections of this thread."""
@@ -942,11 +1015,14 @@ class ChartApp:
         reader = None
         try:
             reader = self.store.reader()
-            self._row_counts[ticker] = (time.monotonic(), inventory.row_counts(reader, ticker))
+            counts = inventory.row_counts(reader, ticker)
+            with self._counts_lock:
+                self._row_counts[ticker] = (time.monotonic(), counts)
         except Exception:  # noqa: BLE001 - the panel shows no counts; the next read tries again
             pass
         finally:
-            self._counting.discard(ticker)
+            with self._counts_lock:
+                self._counting.discard(ticker)
             if reader is not None and reader is not self.store:
                 reader.close()
 
@@ -965,7 +1041,7 @@ class ChartApp:
     @contextmanager
     def _view(self, q: dict[str, str]):
         """The request's view of the data: filtered (bad data left out) unless it asks unfiltered=1."""
-        from .window import UNFILTERED
+        from .bars import UNFILTERED
 
         token = UNFILTERED.set(q.get("unfiltered") == "1")
         try:
@@ -1147,6 +1223,14 @@ def _model(q: dict[str, str]) -> Model:
     ).validate()
 
 
+def _level(q: dict[str, str]) -> tuple[str, int]:
+    """The chart level a request asks for (period, span): one the chart draws (window.LEVELS, the
+    series path's intervals too), checked before anything is read (ValueError: 400)."""
+    from .window import check_level
+
+    return check_level(q.get("period", "minute"), int(q.get("span", 1)))
+
+
 def _adjust(value: str | None) -> str:
     value = value or "none"
     if value not in ("none", "difference", "ratio"):
@@ -1185,6 +1269,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass  # the page went away
+            except Exception:  # noqa: BLE001 - the answer has begun: logged, and the stream ends (the page opens another)
+                traceback.print_exc()
 
         def _json(self, data, status: int = 200) -> None:
             try:
@@ -1192,6 +1278,15 @@ def make_handler(app: ChartApp, port_ref: list[int]):
             except ValueError:  # a NaN slipped in (pandas' missing value): sent as null, not a broken endpoint
                 body = json.dumps(finite(data), allow_nan=False)
             self._send(status, body.encode(), "application/json")
+
+        def _failed(self, err: Exception) -> None:
+            """An error no route expects: logged and answered (500; 503 while another process holds
+            the database), not a dropped connection the page cannot tell from the app being gone."""
+            traceback.print_exc()
+            if isinstance(err, sqlite3.OperationalError) and "locked" in str(err):
+                return self._json({"error": "the database is busy (another process is writing to it): ask again shortly"},
+                                  HTTPStatus.SERVICE_UNAVAILABLE)
+            self._json({"error": f"the chart app failed: {type(err).__name__}: {err}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
         def _local(self) -> bool:
             # Only answer requests addressed to this machine (blocks DNS-rebinding from web pages).
@@ -1201,10 +1296,26 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 return False
             return True
 
+        def _from_this_app(self) -> bool:
+            """Whether an /api/ request comes from this app's own pages (or the address bar). A
+            browser says where a request comes from (Sec-Fetch-Site) and, for most, the page's
+            origin (Origin); a GET needs no header, so another site's page could otherwise reach
+            the routes that start work or write (an <img> asking /api/inventory for one ticker
+            after another, each a thread; /api/trading filling paper orders). A request saying
+            neither (not from a browser, or one too old to say) passes: writes still need
+            WRITE_HEADER, which no other page can send."""
+            site = self.headers.get("Sec-Fetch-Site")
+            origin = self.headers.get("Origin")
+            if (site is None or site in ("same-origin", "none")) \
+                    and (origin is None or origin == f"http://{self.headers.get('Host')}"):
+                return True
+            self._send(HTTPStatus.FORBIDDEN, b"forbidden: not from this app's pages", "text/plain")
+            return False
+
         def _write(self, method: str) -> None:
             """POST/PUT/DELETE for layouts. The custom header can't be sent cross-site without a
             CORS preflight, which this server never grants, so other web pages can't write."""
-            if not self._local():
+            if not self._local() or not self._from_this_app():
                 return
             if self.headers.get(WRITE_HEADER) != "1":
                 return self._send(HTTPStatus.FORBIDDEN, b"missing request header", "text/plain")
@@ -1273,6 +1384,10 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 return self._json({"error": f"bad request: {e}"}, HTTPStatus.BAD_REQUEST)
             except LookupError as e:
                 return self._json({"error": str(e)}, HTTPStatus.NOT_FOUND)
+            except ConnectionError:
+                pass  # the page went away
+            except Exception as e:  # noqa: BLE001 - answered, not dropped (_failed)
+                return self._failed(e)
 
         def do_POST(self) -> None:
             self._write("POST")
@@ -1287,6 +1402,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
             if not self._local():
                 return
             url = urlparse(self.path)
+            if url.path.startswith("/api/") and not self._from_this_app():
+                return
             q = {k: v[-1] for k, v in parse_qs(url.query).items()}
             try:
                 if url.path == "/api/layouts":
@@ -1370,6 +1487,10 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 return self._json({"error": str(e)}, HTTPStatus.NOT_FOUND)
             except Busy as e:
                 return self._json({"error": str(e)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            except ConnectionError:
+                return  # the page went away
+            except Exception as e:  # noqa: BLE001 - answered, not dropped (_failed)
+                return self._failed(e)
             return self._static(url.path)
 
         def _static(self, path: str) -> None:

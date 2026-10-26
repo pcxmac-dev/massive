@@ -105,7 +105,7 @@ def renko(bars: pd.DataFrame, box: float) -> pd.DataFrame:
     close; continuing needs one box beyond the last brick, reversing needs two."""
     if box <= 0:
         raise ValueError("box size must be positive")
-    _check_bricks(bars["close"].to_numpy(dtype=float) if not bars.empty else np.array([]), box)
+    _check_bricks(float(np.abs(np.diff(bars["close"].to_numpy(dtype=float))).sum()) if len(bars) > 1 else 0.0, box)
     out = _Out()
     if bars.empty:
         return out.frame()
@@ -263,10 +263,21 @@ def point_figure(bars: pd.DataFrame, box: float, reversal: int = 3) -> pd.DataFr
 MAX_BRICKS = 200_000  # more would be a page no chart can draw and a server's memory gone
 
 
-def _check_bricks(prices: np.ndarray, box: float) -> None:
-    """Refuse a box so small that the moves would make more than MAX_BRICKS bricks."""
-    if len(prices) > 1 and float(np.abs(np.diff(prices)).sum()) / box > MAX_BRICKS:
+def _check_bricks(moved: float, box: float) -> None:
+    """Refuse a box so small that the price's travel (`moved`) would make more than MAX_BRICKS bricks."""
+    if moved / box > MAX_BRICKS:
         raise ValueError(f"box size too small for this range: more than {MAX_BRICKS:,} bricks; choose a larger box")
+
+
+def _path_length(bars: pd.DataFrame) -> float:
+    """How far the price travels along range_bars' path: in each bar from the open to the nearer
+    extreme, across to the other and on to the close, and from each close to the next open (the
+    closes alone miss every bar whose range is wide and close flat)."""
+    o, h, l, c = (bars[k].to_numpy(dtype=float) for k in ("open", "high", "low", "close"))  # noqa: E741
+    low_first = np.abs(o - l) < np.abs(o - h)
+    inside = np.where(low_first, np.abs(o - l) + np.abs(h - l) + np.abs(h - c),
+                      np.abs(h - o) + np.abs(h - l) + np.abs(c - l))
+    return float(inside.sum() + np.abs(o[1:] - c[:-1]).sum())
 
 
 def range_bars(fine: pd.DataFrame, size: float) -> pd.DataFrame:
@@ -276,7 +287,7 @@ def range_bars(fine: pd.DataFrame, size: float) -> pd.DataFrame:
     unknown; the path is assumed open -> nearer extreme -> farther extreme -> close.
     """
     if size > 0 and not fine.empty:
-        _check_bricks(fine["close"].to_numpy(dtype=float), size)
+        _check_bricks(_path_length(fine), size)
     if size <= 0:
         raise ValueError("range size must be positive")
     out = _Out()

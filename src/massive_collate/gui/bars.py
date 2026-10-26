@@ -6,16 +6,18 @@ intervals are left out (as TradingView does).
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import math
 from collections import OrderedDict
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from dataclasses import replace
 from datetime import datetime, time
 from time import monotonic
 from time import time as _wall_clock
 from zoneinfo import ZoneInfo
-from threading import RLock
+from threading import Event, RLock
 
 import numpy as np
 import pandas as pd
@@ -23,6 +25,15 @@ import pandas as pd
 from ..live import PARTIAL_FEEDS
 from ..storage import Store
 from ..calc.derivatives import Model, apply_model
+
+
+# The view a request reads (server.ChartApp._view): filtered, bad data left out (the pruned list,
+# baddata.py), unless it asks for all of it (unfiltered). Per request thread; caches key on it.
+UNFILTERED = contextvars.ContextVar("unfiltered", default=False)
+
+
+def _filtered() -> bool:
+    return not UNFILTERED.get()
 
 
 def _money(step: float | None) -> str:
@@ -77,7 +88,8 @@ class Series:
     # when the series was last loaded whole (monotonic seconds).
     stored_hw: int = 0
     loaded_at: float = 0.0
-    fp: tuple = ()  # the store's fingerprint this series was loaded at (what results from it are cached under)
+    fp: tuple = ()  # the store's fingerprint this series was loaded at, and its view (what results are cached under)
+    filtered: bool = True  # the view it was read in: bad data left out, or all data (the chart's "All data")
 
     @property
     def around_the_clock(self) -> bool:
@@ -193,9 +205,11 @@ def bin_keys(index: pd.DatetimeIndex, period: str, span: int = 1, align_hours_to
     """The start of the bar each timestamp falls in (what `resample` groups by)."""
     if period in INTRADAY:
         # US equities: hour bars line up with the 09:30 open, like TradingView. Around-the-clock
-        # markets (fx, futures) use clock hours.
+        # markets (fx, futures) use clock hours; crypto and forex, whose days are UTC days, UTC
+        # clock hours (2 and 4 hours from New York's midnight split their days, and derive.py
+        # builds them from UTC midnight).
         offset = 570 * 60 if period == "hour" and align_hours_to_open else 0
-        return wall_clock_bins(index, period, span, offset)
+        return wall_clock_bins(index, period, span, offset, zone="UTC" if utc_days else ET)
     return calendar_key(index, period, utc=utc_days, session_hours=session_hours)
 
 
@@ -217,16 +231,22 @@ _ET_ZONE = ZoneInfo(ET)
 _ET_STANDARD_NS = int(_ET_ZONE.utcoffset(datetime(2001, 1, 15)).total_seconds() * 1e9)
 
 
-def wall_clock_bins(index: pd.DatetimeIndex, period: str, span: int, offset_seconds: int = 0) -> pd.DatetimeIndex:
+def wall_clock_bins(index: pd.DatetimeIndex, period: str, span: int, offset_seconds: int = 0,
+                    zone: str = ET) -> pd.DatetimeIndex:
     """Start of each timestamp's bar: every `span` units of New York wall-clock time from
     midnight (+ offset), the same on every day of the year whatever the daylight-saving
     change and however much data is loaded. The repeated hour when clocks go back keeps its
-    two halves apart (they are different moments)."""
+    two halves apart (they are different moments). With `zone` UTC (crypto and forex), of UTC
+    time from midnight; given in New York time either way."""
+    step = span * _UNIT_SECONDS[period]
+    if zone == "UTC":  # no clock changes: the epoch's own steps
+        secs = index.as_unit("ns").asi8 // 1_000_000_000
+        start = (secs - offset_seconds) // step * step + offset_seconds
+        return pd.DatetimeIndex(start * 1_000_000_000, dtype="datetime64[ns, UTC]").tz_convert(ET)
     local = index.tz_convert(ET)
     naive = local.tz_localize(None).as_unit("ns")
     day = naive.normalize()
     secs = (naive.asi8 - day.asi8) // 1_000_000_000
-    step = span * _UNIT_SECONDS[period]
     start = (secs - offset_seconds) // step * step + offset_seconds
     bins = pd.DatetimeIndex(day.asi8 + start * 1_000_000_000).as_unit("ns")
     utc_offset = naive.asi8 - local.tz_convert("UTC").tz_localize(None).as_unit("ns").asi8
@@ -506,6 +526,14 @@ class _SizedCache(OrderedDict):
         return self._bytes
 
 
+class _Reading:
+    """A series being read whole (BarEngine._once): what it is read at, and when done, the
+    series (ok: read without an error)."""
+
+    def __init__(self, fp: tuple):
+        self.fp, self.done, self.value, self.ok = fp, Event(), None, False
+
+
 # Every cache of the chart app together (CHART_CACHE_MB, config.py: a gigabyte by default), shared
 # out: the whole histories the series path still loads (continuous futures, the composite, box
 # plots), resampled and styled frames, the price-based charts' bricks and the 30-minute bins
@@ -535,13 +563,14 @@ class BarEngine:
         # One SQLite connection is shared by the server's threads: every store access holds this lock.
         self.lock = RLock()
         self._lock = self.lock
+        self._reading: dict[tuple, _Reading] = {}  # series being read whole, outside the lock (series())
 
     def budget(self, cache: str) -> int:
         """Bytes one of the chart app's caches may hold (CACHE_SHARES of cache_bytes)."""
         return int(self.cache_bytes * CACHE_SHARES[cache])
 
-    def _watch_item(self, source: str, ticker: str) -> dict | None:
-        return next(iter(self.store.watchlist(source, ticker)), None)
+    def _watch_item(self, source: str, ticker: str, store: Store | None = None) -> dict | None:
+        return next(iter((store or self.store).watchlist(source, ticker)), None)
 
     def sources_for(self, ticker: str) -> list[str]:
         """Feeds holding a ticker, best first: a feed with ticks (finer data) for it ranks first,
@@ -580,27 +609,73 @@ class BarEngine:
         return self.store.series_fingerprint(source, ticker)
 
     def series(self, source: str, ticker: str, adjust: str = "none") -> Series | None:
-        """A ticker's finest stored series. `adjust` applies to continuous futures only."""
+        """A ticker's finest stored series, in the request's view (filtered unless it asks for all
+        data). `adjust` applies to continuous futures only. A whole history is read outside the
+        engine's lock, on connections of its own (_read_whole): a continuous future's contracts or
+        twenty years of minutes held the lock for a minute, and every other chart and live stream
+        waited behind it."""
         ticker = ticker.upper()
+        view = _filtered()
+        key = (source, ticker, adjust, view)
+        if source == MERGED:
+            with self._lock:
+                ranked = self.sources_for(ticker)
+            parts = [p for p in (self.series(s, ticker, adjust) for s in ranked) if p]
+            fp = tuple(p.fp for p in parts)  # from the parts: the cache may have let one go since
+            return self._once(key, fp, lambda cached: self._merge(ticker, parts))
         with self._lock:
-            if source == MERGED:
-                parts = [self.series(s, ticker, adjust) for s in self.sources_for(ticker)]
-                fp = tuple(p.fp for p in parts if p)  # from the parts: the cache may have let one go since
-            else:
-                parts = None
-                fp = self._fingerprint(source, ticker)
-            key = (source, ticker, adjust)
-            cached = self._series.get(key)
-            if cached and cached[0] == fp:
-                return cached[1]
-            s = self._refresh_tail(cached[1]) if parts is None and cached and cached[1] is not None else None
-            if s is None:
-                s = self._merge(ticker, [p for p in parts if p]) if parts is not None else self._load(source, ticker, adjust)
+            fp = (self._fingerprint(source, ticker), view)
+        return self._once(key, fp, lambda cached: self._read_whole(source, ticker, adjust, view, cached))
+
+    def _once(self, key: tuple, fp: tuple, read) -> Series | None:
+        """The series cached under `key` at `fp`, or `read(cached entry)` outside the lock and kept:
+        once at a time per series, a request for one being read waiting for that read rather than
+        making its own (two charts of a future opened together read its contracts once)."""
+        while True:
+            with self._lock:
+                cached = self._series.get(key)
+                if cached and cached[0] == fp:
+                    return cached[1]
+                reading = self._reading.get(key)
+                if reading is None:
+                    reading = self._reading[key] = _Reading(fp)
+                    break
+            reading.done.wait()
+            if reading.ok and reading.fp == fp:
+                return reading.value  # (a history over the cache's budget is served, not kept)
+            # read at another fingerprint, or the read failed: look again
+        try:
+            s = read(cached)
             if s is not None:
-                s.adjust = adjust
                 s.fp = fp
-            self._series[key] = (fp, s)
+            with self._lock:
+                self._series[key] = (fp, s)
+            reading.value, reading.ok = s, True
             return s
+        finally:
+            with self._lock:
+                self._reading.pop(key, None)
+            reading.done.set()
+
+    def _read_whole(self, source: str, ticker: str, adjust: str, filtered: bool, cached: tuple | None) -> Series | None:
+        """The cached series with what was stored since spliced in (_refresh_tail: a few days of
+        bars, under the lock), or the series read whole through a store of its own, outside the
+        lock (an in-memory store has no files to share: under the lock)."""
+        s = None
+        if cached and cached[1] is not None:
+            with self._lock:
+                s = self._refresh_tail(cached[1])
+        if s is None:
+            store = self.store.reader()
+            try:
+                with self._lock if store is self.store else nullcontext():
+                    s = self._load(source, ticker, adjust, store, filtered)
+            finally:
+                if store is not self.store:
+                    store.close()
+        if s is not None:
+            s.adjust = adjust
+        return s
 
     def _merge(self, ticker: str, parts: list[Series]) -> Series | None:
         if not parts:
@@ -608,7 +683,7 @@ class BarEngine:
         if len(parts) == 1:
             p = parts[0]
             return Series(MERGED, ticker, p.kind, p.frame, p.daily, p.price_precision, p.volume_precision,
-                          p.asset, p.rolls, fine_sources=p.fine_sources, fine_spans=p.fine_spans)
+                          p.asset, p.rolls, fine_sources=p.fine_sources, fine_spans=p.fine_spans, filtered=p.filtered)
         # A feed of daily bars only (Tiingo, Cboe) adds days, not the base: with it in the base, every
         # intraday interval of the merged chart would go.
         day_only = [p for p in parts if p.kind == "day"]
@@ -637,34 +712,37 @@ class BarEngine:
             max(p.price_precision for p in parts), max(p.volume_precision for p in parts),
             parts[0].asset, parts[0].rolls,
             fine_sources=[src for p in parts for src in p.fine_sources],
-            fine_spans=sorted(span for p in parts for span in p.fine_spans),
+            fine_spans=sorted(span for p in parts for span in p.fine_spans), filtered=parts[0].filtered,
         )
 
-    def _load(self, source: str, ticker: str, adjust: str = "none") -> Series | None:
-        item = self._watch_item(source, ticker)
+    def _load(self, source: str, ticker: str, adjust: str = "none", store: Store | None = None,
+              filtered: bool = True) -> Series | None:
+        """A series read whole through `store` (the engine's own by default), in the view asked."""
+        store = store or self.store
+        item = self._watch_item(source, ticker, store)
         if item is None:  # a feed holding a symbol it does not watch (Bitstamp's live BTCUSD): the symbol's class
-            item_asset = next((w["asset"] for w in self.store.watchlist(ticker=ticker)), "stock")
+            item_asset = next((w["asset"] for w in store.watchlist(ticker=ticker)), "stock")
         asset = item["asset"] if item else item_asset
         if asset == "future" and item is not None:
-            return self._load_future(source, item, adjust)
-        s = self._load_plain(source, ticker)
+            return self._load_future(source, item, adjust, store, filtered)
+        s = self._load_plain(source, ticker, store, filtered)
         if s is not None:
             s.asset = asset
         return s
 
-    def _load_future(self, source: str, item: dict, adjust: str) -> Series | None:
+    def _load_future(self, source: str, item: dict, adjust: str, store: Store, filtered: bool = True) -> Series | None:
         from ..futures import continuous
 
-        rolls = self.store.rolls(source, item["source_ticker"], item["rank"])
+        rolls = store.rolls(source, item["source_ticker"], item["rank"])
         if not rolls:
             return None
         contracts = sorted({t for _, t in rolls})
-        kinds = {k for s, t, k in self.store.stored_series() if s == source and t in contracts}
+        kinds = {k for s, t, k in store.stored_series() if s == source and t in contracts}
         kind = next((k for k in BASE_KINDS if k in kinds and k != "day"), None)
         if kind is None:
             return None
-        frames = {c: frame_from_bars(self.store.load_bars([c], kind, 1, source=source)) for c in contracts}
-        dailies = {c: frame_from_bars(self.store.load_bars([c], "day", 1, source=source)) for c in contracts}
+        frames = {c: frame_from_bars(store.load_bars([c], kind, 1, source=source, filtered=filtered)) for c in contracts}
+        dailies = {c: frame_from_bars(store.load_bars([c], "day", 1, source=source, filtered=filtered)) for c in contracts}
         joined, roll_list = continuous(frames, rolls, adjust, sessions=dailies)
         daily, _ = continuous(dailies, rolls, adjust, sessions=dailies)
         frame = joined.drop(columns="contract")
@@ -676,6 +754,7 @@ class BarEngine:
             asset="future",
             rolls=[{"time": int(epoch_ms(pd.DatetimeIndex([r.time]))[0]), "session": str(r.session), "from": r.old,
                     "to": r.new, "gap": r.gap} for r in roll_list],
+            filtered=filtered,
         )
 
     STREAM_FEEDS_S = 60.0
@@ -720,7 +799,8 @@ class BarEngine:
         for kind, (lo, _) in changed.items():
             start = (pd.Timestamp(lo, unit="ms", tz="UTC") - pd.Timedelta(days=1)).date()
             cut = pd.Timestamp(start, tz="UTC")  # load_bars reads ts >= this
-            tail = frame_from_bars(self.store.load_bars([s.ticker], kind, 1, start=start, source=s.source))
+            tail = frame_from_bars(self.store.load_bars([s.ticker], kind, 1, start=start, source=s.source,
+                                                        filtered=s.filtered))
             prices.append(decimals(tail[["open", "high", "low", "close"]].to_numpy().ravel(), cap=6, minimum=2))
             if kind == s.kind:
                 frame = pd.concat([frame[frame.index < cut], tail]).sort_index()
@@ -731,14 +811,15 @@ class BarEngine:
                        fine_sources=[s.source] if fine else [], fine_spans=fine,
                        stored_hw=max([s.stored_hw, *(hi for _, hi in changed.values())]))
 
-    def _fine(self, source: str, ticker: str, kind: str) -> list:
+    def _fine(self, source: str, ticker: str, kind: str, store: Store | None = None) -> list:
         """Spans of one-second bars a minute series has (read by window, not loaded)."""
-        kinds = {k for src, t, k in self.store.stored_series() if src == source and t == ticker}
-        return [(a, b) for src, _, a, b in self.store.coverage_detail(ticker, "second") if src == source] \
+        store = store or self.store
+        kinds = {k for src, t, k in store.stored_series() if src == source and t == ticker}
+        return [(a, b) for src, _, a, b in store.coverage_detail(ticker, "second") if src == source] \
             if kind == "minute" and "second" in kinds else []
 
-    def _load_plain(self, source: str, ticker: str) -> Series | None:
-        kinds = {k for s, t, k in self.store.stored_series() if s == source and t == ticker}
+    def _load_plain(self, source: str, ticker: str, store: Store, filtered: bool = True) -> Series | None:
+        kinds = {k for s, t, k in store.stored_series() if s == source and t == ticker}
         # Minute bars are the base wherever a feed has them (second bars built from its ticks are a
         # layer read by window); a series of ticks or seconds alone is small and loaded whole.
         kind = "minute" if "minute" in kinds else next((k for k in BASE_KINDS if k in kinds), None)
@@ -748,16 +829,16 @@ class BarEngine:
         # bar's stored_at for the newest of them was a second scan of the whole series)
         started = int(_wall_clock() * 1000)
         if kind == "trades":
-            frame = frame_from_trades(self.store.load_trades(ticker, source))
+            frame = frame_from_trades(store.load_trades(ticker, source))
         else:
-            frame = frame_from_bars(self.store.load_bars([ticker], kind, 1, source=source))
+            frame = frame_from_bars(store.load_bars([ticker], kind, 1, source=source, filtered=filtered))
         daily = None
         if "day" in kinds and kind != "day":
-            daily = frame_from_bars(self.store.load_bars([ticker], "day", 1, source=source))
+            daily = frame_from_bars(store.load_bars([ticker], "day", 1, source=source, filtered=filtered))
         prices = frame[["open", "high", "low", "close"]].to_numpy().ravel()
-        fine = self._fine(source, ticker, kind)
+        fine = self._fine(source, ticker, kind, store)
         if source in MODEL_SOURCES:  # the composite carries its deviation across exchanges
-            stats = self.store.composite_stats(ticker, kind)
+            stats = store.composite_stats(ticker, kind)
             if not stats.empty:
                 idx = pd.to_datetime(stats["ts"], unit="ms", utc=True).dt.tz_convert(ET)
                 extra = pd.DataFrame({"env_high": stats["env_h"].to_numpy(), "env_low": stats["env_l"].to_numpy(),
@@ -769,7 +850,7 @@ class BarEngine:
             price_precision=decimals(prices, cap=6, minimum=2),
             volume_precision=decimals(frame["volume"].to_numpy(), cap=4),
             fine_sources=[source] if fine else [], fine_spans=fine,
-            stored_hw=started if kind in BAR_KINDS else 0, loaded_at=monotonic(),
+            stored_hw=started if kind in BAR_KINDS else 0, loaded_at=monotonic(), filtered=filtered,
         )
 
     PERIOD_CHOICES = (("second", (1, 30)), ("minute", (1, 5, 30)), ("hour", (1, 2, 4)),
@@ -1089,7 +1170,7 @@ class BarEngine:
 
     def _fine_bars(self, s: Series, span: int, session: str, lo_ms: int, hi_ms: int) -> pd.DataFrame:
         with self._lock:
-            raw = self.store.bars_window(s.fine_sources, s.ticker, "second", lo_ms, hi_ms)
+            raw = self.store.bars_window(s.fine_sources, s.ticker, "second", lo_ms, hi_ms, filtered=s.filtered)
         if raw.empty:
             return pd.DataFrame(columns=COLUMNS, index=pd.DatetimeIndex([], tz=ET))
         out = resample(frame_from_bars(raw), "second", span, session)
@@ -1216,7 +1297,7 @@ class BarEngine:
         parts = []
         with self._lock:
             for feed in feeds:
-                df = self.store.load_bars([s.ticker], period, span, start=start, source=feed)
+                df = self.store.load_bars([s.ticker], period, span, start=start, source=feed, filtered=s.filtered)
                 if len(df):
                     df = frame_from_bars(df)
                     parts.append(df[~df["derived"]])

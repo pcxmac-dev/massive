@@ -44,11 +44,14 @@ class Tape:
     def last(self, source, ticker):
         return self.bars[-1][4] if self.bars else None
 
+    def stored_to(self, source, ticker):
+        return max(b[0] for b in self.bars) + MIN if self.bars else None
+
 
 @pytest.fixture
 def book():
     tape = Tape()
-    b = PaperBook(sqlite3.connect(":memory:"), tape.after, tape.last)
+    b = PaperBook(sqlite3.connect(":memory:"), tape.after, tape.last, stored_to=tape.stored_to)
     b.tape = tape
     return b
 
@@ -91,6 +94,9 @@ def test_a_day_order_expires_at_the_close_and_a_good_till_cancelled_one_does_not
     day = book.place("SPCX", "*", "buy", 1, "limit", limit=1.0, now_ms=T0)
     gtc = book.place("SPCX", "*", "buy", 1, "limit", limit=1.0, tif="gtc", now_ms=T0)
     book.tape.add(0, 10, 10, 10, 10)
+    book.match(_ms("2026-10-15 10:00"))
+    assert book.order(day["id"])["status"] == "working"  # the rest of its session is not stored yet: it may fill
+    book.tape.bars.append((_ms("2026-10-14 16:30"), 10, 10, 10, 10))  # after hours: the session is stored
     book.match(_ms("2026-10-15 10:00"))
     assert book.order(day["id"])["status"] == "expired" and book.order(day["id"])["done_at"] == _ms("2026-10-14 16:00")
     assert book.order(gtc["id"])["status"] == "working"
