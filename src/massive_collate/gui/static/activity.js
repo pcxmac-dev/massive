@@ -15,7 +15,7 @@
                                // answer is work for the server, and the sync runs nearly all the time)
   const POLL_SLOW_MS = 10000;
   // As the server ranks them (gui/activity.py STATE_RANK): a blocked symbol needs attention before current ones.
-  const STATE_ORDER = { fetching: 0, next: 1, new: 2, backfilling: 3, queued: 4, blocked: 5, current: 6, retired: 7, closed: 8 };
+  const STATE_ORDER = { fetching: 0, next: 1, new: 2, backfilling: 3, queued: 4, held: 5, blocked: 6, current: 7, retired: 8, closed: 9 };
   const el = (id) => document.getElementById(id);
   const esc = window.MassiveIcons.esc;
   const safeUrl = window.MassiveIcons.safeUrl;

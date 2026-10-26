@@ -91,12 +91,16 @@ def symbol_status(item: dict, edges: tuple | None, floor: date, today: date, now
     source_through = None
     if probe and probe[1] is not None:
         source_through = datetime.fromtimestamp(probe[1] / 1000, ET)
+    # Behind by its last bar is not enough: a stock nobody traded after 16:37 stays short of the
+    # plan's last minute, yet it is complete once synced after the session was published. The
+    # sync's own rule (collector._due) decides: newer data can exist only if published since.
+    published_since = item.get("synced_at") is None or collector._due(item["asset"], tier, item["synced_at"], now, 0.0)
     if item["ticker"] == current:
         state = "fetching"
     elif not done:
         state = "backfilling" if reached else "queued"
-    elif fresh["state"] == "behind":
-        state = "new"  # the plan should have published newer data than is stored
+    elif fresh["state"] == "behind" and published_since:
+        state = "new"  # the plan has published newer data than is stored
     else:
         state = "current"
     return {
@@ -113,8 +117,8 @@ def symbol_status(item: dict, edges: tuple | None, floor: date, today: date, now
 
 # The Fetcher's table: the rows most worth seeing first (what is being fetched, then new data,
 # backfills, the queue ...), the initializer's order (most traded) within each state.
-STATE_RANK = {"fetching": 0, "next": 1, "new": 2, "backfilling": 3, "queued": 4, "blocked": 5, "current": 6,
-              "retired": 7, "closed": 8}
+STATE_RANK = {"fetching": 0, "next": 1, "new": 2, "backfilling": 3, "queued": 4, "held": 5, "blocked": 6,
+              "current": 7, "retired": 8, "closed": 9}
 DETAIL_ROWS = 300  # rows the Fetcher shows, each with what it still needs; the rest are counted
 
 
@@ -164,9 +168,9 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
         elif row["state"] != "fetching" and item["ticker"] in asked and (
                 item.get("synced_at") is None or item["synced_at"] < asked[item["ticker"]]["at"]):
             row.update(state="next", note="opened in the chart: taken before anything else")
-        elif paused and row["state"] in ("new", "current") and item["ticker"] not in picked and item.get("synced_at") \
+        elif paused and row["state"] == "new" and item["ticker"] not in picked and item.get("synced_at") \
                 and now - item["synced_at"] < timedelta(days=collector.UPDATES_GAP_DAYS):
-            row["note"] = f"updates paused until {paused['until'][:10]}: not picked, not missing much"
+            row.update(state="held", note=f"updates paused until {paused['until'][:10]}: not picked, not missing much")
         rows.append(row)
         items.append((item, floor))
     chosen = set(range(len(rows))) if detail is None else \

@@ -79,12 +79,14 @@ def test_the_daily_first_sweep_stops_for_a_symbol_opened_in_the_chart(store):
 
 def test_the_fetcher_lists_an_opened_symbol_as_next_and_says_why_others_wait(store):
     _caught_up(store, ["OPEN", "IDLE"], timedelta(days=2))
+    store.upsert_bars("fake", "IDLE", "minute", 1, [{"t": _ms(date(2026, 10, 16)) + 14 * 3_600_000, "o": 1, "h": 1,
+                                                     "l": 1, "c": 1, "v": 1}])  # behind: newer sessions published
     collector.request_priority(store, "OPEN", NOW.astimezone(timezone.utc))
     collector.set_updates_pause(store, 7, NOW)
     settings = load_settings(env={"MASSIVE_API_KEY": "k"}, env_file=None)
     rows = {r["ticker"]: r for r in activity.symbol_rows(store, settings, "fake", NOW)}
     assert rows["OPEN"]["state"] == "next" and "opened in the chart" in rows["OPEN"]["note"]
-    assert "updates paused until 2026-10-28" in rows["IDLE"].get("note", "")
+    assert rows["IDLE"]["state"] == "held" and "updates paused until 2026-10-28" in rows["IDLE"]["note"]
     order = [r["ticker"] for r in (list(rows.values())[i] for i in activity.ranked(list(rows.values())))]
     assert order[0] == "OPEN"
 
@@ -111,3 +113,21 @@ def test_an_opened_symbol_found_up_to_date_has_its_request_met(store):
     assert collector._unserved_request(store, "fake", NOW) == "OPEN"
     sync(FakeSource(entitled=("minute",), bars={"day": [], "minute": []}), store, FREE, NOW, log=lambda *_: None)
     assert collector._unserved_request(store, "fake", NOW) is None
+
+
+def test_a_stock_nobody_traded_late_is_current_once_synced_after_the_session(store):
+    # TMO's last trade on Friday was 16:37: short of the plan's last minute (19:59) for good, but
+    # synced on Saturday, after the session was published, it is complete: not "new" all weekend
+    from massive_collate.collector import ET as _ET
+
+    tier = TIERS["advanced"]
+    sat = datetime(2026, 10, 24, 21, 27, tzinfo=_ET)
+    item = {"ticker": "TMO", "asset": "stock", "resolution": "second", "listed_from": None,
+            "backfilled_to": date(2003, 9, 10), "synced_at": sat}
+    last = _ms(date(2026, 10, 23)) + (16 * 60 + 37) * 60_000
+    sunday = datetime(2026, 10, 25, 23, 0, tzinfo=_ET)
+    row = activity.symbol_status(item, (last - 60_000, last), date(2003, 9, 10), sunday.date(), sunday, tier, None)
+    assert row["state"] == "current"
+    row = activity.symbol_status({**item, "synced_at": datetime(2026, 10, 23, 12, 0, tzinfo=_ET)},
+                                 (last - 60_000, last), date(2003, 9, 10), sunday.date(), sunday, tier, None)
+    assert row["state"] == "new"  # synced before Friday's session ended: newer data was published since
