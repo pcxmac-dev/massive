@@ -136,3 +136,18 @@ def test_the_gov_view_says_which_sources_wait_and_why(store):
     assert states["fed-press"]["state"] == "not asked yet" and out["items"] == []
     assert any(p["name"] == "Settlement cycle" for p in out["parameters"])
     assert all("finra.org" not in s.url for s in gov.SOURCES)  # FINRA's site is linked, never read
+
+
+def test_the_gov_command_lists_each_sources_state(tmp_path, monkeypatch, capsys):
+    from massive_collate import cli
+
+    monkeypatch.setenv("MASSIVE_DB", str(tmp_path / "m.db"))
+    monkeypatch.setenv("MASSIVE_API_KEY", "k")
+    asked = []
+    monkeypatch.setattr(cli, "_fetch_gov", lambda settings, log: asked.append(settings.db_path))  # no real requests
+    assert cli.main(["gov"]) == 0
+    out = capsys.readouterr().out
+    assert asked and "Press releases" in out and "waiting  (SEC asks automated readers" in out
+    monkeypatch.setenv("MASSIVE_OFFLINE", "1")
+    asked.clear()
+    assert cli.main(["gov"]) == 0 and not asked and "nothing is fetched" in capsys.readouterr().out

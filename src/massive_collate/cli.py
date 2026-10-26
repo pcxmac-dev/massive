@@ -392,6 +392,24 @@ def _fetch_gov(settings: Settings, log) -> None:
         db.close()
 
 
+def cmd_gov(args, settings: Settings) -> int:
+    """Fetch the agencies' due feeds now (gov.py; the sync does it after each full run) and list
+    each source's state."""
+    from . import gov
+
+    if settings.offline:
+        print("this copy of the app is offline (MASSIVE_OFFLINE): nothing is fetched")
+    else:
+        _fetch_gov(settings, Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
+    db = gov.GovDB(gov.db_path(settings.db_path))
+    try:
+        for s in gov.view(db, contact_set=bool(settings.gov_contact))["sources"]:
+            print(f"{s['agency']:17} {s['title'][:56]:56} {s['state']}" + (f"  ({s['message']})" if s["message"] else ""))
+    finally:
+        db.close()
+    return 0
+
+
 def _sync(args, settings: Settings) -> tuple[int, int]:
     """The feeds' downloads: (exit code, feeds that ran)."""
     tickers = {t.upper() for t in getattr(args, "tickers", None) or []} or None
@@ -1165,6 +1183,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--daily", action="store_true",
                    help="fast audit: every stock's daily bars held from its listing date? (no requests)")
     s.set_defaults(func=cmd_audit)
+
+    s = sub.add_parser("gov", help="the regulators' news and rates (the Gov view): fetch the due ones now, "
+                                  "at most hourly each, and show each source's state")
+    s.set_defaults(func=cmd_gov)
 
     s = sub.add_parser("feeds", help="list the feeds and their state; reopen a closed one")
     s.add_argument("action", nargs="?", default="list", choices=["list", "reopen"])
