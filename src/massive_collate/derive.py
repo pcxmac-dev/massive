@@ -155,7 +155,7 @@ def build_chain(store, source: str, ticker: str, base: str, asset: str = "stock"
     edges = store.bar_edges(source, ticker, base)
     if edges is None:
         return 0
-    dirty = take_dirty(store, source, ticker, base)  # bad data pruned there: what was built over it goes
+    dirty = take_dirty(store, source, ticker, base)  # bad data pruned there: what was built over it goes (done_dirty)
     if built_to < 0:  # a first build covers everything held (bars from before stored_at have none)
         lo, hi = edges
     else:
@@ -198,6 +198,7 @@ def build_chain(store, source: str, ticker: str, base: str, asset: str = "stock"
     # Bars stored before this build started reading are in it, but a write committed late can
     # carry an earlier stored_at: the next build looks again from a minute before.
     store.kv_set(key, str(started - SLACK_MS))
+    done_dirty(store, source, ticker, base, dirty)
     return stored
 
 
@@ -212,14 +213,19 @@ def mark_dirty(store, source: str, ticker: str, base: str, lo_ms: int, hi_ms: in
 
 
 def take_dirty(store, source: str, ticker: str, base: str) -> tuple[int, int] | None:
-    """The span marked dirty for a build (cleared as it is taken)."""
-    taken: list = [None]
+    """The span marked dirty for a build. It stays marked until the build is done (done_dirty):
+    cleared as it was taken, a build that failed lost it, and the frames above stayed built over
+    the pruned bars."""
+    held = store.kv_json(DIRTY_KEY.format(source, ticker.upper(), base), None)
+    return (int(held[0]), int(held[1])) if held else None
 
-    def clear(held):
-        taken[0] = held
-        return None
-    store.kv_update(DIRTY_KEY.format(source, ticker.upper(), base), clear, None)
-    return (int(taken[0][0]), int(taken[0][1])) if taken[0] else None
+
+def done_dirty(store, source: str, ticker: str, base: str, taken: tuple[int, int] | None) -> None:
+    """Clear the dirty mark a finished build took; one widened meanwhile (another check pruned more)
+    stays for the next build."""
+    if taken is not None:
+        store.kv_update(DIRTY_KEY.format(source, ticker.upper(), base),
+                        lambda held: None if held and (int(held[0]), int(held[1])) == taken else held, None)
 
 
 def build_series(store, source: str, ticker: str, asset: str = "stock", log=print) -> int:

@@ -273,3 +273,81 @@ def test_the_directorys_allowance_is_reckoned_after_the_watchlist_has_spent(stor
                         lambda source, store, allowance, today, log: given.append(allowance) or 0)
     sync(src, store, FREE, NOW, log=_log, directory_allowance=lambda: left_today - src.requests_made)
     assert src.requests_made > 0 and given == [left_today - src.requests_made]  # what the run left, not the reserve
+
+
+# -- the lows ---------------------------------------------------------------------------------------
+
+def test_a_live_futures_contract_is_up_to_date_on_a_monday_with_fridays_session(store):
+    from massive_collate.symbols import resolve
+
+    monday = datetime(2026, 10, 26, 12, 0, tzinfo=ET)
+    day = lambda d, v: {"t": ms(datetime(d.year, d.month, d.day, tzinfo=ET)), "o": 1, "h": 1, "l": 1, "c": 1, "v": v}  # noqa: E731
+    d1, d2, friday = date(2026, 9, 17), date(2026, 9, 18), date(2026, 10, 23)
+    src = FakeSource(entitled=("minute",))
+    src.bars = {("NQU6", "day"): [day(d1, 900), day(d2, 100)],
+                ("NQZ6", "day"): [day(d1, 100), day(d2, 800), day(friday, 700)],
+                ("NQZ6", "minute"): [_bar(datetime(2026, 10, 23, 10, tzinfo=ET))]}
+    store.watch_spec("fake", resolve("NQ1!"))
+    sync(src, store, FREE, monday, log=_log)
+    src.bar_calls = []
+    sync(src, store, FREE, monday + timedelta(hours=1), log=_log)
+    assert [c for c in src.bar_calls if c[3] == "day"] == []  # Friday's is the session before Monday's
+
+
+def test_one_symbols_refusal_leaves_the_class_entitlement_alone(store):
+    from massive_collate.errors import NotEntitled
+
+    class OneRefused(FakeSource):
+        def bar_pages(self, ticker, start, end, timespan, multiplier=1, descending=False, asset="stock"):
+            if ticker == "ODD" and timespan == "minute":
+                self._spend()
+                raise NotEntitled(403, "not this symbol on your plan")
+            yield from super().bar_pages(ticker, start, end, timespan, multiplier, descending, asset)
+
+    store.watch("fake", ["AAA", "ODD"], "auto")
+    src = OneRefused(entitled=("second", "minute"), bars={"minute": [], "second": [], "day": []})
+    sync(src, store, FREE, NOW, log=_log)
+    assert {t for _, t, a in src.probed if a == "stock"} == {"AAPL"}  # the class asked with a symbol all plans cover
+    assert store.watchlist("fake", "ODD")[0]["resolution"] == "auto"  # found again next run
+    assert store.entitlement("fake", "stock", "second") is True  # not cleared for every stock by one refusal
+
+
+def test_a_build_that_fails_keeps_the_dirty_mark(store, monkeypatch):
+    import pytest
+
+    from massive_collate import derive
+
+    t0 = datetime(2026, 10, 20, 10, 0, tzinfo=ET)
+    store.upsert_bars("fake", "AAA", "minute", 1, [_bar(t0 + timedelta(minutes=i)) for i in range(10)])
+    derive.build_chain(store, "fake", "AAA", "minute")
+    derive.mark_dirty(store, "fake", "AAA", "minute", ms(t0), ms(t0) + 600_000)  # a pruned minute there
+
+    def fails(*a, **k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(derive, "aggregate", fails)
+    with pytest.raises(RuntimeError):
+        derive.build_chain(store, "fake", "AAA", "minute")
+    assert derive.take_dirty(store, "fake", "AAA", "minute") == (ms(t0), ms(t0) + 600_000)  # still to rebuild
+    monkeypatch.undo()
+    derive.build_chain(store, "fake", "AAA", "minute")
+    assert derive.take_dirty(store, "fake", "AAA", "minute") is None
+
+
+def test_a_watch_row_left_at_trades_reserves_no_window_of_ticks(store):
+    import pytest
+
+    from massive_collate.cli import build_parser
+    from massive_collate.coverage import FeedProfile, plan
+
+    feeds = {"fake": FeedProfile("fake", FREE, frozenset({"stock"}), 1),
+             "other": FeedProfile("other", FREE, frozenset({"stock"}), 0)}
+    store.watch("fake", ["AAA"], "minute")
+    store.watch("other", ["AAA"], "trades")  # from before ticks were dropped for history
+    lo = ms(datetime(2025, 10, 22, tzinfo=ET))
+    store.add_coverage("other", "AAA", "minute", lo, ms(datetime(2026, 10, 21, tzinfo=ET)), origin="none")
+    # the other feed was asked and has nothing there: this feed takes it (ticks for it never come)
+    gaps = plan(store, feeds["fake"], feeds, "AAA", "stock", "minute", date(2025, 10, 22), NOW)
+    assert gaps == [(lo, ms(datetime(2026, 10, 20, 20, 0, tzinfo=ET)))]
+    with pytest.raises(SystemExit):  # and no symbol is watched at 'trades' any more
+        build_parser().parse_args(["watch", "add", "AAA", "--resolution", "trades"])

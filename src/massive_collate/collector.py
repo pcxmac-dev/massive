@@ -11,7 +11,6 @@ part-way loses nothing and the stored data always stays contiguous.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Iterator
 from zoneinfo import ZoneInfo
@@ -95,6 +94,11 @@ def _guard(pages: Iterator[list[dict]]) -> Iterator[list[dict]]:
 
 # -- resolution --------------------------------------------------------------
 
+# The symbol a plan's entitlement for an asset class is asked with: one every plan of the class
+# covers (other classes' tickers differ by feed, so their own symbol is asked).
+PROBE_TICKERS = {"stock": "AAPL"}
+
+
 def resolve_resolution(
     source: DataSource, store: Store, ticker: str, log: Log = print, asset: str = "stock", fetch: str | None = None,
 ) -> str | None:
@@ -102,12 +106,14 @@ def resolve_resolution(
     `fetch` is the source's own ticker when it differs (I:COMP, C:EURUSD, a futures contract).
 
     Entitlements belong to the plan and asset class, not the ticker, so an answer is reused
-    for every symbol of that class for a week instead of probing each one again."""
+    for every symbol of that class for a week instead of probing each one again; a stock plan
+    is probed with a symbol every plan covers (PROBE_TICKERS), so one symbol's own refusal never
+    stands for the class."""
     for resolution in source.resolutions(asset):
         ok = known = store.entitlement(source.name, asset, resolution)
         if ok is None:
             try:
-                ok = source.is_entitled(resolution, fetch or ticker, asset)
+                ok = source.is_entitled(resolution, PROBE_TICKERS.get(asset) or fetch or ticker, asset)
             except Paused as e:
                 raise StopRun(str(e)) from e
             except BudgetExhausted as e:
@@ -125,83 +131,8 @@ def resolve_resolution(
 
 
 # -- one series ----------------------------------------------------------------
-
-TICK_STOP_FRACTION = 5  # below TICK_MIN_FREE_GB / 5 no ticks are downloaded at all
-
-
-def tick_space(store: Store, min_free_gb: int) -> str:
-    """'ok', 'no-backfill' (free disk under min_free_gb: only new ticks) or 'stop' (under a fifth
-    of it). Remembered in kv so the planner and the Fetcher know."""
-    import shutil
-
-    where = store.feeds_dir if store.feeds_dir and store.feeds_dir.is_dir() else Path.home()
-    free_gb = shutil.disk_usage(where).free / 1e9
-    state = "stop" if free_gb < min_free_gb / TICK_STOP_FRACTION else "no-backfill" if free_gb < min_free_gb else "ok"
-    if state == "ok":
-        store.kv_set("ticks:backfill-paused", "")
-    else:
-        store.kv_set("ticks:backfill-paused", f"{free_gb:.0f} GB free")
-    return state
-
-
-def sync_trades(source: DataSource, store: Store, ticker: str, floor: date, now: datetime, me: FeedProfile,
-                feeds: dict[str, FeedProfile], fetch: str | None = None, asset: str = "stock",
-                listed_from: date | None = None, log: Log = print, rules: dict | None = None) -> int:
-    """Ticks for the recent window (TICK_HISTORY_DAYS) the way bars are filled: spans nobody holds,
-    newest first, recorded in the ledger page by page. One-second and minute bars are then built
-    from them here (condition rules as the tape uses them), so those spans need no bar downloads."""
-    from .coverage import tick_floor
-
-    today = now.astimezone(ET).date()
-    lo = tick_floor(store, me, ticker, today, floor)
-    gaps = plan(store, me, feeds, ticker, asset, "trades", lo, now, listed_from)
-    edge = frontier_ms(asset, me.tier, now, "minute")  # the feed's publication edge
-    saved = 0
-    for i, (a, b) in enumerate(reversed(gaps)):
-        n, span = _fill_ticks(source, store, ticker, a, b, fetch or ticker, asset, frontier=b >= edge, rules=rules, log=log)
-        saved += n
-        if i == 0 and n:
-            _queue_audit(store, me, feeds, ticker, asset, "minute", span[1] - 60_000 if span else None)
-    return saved
-
-
-def _fill_ticks(source: DataSource, store: Store, ticker: str, a: int, b: int, fetch: str, asset: str,
-                frontier: bool, rules: dict | None, log: Log) -> tuple[int, tuple[int, int] | None]:
-    """Download ticks in [a, b) ms newest first; after every page record the span held and, at the
-    end (or when a cap stops the run), build bars for the whole minutes now fully held."""
-    if not has_open_time(asset, a, b):
-        store.add_coverage(source.name, ticker, "trades", a, b)
-        return 0, None
-    sessions = [x for x in freshness.CALENDAR.sessions(asset, _ms_to_date(a) - timedelta(days=1), _ms_to_date(b))
-                if ms(x.open) < b]
-    last_open = ms(sessions[-1].open) if sessions else a
-    saved, oldest, newest, span = 0, None, None, None
-
-    def top() -> int:
-        if not frontier or (newest is not None and newest >= last_open):
-            return b
-        return (newest // 60_000 + 1) * 60_000 if newest is not None else a
-
-    try:
-        for page in _guard(source.trade_pages(fetch, gte_ns=a * 1_000_000, lt_ns=b * 1_000_000, descending=True)):
-            if not page:
-                continue
-            saved += store.upsert_trades(source.name, ticker, page)
-            times = [int(t["sip_timestamp"]) for t in page]
-            o, n = min(times) // 1_000_000, max(times) // 1_000_000
-            oldest = o if oldest is None else min(oldest, o)
-            newest = n if newest is None else max(newest, n)
-            # held from the millisecond after the oldest: more ticks of that same millisecond may come
-            # on the next page, and a run stopped here asks for the whole of it again (the store
-            # keeps one of each)
-            store.add_coverage(source.name, ticker, "trades", oldest + 1, top())
-        _close_head(store, source.name, ticker, "trades", a, top(), oldest, frontier)
-        span = (a, top())
-    finally:  # also when a cap stops the run: build what is complete
-        if oldest is not None:
-            build_from_ticks(store, source.name, ticker, oldest, top(), rules, log)
-    return saved, span
-
+# No ticks are downloaded for history (the user's call, 2026-10-24: sources.base.RESOLUTIONS_BY_ASSET);
+# the live recorder records the streams' trades, and their bars are built here (build_from_ticks).
 
 def build_from_ticks(store: Store, source: str, ticker: str, a: int, b: int, rules: dict | None = None,
                      log: Log = print) -> int:
@@ -506,6 +437,11 @@ def sync_future(
         store.set_listing(source.name, ticker, None, None, today, f"{product} continuous #{rank}", "future")
     horizon = today + timedelta(days=ROLL_HORIZON_DAYS)
     known = {c["ticker"]: c for c in store.contracts(source.name, product)}
+    # A live contract is up to date with the CME session before today's: Friday's on a Monday, the
+    # one before a holiday after it (asked for yesterday's, each was asked on every run those days).
+    previous = max((s.day for s in freshness.CALENDAR.sessions("future", today - timedelta(days=10),
+                                                               today - timedelta(days=1), product) if s.day < today),
+                   default=today - timedelta(days=1))
     saved = 0
     for month, tickers in candidate_contracts(product, floor - timedelta(days=31), horizon):
         recs = [known[t] for t in tickers if t in known]
@@ -522,7 +458,7 @@ def sync_future(
         options = [live["ticker"]] if live else [t for t in tickers if known.get(t, {}).get("state") != "missing"]
         for t in options:
             stored = store.bar_range(source.name, t, "day")
-            if stored and _ms_to_date(stored[1]) >= today - timedelta(days=1):
+            if stored and _ms_to_date(stored[1]) >= previous:
                 break  # live and already up to date today
             start = _ms_to_date(stored[1]) if stored else max(floor, month - timedelta(days=CONTRACT_LEAD_DAYS))
             end = min(today, month + timedelta(days=62))
@@ -1212,7 +1148,7 @@ def sync(
     source: DataSource, store: Store, tier: Tier, now: datetime | None = None, log: Log = print,
     refresh_hours: float = 0.0, on_item: Callable[[str], None] | None = None, only: set[str] | None = None,
     directory_allowance: int | Callable[[], int] = 0, feeds: dict[str, FeedProfile] | None = None,
-    audits: tuple[int, int] = (0, 0), tick_min_free_gb: int = 250, published_only: bool = False,
+    audits: tuple[int, int] = (0, 0), published_only: bool = False,
 ) -> SyncResult:
     """One scheduled run over the watchlist for a source.
 
@@ -1413,10 +1349,13 @@ def sync(
                     else:
                         n = sync_bars(source, store, ticker, resolution, item_floor, horizon, **span)
                 except NotEntitled as e:
+                    # Its resolution is found again next run, from the class's answers: one symbol's
+                    # refusal no longer clears them (the next probe, with whatever ticker came next,
+                    # could mark the whole class refused for a week). A plan change is noticed by its
+                    # setting (cli._note_tier) and by the answers' age (a week).
                     log(f"{ticker} {resolution}: refused by your plan ({e.message}); re-checking resolution next run"
                         + refusals.note(ticker, now, e.message))
                     store.set_resolution(source.name, ticker, "auto")
-                    store.clear_entitlements(source.name)  # the plan may have changed: probe again
                     continue
                 refusals.clear(ticker)
                 result.rows += n

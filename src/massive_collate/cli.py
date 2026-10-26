@@ -479,7 +479,6 @@ def _sync(args, settings: Settings) -> tuple[int, int]:
                 result = collector.sync(source, store, feed.tier, log=log, refresh_hours=settings.refresh_hours,
                                         feeds=feed_profiles(settings), only=tickers, published_only=True,
                                         audits=(settings.audits_per_run, settings.audits_random_per_run),
-                                        tick_min_free_gb=settings.tick_min_free_gb,
                                         on_item=lambda t: store.set_run_current(args._run_id, t),
                                         directory_allowance=reserve_left)
                 args._rows = result.rows
@@ -1177,7 +1176,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("watch", help="manage the watchlist")
     s.add_argument("action", choices=["add", "remove", "list"])
     s.add_argument("tickers", nargs="*")
-    s.add_argument("--resolution", default="auto", choices=["auto", "trades", "second", "minute"])
+    # no "trades": ticks are not fetched for history (only the live recorder records trades)
+    s.add_argument("--resolution", default="auto", choices=["auto", "second", "minute"])
     s.add_argument("--every-feed", action="store_true",
                    help="add to every feed that can collect it (each span is still downloaded once)")
     s.set_defaults(func=cmd_watch)
