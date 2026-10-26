@@ -677,9 +677,12 @@ def cmd_pruned(args, settings: Settings) -> int:
             if not (args.feed and args.tickers and args.ts is not None):
                 raise SystemExit("release needs --feed, --tickers (one) and --ts")
             n = store.release_pruned(args.feed, args.tickers[0], args.timespan, 1, args.ts)
+            if n and args.timespan in baddata.BASES:  # the frames above are built again with it, however old the build
+                derive.mark_dirty(store, args.feed, args.tickers[0], args.timespan, args.ts,
+                                  args.ts + baddata.STEP_MS[args.timespan])
             print(f"{n} entr{'y' if n == 1 else 'ies'} released")
             return 0
-        tickers = args.tickers or sorted(set(store.pruned(args.feed)["ticker"]))
+        tickers = args.tickers or store.pruned_tickers(args.feed)  # a seek per symbol, not the whole list
         for ticker in tickers:
             print(f"{ticker}: " + "; ".join(f"{feed} " + ", ".join(f"{n:,} {rule}" for rule, n in c.items())
                                            for feed, c in store.pruned_counts(ticker).items()))

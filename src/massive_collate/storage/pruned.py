@@ -13,7 +13,8 @@ from typing import Iterable, Sequence
 import numpy as np
 import pandas as pd
 
-from .feeds import BAR_COLUMNS, _stored_ms
+from .common import write_transaction
+from .feeds import BAR_COLUMNS, _log_changes, _stored_ms
 
 RULES = ("malformed", "spike", "inconsistent", "rebuilt", "out_of_line")
 _VALUES = ["open", "high", "low", "close", "volume", "vwap", "transactions"]
@@ -27,7 +28,12 @@ class PrunedStore:
               excludes: bool, evidence: Sequence[dict] | None = None, code: str | None = None) -> int:
         """Put bars (columns ts and the bar values; stored_at, derivation if known) on a feed's
         pruned list under `rule`, each with its evidence. A time already pruned by this rule (also
-        one released since: a release is a decision) is left as it is. Returns entries added."""
+        one released since: a release is a decision) is left as it is; under "rebuilt", a version
+        already listed (its stored_at and derivation): each rebuild keeps the version it replaced,
+        so a second repair keeps the one the first made (by time alone it was passed over, and lost).
+        Looked for and written in one write transaction (two scans of a series at once listed a bar
+        twice). A bar left out of the filtered view (`excludes`) is logged in the change log, as a
+        write is (feeds._LOG_CHANGE). Returns entries added."""
         if rule not in RULES:
             raise ValueError(f"rule must be one of {RULES}")
         if bars is None or bars.empty:
@@ -36,27 +42,34 @@ class PrunedStore:
 
         feed = self._feed(source, create=True)
         ticker = ticker.upper()
-        held = {ts for (ts,) in feed.conn.execute(
-            "SELECT ts FROM pruned WHERE ticker=? AND timespan=? AND multiplier=? AND rule=? AND ts >= ? AND ts <= ?",
-            (ticker, timespan, multiplier, rule, int(bars["ts"].min()), int(bars["ts"].max())))}
         now, code = _ms_now(), code or code_version()
         evidence = list(evidence) if evidence is not None else [{}] * len(bars)
-        keep = ~bars["ts"].astype("int64").isin(held).to_numpy()
-        cols = {k: (bars[k].to_numpy(dtype=float) if k in bars else np.full(len(bars), np.nan))[keep]
+        cols = {k: (bars[k].to_numpy(dtype=float) if k in bars else np.full(len(bars), np.nan))
                 for k in (*_VALUES, "stored_at", "derivation")}
         num = lambda v, whole=False: None if np.isnan(v) else (int(v) if whole else float(v))
-        ts = bars["ts"].to_numpy(dtype="int64")[keep]
-        evidence = [ev for ev, k in zip(evidence, keep) if k]
-        rows = [(ticker, timespan, multiplier, int(ts[i]), *(num(cols[k][i], k == "transactions") for k in _VALUES),
-                 num(cols["stored_at"][i], True), num(cols["derivation"][i], True), rule, int(bool(excludes)),
-                 json.dumps(evidence[i], default=float), now, code) for i in range(len(ts))]
-        with feed.conn:
-            feed.conn.executemany(
+        ts = bars["ts"].to_numpy(dtype="int64")
+        version = rule == "rebuilt"  # a version is listed once; any other rule lists a time once
+        same = " AND stored_at IS ? AND derivation IS ?" if version else ""
+        rows = []
+        for i in range(len(ts)):
+            key = (ticker, timespan, multiplier, int(ts[i]), rule)
+            stored_at, derivation = num(cols["stored_at"][i], True), num(cols["derivation"][i], True)
+            rows.append((*key[:4], *(num(cols[k][i], k == "transactions") for k in _VALUES), stored_at, derivation,
+                         rule, int(bool(excludes)), json.dumps(evidence[i], default=float), now, code,
+                         *key, *((stored_at, derivation) if version else ())))
+        with write_transaction(feed.conn):
+            added = feed.conn.executemany(
                 "INSERT OR IGNORE INTO pruned (ticker, timespan, multiplier, ts, open, high, low, close, volume, vwap, "
                 "transactions, stored_at, derivation, rule, excludes, evidence, pruned_at, code) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+                "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM pruned "
+                f"WHERE ticker=? AND timespan=? AND multiplier=? AND ts=? AND rule=?{same})", rows).rowcount
+            if excludes and added:  # the entries this call made (its pruned_at) change the filtered view
+                _log_changes(feed.conn, ticker, timespan, multiplier, [t for (t,) in feed.conn.execute(
+                    "SELECT ts FROM pruned WHERE ticker=? AND timespan=? AND multiplier=? AND rule=? AND pruned_at=? "
+                    "AND ts >= ? AND ts <= ?", (ticker, timespan, multiplier, rule, now, int(ts.min()), int(ts.max())))],
+                             now)
         self._wrote()
-        return len(rows)
+        return max(0, added)
 
     def pruned(self, source: str | None = None, ticker: str | None = None, timespan: str | None = None,
                rule: str | None = None, active: bool = False, limit: int | None = None) -> pd.DataFrame:
@@ -99,20 +112,42 @@ class PrunedStore:
 
     def release_pruned(self, source: str, ticker: str, timespan: str, multiplier: int, ts: int,
                        rule: str | None = None) -> int:
-        """Put a pruned bar back in the filtered view (the entry stays, marked released)."""
+        """Put a pruned bar back in the filtered view (the entry stays, marked released). Logged in
+        the change log as a write of that bar (feeds._LOG_CHANGE), so the frames built above it
+        are built again with it and the chart's caches see it; nothing changed that otherwise.
+        (The command line also marks derive's span dirty, for a series whose last build is older
+        than the change log.)"""
         feed = self._feed(source)
         if feed is None:
             return 0
-        sql = ("UPDATE pruned SET released_at=? WHERE ticker=? AND timespan=? AND multiplier=? AND ts=? "
-               "AND released_at IS NULL")
-        args: list = [_ms_now(), ticker.upper(), timespan, multiplier, int(ts)]
+        where = "WHERE ticker=? AND timespan=? AND multiplier=? AND ts=? AND released_at IS NULL"
+        args: list = [ticker.upper(), timespan, multiplier, int(ts)]
         if rule:
-            sql += " AND rule=?"
+            where += " AND rule=?"
             args.append(rule)
-        with feed.conn:
-            n = feed.conn.execute(sql, args).rowcount
+        now = _ms_now()
+        with write_transaction(feed.conn):
+            shown = feed.conn.execute(f"SELECT 1 FROM pruned {where} AND excludes=1 LIMIT 1", args).fetchone()
+            n = feed.conn.execute(f"UPDATE pruned SET released_at=? {where}", [now, *args]).rowcount
+            if shown:  # it was left out of the filtered view: now it is in it
+                _log_changes(feed.conn, ticker.upper(), timespan, multiplier, [int(ts)], now)
         self._wrote()
         return n
+
+    def pruned_tickers(self, source: str | None = None) -> list[str]:
+        """The symbols with a pruned list on a feed (every feed without one), without reading the
+        list: one seek per symbol in pruned_by_time (a loose index scan; the list holds millions of
+        entries, and reading them whole to list their symbols took gigabytes)."""
+        out: set[str] = set()
+        for feed in [self._feed(source)] if source else self._open_feeds():
+            if feed is None:
+                continue
+            row = feed.conn.execute("SELECT ticker FROM pruned INDEXED BY pruned_by_time ORDER BY ticker LIMIT 1").fetchone()
+            while row is not None:
+                out.add(row[0])
+                row = feed.conn.execute("SELECT ticker FROM pruned INDEXED BY pruned_by_time WHERE ticker > ? "
+                                        "ORDER BY ticker LIMIT 1", row).fetchone()
+        return sorted(out)
 
     def series_rows(self, source: str, ticker: str, timespan: str, lo_ms: int, hi_ms: int) -> pd.DataFrame:
         """All of a series' bars in [lo, hi) as stored, bad data included: the feed's own first, those
