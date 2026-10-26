@@ -782,6 +782,7 @@ def daily_first(source: DataSource, store: Store, me: FeedProfile, feeds: dict[s
                 if item.get("retired_on") else now
             n = sync_bars(source, store, ticker, "day", start, until, me=me, feeds=feeds, fetch=item["source_ticker"],
                           asset="stock", invert=item["invert"], listed_from=listing.listed_from, log=log)
+            fetch_icon(source, store, ticker, log)  # its details were just read: the logo with them
         except NotEntitled as e:
             log(f"{ticker} day: refused by your plan ({e.message})")
             continue
@@ -1048,6 +1049,13 @@ def sync(
             store.kv_set(f"symbols:{source.name}:{now.astimezone(timezone.utc):%Y-%m}", "[]")
             log(f"{source.name}: this month's symbol places were taken with nothing sent; given back")
         store.kv_set(f"ledger:month-places:{source.name}:v1", now.isoformat())
+    if not store.kv_get(f"icons:unasked:{source.name}:v1"):
+        # one-off: icons recorded as "none" for stocks whose details were never read (they were not
+        # asked, so they waited 30 days for nothing); asked once their details are in
+        n = store.forget_unasked_icons(source.name)
+        store.kv_set(f"icons:unasked:{source.name}:v1", now.isoformat())
+        if n:
+            log(f"{source.name}: {n:,} icons marked missing without being asked; asked again with their details")
     if not store.kv_get("ledger:empty-heads:v1"):  # one-off: feeds' empty history heads become 'none'
         n = store.mark_empty_heads()
         store.kv_set("ledger:empty-heads:v1", now.isoformat())
@@ -1504,7 +1512,10 @@ def fill_directory_icons(source: DataSource, store: Store, allowance: int, today
 def fetch_icon(source: DataSource, store: Store, ticker: str, log: Log = print) -> bool:
     """Download a stock's company icon once (one request) and keep it locally.
     Asked for only after the symbol's data is complete, so icons never delay a backfill."""
-    url = ((store.details(source.name, ticker) or {}).get("branding") or {}).get("icon_url")
+    details = store.details(source.name, ticker)
+    if not details:  # its reference record was never read: not "no logo", just not asked yet
+        return False
+    url = (details.get("branding") or {}).get("icon_url")
     if store.icon_checked(source.name, ticker, url=url):  # fetched from this link already (or none lately)
         return False
     if not url:

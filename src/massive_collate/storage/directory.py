@@ -39,6 +39,14 @@ class DirectoryStore:
             return url is None or row[2] == url
         return (datetime.now(timezone.utc) - datetime.fromisoformat(row[1])).days < max_age_days
 
+    def forget_unasked_icons(self, source: str) -> int:
+        """Drop "no icon" records of tickers whose details were never read (nothing was asked).
+        Returns how many."""
+        with self.conn:
+            return self.conn.execute(
+                "DELETE FROM icons WHERE source=? AND data IS NULL AND url IS NULL AND ticker NOT IN "
+                "(SELECT ticker FROM instrument_details WHERE source=?)", (source, source)).rowcount
+
     def stale_details(self, source: str, tickers_types: tuple[str, ...], max_age_days: int, limit: int) -> list[str]:
         """Directory companies whose stored details (and so logo link) are older than max_age_days."""
         cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat(timespec="seconds")

@@ -106,3 +106,30 @@ def test_an_archive_spends_its_months_places_only_on_history_it_can_fill(store, 
     rows = {w["ticker"]: w for w in store.watchlist("fake")}
     assert rows["COVERED"]["closed_at"] is not None and rows["UNCHECKED"]["closed_at"] is None
     assert any("1 stocks wait for a listing date from another feed" in m for m in logged)
+
+
+def test_a_stock_whose_details_were_never_read_is_not_marked_logo_less(store):
+    src = FakeSource(entitled=("minute",))
+    store.watch("fake", ["UNREAD", "READ"], "minute")
+    assert collector.fetch_icon(src, store, "UNREAD") is False
+    assert not store.icon_checked("fake", "UNREAD")  # not asked: nothing recorded, asked once its details are in
+    store.set_details("fake", "READ", {"name": "Read Corp"})  # read, and no logo link in it
+    collector.fetch_icon(src, store, "READ")
+    assert store.icon_checked("fake", "READ")  # genuinely none: not asked again for 30 days
+    store.save_icon("fake", "UNREAD", None, None, None)  # recorded by the old code
+    assert store.forget_unasked_icons("fake") == 1 and store.icon_checked("fake", "READ")
+
+
+def test_the_daily_sweep_brings_each_stocks_logo_with_its_details(store):
+    from massive_collate.models import Instrument
+
+    class WithLogos(FakeSource):
+        def icon(self, url):
+            self._spend()
+            return b"<svg/>", "image/svg+xml"
+
+    listing = Instrument("LOGO", list_date=date(2020, 1, 2), details={"branding": {"icon_url": "https://x/logo.svg"}})
+    src = WithLogos(entitled=("minute",), bars={"day": _days(date(2025, 6, 2)), "minute": []}, listing=listing)
+    store.watch("fake", ["LOGO"], "minute")
+    sync(src, store, FREE, NOW, log=lambda *_: None)
+    assert store.icon_checked("fake", "LOGO", url="https://x/logo.svg")
