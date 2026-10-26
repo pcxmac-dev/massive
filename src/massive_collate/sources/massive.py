@@ -76,6 +76,9 @@ class MassiveClient:
         self.on_retry: Callable[[float, int], None] | None = None
         # Asked before every request: a reason to stop (the user paused background fetching), or None.
         self.should_stop: Callable[[], str | None] | None = None
+        # Asked as each request goes, counting it: False once the machine's requests on this key
+        # today have reached the daily cap (every database on the machine counts: MachineLedger).
+        self.take_day: Callable[[], bool] | None = None
 
     def get(self, path_or_url: str, params: dict[str, Any] | None = None) -> dict:
         resp = self._request(path_or_url, params)
@@ -112,6 +115,8 @@ class MassiveClient:
             reason = self.should_stop() if self.should_stop else None  # paused during the window's wait
             if reason:
                 raise Paused(reason)
+            if self.take_day is not None and not self.take_day():
+                raise BudgetExhausted("the daily request cap is reached on this machine (all its databases together)")
             self.requests_made += 1  # counted before it goes: one that times out may have reached the server
             if self.on_request:
                 self.on_request(self.requests_made)

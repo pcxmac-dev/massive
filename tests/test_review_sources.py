@@ -138,6 +138,105 @@ def test_each_asset_classs_window_keeps_the_margin_of_a_few_a_minute():
     assert all(lim.period == 62.0 for lim in client.class_limiters.values())
 
 
+# -- one request window per key on the machine (finding 21) -----------------------------------------
+
+class _Clock:
+    def __init__(self):
+        self.now, self.sleeps = 1_000_000.0, []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def _built(env: dict, clock: _Clock):
+    from massive_collate.config import load_settings
+    from massive_collate.sources import build_source
+
+    client = build_source("massive", load_settings(env={"MASSIVE_API_KEY": "FAKE", **env}, env_file=None)).client
+    client._limiter._clock, client._limiter._sleep = clock, clock.sleep
+    return client
+
+
+def test_two_databases_on_one_key_share_one_window_on_the_machine():
+    clock = _Clock()
+    first, copy = _built({}, clock), _built({}, clock)  # say the app's database and a test copy's
+    for _ in range(5):
+        first._limiter.acquire()
+    assert clock.sleeps == []
+    copy._limiter.acquire()  # its own database's window is empty, the server's is not
+    assert clock.sleeps == [62.0]
+    other = _built({"MASSIVE_API_KEY": "ANOTHER"}, clock)  # another key: its own window
+    other._limiter.acquire()
+    assert clock.sleeps == [62.0]
+
+
+def test_the_window_is_taken_in_one_transaction_whoever_asks_at_once(tmp_path):
+    import threading
+
+    from massive_collate.ratelimit import MachineLedger, RateLimiter
+
+    class Full(Exception):
+        pass
+
+    def full(seconds):
+        raise Full
+
+    taken, errors = [], []
+
+    def run():
+        limiter = RateLimiter(5, 60.0, clock=lambda: 1000.0, sleep=full)  # a process of its own
+        limiter.share(MachineLedger("massive", "KEY", path=tmp_path / "windows.db"))
+        try:
+            for _ in range(3):
+                limiter.acquire()
+                taken.append(1)
+        except Full:
+            pass
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=run) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == [] and len(taken) == 5  # never a sixth in the window, however they interleave
+
+
+def test_the_daily_cap_holds_for_the_machine_not_each_database():
+    from massive_collate.errors import BudgetExhausted
+
+    clock = _Clock()
+    first, copy = (_built({"MASSIVE_MAX_REQUESTS_PER_DAY": "3"}, clock) for _ in range(2))
+    for client in (first, copy):
+        client._session = FakeSession([FakeResponse(200, {})] * 3)
+    first.get("/x")
+    first.get("/x")
+    copy.get("/x")
+    with pytest.raises(BudgetExhausted, match="on this machine"):
+        copy.get("/x")
+    assert len(copy._session.calls) == 1 and copy.requests_made == 1  # refused before it went
+
+
+def test_the_databases_window_is_kept_atomically_too(tmp_path):
+    from massive_collate.ratelimit import KvLedger, RateLimiter, load_times
+
+    clock = _Clock()
+    with Store(tmp_path / "m.db") as a, Store(tmp_path / "m.db") as b:  # two processes on one database
+        one, two = (RateLimiter(5, 60.0, clock=clock, sleep=clock.sleep) for _ in range(2))
+        one.share(KvLedger(a, "massive"))
+        two.share(KvLedger(b, "massive"))
+        for limiter in (one, two, one, two, one):
+            limiter.acquire()
+        assert clock.sleeps == [] and len(load_times(a, "massive")) == 5
+        two.acquire()
+        assert clock.sleeps == [60.0]
+
+
 def test_the_futures_day_window_ends_with_the_last_days_session():
     client, session = _client([FakeResponse(200, {"results": []})])
     list(MassiveSource(client).bar_pages("ESZ6", date(2026, 10, 19), date(2026, 10, 23), "day", asset="future"))
