@@ -2,6 +2,28 @@
 
 Working notes so work can resume in a fresh session. Newest first.
 
+## State (2026-10-26, early morning)
+
+- **Code review**: CODE_REVIEW.md (top level): five reviews by area, fixes made, 44 open findings
+  ranked, disk measurements and the decisions they need. Start there.
+- **Fetcher principles** the user set (also in Claude's memory): live feeds (real time or delayed)
+  own the session under way, history takes completed sessions only (per venue: BOATS makes US
+  stocks ~24/5); fetch only 1 s, 1 min and 1 day (1 min only before 1-second data starts), derive
+  the rest; interrogate each source's full range; a second source with more range wins; resume with
+  an overlap audit; picked symbols (opened, on a watchlist) updated regularly, the rest can be paused.
+- **Done tonight** (committed; the sync and chart app on 8765 still run older code until restarted):
+  history horizon (completed sessions only), writes sorted oldest first (pages were half empty:
+  1.76x disk), no fetching of feeds' own 5 min / 1 h candles, fetch order (opened, watchlists, the
+  last session's big movers, then most traded), daily-bars-first sweep, Tiingo with its key (AAPL
+  daily complete from 1980), `audit --daily`, updates pause (7 days to 2 Nov), Gov view, live key
+  reading, `tools/set-key.ps1`, listing-identity fix (Alpaca's empty check blanked Massive's).
+- **Needs the user**: restart the sync and chart app to run tonight's code; decide on compacting
+  massive.db (~150 GB), dropping built-bar revisions (~14 M rows+), the pre-split backups (12 GB),
+  moving tick files (82 GB), and which symbols get 1-second depth.
+- **Redesign still to build**: per-source range interrogation and the 1 s / 1 min / 1 day map per
+  symbol (with the transition rule), per-venue session calendars (BOATS), best current-session feed
+  per symbol, resume with an overlap audit.
+
 ## State (2026-10-24, night)
 
 - **Bug sweeps done** (5, with erroneous process behaviour in mind; 564 tests): processes and
