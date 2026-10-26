@@ -263,10 +263,16 @@ def parse_constituents(url: str, blob: bytes) -> Parsed:
     return out
 
 
+# A year's COT file is final only from this day of the next January: its last Tuesday's report
+# comes out the Friday after (in January when the year ends late in the week, later still after a
+# holiday), and a file closed before it is in would never have it.
+COT_FINAL_FROM = (1, 15)
+
+
 def _cot_files(today: date) -> list[tuple[str, bool]]:
-    # 1986-2016 in one archive, then a file a year; a past year's file is final
+    # 1986-2016 in one archive, then a file a year; a past year's file is final once its last report is out
     return [(CFTC + "deacot1986_2016.zip", True)] + [
-        (f"{CFTC}deacot{y}.zip", y < today.year) for y in range(2017, today.year + 1)]
+        (f"{CFTC}deacot{y}.zip", today >= date(y + 1, *COT_FINAL_FROM)) for y in range(2017, today.year + 1)]
 
 
 DATASETS: dict[str, Dataset] = {d.name: d for d in (
