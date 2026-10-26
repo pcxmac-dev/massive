@@ -27,7 +27,7 @@ from .. import config, live
 from ..config import Settings, load_settings
 from ..storage import LayoutLimit, Store
 from . import activity, astro
-from .bars import CALENDAR, PRICE_BASED, TIME_TYPES, BarEngine, Style, resample
+from .bars import CALENDAR, PRICE_BASED, TIME_TYPES, BarEngine, Style, _BoundedCache, resample
 from ..calc.derivatives import Model
 from .stats import details_subset, key_stats
 
@@ -48,6 +48,8 @@ def finite(data):
 MAX_LIMIT = 20000
 CALENDAR_MAX_DAYS = 3700  # the widest /api/calendar range (timeaxis.js asks for at most CALENDAR_DAYS)
 ROW_COUNTS_TTL_S = 600  # a symbol's bar counts (the Data panel) are counted again after this
+ROW_COUNTS_KEPT = 64  # the symbols whose counts are kept (the ones counted last)
+COUNTING_AT_ONCE = 2  # counts made at once, each on a thread and connections of its own
 PRUNED_COUNTS_TTL_S = 300  # a symbol's pruned-list counts by rule (an index scan of up to millions)
 ACTIVITY_TTL_S = 2.0  # the status answer shared by polls this close together
 SYMBOL_ROWS_TTL_S = 10.0  # its symbols' rows (index seeks in every feed file) kept this long
@@ -106,9 +108,13 @@ class ChartApp:
         # shared lock, and the symbol list for the picker's map, the calendar and the side panel
         # all waited behind it).
         self._panel_store, self._panel_lock = store.reader(), threading.Lock()
-        self._row_counts: dict[str, tuple[float, dict]] = {}  # ticker -> (counted at, row_counts)
+        # ticker -> (counted at, row_counts) for the ROW_COUNTS_KEPT symbols counted last, and the
+        # tickers being counted (at most COUNTING_AT_ONCE): under _counts_lock (_counts)
+        self._row_counts: OrderedDict[str, tuple[float, dict]] = _BoundedCache(ROW_COUNTS_KEPT)
         self._counting: set[str] = set()
-        self._pruned_counts: dict[str, tuple[float, dict]] = {}  # ticker -> (counted at, by feed and rule)
+        self._counts_lock = threading.Lock()
+        # ticker -> (counted at, by feed and rule) for the ROW_COUNTS_KEPT symbols counted last: under _panel_lock
+        self._pruned_counts: OrderedDict[str, tuple[float, dict]] = _BoundedCache(ROW_COUNTS_KEPT)
         self._status_store, self._status_lock = store.reader(), threading.Lock()  # the Fetcher view and status bar
         self._activity: dict[tuple, tuple[float, dict]] = {}
         self._activity_rows: dict = {}  # activity.activity's symbol rows (SYMBOL_ROWS_TTL_S)
@@ -922,25 +928,33 @@ class ChartApp:
 
         t = ticker.upper()
         rank = self.engine.sources_for(t)
-        counted = self._row_counts.get(t)
+        counted = self._counts(t)  # the counts follow on the panel's next read
         with self._panel_lock:
             out = inventory.symbol_inventory(self._panel_store, t, rank, counts=counted[1] if counted else {})
-        if (counted is None or time.monotonic() - counted[0] > ROW_COUNTS_TTL_S) and t not in self._counting:
-            self._counting.add(t)  # the counts follow on the panel's next read
-            threading.Thread(target=self._count_rows, args=(t,), daemon=True, name=f"count-{t}").start()
         return out
 
     def _base_rows(self, ticker: str, feeds: list[str], base: str) -> int | None:
         """The bars a series holds at its base level (the feed holding most, its own and built), from
         the background counts (None until they are made; asked for here)."""
-        counted = self._row_counts.get(ticker)
-        if (counted is None or time.monotonic() - counted[0] > ROW_COUNTS_TTL_S) and ticker not in self._counting:
-            self._counting.add(ticker)
-            threading.Thread(target=self._count_rows, args=(ticker,), daemon=True, name=f"count-{ticker}").start()
+        counted = self._counts(ticker)
         if counted is None:
             return None
         rows = counted[1]
         return max((rows.get((f, "bars", base, 1), 0) + rows.get((f, "built_bars", base, 1), 0) for f in feeds), default=0)
+
+    def _counts(self, ticker: str) -> tuple[float, dict] | None:
+        """A symbol's bar counts frame by frame as last made (counted at, counts), or None; made again
+        in the background when missing or older than ROW_COUNTS_TTL_S. At most COUNTING_AT_ONCE at
+        once (each a thread and connections of its own: a page asking for one ticker after another
+        started one each), and the ROW_COUNTS_KEPT symbols counted last are kept; the rest are
+        counted when asked again."""
+        with self._counts_lock:
+            counted = self._row_counts.get(ticker)
+            stale = counted is None or time.monotonic() - counted[0] > ROW_COUNTS_TTL_S
+            if stale and ticker not in self._counting and len(self._counting) < COUNTING_AT_ONCE:
+                self._counting.add(ticker)
+                threading.Thread(target=self._count_rows, args=(ticker,), daemon=True, name=f"count-{ticker}").start()
+        return counted
 
     def _count_rows(self, ticker: str) -> None:
         """Count a symbol's bars frame by frame (inventory.row_counts) on connections of this thread."""
@@ -949,11 +963,14 @@ class ChartApp:
         reader = None
         try:
             reader = self.store.reader()
-            self._row_counts[ticker] = (time.monotonic(), inventory.row_counts(reader, ticker))
+            counts = inventory.row_counts(reader, ticker)
+            with self._counts_lock:
+                self._row_counts[ticker] = (time.monotonic(), counts)
         except Exception:  # noqa: BLE001 - the panel shows no counts; the next read tries again
             pass
         finally:
-            self._counting.discard(ticker)
+            with self._counts_lock:
+                self._counting.discard(ticker)
             if reader is not None and reader is not self.store:
                 reader.close()
 
@@ -1227,10 +1244,26 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 return False
             return True
 
+        def _from_this_app(self) -> bool:
+            """Whether an /api/ request comes from this app's own pages (or the address bar). A
+            browser says where a request comes from (Sec-Fetch-Site) and, for most, the page's
+            origin (Origin); a GET needs no header, so another site's page could otherwise reach
+            the routes that start work or write (an <img> asking /api/inventory for one ticker
+            after another, each a thread; /api/trading filling paper orders). A request saying
+            neither (not from a browser, or one too old to say) passes: writes still need
+            WRITE_HEADER, which no other page can send."""
+            site = self.headers.get("Sec-Fetch-Site")
+            origin = self.headers.get("Origin")
+            if (site is None or site in ("same-origin", "none")) \
+                    and (origin is None or origin == f"http://{self.headers.get('Host')}"):
+                return True
+            self._send(HTTPStatus.FORBIDDEN, b"forbidden: not from this app's pages", "text/plain")
+            return False
+
         def _write(self, method: str) -> None:
             """POST/PUT/DELETE for layouts. The custom header can't be sent cross-site without a
             CORS preflight, which this server never grants, so other web pages can't write."""
-            if not self._local():
+            if not self._local() or not self._from_this_app():
                 return
             if self.headers.get(WRITE_HEADER) != "1":
                 return self._send(HTTPStatus.FORBIDDEN, b"missing request header", "text/plain")
@@ -1317,6 +1350,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
             if not self._local():
                 return
             url = urlparse(self.path)
+            if url.path.startswith("/api/") and not self._from_this_app():
+                return
             q = {k: v[-1] for k, v in parse_qs(url.query).items()}
             try:
                 if url.path == "/api/layouts":

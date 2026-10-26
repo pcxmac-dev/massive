@@ -158,6 +158,61 @@ def test_a_stretch_within_the_cap_still_answers(served):
     assert status == 200 and body["bars"]
 
 
+# -- 32: requests from other sites; the row counts bounded -----------------------------------------
+def test_requests_from_other_sites_are_refused_and_the_apps_own_pass(served):
+    app, port = served
+    own = f"http://127.0.0.1:{port}"
+    for ok in ({}, {"Sec-Fetch-Site": "same-origin"}, {"Sec-Fetch-Site": "none"},  # the address bar
+               {"Sec-Fetch-Site": "same-origin", "Origin": own}):
+        assert _call(port, "/api/watchlists", headers=ok)[0] == 200, ok
+    for bad in ({"Sec-Fetch-Site": "cross-site"}, {"Sec-Fetch-Site": "same-site"}, {"Origin": "http://evil.example"},
+                {"Origin": "null"}, {"Sec-Fetch-Site": "same-origin", "Origin": "http://localhost:1"}):
+        assert _call(port, "/api/inventory?ticker=ZZZ", headers=bad)[0] == 403, bad  # an <img> on another site
+    assert not app._counting and "ZZZ" not in app._row_counts  # nothing was started
+    # writes: the header is still needed, and from another site not even with it
+    # (refused without a body: one left unread can reset the connection before the answer is read)
+    assert _call(port, "/api/watchlists", "PUT", {WRITE_HEADER: "1", "Sec-Fetch-Site": "cross-site"})[0] == 403
+    assert _call(port, "/api/watchlists", "PUT", {"Origin": own})[0] == 403
+    lists = {"lists": [{"name": "Mine", "tickers": ["SPCX"]}]}
+    assert _call(port, "/api/watchlists", "PUT", {WRITE_HEADER: "1", "Origin": own}, lists)[0] == 200
+    assert _call(port, "/", headers={"Sec-Fetch-Site": "cross-site"})[0] == 200  # the page itself is not data
+
+
+def test_row_counts_are_made_a_few_at_a_time_and_a_bounded_number_kept(store, monkeypatch):
+    from massive_collate import inventory
+
+    monkeypatch.setattr(server_module, "ROW_COUNTS_KEPT", 3)
+    release, started = threading.Event(), []
+
+    def slow(reader, ticker):
+        started.append(ticker)
+        release.wait(10)
+        return {}
+    monkeypatch.setattr(inventory, "row_counts", slow)
+    app = ChartApp(store)
+    tickers = [f"T{i}" for i in range(8)]
+    for t in tickers:
+        app.inventory(t)  # a page asking for one ticker after another
+    for _ in range(500):
+        if len(started) == server_module.COUNTING_AT_ONCE:
+            break
+        time.sleep(0.01)
+    time.sleep(0.1)
+    assert len(app._counting) == len(started) == server_module.COUNTING_AT_ONCE  # the rest when asked again
+    release.set()
+    for t in tickers:  # each asked again until its count starts
+        for _ in range(500):
+            app.inventory(t)
+            if t in started:
+                break
+            time.sleep(0.01)
+    for _ in range(500):
+        if not app._counting:
+            break
+        time.sleep(0.01)
+    assert set(started) == set(tickers) and len(app._row_counts) == 3  # the symbols counted last
+
+
 # -- low: an unexpected error is answered, not dropped ------------------------------------------------
 def test_an_unexpected_error_is_answered_not_dropped(served, monkeypatch, capsys):
     app, port = served
