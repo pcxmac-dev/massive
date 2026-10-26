@@ -10,8 +10,9 @@
   'use strict';
 
   const { dataIcon, symbolIcon, DATA_LABEL } = window.MassiveIcons;
-  const POLL_FAST_MS = 1500;   // while the Fetcher or Live view is open, or a fetch asked for here waits
-  const POLL_RUN_MS = 5000;    // while a run is going, for the status line (each answer is work for the server)
+  const POLL_FAST_MS = 1500;   // while the Fetcher or Live view is open
+  const POLL_RUN_MS = 5000;    // while a run is going, or the open symbol's fetch waits for it to end (each
+                               // answer is work for the server, and the sync runs nearly all the time)
   const POLL_SLOW_MS = 10000;
   // As the server ranks them (gui/activity.py STATE_RANK): a blocked symbol needs attention before current ones.
   const STATE_ORDER = { fetching: 0, new: 1, backfilling: 2, queued: 3, blocked: 4, current: 5, retired: 6, closed: 7 };
@@ -63,8 +64,16 @@
   let feed = 'massive';
   try { feed = localStorage.getItem('fetcherFeed') || 'massive'; } catch { /* private window */ }
 
-  async function poll() {
+  // One poll at a time, and one timer: a call while one is on its way gets that one's answer (each
+  // view switch called poll() and started another loop of polls, never stopped: 9 in 20 s).
+  let polling = null;
+  function poll() {
     clearTimeout(timer);
+    if (!polling) polling = pollOnce().finally(() => { polling = null; });
+    return polling;
+  }
+
+  async function pollOnce() {
     try {
       // `open`: the chart's symbol, so the live recorder streams it (stocks, from IEX).
       const open = openTicker ? `&open=${encodeURIComponent(openTicker)}` : '';
@@ -86,8 +95,9 @@
       pollFailed = true;
       render();
     }
-    const fast = job?.phase === 'waiting' || viewOpen('fetcher') || viewOpen('live');
-    timer = setTimeout(poll, fast ? POLL_FAST_MS : data?.running ? POLL_RUN_MS : POLL_SLOW_MS);
+    const fast = viewOpen('fetcher') || viewOpen('live');
+    clearTimeout(timer);
+    timer = setTimeout(poll, fast ? POLL_FAST_MS : data?.running || job?.phase === 'waiting' ? POLL_RUN_MS : POLL_SLOW_MS);
   }
 
   function render() {

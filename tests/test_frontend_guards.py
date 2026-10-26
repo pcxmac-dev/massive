@@ -212,5 +212,10 @@ def test_panels_sit_on_the_lighter_grey_as_large_as_what_they_hold():
 def test_the_status_is_polled_fast_only_while_its_views_are_open():
     act = _js("activity.js")
     rule = act.split("const fast = ", 1)[1].split(";", 1)[0]
-    assert "viewOpen('fetcher')" in rule and "viewOpen('live')" in rule and "running" not in rule
-    assert "data?.running ? POLL_RUN_MS : POLL_SLOW_MS" in act and "const POLL_RUN_MS = 5000;" in act
+    assert "viewOpen('fetcher')" in rule and "viewOpen('live')" in rule and "running" not in rule and "job" not in rule
+    assert "data?.running || job?.phase === 'waiting' ? POLL_RUN_MS : POLL_SLOW_MS" in act
+    assert "const POLL_RUN_MS = 5000;" in act
+    once = act.split("  function poll() {", 1)[1].split("\n  }\n", 1)[0]
+    assert "if (!polling) polling = pollOnce()" in once  # a poll while one is on its way joins it: one loop
+    tail = act.split("async function pollOnce()", 1)[1].split("\n  }\n", 1)[0]
+    assert tail.index("clearTimeout(timer);") < tail.index("timer = setTimeout(poll,")  # one timer, never two
