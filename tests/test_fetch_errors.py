@@ -184,6 +184,8 @@ def test_a_feed_with_a_monthly_symbol_limit_takes_them_in_order(store, monkeypat
 
     monkeypatch.setitem(collector.SYMBOLS_PER_MONTH, "fake", 2)
     store.watch("fake", ["AAA", "BBB", "CCC"], "minute")
+    for t in ("AAA", "BBB", "CCC"):  # an archive fills a stock from its listing date only
+        store.set_listing("fake", t, date(2020, 1, 2), None, NOW.date())
     src = Archive(entitled=("minute",))
     logged = []
     sync(src, store, FREE, NOW, log=logged.append)

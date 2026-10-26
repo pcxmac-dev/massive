@@ -787,10 +787,30 @@ def _audit_line(r: dict) -> str:
             f"close {fmt(close, 'bps')}  high-low {fmt(rng, 'bps')}  volume {fmt(vol, '%')}")
 
 
+def daily_audit_text(a: dict, show: int = 10) -> str:
+    """The daily history audit (audit.daily_history) for the terminal."""
+    lines = [f"Daily history of {a['stocks']:,} stocks (from the coverage ledger: no requests)",
+             f"  complete from their listing date: {a['complete']:,}"]
+    if a["head"]:
+        lines.append(f"  missing their oldest years: {len(a['head']):,} (the closed archives fill them: Tiingo, "
+                     f"{collector.SYMBOLS_PER_MONTH['tiingo']} a month, most traded first)")
+        lines += [f"    {t}: listed {l}, daily bars from {f}" for t, l, f in a["head"][:show]]
+    if a["none"]:
+        lines.append(f"  no daily bars yet: {len(a['none']):,} (daily bars first: {collector.DAILY_FIRST_PER_RUN:,} "
+                     f"a run, most traded first): {', '.join(a['none'][:show])}{' ...' if len(a['none']) > show else ''}")
+    if a["unchecked"]:
+        lines.append(f"  listing date not checked yet: {len(a['unchecked']):,}")
+    return "\n".join(lines)
+
+
 def cmd_audit(args, settings: Settings) -> int:
     """Audit stored spans against another feed: the second copy is compared, never stored."""
     from . import audit
 
+    if args.daily:
+        with Store(settings.db_path) as store:
+            print(daily_audit_text(audit.daily_history(store)))
+        return 0
     if args.list:
         with Store(settings.db_path) as store:
             for r in store.audits(30, args.ticker):
@@ -1122,6 +1142,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--random", type=int, default=1, help="random sessions to audit when no ticker is given")
     s.add_argument("--auditor", choices=sorted(BUILDERS), help="feed asked for the second copy (default: --source)")
     s.add_argument("--list", action="store_true", help="show recent audits instead of running one")
+    s.add_argument("--daily", action="store_true",
+                   help="fast audit: every stock's daily bars held from its listing date? (no requests)")
     s.set_defaults(func=cmd_audit)
 
     s = sub.add_parser("feeds", help="list the feeds and their state; reopen a closed one")

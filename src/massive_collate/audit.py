@@ -16,6 +16,12 @@ margin of error is expected; the verdict says whether it stays small.
 Audits run after new data arrives (queued for another feed's run, within that feed's caps), at
 random over stored history, or on demand (`audit` command). Their pass rates feed the ranking
 that decides which feed downloads a span (coverage.py).
+
+The daily history audit (`audit --daily`, daily_history) is a fast one of another kind: whether
+some feed holds each watched stock's daily bars from its listing date, read from the coverage
+ledger alone (no requests, no bars). What it finds missing the fetching fills: the daily-first
+sweep (collector.daily_first) for stocks with no daily bars yet, the closed archives (Tiingo) for
+years before the plans reach.
 """
 from __future__ import annotations
 
@@ -293,3 +299,35 @@ def manual_day(store, ticker: str, day: date, asset: str) -> tuple[int, int] | N
     """The session span of one day for `audit --day`."""
     s = freshness.CALENDAR.sessions(asset, day, day)
     return (ms(s[0].open), ms(s[-1].close)) if s else None
+
+
+# -- the daily history audit -------------------------------------------------------------------
+DAILY_SLACK_DAYS = 7  # a first daily bar this soon after the listing date is from the listing
+
+
+def daily_history(store) -> dict:
+    """Whether some feed holds each watched stock's daily bars from its listing date: "stocks",
+    "complete", "none" (no daily bars on any feed), "head" ([ticker, listed, first daily held]:
+    listed earlier than its oldest daily bar) and "unchecked" (daily bars, listing date not checked
+    yet), each list most traded first. Reads the coverage ledger and the watchlist only."""
+    from .initializer import load_order
+
+    order = load_order(store)
+    listed: dict[str, date | None] = {}
+    for w in store.watchlist():
+        if w["asset"] == "stock":
+            listed[w["ticker"]] = max(filter(None, (listed.get(w["ticker"]), w["listed_from"])), default=None)
+    first = store.daily_from()
+    rank = lambda t: (order.get(t, len(order)), t)
+    none, head, unchecked = [], [], []
+    for t in sorted(listed, key=rank):
+        if t not in first:
+            none.append(t)
+            continue
+        held = datetime.fromtimestamp(first[t] / 1000, ET).date()
+        if listed[t] is None:
+            unchecked.append(t)
+        elif held > listed[t] + timedelta(days=DAILY_SLACK_DAYS):
+            head.append([t, listed[t].isoformat(), held.isoformat()])
+    return {"stocks": len(listed), "complete": len(listed) - len(none) - len(head) - len(unchecked),
+            "none": none, "head": head, "unchecked": unchecked}

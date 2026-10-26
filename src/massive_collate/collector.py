@@ -731,6 +731,70 @@ def _monthly_symbol(store: Store, feed: str, ticker: str, now: datetime) -> bool
     return allowed
 
 
+def _archive_gap(source: DataSource, store: Store, me: FeedProfile, feeds: dict[str, FeedProfile], item: dict,
+                 floor: date, now: datetime) -> bool | None:
+    """Whether a closed feed has history to fill for a stock: spans from its listing date that no
+    better-placed feed can serve (coverage.plan). None while no feed has checked its listing: a
+    reused symbol's earlier issuer must not be filled, so it waits."""
+    ticker = item["ticker"]
+    listed = item["listed_from"] or next((w["listed_from"] for w in store.watchlist(ticker=ticker) if w["listed_from"]), None)
+    if not listed:
+        return None
+    start = max(floor, listed)
+    return any(plan(store, me, feeds, ticker, "stock", ts, start, now, listed)
+               for ts in dict.fromkeys((*source.resolutions("stock"), "day")))
+
+
+# Daily bars before the minute backfill: one request brings a stock's whole daily history on the
+# plan, while its minutes take tens, so every stock's dailies (from its listing, as far as the plan
+# reaches) are in long before the backfill gets to it. At most this many stocks a run.
+DAILY_FIRST_PER_RUN = 2000
+
+
+def daily_first(source: DataSource, store: Store, me: FeedProfile, feeds: dict[str, FeedProfile], watched: list[dict],
+                floor: date, order: dict, refusals: "Refusals", now: datetime, log: Log = print,
+                limit: int = DAILY_FIRST_PER_RUN) -> int:
+    """The daily bars of the stocks no feed holds any of yet, most traded first: the listing
+    check (its date bounds what is kept), then the spans coverage.plan leaves this feed. A stock
+    a better-placed feed should take costs no request here. Returns the stocks filled."""
+    held = store.daily_from()
+    todo = sorted((w for w in watched if w["asset"] == "stock" and w["ticker"] not in held and not w.get("closed_at")),
+                  key=lambda w: (order.get(w["ticker"], len(order)), w["ticker"]))
+    today, done = now.date(), 0
+    for item in todo:
+        if done >= limit:
+            break
+        ticker, listed = item["ticker"], item["listed_from"]
+        if refusals.paused(ticker, now):
+            continue
+        if not plan(store, me, feeds, ticker, "stock", "day", max(floor, listed) if listed else floor, now, listed):
+            continue  # another feed is better placed for it, or nothing is left: nothing asked here
+        try:
+            listing = check_listing(source, store, item, today, log)
+            item.update(store.watchlist(source.name, ticker)[0])  # the run's own row: not checked again below
+            if not listing.ok:
+                continue
+            start = max(floor, listing.listed_from) if listing.listed_from else floor
+            until = min(now, datetime.combine(item["retired_on"] + timedelta(days=1), datetime.min.time(), tzinfo=ET)) \
+                if item.get("retired_on") else now
+            n = sync_bars(source, store, ticker, "day", start, until, me=me, feeds=feeds, fetch=item["source_ticker"],
+                          asset="stock", invert=item["invert"], listed_from=listing.listed_from, log=log)
+        except NotEntitled as e:
+            log(f"{ticker} day: refused by your plan ({e.message})")
+            continue
+        except RateLimited as e:  # the server says slow down: the run stops and the feed is killed
+            raise StopRun(f"rate limited ({e.message}); stopping until the next run", strike=True) from e
+        except SourceError as e:  # counted once, when the run's own pass asks for the symbol below
+            log(f"{ticker} day: {e}; left to the run's own pass")
+            continue
+        done += 1
+        log(f"{ticker} day: {n} rows (daily bars first)")
+    if done:
+        log(f"{source.name}: daily bars first: {done:,} stocks"
+            + (f" ({len(todo) - done:,} without any daily bars yet, next runs)" if len(todo) > done else ""))
+    return done
+
+
 def _derive_symbol(store: Store, feed: str, ticker: str, asset: str, log) -> int:
     """The frames `feed` does not send for one symbol, built from what its fetch just stored
     (derive.py), so in a long backfill each symbol's derived frames are ready as it is done, not
@@ -921,7 +985,14 @@ def sync(
     feeds[source.name] = me
     waiting: dict[str, int] = {}
     archival = getattr(source, "archival", False)  # a closed feed: fills history once per symbol
-    closed = capped = 0
+    closed = capped = unlisted = 0
+    if source.name in SYMBOLS_PER_MONTH and not store.kv_get(f"ledger:month-places:{source.name}:v1"):
+        # one-off: a feed that never stored anything (Tiingo without its key) took the month's places
+        # without sending a request; they are given back
+        if not store.holds_any(source.name):
+            store.kv_set(f"symbols:{source.name}:{now.astimezone(timezone.utc):%Y-%m}", "[]")
+            log(f"{source.name}: this month's symbol places were taken with nothing sent; given back")
+        store.kv_set(f"ledger:month-places:{source.name}:v1", now.isoformat())
     if not store.kv_get("ledger:empty-heads:v1"):  # one-off: feeds' empty history heads become 'none'
         n = store.mark_empty_heads()
         store.kv_set("ledger:empty-heads:v1", now.isoformat())
@@ -952,6 +1023,9 @@ def sync(
         def backfilling(w: dict) -> bool:
             return _backfilling(w, floors[w["asset"]]) or (not filling and _seconds_pending(w))
 
+        if only is None and not archival and source.serves("stock"):
+            daily_first(source, store, me, feeds, watched, floors["stock"], order, refusals, now, log,
+                        limit=DAILY_FIRST_PER_RUN)
         pending = sorted(watched, key=lambda w: (backfilling(w), order.get(w["ticker"], len(order)), w["ticker"]))
         server_fails = 0  # symbols in a row whose server failed (5xx, no answer): FETCH_FAILURES kill the feed
         served: dict = {}  # priority requests taken this run (each once)
@@ -965,15 +1039,24 @@ def sync(
                 if archival and item.get("closed_at"):  # archive complete: never asked again
                     closed += 1
                     continue
-                if not _monthly_symbol(store, source.name, ticker, now):  # Tiingo's free plan: 500 symbols a month
-                    capped += 1
+                if not source.serves(asset):  # e.g. Alpaca stocks or Tiingo without keys: nothing is sent
+                    waiting[asset] = waiting.get(asset, 0) + 1
                     continue
                 if archival and not source.covers(item["source_ticker"]):
                     store.set_closed(source.name, ticker, now)
                     log(f"{ticker}: {source.name} has no history for it; closed")
                     continue
-                if not source.serves(asset):  # e.g. Alpaca stocks without keys: nothing is sent
-                    waiting[asset] = waiting.get(asset, 0) + 1
+                if archival and asset == "stock":  # a month's place only for history it can fill
+                    gap = _archive_gap(source, store, me, feeds, item, floors[asset], now)
+                    if gap is None:
+                        unlisted += 1
+                        continue
+                    if not gap:
+                        store.set_closed(source.name, ticker, now)
+                        log(f"{ticker}: {source.name} has nothing to add (other feeds hold its history); closed")
+                        continue
+                if not _monthly_symbol(store, source.name, ticker, now):  # Tiingo's free plan: 500 symbols a month
+                    capped += 1
                     continue
                 if not urgent and refusals.paused(ticker, now):  # refused run after run: left alone a while
                     result.skipped += 1
@@ -1098,6 +1181,9 @@ def sync(
         if capped:
             log(f"{source.name}: {capped} symbols wait for next month (its plan: "
                 f"{SYMBOLS_PER_MONTH[source.name]} different symbols a month)")
+        if unlisted:
+            log(f"{source.name}: {unlisted} stocks wait for a listing date from another feed (history is kept "
+                "from the current listing only)")
         if waiting:
             log(f"{source.name}: " + ", ".join(f"{n} {a} symbols" for a, n in sorted(waiting.items()))
                 + " not collected by this feed here (see `deps`: keys or plan)")

@@ -100,6 +100,16 @@ class LedgerStore:
             out.setdefault(src, []).append((a, b))
         return out
 
+    def daily_from(self) -> dict[str, int]:
+        """{ticker: the start (ms) of the oldest daily span any feed holds}: one pass over the
+        ledger, no bars read (the audit of daily history and the daily-first sweep)."""
+        return dict(self.conn.execute(
+            "SELECT ticker, MIN(start_ms) FROM coverage WHERE timespan='day' AND origin != 'none' GROUP BY ticker"))
+
+    def holds_any(self, source: str) -> bool:
+        """Whether `source` has ever stored a span (a feed that never sent anything holds none)."""
+        return self.conn.execute("SELECT 1 FROM coverage WHERE source=? LIMIT 1", (source,)).fetchone() is not None
+
     def _seed_coverage(self, ticker: str, timespan: str) -> None:
         """A series stored before the ledger: its feed holds from its first bar (or the start of
         the day it was backfilled to) through its last bar."""
