@@ -113,7 +113,8 @@ def symbol_status(item: dict, edges: tuple | None, floor: date, today: date, now
 
 # The Fetcher's table: the rows most worth seeing first (what is being fetched, then new data,
 # backfills, the queue ...), the initializer's order (most traded) within each state.
-STATE_RANK = {"fetching": 0, "new": 1, "backfilling": 2, "queued": 3, "blocked": 4, "current": 5, "retired": 6, "closed": 7}
+STATE_RANK = {"fetching": 0, "next": 1, "new": 2, "backfilling": 3, "queued": 4, "blocked": 5, "current": 6,
+              "retired": 7, "closed": 8}
 DETAIL_ROWS = 300  # rows the Fetcher shows, each with what it still needs; the rest are counted
 
 
@@ -133,6 +134,11 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
     settings = settings.for_source(source)
     me = profiles.get(source)
     holders = store.series_holders()  # once, not once a symbol
+    from .. import collector
+
+    asked = collector.priority_requests(store, now)  # opened in the chart: taken before anything else
+    paused = collector.updates_pause(store, now)
+    picked = collector.picked_symbols(store, now) if paused else set()
     rows, items = [], []
     for item in store.watchlist(source):
         floor = history_floor(settings.tier, today, item["asset"])
@@ -155,6 +161,12 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
                 and item["asset"] not in me.assets:
             row.update(state="blocked", requestsLeft=0,
                        note="keys not set" if source == "alpaca" else f"{source} has no {item['asset']} data here")
+        elif row["state"] != "fetching" and item["ticker"] in asked and (
+                item.get("synced_at") is None or item["synced_at"] < asked[item["ticker"]]["at"]):
+            row.update(state="next", note="opened in the chart: taken before anything else")
+        elif paused and row["state"] in ("new", "current") and item["ticker"] not in picked and item.get("synced_at") \
+                and now - item["synced_at"] < timedelta(days=collector.UPDATES_GAP_DAYS):
+            row["note"] = f"updates paused until {paused['until'][:10]}: not picked, not missing much"
         rows.append(row)
         items.append((item, floor))
     chosen = set(range(len(rows))) if detail is None else \
@@ -469,6 +481,7 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
         "liveFeeds": live_feeds(store, settings, source, now),
         "derive": derive_progress(store, now),
         "paused": _pause(store, now),
+        "updatesPause": collector.updates_pause(store, now),
         "limits": limit_rows,
         "health": sources_health,
         "canFetch": can_fetch(sources_health),

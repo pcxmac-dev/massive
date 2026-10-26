@@ -1008,6 +1008,17 @@ class ChartApp:
             self._scan, started = proc, proc.pid
         return {"paused": p, "started": started}
 
+    def set_updates_pause(self, body: dict) -> dict:
+        """Pause the updates of the symbols not picked ({"days": n}, 1-30) or resume them
+        ({"days": 0}): history and the picked symbols (opened, or on a watchlist) go on."""
+        from .. import collector
+
+        days = float(body.get("days") or 0)
+        if days and not 1 <= days <= 30:
+            raise ValueError("days must be 1-30 (0 resumes)")
+        with self._lock:
+            return {"updatesPause": collector.set_updates_pause(self.store, days)}
+
     def _halted(self) -> bool:
         from .. import collector
 
@@ -1195,6 +1206,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     if not ticker:
                         return self._json({"error": "ticker is required"}, HTTPStatus.BAD_REQUEST)
                     return self._json(app.watch(ticker), HTTPStatus.CREATED)
+                if method == "POST" and parts == ["", "api", "updates-pause"]:
+                    return self._json(app.set_updates_pause(body))
                 if method == "PUT" and parts == ["", "api", "watchlists"]:
                     return self._json(app.save_watchlists(body))
                 if method == "POST" and parts == ["", "api", "priority"]:

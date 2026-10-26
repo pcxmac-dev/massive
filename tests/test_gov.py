@@ -39,6 +39,7 @@ SOFR = {"refRates": [{"effectiveDate": "2026-10-23", "type": "SOFR", "percentRat
 class Resp:
     def __init__(self, status=200, text="", body=None, headers=None):
         self.status_code, self.text, self._body, self.headers = status, text, body, headers or {}
+        self.content = b"\xef\xbb\xbf" + text.encode("utf-8")  # the Fed's feeds start with a byte-order mark
 
     def json(self):
         if self._body is None:
@@ -144,10 +145,41 @@ def test_the_gov_command_lists_each_sources_state(tmp_path, monkeypatch, capsys)
     monkeypatch.setenv("MASSIVE_DB", str(tmp_path / "m.db"))
     monkeypatch.setenv("MASSIVE_API_KEY", "k")
     asked = []
-    monkeypatch.setattr(cli, "_fetch_gov", lambda settings, log: asked.append(settings.db_path))  # no real requests
+    monkeypatch.setattr(cli, "_fetch_gov", lambda settings, log, minutes=None: asked.append(minutes))  # no real requests
     assert cli.main(["gov"]) == 0
     out = capsys.readouterr().out
-    assert asked and "Press releases" in out and "waiting  (SEC asks automated readers" in out
+    assert asked == [gov.REFRESH_MINUTES] and "Press releases" in out and "waiting  (SEC asks automated readers" in out
+    assert cli.main(["gov", "--all"]) == 0 and asked[-1] == 0  # every source now
     monkeypatch.setenv("MASSIVE_OFFLINE", "1")
     asked.clear()
     assert cli.main(["gov"]) == 0 and not asked and "nothing is fetched" in capsys.readouterr().out
+
+
+def test_a_feed_with_a_byte_order_mark_and_no_charset_is_read():
+    data = b"\xef\xbb\xbf" + FED_RSS.replace("Agencies", "Agencías").encode("utf-8")
+    items = gov.parse_rss(data, Source("fed-press", "Fed", "Press releases", "u"))
+    assert [i["title"] for i in items][1] == "Agencías issue proposal"  # not mojibake from Latin-1
+
+
+def test_a_dropped_connection_is_tried_once_more_and_a_failure_again_in_ten_minutes():
+    import requests
+
+    class Flaky(Agencies):
+        def get(self, url, headers=None, timeout=None):
+            if "bls.gov" in url:
+                self.calls.append((url, dict(headers or {})))
+                raise requests.ConnectionError("dropped")
+            if "effr" in url and not any("effr" in u for u, _ in self.calls):
+                self.calls.append((url, dict(headers or {})))
+                raise requests.ConnectionError("dropped once")
+            return super().get(url, headers, timeout)
+
+    db, http, waits = GovDB(None), Flaky(), []
+    gov.fetch(db, NOW, log=lambda *_: None, session=http, sleep=waits.append)
+    states = db.fetched()
+    assert states["nyfed-effr"]["status"] == "ok" and db.rate("EFFR")  # the second try answered
+    assert states["bls-cpi"]["status"] == "failed" and sum("cpi.rss" in u for u, _ in http.calls) == 2
+    assert waits and all(w == gov.RETRY_WAIT_S for w in waits)
+    assert {s.key for s in gov.due(db, NOW + timedelta(minutes=11))} == {k for k, f in states.items()
+                                                                        if f["status"] in ("failed", "waiting")} - {
+        k for k, f in states.items() if f["status"] == "waiting"}  # only the failed ones, after ten minutes

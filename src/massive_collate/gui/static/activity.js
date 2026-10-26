@@ -15,7 +15,7 @@
                                // answer is work for the server, and the sync runs nearly all the time)
   const POLL_SLOW_MS = 10000;
   // As the server ranks them (gui/activity.py STATE_RANK): a blocked symbol needs attention before current ones.
-  const STATE_ORDER = { fetching: 0, new: 1, backfilling: 2, queued: 3, blocked: 4, current: 5, retired: 6, closed: 7 };
+  const STATE_ORDER = { fetching: 0, next: 1, new: 2, backfilling: 3, queued: 4, blocked: 5, current: 6, retired: 7, closed: 8 };
   const el = (id) => document.getElementById(id);
   const esc = window.MassiveIcons.esc;
   const safeUrl = window.MassiveIcons.safeUrl;
@@ -246,6 +246,11 @@
     el('netPause').textContent = pausedUntil ? 'Resume fetching' : 'Pause fetching';
     el('netPause').classList.toggle('on', !!pausedUntil);
     el('netHalt').hidden = !!pausedUntil;  // halted or paused: Resume is the one way back
+    // The updates pause: the symbols not picked are not updated (history and the picked ones go on).
+    const updatesUntil = data?.updatesPause?.until;
+    el('netUpdates').textContent = updatesUntil
+      ? `Resume updates (paused to ${new Date(updatesUntil).toLocaleDateString([], { month: 'short', day: 'numeric' })})` : 'Pause updates 7 d';
+    el('netUpdates').classList.toggle('on', !!updatesUntil);
     if (data?.paused?.halt && !busy) {
       msg = 'Fetching halted: nothing is fetched until you resume (the live streams go on)';
     } else if (pausedUntil && !busy && !msg) {
@@ -301,6 +306,12 @@
       await apiWrite('POST', '/api/fetching', { paused: pause });
       await poll();
       if (openTicker) checkSymbol(openTicker);
+    } catch (err) { showError(err); }
+  });
+  el('netUpdates').addEventListener('click', async () => {
+    try {
+      await apiWrite('POST', '/api/updates-pause', { days: data?.updatesPause ? 0 : 7 });
+      await poll();
     } catch (err) { showError(err); }
   });
   el('netHalt').addEventListener('click', async () => {

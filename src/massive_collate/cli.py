@@ -378,18 +378,37 @@ def after_sync(args, settings: Settings) -> bool:
     return True
 
 
-def _fetch_gov(settings: Settings, log) -> None:
+def _fetch_gov(settings: Settings, log, minutes: int | None = None) -> None:
     """The Fed's, the SEC's, BLS's, the Federal Register's and the New York Fed's newest (gov.py):
     each source at most hourly; a failure is logged and never fails the run."""
     from . import gov
 
     db = gov.GovDB(gov.db_path(settings.db_path))
     try:
-        gov.fetch(db, datetime.now(timezone.utc), contact=settings.gov_contact, log=log)
+        gov.fetch(db, datetime.now(timezone.utc), contact=settings.gov_contact, log=log,
+                  minutes=gov.REFRESH_MINUTES if minutes is None else minutes)
     except Exception as e:  # noqa: BLE001 - the agencies' feeds are extras: the run's data is in
         log(f"gov: failed ({type(e).__name__}: {e})")
     finally:
         db.close()
+
+
+def cmd_updates(args, settings: Settings) -> int:
+    """Pause or resume the unpicked symbols' updates (collector.updates_pause), or show the pause."""
+    with Store(settings.db_path) as store:
+        if args.action == "pause":
+            collector.set_updates_pause(store, args.days)
+        elif args.action == "resume":
+            collector.set_updates_pause(store, None)
+        p = collector.updates_pause(store)
+        picked = collector.picked_symbols(store)
+    if p:
+        print(f"updates paused until {p['until']} for the symbols not picked ({len(picked)} picked: opened in the "
+              f"chart or on a watchlist); a symbol more than {collector.UPDATES_GAP_DAYS} days behind is still "
+              "updated, and history goes on")
+    else:
+        print("updates are not paused")
+    return 0
 
 
 def cmd_gov(args, settings: Settings) -> int:
@@ -400,7 +419,8 @@ def cmd_gov(args, settings: Settings) -> int:
     if settings.offline:
         print("this copy of the app is offline (MASSIVE_OFFLINE): nothing is fetched")
     else:
-        _fetch_gov(settings, Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
+        _fetch_gov(settings, Logger(settings.db_path.parent / "logs" / "massive-collate.log"),
+                   minutes=0 if getattr(args, "all", False) else gov.REFRESH_MINUTES)
     db = gov.GovDB(gov.db_path(settings.db_path))
     try:
         for s in gov.view(db, contact_set=bool(settings.gov_contact))["sources"]:
@@ -1184,8 +1204,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="fast audit: every stock's daily bars held from its listing date? (no requests)")
     s.set_defaults(func=cmd_audit)
 
+    s = sub.add_parser("updates", help="pause the updates of the symbols you have not picked (opened in the "
+                                      "chart or on a watchlist) for some days, or resume them; history goes on")
+    s.add_argument("action", nargs="?", choices=("pause", "resume"), help="without one: show the pause")
+    s.add_argument("--days", type=float, default=7.0, help="how long (default: 7)")
+    s.set_defaults(func=cmd_updates)
+
     s = sub.add_parser("gov", help="the regulators' news and rates (the Gov view): fetch the due ones now, "
                                   "at most hourly each, and show each source's state")
+    s.add_argument("--all", action="store_true", help="ask every source now, not only the due ones (once each)")
     s.set_defaults(func=cmd_gov)
 
     s = sub.add_parser("feeds", help="list the feeds and their state; reopen a closed one")

@@ -760,9 +760,12 @@ def daily_first(source: DataSource, store: Store, me: FeedProfile, feeds: dict[s
     held = store.daily_from()
     todo = sorted((w for w in watched if w["asset"] == "stock" and w["ticker"] not in held and not w.get("closed_at")),
                   key=lambda w: (order.get(w["ticker"], len(order)), w["ticker"]))
-    today, done = now.date(), 0
+    today, done, stopped = now.date(), 0, None
     for item in todo:
         if done >= limit:
+            break
+        stopped = _unserved_request(store, source.name, now)
+        if stopped:  # opened in the chart: the run's own pass takes it now, this sweep goes on next run
             break
         ticker, listed = item["ticker"], item["listed_from"]
         if refusals.paused(ticker, now):
@@ -789,8 +792,9 @@ def daily_first(source: DataSource, store: Store, me: FeedProfile, feeds: dict[s
             continue
         done += 1
         log(f"{ticker} day: {n} rows (daily bars first)")
-    if done:
+    if done or stopped:
         log(f"{source.name}: daily bars first: {done:,} stocks"
+            + (f", stopped for {stopped} (opened in the chart)" if stopped else "")
             + (f" ({len(todo) - done:,} without any daily bars yet, next runs)" if len(todo) > done else ""))
     return done
 
@@ -881,6 +885,57 @@ def _due(asset: str, tier: Tier, synced: datetime, now: datetime, refresh_hours:
 # -- the symbol open in the chart goes first ------------------------------------------------
 PRIORITY_KEY = "fetch:priority"
 PRIORITY_HOURS = 6  # a request older than this has been dealt with (or given up on)
+
+
+# Updates paused by the user: until it ends, a symbol they have not picked (opened in the chart,
+# or on one of their watchlists) gets no new-data updates unless it is more than UPDATES_GAP_DAYS
+# behind (missing a substantial amount); history goes on (backfills, daily bars first), and the
+# picked symbols are updated as usual. The requests go to those and to filling history.
+UPDATES_PAUSE_KEY = "updates:pause"
+UPDATES_GAP_DAYS = 7
+
+
+def updates_pause(store: Store, now: datetime | None = None) -> dict | None:
+    """The updates pause, if one is on: {at, until}."""
+    p = store.kv_json(UPDATES_PAUSE_KEY, {})
+    now = now or datetime.now(timezone.utc)
+    try:
+        return p if datetime.fromisoformat(p["until"]) > now else None
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def set_updates_pause(store: Store, days: float | None, now: datetime | None = None) -> dict | None:
+    """Pause the unpicked symbols' updates for `days` (None or 0: resume them)."""
+    import json
+
+    now = now or datetime.now(timezone.utc)
+    if not days:
+        store.kv_set(UPDATES_PAUSE_KEY, "")
+        return None
+    p = {"at": now.isoformat(timespec="seconds"), "until": (now + timedelta(days=days)).isoformat(timespec="seconds")}
+    store.kv_set(UPDATES_PAUSE_KEY, json.dumps(p))
+    return p
+
+
+def picked_symbols(store: Store, now: datetime | None = None) -> set[str]:
+    """The symbols the user picked: opened in the chart lately (priority requests) or on one of
+    their watchlists (the rail's lists)."""
+    from .live import WATCHLISTS_KEY
+
+    lists = store.kv_json(WATCHLISTS_KEY, [])
+    on_lists = {str(t).upper() for lst in lists if isinstance(lst, dict) for t in lst.get("tickers") or []}
+    return on_lists | set(priority_requests(store, now))
+
+
+def _unserved_request(store: Store, source: str, now: datetime) -> str | None:
+    """A symbol opened in the chart that this feed has not synced since: it goes before anything
+    else (the daily-first sweep stops for it)."""
+    for ticker, req in priority_requests(store, now).items():
+        row = next(iter(store.watchlist(source, ticker)), None)
+        if row is not None and (row.get("synced_at") is None or row["synced_at"] < req["at"]):
+            return ticker
+    return None
 
 
 def _priority_raw(store: Store) -> dict:
@@ -1027,6 +1082,9 @@ def sync(
             daily_first(source, store, me, feeds, watched, floors["stock"], order, refusals, now, log,
                         limit=DAILY_FIRST_PER_RUN)
         pending = sorted(watched, key=lambda w: (backfilling(w), order.get(w["ticker"], len(order)), w["ticker"]))
+        paused_updates = updates_pause(store, now) if not archival else None
+        held_back = 0 if paused_updates else None  # symbols whose update the pause left for later
+        picked = picked_symbols(store, now) if paused_updates else set()
         server_fails = 0  # symbols in a row whose server failed (5xx, no answer): FETCH_FAILURES kill the feed
         served: dict = {}  # priority requests taken this run (each once)
         while pending:
@@ -1065,6 +1123,11 @@ def sync(
                 if (only is None or published_only) and synced and not backfilling(item) and not _due(
                         asset, tier, synced, now, 0.0 if urgent or only is not None else refresh_hours):
                     # nothing new published since its last sync (a symbol still backfilling is never skipped)
+                    result.skipped += 1
+                    continue
+                if (held_back is not None and not urgent and only is None and synced and not backfilling(item)
+                        and ticker not in picked and now - synced < timedelta(days=UPDATES_GAP_DAYS)):
+                    held_back += 1  # updates paused: not picked, and not missing much
                     result.skipped += 1
                     continue
                 if on_item:
@@ -1184,6 +1247,9 @@ def sync(
         if unlisted:
             log(f"{source.name}: {unlisted} stocks wait for a listing date from another feed (history is kept "
                 "from the current listing only)")
+        if held_back:
+            log(f"{source.name}: {held_back:,} symbols' updates paused until {paused_updates['until'][:10]} "
+                f"(not picked, at most {UPDATES_GAP_DAYS} days behind)")
         if waiting:
             log(f"{source.name}: " + ", ".join(f"{n} {a} symbols" for a, n in sorted(waiting.items()))
                 + " not collected by this feed here (see `deps`: keys or plan)")

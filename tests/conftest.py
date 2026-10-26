@@ -26,7 +26,7 @@ def no_agency_requests(monkeypatch):
     (cli._fetch_gov); test_gov.py drives gov.fetch with fake answers instead."""
     from massive_collate import cli
 
-    monkeypatch.setattr(cli, "_fetch_gov", lambda settings, log: None)
+    monkeypatch.setattr(cli, "_fetch_gov", lambda settings, log, minutes=None: None)
 
 
 @pytest.fixture(autouse=True)

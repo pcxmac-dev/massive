@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 import xml.etree.ElementTree as ET_XML
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -37,6 +38,8 @@ import requests
 
 USER_AGENT = "massive-collate/1 (personal research)"
 REFRESH_MINUTES = 60  # each source at most this often
+FAILED_RETRY_MINUTES = 10  # a source that failed (no answer, an error) is asked again sooner
+RETRY_WAIT_S = 2.0  # a dropped connection is tried once more after this
 KEEP = 200  # items kept per source, newest first
 TIMEOUT_S = 20
 
@@ -207,9 +210,12 @@ def _iso(text: str | None) -> str | None:
     return t.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
-def parse_rss(text: str, source: Source) -> list[dict]:
-    """An RSS 2.0 (or Atom) feed's items: id (guid or link), title, link, when published."""
-    root = ET_XML.fromstring(text)
+def parse_rss(data: bytes | str, source: Source) -> list[dict]:
+    """An RSS 2.0 (or Atom) feed's items: id (guid or link), title, link, when published. Read
+    from the bytes, so the XML's own declaration (and a byte-order mark) sets the encoding: the
+    Fed's feeds start with one and their HTTP header names no charset (decoded as Latin-1, the
+    first character was unreadable)."""
+    root = ET_XML.fromstring(data)
     out = []
     for it in root.iter():
         tag = it.tag.rsplit("}", 1)[-1]
@@ -265,14 +271,17 @@ def parse_nyfed(data: dict) -> dict | None:
 
 # -- fetching ----------------------------------------------------------------------------------
 def due(db: GovDB, now: datetime, minutes: int = REFRESH_MINUTES) -> list[Source]:
-    """The sources not asked within `minutes`."""
+    """The sources not asked within `minutes` (FAILED_RETRY_MINUTES for one whose last try failed)."""
     seen = db.fetched()
-    return [s for s in SOURCES if s.key not in seen
-            or now - datetime.fromisoformat(seen[s.key]["at"]) >= timedelta(minutes=minutes)]
+
+    def wait(f: dict) -> timedelta:
+        return timedelta(minutes=min(minutes, FAILED_RETRY_MINUTES) if f["status"] == "failed" else minutes)
+    return [s for s in SOURCES if s.key not in seen or now - datetime.fromisoformat(seen[s.key]["at"]) >= wait(seen[s.key])]
 
 
 def fetch(db: GovDB, now: datetime, contact: str | None = None, log: Callable[[str], None] = print,
-          session: requests.Session | None = None, minutes: int = REFRESH_MINUTES) -> int:
+          session: requests.Session | None = None, minutes: int = REFRESH_MINUTES,
+          sleep: Callable[[float], None] = time.sleep) -> int:
     """Ask every due source once (conditional requests: an unchanged feed sends nothing back).
     Sources that want a contact wait without one. Returns requests sent."""
     session = session or requests.Session()
@@ -288,11 +297,21 @@ def fetch(db: GovDB, now: datetime, contact: str | None = None, log: Callable[[s
             headers["If-None-Match"] = prev["etag"]
         if prev.get("modified"):
             headers["If-Modified-Since"] = prev["modified"]
-        sent += 1
-        try:
-            r = session.get(s.url, headers=headers, timeout=TIMEOUT_S)
-        except requests.RequestException as e:
-            db.note(s.key, now, "failed", f"no answer: {type(e).__name__}")
+        r = None
+        for attempt in (1, 2):  # a dropped connection: once more
+            sent += 1
+            try:
+                r = session.get(s.url, headers=headers, timeout=TIMEOUT_S)
+                break
+            except (requests.ConnectionError, requests.Timeout) as e:
+                error = e
+                if attempt == 1:
+                    sleep(RETRY_WAIT_S)
+            except requests.RequestException as e:
+                error = e
+                break
+        if r is None:
+            db.note(s.key, now, "failed", f"no answer: {type(error).__name__}")
             continue
         if r.status_code == 304:
             db.note(s.key, now, "unchanged")
@@ -308,7 +327,7 @@ def fetch(db: GovDB, now: datetime, contact: str | None = None, log: Callable[[s
                     db.save_rate(rate["series"], rate["day"], rate["value"], rate["lo"], rate["hi"], now)
                 n = 0
             else:
-                items = parse_fedreg(r.json()) if s.kind == "fedreg" else parse_rss(r.text, s)
+                items = parse_fedreg(r.json()) if s.kind == "fedreg" else parse_rss(r.content, s)
                 n = db.save_items(s.key, items, now)
         except (ValueError, ET_XML.ParseError) as e:
             db.note(s.key, now, "failed", f"unreadable answer: {e}"[:200])

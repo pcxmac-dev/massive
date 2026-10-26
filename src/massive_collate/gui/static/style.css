@@ -416,6 +416,7 @@ body.light { --st-new: #00838f; --st-wait: #a85d00; --st-queued: #5e35b1; --st-b
 .state { font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); color: var(--muted); }
 .state.fetching, .state.run-running { color: #fff; background: var(--accent); border-color: var(--accent); }
 .state.new { color: var(--st-new); border-color: var(--st-new); }
+.state.next { color: var(--accent); border-color: var(--accent); }
 .state.backfilling, .state.run-stopped { color: var(--st-wait); border-color: var(--st-wait); }
 .state.queued { color: var(--st-queued); border-color: var(--st-queued); }
 .state.blocked { color: var(--st-blocked); border-color: var(--st-blocked); }
@@ -428,6 +429,7 @@ body.light { --st-new: #00838f; --st-wait: #a85d00; --st-queued: #5e35b1; --st-b
 .state.killed { color: #fff; background: var(--down); border-color: var(--down); }
 .st-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; background: var(--muted); }
 .st-dot.fetching { background: var(--accent); } .st-dot.new { background: var(--st-new); }
+.st-dot.next { background: transparent; box-shadow: inset 0 0 0 2px var(--accent); }
 .st-dot.backfilling { background: var(--st-wait); } .st-dot.queued { background: var(--st-queued); }
 .st-dot.blocked { background: var(--st-blocked); } .st-dot.current { background: var(--up); }
 .st-dot.retired { background: var(--st-retired); } .st-dot.closed { background: var(--st-closed); }
