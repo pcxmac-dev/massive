@@ -67,10 +67,18 @@ nothing and the next run continues where it left off.
 python -m pip install -e ".[dev]"
 ```
 
-Set your key and plan as user environment variables (Windows PowerShell):
+Save each API key with `tools/set-key.ps1`: it asks for the key with the input hidden (not shown,
+not kept in the shell's history, not written to a file) and saves it as a user environment variable,
+where the app reads keys. Without a name it lists the keys and marks the ones already set; `-Remove`
+deletes one. Restart running processes (the sync, the chart app) after setting a key.
 
 ```powershell
-[Environment]::SetEnvironmentVariable("MASSIVE_API_KEY", "<your key>", "User")
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\set-key.ps1 TIINGO_API_KEY
+```
+
+Set your plan the same way, as a user environment variable (not a secret):
+
+```powershell
 [Environment]::SetEnvironmentVariable("MASSIVE_TIER", "free", "User")
 ```
 
