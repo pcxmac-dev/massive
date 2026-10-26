@@ -341,6 +341,49 @@ def test_paper_and_the_markets_do_their_slow_work_off_the_shared_lock(store, mon
     assert answered and answered[0]["broker"] == "paper"
 
 
+# -- 36: a whole history is read outside the engine's lock, once -------------------------------------
+def test_a_whole_history_is_read_outside_the_engines_lock_and_once(store, monkeypatch):
+    eng = BarEngine(store)
+    started, release, loads, got = threading.Event(), threading.Event(), [], []
+    real = eng._load
+
+    def slow(*a, **k):
+        loads.append(a[:2])
+        started.set()
+        release.wait(10)
+        return real(*a, **k)
+    monkeypatch.setattr(eng, "_load", slow)
+    readers = [threading.Thread(target=lambda: got.append(eng.series("massive", "SPCX"))) for _ in range(2)]
+    readers[0].start()
+    assert started.wait(10)
+    readers[1].start()  # the same series asked for meanwhile: waits for that read
+    assert eng.lock.acquire(timeout=5)  # the engine's lock is free while the history is read
+    eng.lock.release()
+    assert eng.fingerprint("massive", "SPCX")  # the live stream's check answers
+    release.set()
+    for t in readers:
+        t.join(10)
+    assert loads == [("massive", "SPCX")] and len(got) == 2 and got[0] is got[1] and len(got[0].frame)
+    assert eng.series("*", "SPCX").ticker == "SPCX"  # a merged chart from parts read that way
+
+
+# -- low: "All data" on the series path -----------------------------------------------------------------
+def test_all_data_reaches_the_series_path_and_its_caches_keep_the_views_apart(tmp_path):
+    s = _spiked(tmp_path)
+    try:
+        app = ChartApp(s)
+        highs: dict[str, list] = {}
+        for view in ("1", "0", "1", "0"):
+            for span in ("1", "5"):
+                q = {"source": "massive", "ticker": "SPCX", "period": "minute", "span": span, "session": "extended",
+                     "to": str(_ms("2026-10-19 17:30")), "limit": "40"}  # no auto: the whole-history series path
+                with app._view({"unfiltered": view}):
+                    highs.setdefault(view, []).append(max(b["high"] for b in app.bars(q)["bars"]))
+        assert highs["1"] == [75.0] * 4 and max(highs["0"]) < 51
+    finally:
+        s.close()
+
+
 # -- low: an unexpected error is answered, not dropped ------------------------------------------------
 def test_an_unexpected_error_is_answered_not_dropped(served, monkeypatch, capsys):
     app, port = served

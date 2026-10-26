@@ -1041,7 +1041,7 @@ class ChartApp:
     @contextmanager
     def _view(self, q: dict[str, str]):
         """The request's view of the data: filtered (bad data left out) unless it asks unfiltered=1."""
-        from .window import UNFILTERED
+        from .bars import UNFILTERED
 
         token = UNFILTERED.set(q.get("unfiltered") == "1")
         try:

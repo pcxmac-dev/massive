@@ -23,7 +23,6 @@ and paged. Box plots keep the series path.
 """
 from __future__ import annotations
 
-import contextvars
 import json
 import threading
 import time
@@ -33,8 +32,9 @@ import pandas as pd
 
 from ..calc.derivatives import Model, apply_model, segments
 from .bars import (CALENDAR, COLUMNS, MERGED, MODEL_SOURCES, PERIOD_SECONDS, PRICE_BASED, TIME_TYPES, Series, Style,
-                   _aggregate, _regular_close, _SizedCache, bin_keys, calendar_key, decimals, epoch_ms, frame_from_bars,
-                   merge_frames, model_info, resample, session_hours, style_used, to_records, transformed, utc_days, ET)
+                   _aggregate, _filtered, _regular_close, _SizedCache, bar_end, bin_keys, calendar_key, decimals, epoch_ms,
+                   frame_from_bars, merge_frames, model_info, resample, session_hours, style_used, to_records,
+                   transformed, utc_days, ET)
 
 # Every level the chart moves through, finest first.
 LEVELS = (("second", 1), ("second", 30), ("minute", 1), ("minute", 5), ("minute", 30), ("hour", 1), ("hour", 2),
@@ -71,13 +71,8 @@ STRETCH_READ = BRICK_READ
 REPLAY_PAGE = 3000  # finer bars a replay page holds (about 50 minutes of seconds, 8 sessions of minutes)
 
 
-# The view a request reads (server.ChartApp._view): filtered, bad data left out (the pruned list,
-# baddata.py), unless it asks for all of it (unfiltered). Per request thread; caches key on it.
-UNFILTERED = contextvars.ContextVar("unfiltered", default=False)
-
-
-def _filtered() -> bool:
-    return not UNFILTERED.get()
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 def _empty() -> pd.DataFrame:
