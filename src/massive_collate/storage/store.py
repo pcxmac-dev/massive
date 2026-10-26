@@ -44,6 +44,7 @@ class Store(ProvenanceStore, AdminStore, FeedStore, PrunedStore, DatasetStore, D
                             "run `python -m massive_collate admin split-feeds` to move each feed to its own "
                             "files (it backs up first)")
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA journal_size_limit=67108864")  # cut back to 64 MB once checkpointed
         self.conn.executescript(SCHEMA)
         self._migrate()
         self._feeds: dict[str, _Feed] = {}

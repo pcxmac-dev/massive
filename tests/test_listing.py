@@ -122,3 +122,29 @@ def test_old_database_is_migrated(tmp_path):
     with Store(path) as s:
         w = s.watchlist()[0]
         assert w["ticker"] == "SPCX" and w["exchange"] is None and w["listed_from"] is None
+
+
+
+def test_a_feed_without_identity_is_not_shared_and_never_blanks_a_listing(store):
+    # Alpaca's asset record has no listing date or FIGI: when it checks first, Massive must still
+    # ask for its own (sharing Alpaca's blanked Massive's listing date and replaced its reference
+    # record, logo link and all)
+    from datetime import date as _date
+
+    from massive_collate import collector
+    from massive_collate.models import Stock
+
+    from .conftest import FakeSource
+
+    for feed in ("alpaca", "massive"):
+        store.watch(feed, ["AAPL"], "minute")
+    today = _date(2026, 10, 21)
+    store.set_listing("alpaca", "AAPL", None, None, today, "Apple Inc.", "stock")
+    store.set_details("alpaca", "AAPL", {"source": "alpaca assets", "status": "active"})
+    src = FakeSource(listing=Stock("AAPL", list_date=_date(1980, 12, 12), figi="BBG000B9XRY4",
+                                   details={"branding": {"icon_url": "https://x/aapl.svg"}}))
+    src.name = "massive"
+    item = store.watchlist("massive", "AAPL")[0]
+    listing = collector.check_listing(src, store, item, today, log=lambda *_: None)
+    assert src.instrument_calls == 1 and listing.listed_from == _date(1980, 12, 12)
+    assert store.details("massive", "AAPL")["branding"]["icon_url"] == "https://x/aapl.svg"

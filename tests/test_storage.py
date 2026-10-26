@@ -141,3 +141,30 @@ def test_history_written_newest_first_does_not_leave_pages_half_empty():
         return n
 
     assert pages(descending=True) <= pages(descending=False) * 1.05
+
+
+
+def test_deleting_before_a_listing_seeks_first_and_deletes_each_frame(tmp_path):
+    from massive_collate.storage import Store
+
+    with Store(tmp_path / "m.db") as s:
+        old, new = 1_600_000_000_000, 1_700_000_000_000
+        bar = lambda t: {"t": t, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}
+        s.upsert_bars("massive", "AAPL", "minute", 1, [bar(old), bar(new)])
+        s.upsert_bars("massive", "AAPL", "day", 1, [bar(old), bar(new)])
+        s.upsert_bars("massive", "MSFT", "minute", 1, [bar(old)])
+        conn = s._bars("massive")
+        before = conn.total_changes
+        assert s.delete_before("massive", "AAPL", (old - 1) * 10**6) == 0
+        assert conn.total_changes == before  # nothing older: no write at all
+        assert s.delete_before("massive", "AAPL", (old + 1) * 10**6) == 2  # the old minute and the old day
+        assert s.bar_edges("massive", "AAPL") == (new, new) and s.bar_edges("massive", "MSFT") == (old, old)
+
+
+def test_write_ahead_logs_are_cut_back_once_checkpointed(tmp_path):
+    from massive_collate.storage import Store
+
+    with Store(tmp_path / "m.db") as s:
+        s.upsert_bars("massive", "AAPL", "minute", 1, [{"t": 1, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}])
+        assert s.conn.execute("PRAGMA journal_size_limit").fetchone()[0] == 64 * 2**20
+        assert s._bars("massive").execute("PRAGMA journal_size_limit").fetchone()[0] == 64 * 2**20

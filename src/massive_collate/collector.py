@@ -579,14 +579,18 @@ def check_listing(source: DataSource, store: Store, item: dict, today: date, log
     ticker, checked = item["ticker"], item["checked_at"]
     if checked and (today - checked).days < LISTING_RECHECK_DAYS and store.details(source.name, ticker):
         return Listing(True, item["listed_from"])
-    # Another feed checked this ticker this week: share its answer instead of asking again.
+    # Another feed checked this ticker this week: share its answer instead of asking again, if it
+    # says who the instrument is (a listing date or FIGI: Alpaca's asset record has neither, and
+    # sharing it blanked Massive's listing date and replaced its reference record, logo link and all).
     for other in store.watchlist(ticker=ticker):
-        if (other["source"] != source.name and other["checked_at"]
+        if (other["source"] != source.name and other["checked_at"] and (other["listed_from"] or other["figi"])
                 and (today - other["checked_at"]).days < LISTING_RECHECK_DAYS and store.details(other["source"], ticker)):
-            store.set_listing(source.name, ticker, other["listed_from"], other["figi"], other["checked_at"],
+            listed = other["listed_from"] or item["listed_from"]
+            store.set_listing(source.name, ticker, listed, other["figi"] or item["figi"], other["checked_at"],
                               other["name"], other["kind"], other["exchange"])
-            store.set_details(source.name, ticker, {**store.details(other["source"], ticker), "sharedFrom": other["source"]})
-            return Listing(True, other["listed_from"])
+            if not store.details(source.name, ticker):  # its own reference record, if it has one, is kept
+                store.set_details(source.name, ticker, {**store.details(other["source"], ticker), "sharedFrom": other["source"]})
+            return Listing(True, listed)
     try:
         inst = _guard_call(source.instrument, ticker, resolve_exchange=False)
     except NotEntitled as e:
@@ -762,7 +766,9 @@ def daily_first(source: DataSource, store: Store, me: FeedProfile, feeds: dict[s
     held = store.daily_from()
     todo = sorted((w for w in watched if w["asset"] == "stock" and w["ticker"] not in held and not w.get("closed_at")),
                   key=lambda w: (order.get(w["ticker"], len(order)), w["ticker"]))
-    today, done, stopped = now.date(), 0, None
+    from . import killswitch
+
+    today, done, stopped, server_fails = now.date(), 0, None, 0
     for item in todo:
         if done >= limit:
             break
@@ -792,7 +798,14 @@ def daily_first(source: DataSource, store: Store, me: FeedProfile, feeds: dict[s
             raise StopRun(f"rate limited ({e.message}); stopping until the next run", strike=True) from e
         except SourceError as e:  # counted once, when the run's own pass asks for the symbol below
             log(f"{ticker} day: {e}; left to the run's own pass")
+            if not isinstance(e, NotEntitled) and killswitch.is_refusal(e, e.status):  # no to the feed, not one symbol
+                raise StopRun(f"refused by {source.name} ({e})", strike=True) from e
+            server_fails = server_fails + 1 if e.status == 0 or e.status >= 500 else 0
+            if server_fails >= killswitch.FETCH_FAILURES:  # an outage: the run stops, not 2,000 stocks of retries
+                raise StopRun(f"{server_fails} symbols in a row failed on {source.name}'s side (last: {e})",
+                              strike=True) from e
             continue
+        server_fails = 0
         done += 1
         log(f"{ticker} day: {n} rows (daily bars first)")
     if done or stopped:
@@ -885,7 +898,8 @@ def _due(asset: str, tier: Tier, synced: datetime, now: datetime, refresh_hours:
     return freshness.expected(asset, tier, now).latest != freshness.expected(asset, tier, synced).latest
 
 
-def needs_fetch(store: Store, ticker: str, tiers: dict[str, Tier], now: datetime) -> list[str]:
+def needs_fetch(store: Store, ticker: str, tiers: dict[str, Tier], now: datetime,
+                assets: dict[str, frozenset] | None = None) -> list[str]:
     """The feeds (of `tiers`: the ones set up here) with something to fetch for `ticker` now:
     history it still lacks, or data its plan has published since its last sync (the same rule
     the sync skips by: nothing new can exist out of session, or before an end-of-day plan's
@@ -894,8 +908,8 @@ def needs_fetch(store: Store, ticker: str, tiers: dict[str, Tier], now: datetime
     out = []
     for row in store.watchlist(ticker=ticker):
         tier = tiers.get(row["source"])
-        if tier is None or row.get("closed_at"):
-            continue
+        if tier is None or row.get("closed_at") or (assets is not None and row["asset"] not in assets.get(row["source"], ())):
+            continue  # not set up here, finished, or not able to serve it (no key for its asset class)
         synced = row.get("synced_at")
         if (synced is None or _backfilling(row, history_floor(tier, today, row["asset"]))
                 or _due(row["asset"], tier, synced, now, 0.0)):
@@ -980,7 +994,9 @@ def big_movers(store: Store, source: str, tickers: list[str], top: int = MOVERS)
     if hit is not None and _time.monotonic() - hit[0] < MOVERS_TTL_S:
         return hit[1][:top]
     days = store.last_days(source, tickers, 2)
-    latest = max((r[0][0] for r in days.values()), default=None)
+    # the session most stocks hold: right after the close only those updated so far hold the newest
+    held = [r[0][0] for r in days.values()]
+    latest = max(set(held), key=held.count) if held else None
     moves = []
     for t, r in days.items():
         if len(r) == 2 and r[0][0] == latest and r[1][1] and r[0][1] * (r[0][2] or 0) >= MOVERS_MIN_DOLLARS:
@@ -1218,7 +1234,7 @@ def sync(
                         asset, tier, synced, horizon, 0.0 if urgent or only is not None else refresh_hours):
                     # nothing new published since its last sync (a symbol still backfilling is never skipped)
                     if urgent or only is not None:  # opened in the chart: checked, nothing new; its request is met
-                        store.set_synced(source.name, ticker, now)
+                        store.set_synced(source.name, ticker, max(now, datetime.now(timezone.utc)))
                     result.skipped += 1
                     continue
                 if (held_back is not None and not urgent and only is None and synced and not backfilling(item)

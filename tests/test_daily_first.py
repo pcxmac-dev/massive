@@ -133,3 +133,24 @@ def test_the_daily_sweep_brings_each_stocks_logo_with_its_details(store):
     store.watch("fake", ["LOGO"], "minute")
     sync(src, store, FREE, NOW, log=lambda *_: None)
     assert store.icon_checked("fake", "LOGO", url="https://x/logo.svg")
+
+
+
+def test_the_daily_sweep_stops_on_an_outage_instead_of_retrying_every_stock(store, monkeypatch):
+    from massive_collate import killswitch
+    from massive_collate.errors import SourceError
+
+    class Down(FakeSource):
+        def bar_pages(self, ticker, *a, **k):
+            self._spend()
+            raise SourceError(0, "no answer: ConnectionError")
+            yield  # pragma: no cover
+
+    tickers = [f"T{i}" for i in range(20)]
+    store.watch("fake", tickers, "minute")
+    src = Down(entitled=("minute",))
+    logged = []
+    result = sync(src, store, FREE, NOW, log=logged.append)
+    assert result.stopped and "failed on fake's side" in result.stopped
+    asked = [c for c in getattr(src, "bar_calls", [])]
+    assert len([m for m in logged if "left to the run's own pass" in m]) == killswitch.FETCH_FAILURES

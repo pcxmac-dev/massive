@@ -104,6 +104,7 @@ class DatasetStore:
                 conn = sqlite3.connect(str(path) if path else ":memory:", check_same_thread=self._check_same_thread,
                                        timeout=BUSY_TIMEOUT_S)
                 conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA journal_size_limit=67108864")  # cut back to 64 MB once checkpointed
                 with conn:
                     for table, column in (("observations", "available_at"), ("constituents", "member")):
                         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}

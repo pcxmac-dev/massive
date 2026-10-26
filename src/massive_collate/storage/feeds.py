@@ -297,6 +297,11 @@ def old_layout(conn: sqlite3.Connection, path: Path | None) -> list[str]:
     return found
 
 
+# A write-ahead log is cut back to this once checkpointed (left alone it keeps its largest size:
+# 1.3 GB beside alpaca.db, 0.76 GB beside massive-ticks.db).
+WAL_LIMIT = 64 * 2**20
+
+
 def _ascending(rows: list[tuple]) -> list[tuple]:
     """Bar rows (ticker, timespan, multiplier, ts, ...) oldest first. Feeds send history newest
     first, and a WITHOUT ROWID table filled from the left splits its pages half empty: the same
@@ -317,6 +322,7 @@ class _Feed:
         self.conn = sqlite3.connect(str(self.path) if self.path else ":memory:", check_same_thread=check_same_thread,
                                     timeout=BUSY_TIMEOUT_S)
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute(f"PRAGMA journal_size_limit={WAL_LIMIT}")
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(bars)")}
         if cols and "stored_at" not in cols:
             with self.conn:  # a file from before versioning: a column only, the bars are not rewritten
@@ -358,6 +364,7 @@ class _Feed:
                 return
             self.conn.execute("ATTACH DATABASE ? AS ticks", (str(self.ticks_path) if self.ticks_path else ":memory:",))
             self.conn.execute("PRAGMA ticks.journal_mode=WAL")
+            self.conn.execute(f"PRAGMA ticks.journal_size_limit={WAL_LIMIT}")
             self.conn.executescript(TICKS_SCHEMA)
             self.ticks = True
 
@@ -790,14 +797,22 @@ class FeedStore:
         feed = self._feed(source)
         if feed is None:
             return 0
-        ticks = feed.has_ticks()
+        # Asked weekly for every listed symbol, and almost always nothing is older: a seek per frame
+        # first (a DELETE on the ticker alone read every bar it has, under a write lock).
+        cutoff_ms = cutoff_ns // 10**6
+        frames = [(f["table"], f["timespan"], f["multiplier"]) for f in self.frame_inventory(source, ticker, counts=False)
+                  if f["first"] is not None and f["first"] < cutoff_ms]
+        ticks = feed.has_ticks() and feed.conn.execute(
+            "SELECT 1 FROM ticks.trades WHERE ticker=? AND ts_ns < ? LIMIT 1", (ticker, cutoff_ns)).fetchone() is not None
+        if not frames and not ticks:
+            return 0
         with feed.conn:
             n = feed.conn.execute(
                 "DELETE FROM ticks.trades WHERE ticker=? AND ts_ns < ?", (ticker, cutoff_ns)
             ).rowcount if ticks else 0
-            for table in _BAR_TABLES:
-                n += feed.conn.execute(f"DELETE FROM {table} WHERE ticker=? AND ts < ?",
-                                       (ticker, cutoff_ns // 10**6)).rowcount
+            for table, timespan, multiplier in frames:  # a range of the key: ticker, frame, then time
+                n += feed.conn.execute(f"DELETE FROM {table} WHERE ticker=? AND timespan=? AND multiplier=? AND ts < ?",
+                                       (ticker, timespan, multiplier, cutoff_ms)).rowcount
         self._wrote()
         return n
 

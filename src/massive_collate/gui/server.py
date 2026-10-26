@@ -1046,8 +1046,12 @@ class ChartApp:
             feeds = sorted({w["source"] for w in rows})
             if not feeds:
                 raise LookupError(f"{ticker} is not on the watchlist")
-            tiers = {name: self.settings.for_source(name).tier for name in feed_profiles(self.settings) if name in feeds}
-            if tiers and not self.settings.offline and not self._halted()                     and not collector.needs_fetch(self.store, ticker, tiers, now):
+            profiles = feed_profiles(self.settings)
+            tiers = {name: self.settings.for_source(name).tier for name in profiles if name in feeds}
+            assets = {name: profiles[name].assets for name in tiers}  # a feed without its key serves nothing
+            serving = any(r["source"] in tiers and r["asset"] in assets[r["source"]] for r in rows)
+            if (serving and not self.settings.offline and not self._halted()
+                    and not collector.needs_fetch(self.store, ticker, tiers, now, assets)):
                 # up to date on every feed: nothing new can exist yet (out of session, or not released)
                 due = [e.next_due for e in (expected(r["asset"], tiers[r["source"]], now) for r in rows
                                             if r["source"] in tiers) if e.next_due]
