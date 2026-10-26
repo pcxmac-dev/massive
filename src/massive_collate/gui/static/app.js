@@ -304,6 +304,10 @@ const chart = kc.init('chart', {
 chart.setDataLoader({
   getBars: async ({ type, timestamp, symbol, period, callback }) => {
     if (type === 'update') { callback([], { backward: false }); return; }
+    // A symbol pick sets the interval, then the symbol, and each loads the chart again: the first would
+    // be the old symbol's at the new interval, a heavy request whose answer is dropped. Only the
+    // symbol's own load goes (the chart's next reset starts it).
+    if (type === 'init' && (state.settingPeriod || symbol.ticker !== state.ticker || symbol.source !== state.source)) return;
     // A replay (replay.js) shows the bars before its start and plays the rest in: nothing newer here.
     if (type === 'init' && state.replay && window.Replay?.keyChanged()) window.Replay.stop(false);
     if (type === 'backward' && state.replay) { callback([], { backward: false }); return; }
@@ -362,9 +366,19 @@ chart.setDataLoader({
         updateStatus(res.bars.length);
       }
     } catch (err) {
+      if (token !== state.loadToken) return;  // a newer symbol/interval's load fills the chart: not blanked
       showError(err);
-      callback([], { forward: false, backward: false });
-      if (type === 'init') retryLoad(token);
+      if (type === 'init') {
+        callback([], { forward: false, backward: false });
+        retryLoad(token);
+        return;
+      }
+      // A page of history (older, or newer after a window in the past) that failed because the app was
+      // busy or out of reach is still there: the chart keeps asking for it (the next scroll to that edge,
+      // or retryPage once the pause is over). A refusal would be the same answer again: no more there.
+      const failing = apiFailing.has('/api/bars');
+      callback([], type === 'forward' ? { forward: failing } : { backward: failing });
+      if (failing) retryPage(token);
     }
   },
   subscribeBar: ({ symbol, period, callback }) => {
@@ -397,6 +411,7 @@ chart.setDataLoader({
     // every 2 s, the rest every minute.
     closeStream();
     state.streamFailed = false;
+    if (state.modelDue) { clearTimeout(state.modelDue.timer); Object.assign(state.modelDue, { timer: 0, stale: false }); }
     const openStream = () => {
       const list = chart.getDataList();
       if (!list.length || PRICE_BASED.has(state.chartType) || state.hasNewer) return;
@@ -410,7 +425,7 @@ chart.setDataLoader({
       es.onmessage = (e) => {
         if (sub !== state.subscription || kind !== state.model.kind) return;
         const msg = JSON.parse(e.data);
-        if (msg.reload) { chart.resetData(); return; }  // a model: its values moved back in time
+        if (msg.reload) { modelMoved(); return; }  // a model: its values moved back in time
         if ((msg.model || 'price') !== kind) return;
         const last = chart.getDataList().at(-1)?.timestamp ?? 0;
         const bars = msg.bars.filter((b) => b.timestamp >= last);
@@ -446,6 +461,17 @@ function retryLoad(token) {
   }, Math.max(1_000, f.until - Date.now() + 50));
 }
 
+// A page of history that failed the same way is asked for again when the pause is over, if the chart
+// is still at that edge: a scroll by nothing makes the chart look at its edges (and load what is
+// beyond one it shows) without moving.
+function retryPage(token) {
+  const f = apiFailing.get('/api/bars');
+  if (!f) return;
+  clearTimeout(state.pageRetry);  // one at a time: a scroll along the edge during the pause asks every frame
+  state.pageRetry = setTimeout(() => { if (token === state.loadToken) chart.scrollByDistance(0); },
+                               Math.max(1_000, f.until - Date.now() + 50));
+}
+
 // Whether the newest bar is on screen (the chart then follows it): only then may a resize put it
 // back where the "now" handle was left; a chart scrolled into history stays where it is.
 function atNewest() {
@@ -463,6 +489,38 @@ function closeStream() {
   state.stream?.close();
   state.stream = null;
 }
+
+// A model's values move back in time as bars are stored (a centred window; a Fourier fit, all of
+// it), and the stream says so with every write of a live symbol, every couple of seconds. The chart
+// loads again at most once a bar of its level, and never sooner than MODEL_RELOAD_MS[0] nor later
+// than MODEL_RELOAD_MS[1] after the last, keeping its zoom as a model switch does. Scrolled back into
+// history (or hidden behind another view) it waits until the newest bar is in view again. Reloading on
+// every write held a heavy request every 2 s and jumped the view back to now.
+const MODEL_RELOAD_MS = [10_000, 60_000];
+
+function modelMoved() {
+  const due = state.modelDue ??= { at: 0, timer: 0, stale: false };  // at: the last reload
+  due.stale = true;
+  if (due.timer) return;
+  const bar = (LEVEL_MS[state.period.type] || 6e4) * (state.period.span || 1);
+  const every = Math.min(MODEL_RELOAD_MS[1], Math.max(MODEL_RELOAD_MS[0], bar));
+  due.timer = setTimeout(reloadMovedModel, Math.max(0, due.at + every - Date.now()));
+}
+
+function reloadMovedModel() {
+  const due = state.modelDue;
+  due.timer = 0;
+  if (!due.stale || state.model.kind === 'price' || state.replay || state.lodSwitch) return;
+  if (!atNewest() || !chartShown()) return;  // asked again when the newest bar is back in view
+  due.stale = false;
+  due.at = Date.now();
+  state.lodSwitch = { barSpace: chart.getBarSpace().bar, anchor: null, anchorX: null, atLatest: true };  // the same zoom
+  chart.resetData();
+}
+
+const modelBackInView = () => { if (state.modelDue?.stale && !state.modelDue.timer && atNewest()) modelMoved(); };
+chart.subscribeAction('onVisibleRangeChange', modelBackInView);
+window.addEventListener('massive:view', () => requestAnimationFrame(modelBackInView));
 
 // Whether the open symbol is streaming live right now (the activity poll's live tickers).
 function isLive() {
@@ -915,10 +973,12 @@ async function reloadWithModelPrecision() {
   if (sym && state.model.kind !== 'price') {
     try {
       const p = chart.getPeriod();
+      const model = JSON.stringify(modelQuery());
       const res = await api('/api/bars', { source: sym.source, ticker: sym.ticker, period: p.type, span: p.span,
                                            session: state.session, limit: 1, adjust: state.adjust, ...modelQuery() });
       const now = chart.getSymbol();
-      if (now?.ticker !== sym.ticker || now?.source !== sym.source) return;  // another symbol meanwhile: its own load
+      // another symbol or model meanwhile (the slider dragged on): its own load, with its own decimals
+      if (now?.ticker !== sym.ticker || now?.source !== sym.source || JSON.stringify(modelQuery()) !== model) return;
       want = res.model?.precision ?? want;
       state.modelUnit = res.model?.unit ?? null;
       state.modelHidden = res.model?.hidden ?? 0;
@@ -1576,7 +1636,8 @@ async function selectSymbol(ticker, source = null) {
   renderFeeds(info);
   renderPeriods();
   chart.removeOverlay({ groupId: 'user' });
-  chart.setPeriod(state.period);
+  state.settingPeriod = true;  // its load is skipped (getBars): the symbol's, next, is the one wanted
+  try { chart.setPeriod(state.period); } finally { state.settingPeriod = false; }
   chart.setSymbol({
     ticker: meta.ticker, source, name: info.name || meta.ticker,
     pricePrecision: meta.pricePrecision, volumePrecision: meta.volumePrecision,
