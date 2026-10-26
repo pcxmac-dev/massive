@@ -18,13 +18,14 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
+from datetime import time as dtime
 from pathlib import Path
 from typing import Iterable, Sequence
 
 import pandas as pd
 
-from .common import BUSY_TIMEOUT_S, _date_ms, _distinct, _feed_name, _now
+from .common import BUSY_TIMEOUT_S, _date_ms, _distinct, _feed_name, _now, add_column, write_transaction
 
 
 # A feed's own files, in the `feeds` folder beside the main file: <feed>.db holds its bars (the
@@ -44,7 +45,8 @@ CREATE TABLE IF NOT EXISTS bars (
 ) WITHOUT ROWID;
 -- Bars built here (from the feed's ticks, or its finer bars for the time frames it does not send):
 -- derived, apart from what the feed published. A rebuild replaces them; a bar the feed sends for
--- the same time replaces them for good (bars_replace_built). `derivation` is the record of how
+-- the same time replaces them for good (bars_replace_built). Where the feed's own bar is bad data
+-- (pruned), one is built beside it for the filtered view. `derivation` is the record of how
 -- (derivations table, main file).
 CREATE TABLE IF NOT EXISTS built_bars (
     ticker       TEXT    NOT NULL,
@@ -87,10 +89,12 @@ CREATE INDEX IF NOT EXISTS pruned_by_rule ON pruned (ticker, rule, released_at);
 
 
 def _excluded(conn: sqlite3.Connection, ticker: str, timespan: str, multiplier: int, lo_ms: int | None = None,
-              hi_ms: int | None = None) -> set:
-    """Times of a series' bars left out of the filtered view (bad data, pruned and not released)."""
-    sql = ("SELECT DISTINCT ts FROM pruned WHERE ticker=? AND timespan=? AND multiplier=? AND excludes=1 "
-           "AND released_at IS NULL")
+              hi_ms: int | None = None) -> dict[str, set]:
+    """Times of a series' bars left out of the filtered view (bad data, pruned and not released),
+    per table: {"bars": the feed's own, "built_bars": those built here} (an entry of a bar built
+    here carries its derivation). A built bar beside a feed's own that was left out is not."""
+    sql = ("SELECT DISTINCT ts, derivation IS NOT NULL FROM pruned WHERE ticker=? AND timespan=? AND multiplier=? "
+           "AND excludes=1 AND released_at IS NULL")
     args: list = [ticker.upper(), timespan, multiplier]
     if lo_ms is not None:
         sql += " AND ts >= ?"
@@ -98,13 +102,32 @@ def _excluded(conn: sqlite3.Connection, ticker: str, timespan: str, multiplier: 
     if hi_ms is not None:
         sql += " AND ts < ?"
         args.append(int(hi_ms))
-    return {ts for (ts,) in conn.execute(sql, args)}
+    out: dict[str, set] = {table: set() for table in _BAR_TABLES}
+    for ts, built in conn.execute(sql, args):
+        out["built_bars" if built else "bars"].add(ts)
+    return out
 
 
-# What the feed sent first: a bar built here is used only where the feed sent none for that time.
+# What the feed sent first: a bar built here is used only where the feed sent none for that time,
+# or where the feed's own is left out of the filtered view (bad data): there the filtered view
+# takes the built bar, and the unfiltered view still the feed's own.
 _BAR_TABLES = ("bars", "built_bars")
 
 # Corrections: the version a re-download replaced, with when it was stored and when it was replaced.
+# A write stores a batch under one stored_at, so a bar written twice in one batch (or in two writes
+# within a millisecond) gives two versions replaced at the same moment: the first is kept, the
+# version readers saw before; the one in between lived only inside the batch. The guard is the
+# WHERE: a trigger's own OR IGNORE / OR REPLACE gives way to the conflict rule of the statement
+# that fired it, and the upsert's is ABORT, so such a batch failed whole ("UNIQUE constraint
+# failed: bar_revisions...") and was stored not at all.
+REVISED_TRIGGER = """CREATE TRIGGER IF NOT EXISTS bars_revised BEFORE UPDATE ON bars
+BEGIN
+    INSERT OR IGNORE INTO bar_revisions (ticker, timespan, multiplier, ts, open, high, low, close, volume, vwap,
+        transactions, stored_at, replaced_at) SELECT old.ticker, old.timespan, old.multiplier, old.ts, old.open,
+        old.high, old.low, old.close, old.volume, old.vwap, old.transactions, old.stored_at, new.stored_at
+    WHERE NOT EXISTS (SELECT 1 FROM bar_revisions WHERE ticker=old.ticker AND timespan=old.timespan
+        AND multiplier=old.multiplier AND ts=old.ts AND replaced_at=new.stored_at);
+END"""
 REVISIONS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS bar_revisions (
     ticker       TEXT    NOT NULL,
@@ -118,13 +141,7 @@ CREATE TABLE IF NOT EXISTS bar_revisions (
     derivation   INTEGER,            -- a version built here (derivations table); NULL: the feed's own
     PRIMARY KEY (ticker, timespan, multiplier, ts, replaced_at)
 ) WITHOUT ROWID;
-CREATE TRIGGER IF NOT EXISTS bars_revised BEFORE UPDATE ON bars
-BEGIN
-    INSERT OR REPLACE INTO bar_revisions (ticker, timespan, multiplier, ts, open, high, low, close, volume, vwap,
-        transactions, stored_at, replaced_at) VALUES (old.ticker, old.timespan, old.multiplier, old.ts, old.open,
-        old.high, old.low, old.close, old.volume, old.vwap, old.transactions, old.stored_at, new.stored_at);
-END;
-"""
+""" + REVISED_TRIGGER + ";\n"
 
 TICKS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS ticks.trades (
@@ -191,18 +208,26 @@ WHERE bars.open IS NOT excluded.open OR bars.high IS NOT excluded.high OR bars.l
 
 
 # A bar the feed sends replaces the one built here for the same time: the built one is kept as the
-# version it replaced (for what was known when), then removed.
-REPLACE_SCHEMA = """
-CREATE TRIGGER IF NOT EXISTS bars_replace_built AFTER INSERT ON bars
+# version it replaced (for what was known when), then removed. A revision already kept for that
+# moment is kept (see REVISED_TRIGGER).
+REPLACE_TRIGGER = """CREATE TRIGGER IF NOT EXISTS bars_replace_built AFTER INSERT ON bars
 BEGIN
-    INSERT OR REPLACE INTO bar_revisions (ticker, timespan, multiplier, ts, open, high, low, close, volume, vwap,
+    INSERT OR IGNORE INTO bar_revisions (ticker, timespan, multiplier, ts, open, high, low, close, volume, vwap,
         transactions, stored_at, replaced_at, derivation)
-    SELECT ticker, timespan, multiplier, ts, open, high, low, close, volume, vwap, transactions, stored_at,
-        MAX(COALESCE(new.stored_at, 0), COALESCE(stored_at, 0)), derivation FROM built_bars
-    WHERE ticker=new.ticker AND timespan=new.timespan AND multiplier=new.multiplier AND ts=new.ts;
+    SELECT d.ticker, d.timespan, d.multiplier, d.ts, d.open, d.high, d.low, d.close, d.volume, d.vwap, d.transactions,
+        d.stored_at, MAX(COALESCE(new.stored_at, 0), COALESCE(d.stored_at, 0)), d.derivation FROM built_bars d
+    WHERE d.ticker=new.ticker AND d.timespan=new.timespan AND d.multiplier=new.multiplier AND d.ts=new.ts
+      AND NOT EXISTS (SELECT 1 FROM bar_revisions r WHERE r.ticker=d.ticker AND r.timespan=d.timespan
+        AND r.multiplier=d.multiplier AND r.ts=d.ts
+        AND r.replaced_at=MAX(COALESCE(new.stored_at, 0), COALESCE(d.stored_at, 0)));
     DELETE FROM built_bars WHERE ticker=new.ticker AND timespan=new.timespan AND multiplier=new.multiplier AND ts=new.ts;
-END;
-"""
+END"""
+REPLACE_SCHEMA = REPLACE_TRIGGER + ";\n"
+
+# Triggers whose text changed, by name: a file made before keeps the old one (CREATE ... IF NOT
+# EXISTS), so it is replaced where it lacks `marker`, a part of the current text.
+_TRIGGER_UPGRADES = (("bars_revised", REVISED_TRIGGER, "NOT EXISTS"),
+                     ("bars_replace_built", REPLACE_TRIGGER, "NOT EXISTS"))
 
 
 # The change log: what was written when, per series and minute of stored_at (a removal: the minute
@@ -238,6 +263,18 @@ END;
     ("update", "new", "COALESCE(new.stored_at, CAST(strftime('%s', 'now') AS INTEGER) * 1000) / 60000"),
     ("delete", "old", "CAST(strftime('%s', 'now') AS INTEGER) / 60")))
 
+# A change no trigger sees: a bar put on the pruned list, or released from it, changes the
+# filtered view without a bar being written. It is logged as the triggers log a write (at the
+# minute it happened, its bar time as lo and hi), so derive.py rebuilds the frames above it and
+# every reader of the change log or of series_fingerprint (the chart's caches) sees it.
+_LOG_CHANGE = ("INSERT INTO changes VALUES (?, ?, ?, ?, ?, ?, 1) ON CONFLICT (ticker, timespan, multiplier, minute) "
+               "DO UPDATE SET lo = MIN(lo, excluded.lo), hi = MAX(hi, excluded.hi), n = n + 1")
+
+
+def _log_changes(conn: sqlite3.Connection, ticker: str, timespan: str, multiplier: int, times: Iterable[int],
+                 now_ms: int) -> None:
+    conn.executemany(_LOG_CHANGE, [(ticker, timespan, multiplier, now_ms // 60_000, int(t), int(t)) for t in times])
+
 
 class TicksBlocked(RuntimeError):
     """Bars-only mode (BARS_ONLY, config.py): this process does not open the tick files."""
@@ -259,6 +296,18 @@ def tick_access() -> bool:
 
 def _stored_ms() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
+def _day_bounds(start: date | None, end: date | None, zone: tzinfo | None) -> tuple[int | None, int | None]:
+    """[from, to) in ms of a read from `start` to `end` (dates, either open). In `zone`, the
+    series' day zone: from start's midnight to the midnight after end there (an export of a
+    stock's days from New York midnight, not 19:00 or 20:00 the evening before). Without a zone,
+    the bounds callers have relied on (gui/bars.py cuts its cached tail at the UTC midnight):
+    from start's UTC midnight, to two days after end's (the caller keeps end's New York date)."""
+    if zone is None:
+        return (_date_ms(start) if start else None, _date_ms(end) + 2 * 86_400_000 if end else None)
+    midnight = lambda d: int(datetime.combine(d, dtime(0), tzinfo=zone).timestamp() * 1000)
+    return (midnight(start) if start else None, midnight(end + timedelta(days=1)) if end else None)
 
 
 def _bar_row(ticker: str, timespan: str, multiplier: int, bar: dict, stored_at: int) -> tuple:
@@ -323,23 +372,28 @@ class _Feed:
                                     timeout=BUSY_TIMEOUT_S)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute(f"PRAGMA journal_size_limit={WAL_LIMIT}")
+        # Upgrades of an older file are looked for without a lock, then made under the write lock
+        # (and looked for again there): the processes opening a file on the day of an upgrade race.
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(bars)")}
         if cols and "stored_at" not in cols:
-            with self.conn:  # a file from before versioning: a column only, the bars are not rewritten
-                self.conn.execute("ALTER TABLE bars ADD COLUMN stored_at INTEGER")
+            with write_transaction(self.conn):  # a file from before versioning: a column only, the bars are not rewritten
+                add_column(self.conn, "bars", "stored_at", "INTEGER")
         self.conn.executescript(FEED_SCHEMA + (COMPOSITE_SCHEMA if name == COMPOSITE else REVISIONS_SCHEMA))
         if name != COMPOSITE:
             if "derivation" not in {r[1] for r in self.conn.execute("PRAGMA table_info(bar_revisions)")}:
-                with self.conn:  # a replaced version that was built here says so (NULL: the feed's own)
-                    self.conn.execute("ALTER TABLE bar_revisions ADD COLUMN derivation INTEGER")
+                with write_transaction(self.conn):  # a replaced version that was built here says so (NULL: the feed's own)
+                    add_column(self.conn, "bar_revisions", "derivation", "INTEGER")
                     self.conn.execute("DROP TRIGGER IF EXISTS bars_revised")  # it named no columns
                 self.conn.executescript(REVISIONS_SCHEMA)
             self.conn.executescript(REPLACE_SCHEMA)
+            self._upgrade_triggers()
         if name == COMPOSITE:  # the derived model's rows point to their derivation (columns only)
-            with self.conn:
-                for table in ("bars", "composite_stats"):
-                    if "derivation" not in {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}:
-                        self.conn.execute(f"ALTER TABLE {table} ADD COLUMN derivation INTEGER")
+            tables = [t for t in ("bars", "composite_stats")
+                      if "derivation" not in {r[1] for r in self.conn.execute(f"PRAGMA table_info({t})")}]
+            if tables:
+                with write_transaction(self.conn):
+                    for table in tables:
+                        add_column(self.conn, table, "derivation", "INTEGER")
         self.conn.executescript(CHANGES_SCHEMA)
         if self.conn.execute("SELECT 1 FROM changes_since").fetchone() is None:  # a write only the first time
             with self.conn:  # complete from now: the triggers exist, so every write after this is logged
@@ -348,6 +402,19 @@ class _Feed:
         self.ticks = False
         self._lock = threading.Lock()
         self.has_ticks()
+
+    def _upgrade_triggers(self) -> None:
+        """Replace triggers made by an older version whose text changed (_TRIGGER_UPGRADES): dropped
+        and made again in one transaction, so no write runs between without one."""
+        def stale() -> list:
+            found = dict(self.conn.execute("SELECT name, sql FROM sqlite_master WHERE type='trigger'"))
+            return [(n, sql) for n, sql, marker in _TRIGGER_UPGRADES if n in found and marker not in found[n]]
+        if not stale():
+            return
+        with write_transaction(self.conn):
+            for trigger, sql in stale():
+                self.conn.execute(f"DROP TRIGGER {trigger}")
+                self.conn.execute(sql)
 
     def has_ticks(self) -> bool:
         """Whether the feed has a tick file, attaching it when one has appeared (another process
@@ -501,16 +568,21 @@ class FeedStore:
         start: date | None = None,
         end: date | None = None,
         exchanges: Sequence[int] | None = None,
+        zone: tzinfo | None = None,
     ) -> pd.DataFrame:
-        """Trades with a `time` column in US/Eastern (ns precision) and the exchange name."""
+        """Trades with a `time` column in US/Eastern (ns precision) and the exchange name. With
+        `zone` (the series' day zone, derive.day_zone), from `start`'s midnight to the end of
+        `end` there; without, as callers have relied on: from `start`'s UTC midnight to the end of
+        `end` in New York."""
         sql = "SELECT ts_ns, seq, price, size, exchange, conditions FROM ticks.trades WHERE ticker=?"
         params: list = [ticker.upper()]
-        if start:
+        lo, hi = _day_bounds(start, end, zone)
+        if lo is not None:
             sql += " AND ts_ns >= ?"
-            params.append(_date_ms(start) * 1_000_000)
-        if end:
+            params.append(lo * 1_000_000)
+        if hi is not None:
             sql += " AND ts_ns < ?"
-            params.append((_date_ms(end) + 2 * 86_400_000) * 1_000_000)
+            params.append(hi * 1_000_000)
         if exchanges:
             sql += f" AND exchange IN ({','.join('?' * len(exchanges))})"
             params += list(exchanges)
@@ -529,7 +601,7 @@ class FeedStore:
         df["exchange_name"] = [None if pd.isna(e) else names.get((s, int(e)))
                                for s, e in zip(df["source"], df["exchange"])]
         df["time"] = pd.to_datetime(df.pop("ts_ns"), unit="ns", utc=True).dt.tz_convert("America/New_York")
-        if end:
+        if end and zone is None:
             df = df[df["time"].dt.date <= end]
         return df[cols].reset_index(drop=True)
 
@@ -550,7 +622,10 @@ class FeedStore:
                           derivation: int) -> int:
         """Bars built here (derived: from the feed's ticks, or its finer bars): kept apart from its
         own, replacing an earlier build of the same bars, each pointing to `derivation`. None goes
-        where the feed sent a bar for that time. Returns bars stored."""
+        where the feed sent a bar for that time, unless the feed's bar is left out of the filtered
+        view (pruned, not released): there the built bar fills the filtered view's hole (NVDA's
+        2024-06-10 daily, pruned, left the day out of every frame above it) and unfiltered reads
+        still give the feed's own. Returns bars stored."""
         ticker = ticker.upper()
         stored = _stored_ms()
         rows = _ascending([(*_bar_row(ticker, timespan, multiplier, b, stored)[:11], derivation, stored) for b in bars])
@@ -558,7 +633,9 @@ class FeedStore:
         with conn:  # the statement's own rows (total_changes would count the change log's too)
             n = conn.executemany(
                 "INSERT OR REPLACE INTO built_bars SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS "
-                "(SELECT 1 FROM bars WHERE ticker=? AND timespan=? AND multiplier=? AND ts=?)",
+                "(SELECT 1 FROM bars b WHERE ticker=? AND timespan=? AND multiplier=? AND ts=? AND NOT EXISTS "
+                "(SELECT 1 FROM pruned p WHERE p.ticker=b.ticker AND p.timespan=b.timespan AND p.multiplier=b.multiplier "
+                "AND p.ts=b.ts AND p.excludes=1 AND p.released_at IS NULL AND p.derivation IS NULL))",
                 [(*r, *r[:4]) for r in rows]).rowcount
         self._wrote()
         return max(0, n)
@@ -604,14 +681,17 @@ class FeedStore:
 
     def drop_superseded_built(self, source: str) -> int:
         """Built bars the feed has since sent its own for (from before bars_replace_built): kept
-        as the versions they were, then removed. Returns bars removed."""
+        as the versions they were, then removed. Returns bars removed. (Not those beside a feed bar
+        left out of the filtered view: they fill its place there, upsert_built_bars.)"""
         conn = self._bars(source)
         if conn is None:
             return 0
-        same = ("b.ticker=d.ticker AND b.timespan=d.timespan AND b.multiplier=d.multiplier AND b.ts=d.ts")
+        same = ("b.ticker=d.ticker AND b.timespan=d.timespan AND b.multiplier=d.multiplier AND b.ts=d.ts AND NOT EXISTS "
+                "(SELECT 1 FROM pruned p WHERE p.ticker=b.ticker AND p.timespan=b.timespan AND p.multiplier=b.multiplier "
+                "AND p.ts=b.ts AND p.excludes=1 AND p.released_at IS NULL AND p.derivation IS NULL)")
         with conn:
             conn.execute(
-                "INSERT OR REPLACE INTO bar_revisions (ticker, timespan, multiplier, ts, open, high, low, close, volume, "
+                "INSERT OR IGNORE INTO bar_revisions (ticker, timespan, multiplier, ts, open, high, low, close, volume, "
                 "vwap, transactions, stored_at, replaced_at, derivation) SELECT d.ticker, d.timespan, d.multiplier, d.ts, "
                 "d.open, d.high, d.low, d.close, d.volume, d.vwap, d.transactions, d.stored_at, "
                 f"MAX(COALESCE(b.stored_at, 0), COALESCE(d.stored_at, 0), 1), d.derivation FROM built_bars d JOIN bars b ON {same}")
@@ -623,7 +703,8 @@ class FeedStore:
                     as_of: int | None = None, published=None, filtered: bool = True) -> pd.DataFrame:
         """Bars of a series in [lo, hi) ms from the given feeds (an index range scan per feed), with
         a `time` column in US/Eastern like load_bars: filtered (bad data left out, the pruned
-        list), or with `filtered=False` all of them. With `as_of` (ms): the series as it stood
+        list; a bar built here takes the place of a feed's own left out), or with `filtered=False`
+        all of them (the feed's own first). With `as_of` (ms): the series as it stood
         then: only bars published by then (`published(ts array) -> ms array`, the feed's rule; all
         if None), each in the version in effect then (the earliest stored if none was stored yet),
         bad data included (it was there)."""
@@ -635,13 +716,14 @@ class FeedStore:
             for conn in (self._bars(src) for src in sources):
                 if conn is None:
                     continue
-                gone = _excluded(conn, ticker, timespan, 1, lo_ms, hi_ms) if filtered else ()
+                gone = _excluded(conn, ticker, timespan, 1, lo_ms, hi_ms) if filtered else {}
                 for table in _BAR_TABLES:
                     f = pd.read_sql_query(
                         f"SELECT ts, open, high, low, close, volume, vwap, transactions, {int(table == 'built_bars')} "
                         f"AS derived FROM {table} WHERE ticker=? AND timespan=? AND multiplier=1 AND ts >= ? AND ts < ? "
                         "ORDER BY ts", conn, params=(ticker.upper(), timespan, int(lo_ms), int(hi_ms)))
-                    frames.append(f[~f["ts"].isin(gone)] if gone else f)
+                    out = gone.get(table)  # each table's own bad data: a built bar beside a feed's left out stays
+                    frames.append(f[~f["ts"].isin(out)] if out else f)
         frames = [f for f in frames if len(f)]  # an empty read has untyped columns: it would turn numbers to objects
         df = pd.concat(frames) if frames else pd.DataFrame(
             columns=["ts", "open", "high", "low", "close", "volume", "vwap", "transactions", "derived"])
@@ -715,31 +797,37 @@ class FeedStore:
         end: date | None = None,
         source: str | None = None,
         filtered: bool = True,
+        zone: tzinfo | None = None,
     ) -> pd.DataFrame:
         """Bars with a `time` column in US/Eastern time: filtered (bad data left out, the pruned
-        list), or with `filtered=False` all of them."""
+        list; a bar built here takes the place of a feed's own left out), or with `filtered=False`
+        all of them. `start` and `end` as load_trades takes them (`zone`: the series' day zone)."""
         where = " WHERE timespan=? AND multiplier=?"
         params: list = [timespan, multiplier]
         if tickers:
             where += f" AND ticker IN ({','.join('?' * len(tickers))})"
             params += [t.upper() for t in tickers]
-        if start:
+        lo, hi = _day_bounds(start, end, zone)
+        if lo is not None:
             where += " AND ts >= ?"
-            params.append(_date_ms(start))
-        if end:
+            params.append(lo)
+        if hi is not None:
             where += " AND ts < ?"
-            params.append(_date_ms(end) + 2 * 86_400_000)
+            params.append(hi)
         sql = "SELECT ticker, ts, " + ", ".join(BAR_COLUMNS) + " FROM {table}" + where
         frames = []
         for feed in [self._feed(source)] if source else self._open_feeds():
             if feed is not None:
-                gone = pd.read_sql_query("SELECT DISTINCT ticker, ts FROM pruned" + where + " AND excludes=1 "
-                                         "AND released_at IS NULL", feed.conn, params=params) if filtered else None
+                gone = pd.read_sql_query("SELECT DISTINCT ticker, ts, derivation IS NOT NULL AS built FROM pruned" + where
+                                         + " AND excludes=1 AND released_at IS NULL", feed.conn,
+                                         params=params) if filtered else None
                 for table in _BAR_TABLES:
                     f = pd.read_sql_query(sql.format(table=table) + " ORDER BY ticker, ts", feed.conn, params=params)
-                    if gone is not None and len(gone) and len(f):
+                    # each table's own bad data (as bars_window: a built bar beside a feed's left out stays)
+                    out = gone[gone["built"] == int(table == "built_bars")] if gone is not None and len(gone) else None
+                    if out is not None and len(out) and len(f):
                         keys = pd.MultiIndex.from_frame(f[["ticker", "ts"]])
-                        f = f[~keys.isin(pd.MultiIndex.from_frame(gone))].copy()
+                        f = f[~keys.isin(pd.MultiIndex.from_frame(out[["ticker", "ts"]]))].copy()
                     frames.append(f)
                     frames[-1].insert(0, "source", feed.name)
                     frames[-1]["derived"] = table == "built_bars"
@@ -750,7 +838,7 @@ class FeedStore:
         if len(frames) > 1:
             df = df.sort_values(["ticker", "ts"], kind="stable", ignore_index=True)
         df["time"] = pd.to_datetime(df.pop("ts"), unit="ms", utc=True).dt.tz_convert("America/New_York")
-        if end:
+        if end and zone is None:
             df = df[df["time"].dt.date <= end]
         return df[["source", "ticker", "time", *BAR_COLUMNS, "derived"]].reset_index(drop=True)
 
@@ -1058,12 +1146,16 @@ class FeedStore:
 
     # -- composite model and quality -----------------------------------------
 
-    def save_composite(self, ticker: str, timespan: str, comp: pd.DataFrame, derivation: int | None = None) -> int:
+    def save_composite(self, ticker: str, timespan: str, comp: pd.DataFrame, derivation: int | None = None,
+                       span: tuple[int, int] | None = None) -> int:
         """Composite bars (the 'composite' feed) and their deviation across exchanges, together, both
-        pointing to the build's derivation record."""
-        if comp.empty:
-            return 0
+        pointing to the build's derivation record. With `span` [lo, hi) ms, the build of that whole
+        span: composite bars in it that the build no longer makes (an exchange's bar gone, fewer than
+        two exchanges left) are removed with their deviation."""
         ticker = ticker.upper()
+        conn = self._feed(COMPOSITE, create=True).conn if len(comp) else self._bars(COMPOSITE)
+        if conn is None:
+            return 0
         stored = _stored_ms()
         bars = _ascending([_bar_row(ticker, timespan, 1, {
             "t": int(t), "o": r.o, "h": r.h, "l": r.l, "c": r.c, "v": r.v,
@@ -1071,8 +1163,14 @@ class FeedStore:
             for t, r in zip(comp.index, comp.itertuples())])
         rows = [(ticker, timespan, int(t), int(r.venues), float(r.sd_bps), float(r.range_bps), float(r.env_h),
                  float(r.env_l), r.members, r.outliers, derivation) for t, r in zip(comp.index, comp.itertuples())]
-        conn = self._feed(COMPOSITE, create=True).conn
-        with conn:
+        with write_transaction(conn):  # one transaction: no reader sees the span half rebuilt
+            if span is not None:
+                held = {ts for table, frame in (("bars", " AND multiplier=1"), ("composite_stats", "")) for (ts,) in
+                        conn.execute(f"SELECT ts FROM {table} WHERE ticker=? AND timespan=?{frame} AND ts >= ? AND ts < ?",
+                                     (ticker, timespan, int(span[0]), int(span[1])))}
+                stale = [(ticker, timespan, ts) for ts in sorted(held - {int(t) for t in comp.index})]
+                conn.executemany("DELETE FROM bars WHERE ticker=? AND timespan=? AND multiplier=1 AND ts=?", stale)
+                conn.executemany("DELETE FROM composite_stats WHERE ticker=? AND timespan=? AND ts=?", stale)
             conn.executemany(_UPSERT_COMPOSITE, bars)
             conn.executemany("INSERT OR REPLACE INTO composite_stats (ticker, timespan, ts, venues, sd_bps, range_bps, "
                              "env_h, env_l, members, outliers, derivation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)

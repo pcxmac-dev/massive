@@ -1131,11 +1131,14 @@ def _ticks_refused(what: str, settings: Settings) -> bool:
 def cmd_export(args, settings: Settings) -> int:
     if args.kind == "trades" and _ticks_refused("export of trades", settings):
         return 2
+    from .derive import day_zone
+
+    zone = day_zone(resolve(args.ticker).asset)  # whole days where the series has them: New York, or UTC (crypto, fx)
     with Store(settings.db_path) as store:
         if args.kind == "trades":
-            df = store.load_trades(args.ticker, args.source, args.start, args.end)
+            df = store.load_trades(args.ticker, args.source, args.start, args.end, zone=zone)
         else:
-            df = store.load_bars([args.ticker], args.kind, 1, args.start, args.end, args.source)
+            df = store.load_bars([args.ticker], args.kind, 1, args.start, args.end, args.source, zone=zone)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out, index=False)
