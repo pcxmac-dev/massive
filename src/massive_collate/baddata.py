@@ -160,20 +160,41 @@ def inconsistent(store, source: str, ticker: str, timespan: str, lo_ms: int, hi_
     day's minutes, a minute's seconds) by more than CONSISTENT: the extreme is in no trade the feed
     shows at the finer frame. Judged only where the feed holds that finer frame for the whole bar
     (its coverage) and has bars in it, the finer bars filtered (a pruned one supports nothing).
+    Read a chunk of the finer frame at a time (CHUNK_MS), and only where the feed holds it: the
+    check of a first minute backfill (twenty years, 4-5 million rows) read it all at once, 1-2 GB.
     Returns (the bars, evidence)."""
     finer = FINER.get(timespan)
     empty = pd.DataFrame(), []
     if finer is None or asset == "future":  # futures' days are CME sessions from 18:00: not a date's minutes
         return empty
+    spans = sorted(store.coverage(ticker, finer, source=source).get(source, []))
+    if not spans:  # nothing to judge by: the bars are not read
+        return empty
+    # a bar outside the finer frame's spans has nothing to be judged by: only their reach is read
+    lo, hi = max(lo_ms, spans[0][0]), min(hi_ms, max(b for _, b in spans))
+    found, evidence = [], []
+    start = lo
+    while start < hi:
+        end = min(hi, start + CHUNK_MS[finer])
+        if any(a < end and b > start for a, b in spans):
+            bad, why = _inconsistent(store, source, ticker, timespan, start, end, asset, finer, spans)
+            if len(bad):
+                found.append(bad)
+                evidence += why
+        start = end
+    return (pd.concat(found, ignore_index=True), evidence) if found else empty
+
+
+def _inconsistent(store, source: str, ticker: str, timespan: str, lo_ms: int, hi_ms: int, asset: str, finer: str,
+                  spans: list[tuple[int, int]]) -> tuple[pd.DataFrame, list[dict]]:
+    """inconsistent() for one chunk [lo, hi), with the finer frame's spans read once for all."""
+    empty = pd.DataFrame(), []
     rows = store.series_rows(source, ticker, timespan, lo_ms, hi_ms)
     own = rows[rows["derivation"].isna()].reset_index(drop=True) if len(rows) else rows
     if own.empty:
         return empty
     ts = own["ts"].to_numpy(dtype="int64")
     ends = _ends(ts, timespan, asset)
-    spans = sorted(store.coverage(ticker, finer, source=source).get(source, []))
-    if not spans:
-        return empty
     starts = np.array([a for a, _ in spans], dtype="int64")
     stops = np.array([b for _, b in spans], dtype="int64")
     at = np.searchsorted(starts, ts, side="right") - 1

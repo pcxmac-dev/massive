@@ -185,3 +185,30 @@ def test_a_real_time_plans_newest_minutes_are_left_to_settle(store):
     assert freshness.history_horizon("stock", ADV, just_after) == datetime(2026, 10, 20, 20, 3, tzinfo=ET)
     horizon = freshness.history_horizon("stock", ADV, datetime(2026, 10, 21, 20, 5, tzinfo=ET))
     assert frontier_ms("stock", ADV, horizon, "minute") == ms(datetime(2026, 10, 21, 20, 0, tzinfo=ET))
+
+
+# -- the fetch check in chunks (finding 6) -----------------------------------------------------------
+
+def test_the_fetch_check_reads_a_chunk_at_a_time_and_only_where_the_finer_frame_is_held(store, monkeypatch):
+    from massive_collate import baddata
+    from massive_collate.coverage import FeedProfile
+
+    first, last = datetime(2025, 10, 1, 10, tzinfo=ET), datetime(2026, 10, 20, 10, tzinfo=ET)
+    store.upsert_bars("fake", "AAA", "minute", 1, [_bar(first), _bar(last)])  # a year of minutes changed
+    store.upsert_bars("fake", "AAA", "day", 1, [_bar(datetime(2025, 10, 1, tzinfo=ET)), _bar(datetime(2026, 10, 20, tzinfo=ET))])
+    store.add_coverage("fake", "AAA", "minute", ms(first), ms(last) + 60_000)
+    seconds_from = ms(datetime(2026, 10, 19, tzinfo=ET))  # seconds held for the last two days only
+    store.add_coverage("fake", "AAA", "second", seconds_from, ms(datetime(2026, 10, 21, tzinfo=ET)))
+    judged, finer = [], []  # the bars checked, and the finer bars they are checked against
+    rows, window = store.series_rows, store.bars_window
+    monkeypatch.setattr(store, "series_rows", lambda s, t, ts, lo, hi: judged.append((ts, lo, hi)) or rows(s, t, ts, lo, hi))
+    monkeypatch.setattr(store, "bars_window",
+                        lambda s, t, ts, lo, hi, **kw: finer.append((ts, lo, hi)) or window(s, t, ts, lo, hi, **kw))
+    me = FeedProfile("fake", FREE, frozenset({"stock"}), 0)
+    out = collector.verify_fetched(FakeSource(), store, "AAA", "stock", "AAA", False, 0, me, {"fake": me}, _log)
+    assert out == {"failed": 0, "asked": 0, "corrected": 0}
+    chunk = {"day": baddata.CHUNK_MS["minute"], "minute": baddata.CHUNK_MS["second"]}  # the finer frame's
+    assert {ts for ts, _, _ in judged} == {"day", "minute"}
+    assert all(hi - lo <= chunk[ts] for ts, lo, hi in judged)  # a chunk at a time, not the year
+    assert all(lo >= seconds_from for ts, lo, _ in judged if ts == "minute")  # none where no seconds are held
+    assert finer and all(hi - lo <= chunk["day"] + 86_400_000 for _, lo, hi in finer)
