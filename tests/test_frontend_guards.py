@@ -237,4 +237,6 @@ def test_the_fetchers_disk_turns_while_fetching_without_restarting_each_poll():
     panels = _js("panels.js")
     assert "icon('disk', RAIL_ICON)" in panels and "dataset.drawn !== fetcherIcon" in panels  # redrawn on change only
     assert "class=\"disk-platter\"" in _js("icons.js") and "class=\"disk-arm\"" in _js("icons.js")
-    assert re.search(r"#railFetcher\.busy \.disk-platter \{ animation: spin", _js("style.css"))
+    css = _js("style.css")
+    assert re.search(r"#railFetcher\.busy \.disk-platter \{ animation: spin", css)
+    assert re.search(r"#railFetcher\.busy \.disk-arm \{ animation: disk-seek 3\.2s ease-in-out infinite alternate", css)

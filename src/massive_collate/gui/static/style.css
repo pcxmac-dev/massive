@@ -269,10 +269,15 @@ dialog::backdrop { background: rgba(0, 0, 0, .5); }
 .data-icon.closed { color: var(--st-closed); }
 .ico.spin, .spin .ico { animation: spin 1.1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-/* The Fetcher's rail icon: the disk's platter turns about its spindle while a run fetches */
+/* The Fetcher's rail icon: while a run fetches, the disk's platter turns about its spindle and the
+   read/write arm sweeps slowly back and forth about its pivot, as a head seeking across the tracks */
 .disk-platter { transform-box: view-box; transform-origin: 11px 11px; }
+.disk-arm { transform-box: view-box; transform-origin: 20.3px 20.3px; }
 #railFetcher.busy .disk-platter { animation: spin 1.6s linear infinite; }
-@media (prefers-reduced-motion: reduce) { .ico.spin, .spin .ico, .dot.on, .rec.on, #railFetcher.busy .disk-platter { animation: none; } }
+#railFetcher.busy .disk-arm { animation: disk-seek 3.2s ease-in-out infinite alternate; }
+@keyframes disk-seek { from { transform: rotate(-9deg); } to { transform: rotate(7deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .ico.spin, .spin .ico, .dot.on, .rec.on, #railFetcher.busy .disk-platter, #railFetcher.busy .disk-arm { animation: none; } }
 
 #rail { display: flex; flex-direction: column; gap: 2px; padding: var(--pad) 4px; align-self: flex-start; max-height: 100%;
   background: var(--card); border-radius: var(--radius); flex: none; overflow-y: auto; }
