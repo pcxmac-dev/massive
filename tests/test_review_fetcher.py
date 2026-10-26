@@ -145,3 +145,43 @@ def test_a_reused_symbol_is_cleared_on_every_feed_watching_it(store):
     store.set_listing("fake", "SPCX", date(2026, 10, 1), "NEW-FIGI", None)
     collector.check_listing(FakeSource(listing=new), store, store.watchlist("fake", "SPCX")[0], NOW.date(), log=_log)
     assert store.bar_range("other", "SPCX", "minute")[0] >= ms(datetime(2026, 10, 1, tzinfo=ET))
+
+
+# -- the ledger: empty heads and the settling frontier (findings 20 and 14) --------------------------
+
+def test_a_first_fetch_whose_history_starts_later_leaves_the_head_to_another_feed(store):
+    from massive_collate.coverage import FeedProfile, plan
+
+    feeds = {"fake": FeedProfile("fake", FREE, frozenset({"stock"}), 0),
+             "other": FeedProfile("other", FREE, frozenset({"stock"}), 1)}
+    for feed in feeds:
+        store.watch(feed, ["META"], "minute")
+    first, newest = datetime(2025, 6, 2, 9, 30, tzinfo=ET), datetime(2026, 10, 20, 19, 59, tzinfo=ET)
+    src = FakeSource(entitled=("minute",), bars={"minute": [_bar(first), _bar(newest)]})
+    floor = date(2024, 10, 22)
+    # one span from the floor to the newest published: the frontier, its head empty on this feed
+    collector.sync_bars(src, store, "META", "minute", floor, NOW, me=feeds["fake"], feeds=feeds, log=_log)
+    a = ms(datetime(2024, 10, 22, tzinfo=ET))
+    assert store.coverage("META", "minute")["fake"] == [(ms(first), ms(newest) + 60_000)]
+    assert (a, ms(first)) in store.coverage("META", "minute", include_none=True)["fake"]  # 'none': not held
+    assert plan(store, feeds["other"], feeds, "META", "stock", "minute", floor, NOW) == [(a, ms(first))]
+
+
+def test_a_real_time_plans_newest_minutes_are_left_to_settle(store):
+    from massive_collate import freshness
+    from massive_collate.coverage import FeedProfile, frontier_ms
+
+    now = datetime(2026, 10, 21, 12, 0, 30, tzinfo=ET)
+    assert frontier_ms("stock", ADV, now, "minute") == ms(datetime(2026, 10, 21, 11, 57, tzinfo=ET))
+    assert frontier_ms("stock", TIERS["starter"], now, "minute") == ms(datetime(2026, 10, 21, 11, 45, tzinfo=ET))
+    # a symbol opened in the chart: the minutes just ended are not recorded held, so they are asked again
+    feeds = {"fake": FeedProfile("fake", ADV, frozenset({"stock"}), 0)}
+    bars = [_bar(datetime(2026, 10, 21, 11, m, tzinfo=ET)) for m in range(50, 60)]
+    src = FakeSource(entitled=("minute",), bars={"minute": bars})
+    collector.sync_bars(src, store, "AAA", "minute", date(2026, 10, 20), now, me=feeds["fake"], feeds=feeds, log=_log)
+    assert max(b for _, b in store.coverage("AAA", "minute")["fake"]) == ms(datetime(2026, 10, 21, 11, 57, tzinfo=ET))
+    # a completed session counts once settled, and then whole
+    just_after = datetime(2026, 10, 21, 20, 1, tzinfo=ET)
+    assert freshness.history_horizon("stock", ADV, just_after) == datetime(2026, 10, 20, 20, 3, tzinfo=ET)
+    horizon = freshness.history_horizon("stock", ADV, datetime(2026, 10, 21, 20, 5, tzinfo=ET))
+    assert frontier_ms("stock", ADV, horizon, "minute") == ms(datetime(2026, 10, 21, 20, 0, tzinfo=ET))

@@ -140,7 +140,7 @@ def test_a_feed_fetches_its_own_minutes_where_it_only_has_built_ones(store):
     cb = FeedProfile("coinbase", PUBLIC_FEEDS["coinbase"][0], frozenset({"crypto"}), 0, venues={"crypto": "coinbase"})
     feeds = {"coinbase": cb}
     store.watch("coinbase", ["BTCUSD"], "minute")
-    now = dt(2026, 10, 24, 8, 0, tzinfo=timezone.utc)
+    now = dt(2026, 10, 24, 8, 3, tzinfo=timezone.utc)  # 08:00 once the newest minutes settled (freshness.SETTLE)
     t = lambda h: int(dt(2026, 10, 24, h, tzinfo=timezone.utc).timestamp() * 1000)
     store.add_coverage("coinbase", "BTCUSD", "minute", t(0), t(7))  # its own minutes to 07:00
     store.add_coverage("coinbase", "BTCUSD", "minute", t(7), t(8), origin="ticks")  # built live since
@@ -155,7 +155,8 @@ def test_a_coarser_frame_is_fetched_only_as_far_as_its_bars_are_complete():
     from massive_collate.config import PUBLIC_FEEDS
     from massive_collate.coverage import frontier_ms
 
-    now = dt(2026, 10, 24, 7, 32, 20, tzinfo=timezone.utc)
+    # 7:32:20 once the exchange's newest minutes have settled (freshness.SETTLE: 3 minutes)
+    now = dt(2026, 10, 24, 7, 35, 20, tzinfo=timezone.utc)
     tier = PUBLIC_FEEDS["coinbase"][0]
     t = lambda h, m: int(dt(2026, 10, 24, h, m, tzinfo=timezone.utc).timestamp() * 1000)
     assert frontier_ms("crypto", tier, now, "minute") == t(7, 32)

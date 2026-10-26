@@ -325,11 +325,13 @@ def _close_head(store: Store, source: str, ticker: str, timespan: str, a: int, b
                 frontier: bool) -> None:
     """Record a finished span: held from `a`, or, when the feed's data starts well after `a` (its
     history begins later), held from its first bar and 'none' before it, so another feed may fill
-    that head."""
-    if frontier:
-        store.add_coverage(source, ticker, timespan, a, b)
-    elif oldest is None:
-        store.add_coverage(source, ticker, timespan, a, b, origin="none")
+    that head. The frontier span is judged so too: a stock's first fetch is one span from its
+    listing to the newest published, and recorded held from `a` it never offered its head to
+    another feed (META's 2012-2016 and GOOGL's 2004-2014 on Massive). A frontier span with no bars
+    is left open (nothing published there yet)."""
+    if oldest is None:
+        if not frontier:
+            store.add_coverage(source, ticker, timespan, a, b, origin="none")
     elif oldest - a >= EMPTY_HEAD_MS:
         store.add_coverage(source, ticker, timespan, a, oldest, origin="none")
         store.add_coverage(source, ticker, timespan, oldest, b)

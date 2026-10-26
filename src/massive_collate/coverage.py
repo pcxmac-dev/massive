@@ -74,7 +74,9 @@ def day_start_ms(d: date) -> int:
 
 def frontier_ms(asset: str, tier: Tier, now: datetime, timespan: str) -> int:
     """End (exclusive) of what a plan has published by `now`: up to its newest expected bar; for
-    day bars only days whose session is over (a day bar of a session still trading would change)."""
+    day bars only days whose session is over (a day bar of a session still trading would change).
+    A real-time plan's newest minutes are left to settle first (freshness.settle)."""
+    now = now - freshness.settle(tier, asset)
     exp = freshness.expected(asset, tier, now)
     if exp.latest is None:
         return ms(now)
