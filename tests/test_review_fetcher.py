@@ -233,3 +233,29 @@ def test_the_audit_queue_keeps_one_entry_per_series_and_expires_old_ones_at_once
     # expired before any audit, whether or not this run audits anything (it was only while it did)
     audit.run_audits(FakeSource(), store, me, {"fake": me}, datetime.now(ET), queued=0, random_count=0, log=_log)
     assert store.audit_queue_count() == 2
+
+
+# -- the collector's calendar takes the official holidays (finding 18) -------------------------------
+
+def test_an_unscheduled_closure_from_the_official_calendar_is_not_asked_for(store):
+    from massive_collate import freshness
+    from massive_collate.sessions import Overrides
+
+    store.watch("fake", ["AAA"], "minute")
+    store.set_backfilled("fake", "AAA", date(2003, 9, 10))
+    store.set_listing("fake", "AAA", None, None, NOW.date(), "AAA Inc", "stock")
+    store.set_details("fake", "AAA", {"name": "AAA Inc"})
+    start = ms(datetime(2003, 9, 10, tzinfo=ET))
+    store.add_coverage("fake", "AAA", "minute", start, ms(datetime(2026, 10, 19, 20, 0, tzinfo=ET)))  # through Monday
+    store.add_coverage("fake", "AAA", "day", start, ms(datetime(2026, 10, 20, tzinfo=ET)))
+    store.set_synced("fake", "AAA", datetime(2026, 10, 20, 6, 0, tzinfo=ET))  # once Monday was published
+    # Tuesday closed (a day of mourning): the official upcoming holidays say so, the rules cannot
+    store.save_market_holidays("massive", [{"date": "2026-10-20", "exchange": "NYSE", "status": "closed"}])
+    try:
+        src = FakeSource(entitled=("minute",), bars={"minute": [], "day": []})
+        sync(src, store, FREE, NOW, log=_log)
+        assert not freshness.CALENDAR.is_trading_day(date(2026, 10, 20))
+        assert [c for c in getattr(src, "bar_calls", []) if c[0] == "AAA"] == []  # nothing new: Tuesday was closed
+    finally:
+        freshness.CALENDAR.overrides = Overrides()
+        freshness.expected.cache_clear()

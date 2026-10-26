@@ -113,6 +113,21 @@ def published_at(ts_ms, timespan: str, asset: str, tier: Tier):
 CALENDAR = MarketCalendar()
 
 
+def use_official(store, source: str = "massive") -> bool:
+    """Give CALENDAR the official schedules a source sent (upcoming holidays and early closes,
+    futures sessions: collector.refresh_calendars), as the chart's calendar has them
+    (gui/bars.BarEngine.calendar). Without them an unscheduled closure was a trading day here, and
+    every symbol's newest session was asked for all day. Returns whether they changed."""
+    from .sessions import overrides_from_store
+
+    official = overrides_from_store(store, source)
+    if official == CALENDAR.overrides:
+        return False
+    CALENDAR.overrides = official
+    expected.cache_clear()  # its answers came from the calendar as it was
+    return True
+
+
 def is_trading_day(d: date) -> bool:
     return CALENDAR.is_trading_day(d)
 

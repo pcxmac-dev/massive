@@ -1232,6 +1232,7 @@ def sync(
     """
     now = (now or now_et()).astimezone(ET)
     today = now.date()
+    freshness.use_official(store)  # the official holidays fetched so far: what is published, and when
     floors = {a: history_floor(tier, today, a) for a in ASSETS}  # each asset class on its own plan
     result = SyncResult()
     saved_before = store.rows_saved
@@ -1263,7 +1264,8 @@ def sync(
     try:
         if not archival and only is None:  # a run for chosen symbols spends nothing on the rest
             sync_exchanges(source, store, log)
-            refresh_calendars(source, store, today, log)
+            if refresh_calendars(source, store, today, log):
+                freshness.use_official(store)  # this week's official schedules, from here on
             fetch_news(source, store, now, log)
             from .gui.world import PROXIES
             fetch_market_moves(source, store, now, PROXIES, log)
@@ -1788,6 +1790,7 @@ def scan(
     data really exists, up to `probe_limit` symbols.
     """
     now = (now or now_et()).astimezone(ET)
+    freshness.use_official(store)  # an unscheduled closure has nothing to publish
     name = source.name if source else source_name or "massive"
     result = ScanResult()
     probes = 0
