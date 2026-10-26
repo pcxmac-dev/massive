@@ -9,11 +9,12 @@
   const $ = (id) => document.getElementById(id);
   const esc = window.MassiveIcons.esc;
   const STEPS = ['auto', '0.01', '0.05', '0.1', '0.25', '0.5', '1', '5', '10', '50', '100', '500'];
-  const FOLLOW_MS = 120;  // the cursor resting this long on a bar asks for its profile
   const LIVE_MS = 3000;   // the newest bar of a live symbol is read again this often
   const IDLE_MS = 30000;  // otherwise
   let step = STEPS.includes(prefs.get('l2Step', 'auto')) ? prefs.get('l2Step', 'auto') : 'auto';
-  let at = null;  // the bar under the cursor (its timestamp); null: the newest
+  let at = null;  // the bar shown (its timestamp); null: the newest
+  let cursorPrice = null;  // the price under the cursor on the price pane: its row is marked (null: off it)
+  let lastProfile = null;
   let token = 0, debounce = 0, lastLoad = 0, shownFor = '';
 
   const shown = () => document.body.dataset.pane === 'analysis' && !document.body.classList.contains('panel-hidden');
@@ -75,6 +76,7 @@
     box.innerHTML = `
       <h3>Virtual level 2${star} ${select}</h3>
       <div class="p-muted small">${esc(p.period === 'day' ? 'Day' : `${p.span} ${p.period}`)} bar · ${esc(when(p))}${p.newest ? ' · newest' : ''}</div>
+      <div class="p-muted small l2-cursor"></div>
       ${kv([
         [p.newest ? 'Last' : 'Close', priceText(ref)],
         ['Bar high · low', `${priceText(p.bar.high)} · ${priceText(p.bar.low)}`],
@@ -94,6 +96,8 @@
     if (kept != null) wrap.scrollTop = kept;
     else if (row) wrap.scrollTop = row.offsetTop - wrap.clientHeight / 2;  // a new bar: its price in the middle
     shownFor = id;
+    lastProfile = p;
+    markCursor();
   }
 
   $('pLevel2').addEventListener('change', (e) => {
@@ -102,11 +106,45 @@
     prefs.set('l2Step', step);
     load();
   });
-  chart.subscribeAction('onCrosshairChange', (c) => {  // follows the bar under the cursor
-    const t = crosshairBar(c)?.bar.timestamp ?? null;
-    if (t !== at && t != null) { at = t; schedule(FOLLOW_MS); }
-  });
-  $('chart').addEventListener('mouseleave', () => { if (at != null) { at = null; schedule(); } });
+  // The ladder follows the cursor's price, not its time: the row at the price under the cursor is
+  // marked and kept in view (the edge row nearest it when it is beyond what traded in the bar).
+  let markFrame = 0;
+  function followCursor(c) {
+    let price = null;
+    if (c?.paneId === 'candle_pane' && Number.isFinite(c.y)) {
+      const [pt] = chart.convertFromPixel([{ x: c.x, y: c.y }], { paneId: 'candle_pane' });
+      price = Number.isFinite(pt?.value) ? pt.value : null;
+    }
+    if (price === cursorPrice) return;
+    cursorPrice = price;
+    if (!markFrame) markFrame = requestAnimationFrame(() => { markFrame = 0; markCursor(); });
+  }
+  chart.subscribeAction('onCrosshairChange', followCursor);
+  $('chart').addEventListener('mouseleave', () => { cursorPrice = null; markCursor(); });
+
+  function markCursor() {
+    const box = $('pLevel2'), p = lastProfile;
+    box.querySelectorAll('tr.cursor').forEach((tr) => tr.classList.remove('cursor', 'beyond'));
+    const label = box.querySelector('.l2-cursor');
+    if (!p?.rows?.length || cursorPrice == null) { if (label) label.textContent = ''; return; }
+    const step = p.step || 0;
+    let best = 0;  // the row holding the price (its segment, or the exact price nearest it)
+    p.rows.forEach((r, i) => {
+      const d = Math.abs(r.price + step / 2 - cursorPrice), b = Math.abs(p.rows[best].price + step / 2 - cursorPrice);
+      if (d < b) best = i;
+    });
+    const top = p.rows[0].price + step, bottom = p.rows[p.rows.length - 1].price;
+    const beyond = cursorPrice > top + 1e-9 ? 'above' : cursorPrice < bottom - 1e-9 ? 'below' : '';
+    const tr = box.querySelectorAll('tbody tr')[best];
+    if (!tr) return;
+    tr.classList.add('cursor');
+    if (beyond) tr.classList.add('beyond');
+    if (label) label.textContent = `Cursor ${priceText(cursorPrice)}${beyond ? ` · ${beyond} what traded in this bar` : ''}`;
+    const wrap = box.querySelector('.l2-wrap'), head = wrap.querySelector('thead')?.offsetHeight || 0;
+    if (tr.offsetTop < wrap.scrollTop + head || tr.offsetTop + tr.offsetHeight > wrap.scrollTop + wrap.clientHeight) {
+      wrap.scrollTop = tr.offsetTop - wrap.clientHeight / 2;
+    }
+  }
   window.addEventListener('massive:symbol', () => { at = null; schedule(50); });
   window.addEventListener('massive:view', (e) => { if (e.detail?.pane === 'analysis') schedule(50); });
   let lastKey = '';
@@ -115,4 +153,7 @@
     if (key() !== lastKey) { lastKey = key(); at = null; load(); return; }
     if (at == null && Date.now() - lastLoad >= (isLive() ? LIVE_MS : IDLE_MS)) load();
   }, 1000);
+  // for inspection and checks: the profile shown, the cursor's price, and the cursor's handling
+  window.Level2 = { get profile() { return lastProfile; }, get cursorPrice() { return cursorPrice; },
+                    follow(c) { followCursor(c); markCursor(); } };
 })();

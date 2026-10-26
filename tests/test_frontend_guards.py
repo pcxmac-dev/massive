@@ -257,10 +257,14 @@ def test_drawings_copy_cut_and_paste_by_keys_and_right_click():
     assert 'src="drawclip.js"' in _js("index.html")
 
 
-def test_the_level_2_and_the_bar_box_follow_the_bar_under_the_cursor():
+def test_the_level_2_follows_the_cursors_price_and_the_bar_box_its_bar():
     # this chart's crosshair event carries the pointer's x and y only: the bar comes from the x
     helper = _function(_js("app.js"), "crosshairBar")
     assert "chart.convertFromPixel([{ x: c.x" in helper and "kLineData" not in helper
     l2 = _js("level2.js")
-    assert "crosshairBar(c)?.bar.timestamp" in l2 and "kLineData" not in l2 and "schedule(FOLLOW_MS)" in l2
+    assert "chart.subscribeAction('onCrosshairChange', followCursor);" in l2
+    follow = l2.split("function followCursor(c) {", 1)[1].split("\n  }\n", 1)[0]
+    assert "convertFromPixel" in follow and "pt.value" in follow  # the ladder follows the cursor's price ...
+    assert "at =" not in follow and "kLineData" not in l2  # ... not its time: the bar shown stays put
+    assert "lastProfile = p;\n    markCursor();" in l2  # marked again after each load
     assert "cursorIndex = crosshairBar(c)?.index ?? null;" in _js("panels.js")
