@@ -160,3 +160,50 @@ def test_a_scheme_answer_is_drawn_for_the_symbol_it_was_asked_for_only():
     on_symbol = schemes.split("window.addEventListener('massive:symbol'", 1)[1].split("});", 1)[0]
     assert "S.token = (S.token || 0) + 1;" in on_symbol  # a run still on its way is dropped
     assert "S.result.source === state.source" in schemes.split("const current = ", 1)[1].split(";", 1)[0]
+
+
+# -- 41: Delete on another view ----------------------------------------------------------------------------
+
+def test_delete_removes_a_drawing_only_from_the_chart_on_screen():
+    keys = _js("app.js").split("document.addEventListener('keydown'", 1)[1].split("\n});\n", 1)[0]
+    delete = keys.split("e.key === 'Delete'", 1)[1].split("{", 1)[0]
+    assert "document.body.dataset.view === 'chart'" in delete
+    show = _inner(_js("panels.js"), "showPane")
+    assert "if (view !== 'chart') state.selectedOverlay = null;" in show
+
+
+# -- 42: a lost WebGL context --------------------------------------------------------------------------------
+
+def test_a_lost_gpu_context_falls_back_to_the_cpu_and_comes_back():
+    gpu = _js("gpu.js")
+    lost = gpu.split("'webglcontextlost'", 1)[1].split("});", 1)[0]
+    assert "e.preventDefault();" in lost and "this.lost = true;" in lost  # or it is never restored
+    restored = gpu.split("'webglcontextrestored'", 1)[1].split("});", 1)[0]
+    assert "this._setup();" in restored and "this.lost = false;" in restored
+    assert "if (this.lost) return;" in gpu and "if (this.lost) return 0;" in gpu
+    app = _js("app.js")
+    assert "!gpuBars?.lost" in _function(app, "gpuActive")  # applyChartType draws the candles on the CPU
+    assert "new window.GpuBars({ onLost: applyChartType, onRestored: applyChartType })" in _function(app, "ensureGpu")
+    globe = _js("globe.js")
+    lost = globe.split("'webglcontextlost'", 1)[1].split("});", 1)[0]
+    assert "e.preventDefault();" in lost and "glr = null;" in lost and "tiles.clear();" in lost
+    restored = globe.split("'webglcontextrestored'", 1)[1].split("});", 1)[0]
+    assert "new window.GlobeGL(glCanvas)" in restored
+    for upload in ("glr.setZones(", "glr.setZoneOffsets(", "glr.setLines('o110'", "glr.setSky("):
+        assert upload in restored, upload
+
+
+# -- 43: the Highlight panel -----------------------------------------------------------------------------------
+
+def test_the_highlight_panel_is_rebuilt_when_the_highlight_changes_only():
+    app = _js("app.js")
+    figures = app.split("kc.registerOverlay({\n  name: 'measure',", 1)[1].split("\n});\n", 1)[0]
+    assert "if (shown !== highlightShown) { highlightShown = shown; scheduleHighlightPanel(); }" in figures
+    assert figures.count("scheduleHighlightPanel()") == 1  # not on every redraw (each crosshair move)
+    shown = figures.split("const shown = ", 1)[1].split(";", 1)[0]
+    for part in ("overlay.id", "pa.value", "pb.value", "${key}", "ext.stats"):
+        assert part in shown, part
+    assert "addEventListener" not in _function(app, "renderHighlightPanel")
+    assert "$('pHighlight').addEventListener('click'" in app and "e.target.closest('#hlRemove')" in app
+    # level 2 still hears of each change (level2.js coverMoved)
+    assert "window.dispatchEvent(new Event('massive:highlight'))" in _function(app, "scheduleHighlightPanel")

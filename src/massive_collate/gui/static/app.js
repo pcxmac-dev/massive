@@ -106,6 +106,7 @@ const UP = '#26a69a';
 const DOWN = '#ef5350';
 const MID = '#f0b90b';
 const statsTimers = new Map();
+let highlightShown = '';  // what the Highlight panel was last scheduled for (the measure overlay)
 
 function signed(v, digits) { return `${v >= 0 ? '+' : ''}${v.toFixed(digits)}`; }
 
@@ -234,7 +235,11 @@ kc.registerOverlay({
     const key = statsKey(pa, pb);
     const ext = overlay.extendData || {};
     if (ext.key !== key) requestRangeStats(overlay, key, pa, pb);
-    scheduleHighlightPanel();  // the panel follows live while the highlight is drawn or dragged
+    // The panel follows live while the highlight is drawn or dragged: rebuilt when what it shows
+    // changed, not on every redraw (each crosshair move redraws the chart, and the rebuilt panel lost
+    // clicks on its Remove button).
+    const shown = `${overlay.id}|${pa.value}|${pb.value}|${key}|${ext.key === key && !!ext.stats}|${state.timezone}|${prec()}`;
+    if (shown !== highlightShown) { highlightShown = shown; scheduleHighlightPanel(); }
     const up = pb.value >= pa.value;
     return [
       { type: 'rect', attrs: { x: left, y: top, width: right - left, height: Math.max(1, bottom - top) },
@@ -1063,13 +1068,16 @@ let gpuBars = null;
 state.gpuFrameMs = null;
 
 function gpuActive() {
-  return state.gpu && GPU_TYPES.has(state.chartType);
+  return state.gpu && GPU_TYPES.has(state.chartType) && !gpuBars?.lost;
 }
 
+// A lost GPU context (a driver reset, the GPU process restarting) took every candle with it, for
+// good: the chart's own candles come back meanwhile (applyChartType draws on the CPU while it is
+// lost), and the GPU's again once the browser restores the context.
 function ensureGpu() {
   if (gpuBars) return gpuBars;
   try {
-    gpuBars = new window.GpuBars();
+    gpuBars = new window.GpuBars({ onLost: applyChartType, onRestored: applyChartType });
   } catch (err) {
     state.gpu = false;
     showError(`GPU rendering unavailable: ${err.message}`);
@@ -1133,12 +1141,13 @@ kc.registerIndicator({
 function renderGpuButton() {
   const b = $('gpuBtn');
   b.classList.toggle('on', state.gpu && GPU_INFO.supported);
-  b.classList.toggle('partial', state.gpu && !GPU_TYPES.has(state.chartType));
+  b.classList.toggle('partial', state.gpu && (!GPU_TYPES.has(state.chartType) || !!gpuBars?.lost));
   b.setAttribute('aria-pressed', String(!!state.gpu));
   b.disabled = !GPU_INFO.supported;
   b.title = !GPU_INFO.supported ? 'GPU rendering not available in this browser (no WebGL2)'
     : `GPU rendering ${state.gpu ? 'on' : 'off'} — ${GPU_INFO.renderer}${GPU_INFO.software ? ' (software, no hardware acceleration)' : ''}`
-      + (state.gpu && !GPU_TYPES.has(state.chartType) ? '. This chart type is drawn on the CPU.' : '');
+      + (state.gpu && !GPU_TYPES.has(state.chartType) ? '. This chart type is drawn on the CPU.' : '')
+      + (state.gpu && gpuBars?.lost ? '. The GPU context was lost: drawn on the CPU until the browser gives it back.' : '');
 }
 
 $('gpuBtn').addEventListener('click', () => {
@@ -2774,8 +2783,8 @@ document.addEventListener('keydown', (e) => {
   if (e.target.matches('input, select, textarea') || document.querySelector('dialog[open]')) return;
   if (e.key === 'Escape') { cancelDrawing(); setActiveTool('cursor'); }
   else if (e.key === 'h' && e.altKey) { e.preventDefault(); startDrawing('measure'); }
-  else if ((e.key === 'Delete' || e.key === 'Backspace') && state.selectedOverlay) {
-    chart.removeOverlay({ id: state.selectedOverlay });
+  else if ((e.key === 'Delete' || e.key === 'Backspace') && state.selectedOverlay && document.body.dataset.view === 'chart') {
+    chart.removeOverlay({ id: state.selectedOverlay });  // only the chart on screen: not a hidden one's drawing
   } else if (e.key === '/' || (e.key.length === 1 && /[a-z]/i.test(e.key) && !e.ctrlKey && !e.metaKey)) {
     e.preventDefault();
     openSymbolDialog();
@@ -3244,8 +3253,11 @@ function renderHighlightPanel() {
       isPrice && ['VWAP', priceText(st.vwap)],
       ['Trades', big(st.trades)],
     ]) : ''}`;
-  $('hlRemove')?.addEventListener('click', () => chart.removeOverlay({ groupId: 'user', name: 'measure' }));
 }
+// one listener for the section, whatever it holds when clicked
+$('pHighlight').addEventListener('click', (e) => {
+  if (e.target.closest('#hlRemove')) chart.removeOverlay({ groupId: 'user', name: 'measure' });
+});
 
 // -- start -------------------------------------------------------------------------
 (async function start() {

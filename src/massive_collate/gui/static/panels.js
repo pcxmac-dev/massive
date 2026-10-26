@@ -36,6 +36,7 @@
     }
     document.body.dataset.pane = name;
     document.body.dataset.view = view;
+    if (view !== 'chart') state.selectedOverlay = null;  // Delete on another view deleted the hidden chart's drawing
     prefs.set('pane', name);
     if (view === 'chart' && name !== 'watchlist') window.switchWorkspace?.(name);  // each chart view keeps its own content
     for (const v of document.querySelectorAll('main > .view')) v.hidden = v.dataset.view !== view;
