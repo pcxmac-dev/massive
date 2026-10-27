@@ -54,6 +54,7 @@ class FeedProfile:
     tick_days: int = 365  # (unused: ticks are no longer fetched for history)
     second_days: int = 365  # 1-second bars are backfilled this far (minutes cover all the history)
     venues: dict = field(default_factory=dict)  # asset class -> the market its data is ('sip', 'coinbase', ...)
+    capacity: float | None = None  # requests a day its subscription allows: its daily cap and rate (sourcing.py)
 
 
 def same_market(feeds: dict, a: str, b: str, asset: str) -> bool:
@@ -107,6 +108,20 @@ def subtract(gaps: list[tuple[int, int]], spans: list[tuple[int, int]]) -> list[
                 nxt.append((b, y))
         out = nxt
     return out
+
+
+def intersect(spans: list[tuple[int, int]], within: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The parts of `spans` inside `within` (all half-open [start, end))."""
+    return [(max(a, x), min(b, y)) for a, b in spans for x, y in within if max(a, x) < min(b, y)]
+
+
+def eras_ahead(eras: list[tuple[int, int, list[str]]], peer: str, me: str) -> list[tuple[int, int]] | None:
+    """Where the delivery scheme (sourcing.Scheme.order: a job's eras in one market) puts `peer`
+    before `me`; None when it knows only one of them (or neither): then the rank decides."""
+    known = {n for *_, order in eras for n in order}
+    if peer not in known or me not in known:
+        return None
+    return [(a, b) for a, b, order in eras if peer in order and me in order and order.index(peer) < order.index(me)]
 
 
 def has_open_time(asset: str, a: int, b: int) -> bool:
@@ -176,7 +191,9 @@ def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, ass
     if gaps:
         scores = store.audit_scores()
         from .composite import quality_of
+        from .sourcing import standing
 
+        eras = standing(store, feeds, now).order(asset, timespan, me.venues.get(asset))
         mine = rank(me, (watch.get((me.name, ticker.upper())) or {}).get("resolution", "auto"), scores,
                     quality_of(store, me.name, asset), asset)
         for peer in feeds.values():
@@ -185,12 +202,15 @@ def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, ass
                 continue
             if not same_market(feeds, peer.name, me.name, asset):
                 continue  # another market's data is not a copy of this feed's
-            if rank(peer, row.get("resolution", "auto"), scores, quality_of(store, peer.name, asset), asset) >= mine:
-                continue
+            ahead = eras_ahead(eras, peer.name, me.name)  # the delivery scheme (sourcing.py) decides
+            if ahead is None:  # where it does not know both: the rank does
+                if rank(peer, row.get("resolution", "auto"), scores, quality_of(store, peer.name, asset), asset) >= mine:
+                    continue
+                ahead = [(0, 2**62)]
             p_floor = history_floor(peer.tier, today, asset)
             if listed_from:
                 p_floor = max(p_floor, listed_from)
-            window = [(day_start_ms(p_floor), frontier_ms(asset, peer.tier, now, timespan))]
+            window = intersect([(day_start_ms(p_floor), frontier_ms(asset, peer.tier, now, timespan))], ahead)
             gaps = subtract(gaps, subtract(window, empty(peer.name)))
     step = STEP_MS.get(timespan, 60_000)
     return [(a, b) for a, b in gaps if b - a >= step]

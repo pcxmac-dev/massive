@@ -14,5 +14,6 @@ PLUGIN = Provider(
     assets=frozenset({"index"}), order=50, about="daily history of Cboe's indices, VIX from 1990 (no key)",
     archival=True, tier=TIER, per_run=PER_RUN, per_day=PER_DAY, limits="none published (a public file server)",
     kind="official", markets=lambda settings: {"index": "index"},
+    provides={"index": ("day",)}, per_request={"day": None},  # one file per index: its whole history
     carries=lambda spec: spec.source_ticker.upper().removeprefix("I:") in CBOE_INDICES,
 )

@@ -155,6 +155,40 @@ A plugin that fails to load is left out and reported (`plugins`), never fatal.
   `deps`, the composite model's reference and priors, audits, the initializer, the monthly caps.
   Not yet: the live recorder's streams (`live.STREAMS`, Alpaca's IEX stream) and Massive's own
   commands (`plan`, the plan-change check).
+- **The standard report.** Every plugin reports in one form (`Provider.report`: a `Report`): its
+  plan, its keys, its limits (requests a day: its daily cap or its rate where tighter; per run; a
+  monthly symbol cap; what its server publishes), one `Capability` per job it can do on that plan
+  (asset class, resolution, market, from when, how fresh, bars a request) and its live streams. It
+  comes from the plugin's declarations (`provides`, `plan_resolutions`, `per_request`, `streams`);
+  a plugin whose plan says more amends it (`reporter`). The delivery scheme reads nothing else.
+
+## Which source delivers what (2026-10-27)
+
+The user's order of collection: **#1 daily bars, #2 1-minute bars, #3 1-second bars**. `sourcing.py`
+reads every provider's standard report and makes the delivery plan; `python -m massive_collate
+sourcing` shows the reports and the plan (no requests).
+
+- **Cost** is what a job spends of a subscription's limits (its price is fixed): requests per
+  symbol-year (from the bars a request returns) against the requests a day it allows, as days of
+  its limits; a monthly symbol cap counts too (Tiingo: 450 symbols a month is 15 a day).
+- **Unique or common.** Per job and market (copies of one market: the consolidated tape from
+  Massive, Alpaca and Tiingo; each exchange's own book is its own market), history is cut into eras
+  where the set of sources that reach it changes. An era one source reaches is unique to it: it
+  delivers it. An era several reach is common.
+- **Delivery**, job by job in the user's order: a job's unique eras go to their source; its
+  common eras each to the source that finishes its load soonest with it (days of its limits), so
+  cheap capacity does the common work and a scarce subscription keeps to what only it has. A later
+  job's load never pushes an earlier job's work aside. Ties: cheaper, fresher, SOURCE_PRIORITY.
+  Audits are shown beside each source, not used to order them (most fail on cross-exchange
+  differences today).
+- **The fetcher follows it** (`coverage.plan`): in an era, the sources ahead in the scheme's order
+  download it and the others stand back, unless the one ahead does not watch the symbol or found
+  nothing there (then the next takes it). Feeds the scheme does not know keep the old rank.
+- On this machine (Massive Advanced at 200,000 requests a day): Tiingo the daily bars before 2003,
+  Massive everything since (its 50,000 bars a request make it the cheapest), Alpaca standing by;
+  each exchange its own crypto, Cboe its index files. At Massive's default 2,000 a day, Alpaca takes
+  the bars since 2016.
+- The current session is the live streams' (only for the symbols open on a chart: `LIVE_STREAMS`).
 
 ## Schemes and replay (2026-10-25)
 

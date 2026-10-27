@@ -817,6 +817,26 @@ def cmd_plugins(args, settings: Settings | None) -> int:
     return 0
 
 
+def cmd_sourcing(args, settings: Settings) -> int:
+    """The delivery scheme (sourcing.py): every provider's standard report (its subscription, limits
+    and capabilities), and which source delivers each job's eras, unique or common, at what cost."""
+    import json
+
+    from . import sourcing
+
+    feeds = feed_profiles(settings)
+    with Store(settings.db_path) as store:
+        scheme = sourcing.standing(store, feeds)
+        used = {name: store.requests_today(name) for name in feeds}
+    reports = sourcing.reports(feeds, scheme.today, settings)
+    if args.json:
+        print(json.dumps({"reports": [{**r.as_dict(), "usedToday": used.get(n)} for n, r in reports.items()],
+                          "scheme": scheme.as_dict()}, default=str))
+        return 0
+    print(sourcing.report(scheme, reports))
+    return 0
+
+
 def _scan_table(result: collector.ScanResult) -> None:
     order = {"behind": 0, "empty": 1, "current": 2}
     print()
@@ -1283,6 +1303,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("plugins", help="the data providers (a plugin each): keys set or not, what each serves")
     s.add_argument("--json", action="store_true", help="as JSON (tools/set-key.ps1's menu); no key's value")
     s.set_defaults(func=cmd_plugins, settings_optional=True)
+
+    s = sub.add_parser("sourcing", help="which source delivers what: each provider's report (subscription, limits, "
+                                       "capabilities) and the plan by cost and capability (no requests)")
+    s.add_argument("--json", action="store_true", help="as JSON")
+    s.set_defaults(func=cmd_sourcing)
 
     s = sub.add_parser("deps", help="check every external dependency (data feeds, calendars, icons, files)")
     s.set_defaults(func=cmd_deps)

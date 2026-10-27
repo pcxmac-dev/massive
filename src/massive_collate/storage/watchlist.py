@@ -109,6 +109,11 @@ class WatchlistStore:
                 "DELETE FROM watchlist WHERE source=? AND ticker=?", [(source, t.upper()) for t in tickers]
             )
 
+    def watch_counts(self) -> dict[tuple[str, str], int]:
+        """{(feed, asset class): symbols watched}, open ones only (a closed archive's are filled)."""
+        return {(s, a or "stock"): n for s, a, n in self.conn.execute(
+            "SELECT source, asset, COUNT(*) FROM watchlist WHERE closed_at IS NULL GROUP BY source, asset")}
+
     def watchlist(self, source: str | None = None, ticker: str | None = None) -> list[dict]:
         """Watchlist entries, of one feed and/or one ticker (`ticker` reads by index: with thousands
         of symbols, per-symbol code asks for its own rows rather than scanning them all)."""

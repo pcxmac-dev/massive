@@ -23,6 +23,7 @@ PLUGIN = Provider(
     archival=True, tier=TIER, per_run=PER_RUN, per_day=PER_DAY,
     limits="free plan: 50 requests per hour, 1,000 per day",
     symbols_per_month=450,  # the free plan's 500 different symbols a month, a little inside
+    provides={"stock": ("day",)}, per_request={"day": None},  # one request: a symbol's whole history
     has_keys=lambda s: bool(s.tiingo_api_key),
     rate=lambda settings: (45, 3600.0),  # free plan: 50 an hour
     markets=lambda settings: {"stock": "sip"},

@@ -10,6 +10,13 @@ Working notes so work can resume in a fresh session. Newest first.
   `massive_collate.providers` entry points. `tools/set-key.ps1` is a menu of the plugins (set,
   replace or remove a provider's keys); `python -m massive_collate plugins` lists them. Not moved
   yet: the live recorder's streams. The chart app on 8765 and the live recorder run it once restarted.
+- **Live streams only for what is selected** (LIVE_STREAMS=selected, default): coins and stocks
+  stream only while open on a chart; with none open nothing is connected. `always` keeps the old way.
+- **Collection priority** (the user): #1 daily bars, #2 1-minute, #3 1-second.
+- **Delivery scheme** (docs/ARCHITECTURE.md, "Which source delivers what"; `sourcing.py`): every
+  plugin's standard report (plan, limits, capabilities, streams), eras unique or common per job and
+  market, given to sources by cost (days of their limits) in the user's order; the fetcher follows
+  it. `python -m massive_collate sourcing` shows it. Not done: a Fetcher panel for it.
 
 ## State (2026-10-26, afternoon)
 

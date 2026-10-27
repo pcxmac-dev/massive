@@ -139,7 +139,7 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
     today = now.date()
     profiles = feed_profiles(settings)
     plugin = providers().get(source)
-    per_request = plugin.bars_per_request if plugin else None
+    per_request = plugin.per_request.get("minute") if plugin else None  # None: BARS_PER_REQUEST
     keys_missing = bool(plugin and plugin.keys_set(settings) is False)
     settings = settings.for_source(source)
     me = profiles.get(source)

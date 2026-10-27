@@ -41,9 +41,18 @@ def feed_profiles(settings: Settings) -> dict[str, FeedProfile]:
         assets = p.served(settings)
         if assets is None:  # not set up here at all
             continue
-        out[name] = FeedProfile(name, settings.for_source(name).tier, assets, i, tick_days=settings.tick_history_days,
-                                second_days=settings.second_history_days, venues=p.market_of(settings))
+        view = settings.for_source(name)
+        out[name] = FeedProfile(name, view.tier, assets, i, tick_days=settings.tick_history_days,
+                                second_days=settings.second_history_days, venues=p.market_of(settings),
+                                capacity=capacity(p.rate_window(settings), view.max_requests_per_day))
     return out
+
+
+def capacity(window: tuple[int | None, float], per_day: int | None) -> float:
+    """Requests a day a subscription allows: its daily cap, or less where its rate window is tighter."""
+    calls, seconds = window
+    by_rate = calls * 86_400 / seconds if calls else float("inf")
+    return float(min(per_day or by_rate, by_rate))
 
 
 def markets(feed: str, settings: Settings) -> dict[str, str]:

@@ -27,6 +27,8 @@ PLUGIN = Provider(
     assets=frozenset({"crypto"}), order=30, about="crypto minute and day bars from 2015 (no key); live trades",
     tier=PUBLIC_FEEDS["coinbase"][0], limits="10 requests per second per IP (public endpoints)",
     kind="exchange", reference_for=frozenset({"crypto"}),
+    per_request={"day": CoinbaseSource.PAGE, "minute": CoinbaseSource.PAGE},
+    streams={"crypto": "real time, public trades (no key), coins open on a chart"},
     view=venue_view("coinbase"),
     rate=lambda settings: (8, 1.0),  # 10 a second per address: a minute's window let 300 go in a burst
     carries=lambda spec: spec.ticker.upper() in CRYPTO_PAIRS,

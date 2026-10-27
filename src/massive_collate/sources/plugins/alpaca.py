@@ -41,7 +41,10 @@ PLUGIN = Provider(
     keyless=frozenset({"crypto"}), signup="alpaca.markets: a paper account's API keys",
     plan_vars=("ALPACA_PLAN",), limits="Basic (free): 200 requests per minute; Algo Trader Plus: 10,000",
     kind="exchange", kind_by_asset={"stock": "consolidated"},  # its stocks are the consolidated tape (SIP)
-    venue_notes={"crypto": "one exchange's book (Kraken)"}, bars_per_request=10_000, bulk_resolution="minute",
+    venue_notes={"crypto": "one exchange's book (Kraken)"}, bulk_resolution="minute",
+    provides={"stock": ("day", "minute"), "crypto": ("day", "minute")},  # no 1-second bars
+    per_request={"day": 10_000, "minute": 10_000},  # PAGE_LIMIT
+    streams={"stock": "real time, IEX's trades only (a few per cent of US volume), symbols open on a chart"},
     missing_keys_note="keys not set: US stocks (SIP from 2016, IEX live), options and news wait for "
                       "ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY; crypto needs no key and is collected",
     missing_keys_chip="stocks need keys",

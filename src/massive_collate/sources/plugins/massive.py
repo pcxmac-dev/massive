@@ -1,10 +1,10 @@
 """Massive (massive.com): stocks, indices, currencies, crypto and futures, one plan per asset class."""
 from __future__ import annotations
 
-from ...config import MASSIVE_CLASS_TIERS
+from ...config import MASSIVE_CLASS_TIERS, asset_tier
 from ...ratelimit import MachineLedger, RateLimiter
 from ...symbols import ASSETS
-from ..massive import MassiveClient, MassiveSource
+from ..massive import PAGE_LIMIT, MassiveClient, MassiveSource
 from ..registry import KeyVar, Provider, limiter, machine_caps, minute_window
 
 
@@ -32,6 +32,10 @@ PLUGIN = Provider(
     plan_vars=("MASSIVE_TIER", *MASSIVE_CLASS_TIERS.values(), "MASSIVE_MAX_REQUESTS_PER_RUN",
                "MASSIVE_MAX_REQUESTS_PER_DAY"),
     kind="consolidated", venue_notes={"crypto": "consolidated across exchanges"}, bulk_resolution="minute",
+    per_request={"day": PAGE_LIMIT, "minute": PAGE_LIMIT, "second": PAGE_LIMIT},
+    # 1-second bars on a paid plan of the asset class (the free plan: day and minute bars, 2 years)
+    plan_resolutions=lambda tier, asset: ("day", "minute") if asset_tier(tier, asset).name == "free"
+    else ("day", "minute", "second"),
     has_keys=lambda s: bool(s.api_key),
     serves=lambda s: frozenset(ASSETS) if s.api_key else None,  # not set up at all without its key
     markets=lambda s: {"stock": "sip", "index": "index", "fx": "otc", "crypto": "consolidated", "future": "cme"},

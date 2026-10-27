@@ -73,7 +73,9 @@ where the app reads keys. Without a name it shows a menu of the data providers (
 app, so a new provider appears by itself), their keys and which are set: pick one to set, replace or
 remove its keys. With a provider's name (`tiingo`) or one key's variable (`TIINGO_API_KEY`) it goes
 straight there; `-Remove` deletes, `-List` only shows. Restart running processes (the sync, the
-chart app) after setting a key. `python -m massive_collate plugins` lists the same providers.
+chart app) after setting a key. `python -m massive_collate plugins` lists the same providers;
+`python -m massive_collate sourcing` shows each one's report (plan, limits, what it provides) and
+which source delivers what, by cost and capability (docs/ARCHITECTURE.md, "Which source delivers what").
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\set-key.ps1

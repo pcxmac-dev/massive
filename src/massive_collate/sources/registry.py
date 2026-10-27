@@ -14,6 +14,11 @@ What a plugin gives:
 - its plan, rate window and caps (`view`, `rate`), and what its server publishes (`limits`).
 - facts the rest of the app asks: its kind of data for the composite model, the exchange it is the
   reference for, the bars one request returns, a monthly symbol cap, the bulk symbols' resolution.
+- its capabilities (`provides`, `plan_resolutions`, `per_request`, `streams`), from which it reports
+  in one standard form (`report`, a `Report`): its subscription, its limits, one line per job it
+  can do on that plan (asset class, resolution, market, how far back, how fresh, bars a request)
+  and its live streams. The delivery scheme (sourcing.py) reads only these reports; `sourcing`
+  shows them. A plugin whose plan says more than its declarations amends its report (`reporter`).
 
 Callbacks left out take the defaults below, so a plain keyed REST feed needs little more than its
 build. A plugin that fails to load is left out and reported (`errors()`, `plugins`), never fatal.
@@ -24,6 +29,7 @@ import importlib
 import pkgutil
 import threading
 from dataclasses import dataclass, field, replace
+from datetime import timedelta
 from typing import TYPE_CHECKING, Callable, Iterable, Mapping
 
 from ..ratelimit import MachineLedger, RateLimiter
@@ -33,6 +39,7 @@ if TYPE_CHECKING:
     from .base import DataSource
 
 ENTRY_POINTS = "massive_collate.providers"
+DEFAULT_PER_REQUEST = 1000  # bars a request returns, for a provider that does not say
 
 
 @dataclass(frozen=True)
@@ -48,6 +55,69 @@ class KeyVar:
 
     def value(self, env: Mapping[str, str]) -> str | None:
         return next((env[n] for n in self.names if env.get(n)), None)
+
+
+# -- the standard report every provider gives the delivery scheme (sourcing.py) ---------------------
+
+@dataclass(frozen=True)
+class Limits:
+    """A subscription's limits: what a job's cost is counted against."""
+    requests_a_day: float  # what it can send in a day: its daily cap, or less where its rate is tighter
+    per_day: int | None = None
+    per_run: int | None = None
+    rate: tuple[int | None, float] | None = None  # (requests, seconds) its limiter keeps
+    symbols_a_month: int | None = None
+    published: str = ""  # what its server publishes
+
+
+@dataclass(frozen=True)
+class Capability:
+    """One job a provider can do on its plan: an asset class at one resolution."""
+    asset: str
+    resolution: str  # day, minute, second
+    market: str  # what its data is: feeds of one market are copies of each other
+    since: object  # date: how far back its plan reaches
+    latency: float  # seconds its newest data trails real time (86,400: end of day)
+    per_request: int | None  # bars one request returns (None: a symbol's whole history at once)
+
+
+@dataclass(frozen=True)
+class Report:
+    """A provider's standard report: the same form for every plugin."""
+    source: str
+    title: str
+    plan: str  # its subscription here
+    keys_set: bool | None  # None: it needs none
+    limits: Limits
+    capabilities: tuple[Capability, ...]
+    streams: tuple[tuple[str, str], ...] = ()  # (asset class, what its live stream is)
+    kind: str = ""  # its kind of data (exchange, consolidated, official, vendor)
+    notes: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict:
+        return {"source": self.source, "title": self.title, "plan": self.plan, "keysSet": self.keys_set,
+                "kind": self.kind, "notes": list(self.notes),
+                "limits": {**self.limits.__dict__, "rate": list(self.limits.rate) if self.limits.rate else None},
+                "capabilities": [{**c.__dict__, "since": str(c.since)} for c in self.capabilities],
+                "streams": [{"asset": a, "what": w} for a, w in self.streams]}
+
+    def lines(self) -> list[str]:
+        """The report for the terminal, the same layout for every provider."""
+        lim = self.limits
+        rate = f", {lim.rate[0]:,} per {lim.rate[1]:g} s" if lim.rate and lim.rate[0] else ""
+        caps = (f"{lim.requests_a_day:,.0f} requests a day{rate}" + (f", {lim.per_run:,} a run" if lim.per_run else "")
+                + (f", {lim.symbols_a_month:,} symbols a month" if lim.symbols_a_month else ""))
+        keys = "" if self.keys_set is None else "; keys set" if self.keys_set else "; keys NOT set"
+        out = [f"{self.source} ({self.title}): plan {self.plan}{keys}; {caps}"
+               + (f"; server: {lim.published}" if lim.published else "")]
+        for c in self.capabilities:
+            fresh = "real time" if c.latency < 60 else f"{c.latency / 60:.0f} min delayed" if c.latency < 86_400 \
+                else "end of day"
+            bars = "whole history a request" if c.per_request is None else f"{c.per_request:,} bars a request"
+            out.append(f"    {c.asset:6} {c.resolution:6} {c.market:12} from {c.since}  {fresh:16} {bars}")
+        out += [f"    {a:6} live   {w}" for a, w in self.streams]
+        out += [f"    note: {n}" for n in self.notes]
+        return out
 
 
 @dataclass(frozen=True, eq=False)
@@ -72,11 +142,16 @@ class Provider:
     kind_by_asset: Mapping[str, str] = field(default_factory=dict)
     reference_for: frozenset = frozenset()  # asset classes whose gold standard exchange it is
     venue_notes: Mapping[str, str] = field(default_factory=dict)  # audits: what its data of an asset is
-    bars_per_request: int | None = None  # one request's bars, for the Fetcher's estimates (None: the default)
     symbols_per_month: int | None = None  # different symbols its plan allows a month
     bulk_resolution: str = "auto"  # the initializer's bulk symbols start at this resolution
     missing_keys_note: str = ""  # the Fetcher's hover text when its keys are not set
     missing_keys_chip: str = "no key"
+    # Capabilities, for the delivery scheme (sourcing.py): the resolutions it provides per asset class
+    # (day, minute, second; default: day and minute for each of `assets`), the bars one request
+    # returns per resolution (None: a symbol's whole history in one request), its live streams.
+    provides: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    per_request: Mapping[str, int | None] = field(default_factory=dict)
+    streams: Mapping[str, str] = field(default_factory=dict)  # asset class -> what its stream is
     # Callbacks (None: the default described at each method).
     view: Callable[["Settings"], "Settings"] | None = None
     rate: Callable[["Settings"], tuple[int | None, float]] | None = None
@@ -84,6 +159,8 @@ class Provider:
     serves: Callable[["Settings"], frozenset | None] | None = None
     markets: Callable[["Settings"], dict] | None = None
     carries: Callable[[object], bool] | None = None
+    plan_resolutions: Callable[["Tier", str], tuple[str, ...]] | None = None  # what its plan gives per asset
+    reporter: Callable[["Report", "Settings | None"], "Report"] | None = None  # amends its standard report
     origin: str = "built in"  # set when loaded: built in, or the package's entry point
 
     @property
@@ -137,6 +214,44 @@ class Provider:
 
     def kind_for(self, asset: str) -> str:
         return self.kind_by_asset.get(asset) or self.kind
+
+    def resolutions_for(self, tier: "Tier", asset: str) -> tuple[str, ...]:
+        """The resolutions its plan (`tier`) provides for an asset class. Default: `provides`, or day
+        and minute for each of its asset classes."""
+        if asset not in self.assets:
+            return ()
+        if self.plan_resolutions:
+            return tuple(self.plan_resolutions(tier, asset))
+        return tuple(self.provides.get(asset, ("day", "minute")))
+
+    def request_bars(self, resolution: str) -> int | None:
+        """Bars one request returns (None: a symbol's whole history at once). Default: 1,000."""
+        return self.per_request.get(resolution, DEFAULT_PER_REQUEST)
+
+    def report(self, profile, today, settings: "Settings | None" = None) -> Report:
+        """Its standard report on this machine: `profile` is its coverage.FeedProfile (plan, asset
+        classes served, markets, capacity); `settings` add its caps and keys (the scheme needs neither)."""
+        from ..collector import history_floor
+        from ..coverage import latency
+
+        caps = []
+        for asset in sorted(profile.assets):
+            for res in self.resolutions_for(profile.tier, asset):
+                since = history_floor(profile.tier, today, asset)
+                if res == "second":
+                    since = max(since, today - timedelta(days=profile.second_days))
+                caps.append(Capability(asset, res, profile.venues.get(asset) or self.name, since,
+                                       latency(profile.tier, asset), self.request_bars(res)))
+        view = settings.for_source(self.name) if settings is not None else None
+        limits = Limits(profile.capacity if profile.capacity is not None else float(view.max_requests_per_day if view else 0),
+                        per_day=view.max_requests_per_day if view else None,
+                        per_run=view.max_requests_per_run if view else None,
+                        rate=self.rate_window(settings) if settings is not None else None,
+                        symbols_a_month=self.symbols_per_month, published=self.limits)
+        out = Report(self.name, self.title, profile.tier.name, self.keys_set(settings) if settings is not None else None,
+                     limits, tuple(caps), tuple((a, w) for a, w in self.streams.items() if a in profile.assets),
+                     self.kind, ("a closed archive: each symbol filled once, then not asked again",) if self.archival else ())
+        return self.reporter(out, settings) if self.reporter else out
 
 
 # -- helpers for building a provider's client ----------------------------------------------------
