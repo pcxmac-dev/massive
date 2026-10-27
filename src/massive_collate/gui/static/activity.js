@@ -405,7 +405,8 @@
     // picks them: being fetched, new data, backfills ... most traded first, the open symbol always).
     const counts = { all: data.symbolTotal ?? data.symbols.length, ...(data.symbolCounts || {}) };
     if (!data.symbolCounts) for (const s of data.symbols) counts[s.state] = (counts[s.state] || 0) + 1;
-    el('actFilters').innerHTML = ['all', 'fetching', 'new', 'backfilling', 'queued', 'current', 'retired', 'closed', 'blocked']
+    // A button for every state, in the table's order: one left off this list hid its rows from the filters.
+    el('actFilters').innerHTML = ['all', ...Object.keys(STATE_ORDER)]
       .filter((k) => k === 'all' || counts[k])
       .map((k) => `<button data-filter="${k}" class="${k === filter ? 'active' : ''}">${k === 'all' ? 'All'
         : `<span class="st-dot ${k}"></span>${DATA_LABEL[k]}`} <span class="chip">${counts[k] || 0}</span></button>`)

@@ -324,3 +324,21 @@ def test_views_restored_on_opening_the_page_load_their_content():
                        ("resources.js", "resources")):
         assert order.index('src="panels.js"') < order.index(f'src="{name}"')
         assert f"if (document.body.dataset.view === '{view}')" in _js(name).split("massive:view", 1)[1]
+
+
+def test_every_fetcher_state_has_its_name_icon_and_filter():
+    from massive_collate.gui.activity import STATE_RANK
+
+    icons, page = _js("icons.js"), _js("activity.js")
+    labels = icons.split("const DATA_LABEL = {", 1)[1].split("};", 1)[0]
+    named = set(re.findall(r"(\w+): '", labels))
+    order = page.split("const STATE_ORDER = {", 1)[1].split("};", 1)[0]
+    ranked = dict((k, int(v)) for k, v in re.findall(r"(\w+): (\d+)", order))
+    assert ranked == STATE_RANK  # the table sorts as the server ranks
+    assert set(STATE_RANK) <= named  # "next" and "held" had none: an empty chip
+    assert "['all', ...Object.keys(STATE_ORDER)]" in page  # a filter button for each, rows hidden by none
+    icon = icons.split("function dataIcon(", 1)[1].split("\n  }\n", 1)[0]
+    assert "d.state === 'next' ? icon('next'" in icon and "d.state === 'held' ? icon('pause'" in icon
+    css = _js("style.css")
+    for state in STATE_RANK:
+        assert f".st-dot.{state}" in css, state

@@ -268,7 +268,8 @@ dialog::backdrop { background: rgba(0, 0, 0, .5); }
 .data-icon { display: inline-grid; place-items: center; flex: none; color: var(--muted); }
 .data-icon.fetching { color: var(--accent); }
 .data-icon.backfilling { color: #f0a020; }
-.data-icon.new { color: var(--accent); }
+.data-icon.new, .data-icon.next { color: var(--accent); }
+.data-icon.held { color: var(--st-closed); }
 .data-icon.current { color: var(--up); }
 .data-icon.queued { color: var(--st-queued); }
 .data-icon.blocked { color: var(--st-blocked); }

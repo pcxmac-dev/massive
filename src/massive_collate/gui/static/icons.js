@@ -37,6 +37,8 @@
     check: '<circle cx="12" cy="12" r="9"/><path d="m8 12.5 2.8 2.8L16.5 9.5"/>',
     clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
     download: '<path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/>',
+    next: '<circle cx="12" cy="12" r="9"/><path d="m10.5 8 4 4-4 4"/>',
+    pause: '<circle cx="12" cy="12" r="9"/><path d="M10 9v6M14 9v6"/>',
     database: '<ellipse cx="12" cy="5.5" rx="7.5" ry="2.8"/><path d="M4.5 5.5v13c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8v-13"/><path d="M4.5 12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8"/>',
     analysis: '<path d="M3 3v18h18"/><path d="m7 15 4-5 3 3 5-7"/><path d="M15 6h4v4"/>',
     // the Analysis view: the definite integral, typeset: a calligraphic sign with ball terminals (an outline
@@ -72,10 +74,12 @@
         stroke-dasharray="${(c * f).toFixed(2)} ${c.toFixed(2)}" transform="rotate(-90 12 12)"/></svg>`;
   }
 
+  // Every state the server gives a row (gui/activity.py STATE_RANK) has its name here: one without
+  // drew an empty chip and a check mark.
   const DATA_LABEL = {
-    fetching: 'Fetching now', backfilling: 'Backfilling history', queued: 'Queued for download',
-    new: 'New data should be available', current: 'Up to date', blocked: 'Not collected by this feed',
-    closed: 'Closed: archive complete',
+    fetching: 'Fetching now', next: 'Next in line', backfilling: 'Backfilling history', queued: 'Queued for download',
+    new: 'New data should be available', held: 'Held: updates paused', current: 'Up to date',
+    blocked: 'Not collected by this feed', closed: 'Closed: archive complete',
     retired: 'Retired: no longer listed, history only',
   };
 
@@ -87,7 +91,9 @@
       : d.state === 'backfilling' ? progressRing(d.progress, size)
         : d.state === 'queued' ? icon('clock', size)
           : d.state === 'new' ? icon('download', size)
-            : icon('check', size);
+            : d.state === 'next' ? icon('next', size)
+              : d.state === 'held' ? icon('pause', size)
+                : icon('check', size);
     const pctText = d.state === 'backfilling' && d.progress != null ? ` (${Math.round(d.progress * 100)}%)` : '';
     return `<span class="data-icon ${esc(d.state)}" title="${esc(label + pctText)}" role="img" aria-label="${esc(label + pctText)}">${body}</span>`;
   }
