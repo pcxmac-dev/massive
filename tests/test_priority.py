@@ -300,3 +300,34 @@ def test_opening_an_up_to_date_symbol_asks_for_nothing(tmp_path, monkeypatch):
     assert out["state"] == "current" and out["nextDue"]
     assert collector.priority_requests(store, Sunday.now(timezone.utc)) == {}  # nothing asked of the running sync
     store.close()
+
+
+def test_an_opened_symbol_waits_only_for_the_feeds_with_something_to_fetch(tmp_path, monkeypatch):
+    # every feed up to date but Tiingo, a closed archive that has not visited SPCX yet: nothing to
+    # wait for (it read "next in line · coinbase is fetching" for hours); once Massive has a new
+    # session to fetch, the request names Massive alone
+    from datetime import datetime as dt
+
+    store = Store(tmp_path / "m.db", check_same_thread=False)
+    for feed in ("massive", "tiingo"):
+        store.watch(feed, ["SPCX"], "minute", exchange="XNAS")
+    store.set_backfilled("massive", "SPCX", collector.history_floor(FREE, dt(2026, 10, 25).date(), "stock"))
+    store.set_synced("massive", "SPCX", dt(2026, 10, 24, 9, 0, tzinfo=ET))  # after Friday's session was released
+    monkeypatch.setattr(server.activity, "lock_owner", lambda path: 99)  # a long sync is running
+    monkeypatch.setattr(server.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("started")))
+    clock = {"now": dt(2026, 10, 26, 3, 0, tzinfo=timezone.utc)}  # Sunday 23:00 ET
+
+    class Fixed(dt):
+        @classmethod
+        def now(cls, tz=None):
+            return clock["now"]
+
+    monkeypatch.setattr(server, "datetime", Fixed)
+    app = ChartApp(store, settings=load_settings(env={"MASSIVE_API_KEY": "k", "TIINGO_API_KEY": "t"}, env_file=None))
+    out = app.priority("SPCX")
+    assert out["state"] == "current" and out["feeds"] == ["massive", "tiingo"]
+    assert collector.priority_requests(store, clock["now"]) == {}  # nothing asked of the running sync
+    clock["now"] = dt(2026, 10, 27, 15, 0, tzinfo=timezone.utc)  # Tuesday: Monday's session is out
+    out = app.priority("SPCX")
+    assert out["state"] == "queued" and out["need"] == ["massive"]
+    store.close()

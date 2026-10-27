@@ -1149,8 +1149,9 @@ class ChartApp:
             tiers = {name: self.settings.for_source(name).tier for name in profiles if name in feeds}
             assets = {name: profiles[name].assets for name in tiers}  # a feed without its key serves nothing
             serving = any(r["source"] in tiers and r["asset"] in assets[r["source"]] for r in rows)
-            if (serving and not self.settings.offline and not self._halted()
-                    and not collector.needs_fetch(self.store, ticker, tiers, now, assets)):
+            found = collector.needs_fetch(self.store, ticker, tiers, now, assets) if serving else []
+            need = [name for name in tiers if name in found]  # the feeds it waits for, in their ranked order
+            if serving and not self.settings.offline and not self._halted() and not need:
                 # up to date on every feed: nothing new can exist yet (out of session, or not released)
                 due = [e.next_due for e in (expected(r["asset"], tiers[r["source"]], now) for r in rows
                                             if r["source"] in tiers) if e.next_due]
@@ -1160,7 +1161,7 @@ class ChartApp:
             if asked is None or (now - asked["at"]).total_seconds() > self.PRIORITY_COOLDOWN:
                 collector.request_priority(self.store, ticker, now)
                 asked = {"at": now, "runs": 0}
-        out = {"ticker": ticker, "feeds": feeds, "asked": asked["at"].isoformat()}
+        out = {"ticker": ticker, "feeds": feeds, "need": need, "asked": asked["at"].isoformat()}
         if self.settings.offline:
             return {**out, "state": "offline"}  # a test copy of the app: nothing is fetched
         if self._halted():

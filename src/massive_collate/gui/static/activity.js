@@ -191,7 +191,7 @@
         if (body.state === 'started') {
           next = { ticker, phase: 'downloading', feeds, since: Date.now() };
           setTimeout(poll, 400);
-        } else if (body.state === 'queued') next = { ticker, phase: 'waiting', feeds, since: Date.now() };
+        } else if (body.state === 'queued') next = { ticker, phase: 'waiting', feeds, need: body.need || [], since: Date.now() };
         else if (body.state === 'halted') next = { ticker, phase: 'halted', since: Date.now() };
         else if (body.state === 'current') next = { ticker, phase: 'current', nextDue: body.nextDue, last: standing(ticker)?.last, since: Date.now() };
         else next = standing(ticker);  // a run for it went in the last few minutes
@@ -234,7 +234,11 @@
         msg = `${t}: updating on ${esc(data.live.source)}${waitNote()}`;
         busy = true;
       } else if (job.phase === 'waiting') {
-        msg = `${t}: next in line · ${data?.live?.source ? `${esc(data.live.source)} is fetching` : 'the fetcher is busy'}${waitNote()}`;
+        // Named: the feeds with something to fetch for it (need). The run takes it on their turn, so
+        // "next in line · coinbase is fetching" read as if Coinbase, which has no SPCX, were about to.
+        const now = data?.live?.source, need = job.need || [];
+        msg = now && need.includes(now) ? `${t}: next on ${esc(now)}${waitNote()}`
+          : `${t}: waiting for ${need.length ? esc(need.join(', ')) : 'its feeds'}${now ? ` · ${esc(now)} is fetching` : ''}${waitNote()}`;
         busy = true;
       } else if (job.phase === 'downloading') {
         msg = running ? `${t}: updating on ${esc(data.live.source)}${job.feeds.length > 1 ? ` (${job.feeds.length} feeds)` : ''} · ${num(data.live.requests)} req${waitNote()}`

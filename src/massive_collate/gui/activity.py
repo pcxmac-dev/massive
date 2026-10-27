@@ -171,7 +171,8 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
             row.update(state="blocked", requestsLeft=0,
                        note="keys not set" if source == "alpaca" else f"{source} has no {item['asset']} data here")
         elif row["state"] != "fetching" and item["ticker"] in asked and (
-                item.get("synced_at") is None or item["synced_at"] < asked[item["ticker"]]["at"]):
+                item.get("synced_at") is None or item["synced_at"] < asked[item["ticker"]]["at"]) \
+                and collector.feed_needs(item, settings.tier, now):  # asked of this feed only if it has something
             row.update(state="next", note="opened in the chart: taken before anything else")
         elif paused and row["state"] == "new" and item["ticker"] not in picked and item.get("synced_at") \
                 and now - item["synced_at"] < timedelta(days=collector.UPDATES_GAP_DAYS):

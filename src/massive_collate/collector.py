@@ -947,22 +947,34 @@ def _due(asset: str, tier: Tier, synced: datetime, now: datetime, refresh_hours:
     return freshness.expected(asset, tier, now).latest != freshness.expected(asset, tier, synced).latest
 
 
+def feed_needs(row: dict, tier: Tier, now: datetime) -> bool:
+    """Whether a feed has something to fetch now for its watchlist `row`: history it still lacks,
+    or data its plan has published since its last sync (the same rule the sync skips by: nothing
+    new can exist out of session, or before an end-of-day plan's release; a retired symbol,
+    nothing after its last listed day). A closed archive (sources.ARCHIVAL) fills each symbol once,
+    in its own order, and has nothing current: one it has not visited yet does not count (SPCX
+    read "next in line" for hours for Tiingo's turn, with every other feed up to date)."""
+    from .sources import ARCHIVAL
+
+    synced, end = row.get("synced_at"), retired_end(row)
+    if row.get("closed_at"):
+        return False
+    if synced is None:
+        return row["source"] not in ARCHIVAL
+    return _backfilling(row, history_floor(tier, now.astimezone(ET).date(), row["asset"])) or (
+        _due(row["asset"], tier, synced, now, 0.0) and (end is None or synced < end))
+
+
 def needs_fetch(store: Store, ticker: str, tiers: dict[str, Tier], now: datetime,
                 assets: dict[str, frozenset] | None = None) -> list[str]:
-    """The feeds (of `tiers`: the ones set up here) with something to fetch for `ticker` now:
-    history it still lacks, or data its plan has published since its last sync (the same rule
-    the sync skips by: nothing new can exist out of session, or before an end-of-day plan's
-    release; a retired symbol, nothing after its last listed day). Empty: every feed holding it is
-    up to date, and opening it asks for nothing."""
-    today = now.astimezone(ET).date()
+    """The feeds (of `tiers`: the ones set up here) with something to fetch for `ticker` now
+    (feed_needs). Empty: every feed holding it is up to date, and opening it asks for nothing."""
     out = []
     for row in store.watchlist(ticker=ticker):
         tier = tiers.get(row["source"])
-        if tier is None or row.get("closed_at") or (assets is not None and row["asset"] not in assets.get(row["source"], ())):
-            continue  # not set up here, finished, or not able to serve it (no key for its asset class)
-        synced, end = row.get("synced_at"), retired_end(row)
-        if (synced is None or _backfilling(row, history_floor(tier, today, row["asset"]))
-                or (_due(row["asset"], tier, synced, now, 0.0) and (end is None or synced < end))):
+        if tier is None or (assets is not None and row["asset"] not in assets.get(row["source"], ())):
+            continue  # not set up here, or not able to serve it (no key for its asset class)
+        if feed_needs(row, tier, now):
             out.append(row["source"])
     return out
 

@@ -342,3 +342,11 @@ def test_every_fetcher_state_has_its_name_icon_and_filter():
     css = _js("style.css")
     for state in STATE_RANK:
         assert f".st-dot.{state}" in css, state
+
+
+def test_the_status_bar_names_the_feeds_an_opened_symbol_waits_for():
+    page = _js("activity.js")
+    assert "phase: 'waiting', feeds, need: body.need || []" in page
+    bar = page.split("function renderStatusBar()", 1)[1].split("\n  }\n", 1)[0]
+    assert "next on ${esc(now)}" in bar and "waiting for ${" in bar
+    assert "`${t}: next in line" not in bar  # it read as if the feed fetching now, with nothing for it, were about to

@@ -131,3 +131,25 @@ def test_a_stock_nobody_traded_late_is_current_once_synced_after_the_session(sto
     row = activity.symbol_status({**item, "synced_at": datetime(2026, 10, 23, 12, 0, tzinfo=_ET)},
                                  (last - 60_000, last), date(2003, 9, 10), sunday.date(), sunday, tier, None)
     assert row["state"] == "new"  # synced before Friday's session ended: newer data was published since
+
+
+def test_an_opened_symbol_is_next_only_on_the_feeds_with_something_to_fetch(store):
+    # SPCX read "next in line" for hours with every feed up to date: Tiingo (a closed archive) had
+    # not visited it yet, which made the chart ask again and again, and the rows of feeds with
+    # nothing to fetch said "next" all the same
+    _caught_up(store, ["FRESH", "OLD"], timedelta(minutes=10))  # nothing published since (end of day plan)
+    store.set_synced("fake", "OLD", NOW - timedelta(days=2))  # a session published since
+    for t in ("FRESH", "OLD"):
+        store.watch("tiingo", [t], "minute", exchange="XNAS")  # the archive has not visited either
+        collector.request_priority(store, t, NOW.astimezone(timezone.utc))
+    settings = load_settings(env={"MASSIVE_API_KEY": "k", "TIINGO_API_KEY": "t"}, env_file=None)
+    rows = {r["ticker"]: r for r in activity.symbol_rows(store, settings, "fake", NOW)}
+    assert rows["OLD"]["state"] == "next" and rows["FRESH"]["state"] != "next"
+    archive = activity.symbol_rows(store, settings, "tiingo", NOW)
+    assert len(archive) == 2 and all(r["state"] != "next" for r in archive)
+    tiers = {name: settings.for_source(name).tier for name in ("fake", "tiingo")}
+    assert collector.needs_fetch(store, "OLD", tiers, NOW) == ["fake"]
+    assert collector.needs_fetch(store, "FRESH", tiers, NOW) == []  # opening it asks for nothing
+    visited = {"source": "tiingo", "asset": "stock", "synced_at": None, "closed_at": None}
+    assert not collector.feed_needs(visited, tiers["tiingo"], NOW)
+    assert collector.feed_needs({**visited, "source": "fake"}, tiers["fake"], NOW)  # a live feed's first visit counts
