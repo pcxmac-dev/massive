@@ -559,7 +559,9 @@ def cmd_live(args, settings: Settings) -> int:
         print(f"recorder: {'running' if live.running(settings.db_path) else 'not running'}, last beat {beat or 'never'}")
         for source, st in (json.loads(raw)["streams"] if raw else {}).items():
             pairs = ", ".join(f"{t} {p['trades']:,}" for t, p in sorted(st.get("pairs", {}).items()))
-            print(f"  {source:9} {'connected' if st.get('connected') else 'down: ' + str(st.get('error'))}  {pairs}")
+            state = "connected" if st.get("connected") else "idle: nothing of it open on a chart" if st.get("idle") \
+                else "down: " + str(st.get("error"))
+            print(f"  {source:9} {state}  {pairs}")
         return 0
     if not (settings.live_coins or live.stock_keys(settings)) or settings.offline:
         print("live recording is off (LIVE_CRYPTO=off and no stocks: no Alpaca keys or LIVE_STOCKS=off; "
@@ -575,7 +577,8 @@ def cmd_live(args, settings: Settings) -> int:
               "count every connection from this address)")
         return 0
     recorder = live.Recorder(settings.db_path, coins=settings.live_coins, stock_keys=live.stock_keys(settings),
-                             locks=locks, log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
+                             locks=locks, log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"),
+                             selected_only=settings.live_selected_only)
     try:
         recorder.run()
     except KeyboardInterrupt:

@@ -54,7 +54,11 @@ Alpaca (second feed; stocks and crypto). Keys are only ever read from the enviro
     ALPACA_PAPER      1 (default): keys are paper-trading keys; 0: live keys (decides the host
                       asked for reference data; market data is the same either way)
     LIVE_STOCKS       on (default) | off: with keys, the live recorder streams IEX's trades for the
-                      symbols open on a chart and on the watchlists (at most 30; live.py)
+                      symbols open on a chart (at most 30; live.py)
+    LIVE_STREAMS      selected (default) | always: selected, every live stream (coins and stocks)
+                      runs only for the symbols open on a chart, and with none open nothing is
+                      connected (the sync downloads the time later); always, the coins of LIVE_CRYPTO
+                      stream all the time, and stocks open on a chart or on the rail's watchlists
     ALPACA_MAX_REQUESTS_PER_RUN / ALPACA_MAX_REQUESTS_PER_DAY   hard caps (default: 3000 / 30000)
 """
 from __future__ import annotations
@@ -179,6 +183,8 @@ class Settings:
     live_coins: tuple[str, ...] = ("BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LTC", "LINK")
     # Stocks streamed live from Alpaca's IEX feed (with its keys; live.py); LIVE_STOCKS=off for none.
     live_stocks: bool = True
+    # LIVE_STREAMS=selected (default): live streams only for the symbols open on a chart (live.py).
+    live_selected_only: bool = True
     # BARS_ONLY (on by default): no tick file is opened but by the live recorder (cli.main).
     bars_only: bool = True
     # CHART_CACHE_MB: every cache of the chart app together (gui/bars.py CACHE_SHARES).
@@ -370,6 +376,7 @@ def load_settings(
         crypto_venue_days=_default(_int_setting(merged, "CRYPTO_VENUE_DAYS"), 0),
         live_coins=_live_coins(merged.get("LIVE_CRYPTO")),
         live_stocks=str(merged.get("LIVE_STOCKS", "on")).strip().lower() not in ("off", "0", "false", "no", "none"),
+        live_selected_only=_live_streams(merged.get("LIVE_STREAMS")),
         offline=str(merged.get("MASSIVE_OFFLINE", "")).strip().lower() in ("1", "true", "yes", "on"),
         bars_only=str(merged.get("BARS_ONLY", "on")).strip().lower() not in ("off", "0", "false", "no", "none"),
         chart_cache_mb=max(64, _default(_int_setting(merged, "CHART_CACHE_MB"), 1024)),
@@ -391,6 +398,14 @@ def _live_coins(value: str | None) -> tuple[str, ...]:
     if unknown:
         raise ConfigError(f"LIVE_CRYPTO: {', '.join(unknown)} not streamed live; choose from {', '.join(LIVE_COINS)}")
     return coins
+
+
+def _live_streams(value: str | None) -> bool:
+    """LIVE_STREAMS: whether the live streams run only for the symbols open on a chart."""
+    v = (value or "selected").strip().lower()
+    if v not in ("selected", "always"):
+        raise ConfigError(f"LIVE_STREAMS must be selected or always, got {value!r}")
+    return v == "selected"
 
 
 def _default(value: int | None, default: int) -> int:

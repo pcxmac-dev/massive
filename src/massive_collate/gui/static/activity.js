@@ -582,8 +582,8 @@
   }
 
   // The live recorder's streams (python -m massive_collate live): connection, and per symbol the
-  // trades recorded, the last price and how long ago it traded. The stock stream (IEX) follows the
-  // open chart and the watchlists.
+  // trades recorded, the last price and how long ago it traded. Every stream follows the symbols
+  // open on a chart (LIVE_STREAMS=selected): with none of its symbols open it is idle, not down.
   function liveStreamsHtml(live) {
     const streams = Object.entries(live.streams || {});
     if (!streams.length) {
@@ -594,7 +594,8 @@
       const pairs = Object.entries(s.pairs || {}).sort(([a], [b]) => a.localeCompare(b));
       const head = `<tr><td><b>${esc(src)}</b></td><td colspan="4">${s.connected
         ? `<span class="rec on"></span> connected${s.since ? ` · since ${when(s.since)}` : ''}${s.symbols
-          ? ` · ${s.symbols.length} of 30 symbols` : ''}`
+          ? ` · ${s.symbols.length} symbol${s.symbols.length === 1 ? '' : 's'}` : ''}`
+        : s.idle ? `<span class="state">idle</span> <span class="sub">nothing of it open on a chart: not connected</span>`
         : `<span class="state run-error">down</span> <span class="sub">${esc(s.error || '')}</span>`}</td></tr>`;
       return [head, ...pairs.map(([t, p]) => `
         <tr class="has-data" data-ticker="${esc(t)}"><td></td><td><b>${esc(t)}</b>${live.liveTickers?.includes(t) ? ' <span class="state fresh">live</span>' : ''}</td>
