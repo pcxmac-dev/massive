@@ -574,6 +574,34 @@ class ChartApp:
         disks and the data files, with the last ten minutes (or `span` "day", the last day)."""
         return self.monitor.view(span)
 
+    VENUES_TTL_S = 30.0  # the Exchanges view's answers are kept this long (the watchlist moves slowly)
+
+    def venues(self) -> dict:
+        """The Exchanges view's venues (venues.summary): each with its state now and its insight."""
+        from ..sources import feed_profiles
+        from .. import sourcing
+        from . import venues
+
+        hit = getattr(self, "_venues_cache", None)
+        if hit and time.monotonic() - hit[0] < self.VENUES_TTL_S:
+            return hit[1]
+        cal = self.engine.calendar()  # outside the shared lock, like the Markets view's
+        feeds = feed_profiles(self.settings)
+        with self._lock:
+            scheme = sourcing.standing(self.store, feeds)
+            out = venues.summary(self.store, cal, feeds, scheme)
+        self._venues_cache = (time.monotonic(), out)
+        return out
+
+    def venue(self, vid: str) -> dict:
+        """One venue's products (venues.products) for the Exchanges view's middle column."""
+        from ..sources import feed_profiles
+        from . import venues
+
+        feeds = feed_profiles(self.settings)
+        with self._lock:
+            return venues.products(self.store, feeds, vid)
+
     def _spx_close(self) -> tuple[str, float] | None:
         """The S&P 500's newest daily close held (the circuit breakers' reference), or None."""
         try:
@@ -1483,6 +1511,10 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.gov())
                 if url.path == "/api/resources":
                     return self._json(app.resources(q.get("span", "recent")))
+                if url.path == "/api/venues":
+                    return self._json(app.venues())
+                if url.path == "/api/venue":
+                    return self._json(app.venue(q.get("id", "")))
                 if url.path == "/api/markets":
                     return self._json(app.markets())
                 if url.path == "/api/calendar":

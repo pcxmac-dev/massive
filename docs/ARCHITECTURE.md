@@ -231,6 +231,18 @@ in the order and those picked are kept current each session; the rest are refres
 official session schedules are asked for those picked and the first 20; the others follow the
 calendar's CME rules.
 
+## The Exchanges view (2026-10-27)
+
+A rail icon of a pair of scales opens every venue the app tracks symbols on (`gui/venues.py`,
+`venues.js`), grouped: the stock exchanges (NYSE, Nasdaq, the other US venues, Blue Ocean's
+overnight), CME Group's four (each futures product by its exchange in the directory), the indices,
+each crypto exchange (a feed's own market), forex. The middle column lists the venue's products (a
+search, a sector filter; the last session's change for stocks); the right shows the venue's
+insight (open now or not and the next change, products by sector, how much is collected and how
+freshly, the feeds, the delivery scheme's eras, the last session's movers) or, for a product
+picked, the symbol panel's statistics (`/api/info`) with a button to open its chart. Built from the
+watchlist and the directory only (`/api/venues`, kept 30 s; `/api/venue?id=`): no bars, no requests.
+
 ## Schemes and replay (2026-10-25)
 
 **Schemes** are trading algorithms run over a stretch of time on the Analysis view: the highlight

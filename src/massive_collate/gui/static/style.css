@@ -831,3 +831,41 @@ body:not([data-pane="analysis"]) .analysis-only { display: none; }
 .tr-filled { color: var(--up, #26a69a); }
 .tr-working { color: var(--accent); }
 .tr-cancelled, .tr-expired { color: var(--muted); }
+
+/* Exchanges view (venues.js): the venues, their products, the insight on the right */
+.ex-view { display: grid !important; grid-template-columns: minmax(200px, 240px) minmax(0, 1fr) minmax(280px, 360px); gap: 0; }
+.ex-view > div, .ex-view > aside { min-height: 0; overflow-y: auto; padding: 12px 14px 18px; }
+.ex-venues { border-right: 1px solid var(--border); }
+.ex-side { border-left: 1px solid var(--border); }
+.ex-group { margin: 14px 0 4px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.ex-venue { display: grid; grid-template-columns: 1fr auto; gap: 2px 6px; width: 100%; text-align: left; padding: 6px 8px;
+  margin: 2px 0; border: 1px solid transparent; border-radius: 6px; background: none; }
+.ex-venue:hover { background: var(--panel); }
+.ex-venue.active { border-color: var(--accent); background: var(--panel); }
+.ex-name { font-weight: 600; }
+.ex-count { grid-column: 1 / -1; font-size: 11px; color: var(--muted); }
+.ex-state { font-size: 10px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--border); color: var(--muted); align-self: center; }
+.ex-state.open { color: var(--up); border-color: var(--up); }
+.ex-state.pre-market, .ex-state.after-hours { color: var(--accent); border-color: var(--accent); }
+.ex-tools { display: flex; gap: 8px; align-items: center; margin: 6px 0 8px; }
+.ex-tools input { flex: 1; min-width: 120px; }
+.ex-table tr[data-product] { cursor: pointer; }
+.ex-table tr.active td { background: var(--panel); }
+.ex-pname { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ex-more { margin: 8px 0; }
+.ex-side h3 { margin: 0 0 4px; font-size: 16px; display: flex; align-items: center; gap: 8px; }
+.ex-side h4 { margin: 14px 0 6px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.ex-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.ex-tiles .big { font-size: 16px; }
+.ex-bars { display: grid; gap: 3px; }
+.ex-bar { display: grid; grid-template-columns: 110px 1fr 44px; gap: 6px; align-items: center; font-size: 12px; cursor: pointer; }
+.ex-bar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ex-bar i { height: 8px; border-radius: 4px; background: var(--accent); opacity: .7; }
+.ex-bar b { font-weight: 500; text-align: right; font-variant-numeric: tabular-nums; }
+.ex-movers { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
+.ex-mover { font-size: 11px; padding: 2px 6px; }
+.ex-mini td { font-size: 11px; padding: 3px 6px; }
+.ex-price { font-size: 20px; margin: 8px 0 2px; }
+.ex-back button { font-size: 11px; padding: 2px 6px; margin-bottom: 6px; }
+.ex-open { margin-top: 12px; }
+@media (max-width: 1100px) { .ex-view { grid-template-columns: 200px minmax(0, 1fr); } .ex-side { grid-column: 1 / -1; border-left: none; border-top: 1px solid var(--border); } }

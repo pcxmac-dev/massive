@@ -7,6 +7,8 @@
                bar under the cursor beside it; schemes and replay (schemes.js, replay.js)
      Trading   the same symbol's chart with content of its own, the paper account and the brokers beside it
                (trading.js); live trading is off
+     Exchanges every tracked exchange (NYSE, Nasdaq, CME Group's four, indices, crypto, forex, Blue
+               Ocean overnight), its products, and insight into them on the right (venues.js)
      Markets   the world's exchanges on a globe turned to where it is noon now (globe.js)
      News      every announcement the globe's ticker shows (news.js)
      Gov       the government and the regulators: current regulatory parameters, the Fed's, the SEC's,
@@ -24,7 +26,8 @@
   const { symbolIcon, icon, esc } = window.MassiveIcons;
   // The watchlist sits beside whichever chart was showing (it has no chart content of its own).
   const VIEWS = { stock: 'chart', analysis: 'chart', trading: 'chart', watchlist: 'chart', markets: 'markets', news: 'news',
-                  gov: 'gov', datasets: 'datasets', fetcher: 'fetcher', live: 'live', resources: 'resources' };
+                  gov: 'gov', datasets: 'datasets', fetcher: 'fetcher', live: 'live', resources: 'resources',
+                  exchanges: 'exchanges' };
 
   // -- rail --------------------------------------------------------------------------------
   function showPane(name, { toggle = true } = {}) {
@@ -79,6 +82,7 @@
     $('railGov').innerHTML = icon('statehouse', RAIL_ICON);
     $('railDatasets').innerHTML = icon('scroll', RAIL_ICON);
     $('railResources').innerHTML = icon('chip', RAIL_ICON);
+    $('railExchanges').innerHTML = icon('scales', RAIL_ICON);
     const running = !!activity?.running;
     const fresh = activity?.newData || 0;
     // its platter turns while a run fetches (.busy): redrawn only when it changes, or each poll would

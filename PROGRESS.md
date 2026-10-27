@@ -24,8 +24,8 @@ Working notes so work can resume in a fresh session. Newest first.
 - **CME Group tracked** (docs/ARCHITECTURE.md, "CME Group alongside NYSE and Nasdaq"): every
   readable CME/NYMEX/CBOT/COMEX product as a continuous future, best-known first; futures capped
   per run (FUTURES_PER_RUN), less traded ones weekly. Estimated 30-100 GB once filled (1-2 weeks).
-- **Next**: the Exchanges page (a scales icon on the rail): the tracked exchanges, their products,
-  insights on the right.
+- **Exchanges view** (rail: a pair of scales; docs/ARCHITECTURE.md, "The Exchanges view"): every
+  tracked venue, its products, the venue's or a product's insight on the right.
 
 ## State (2026-10-26, afternoon)
 
