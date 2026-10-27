@@ -220,6 +220,16 @@ class DirectoryStore:
             (source, *exchanges, *skip_types))
         return [{"ticker": t, "exchange": e, "type": ty, "name": n, "measure": m} for t, e, ty, n, m in rows]
 
+    def futures_products(self, source: str, exchanges: Sequence[str]) -> list[dict]:
+        """Futures products listed on `exchanges` (CME Group's): [{ticker (the product code), exchange,
+        type (its sector), name}], by code. (No volume: the market snapshot is the stocks'; a stock
+        sharing a product's code, CL, is Colgate-Palmolive.)"""
+        rows = self.conn.execute(
+            f"""SELECT ticker, exchange, type, name FROM directory
+                WHERE source=? AND kind='future' AND retired_on IS NULL
+                  AND exchange IN ({','.join('?' * len(exchanges))}) ORDER BY ticker""", (source, *exchanges))
+        return [{"ticker": t, "exchange": e, "type": ty, "name": n} for t, e, ty, n in rows]
+
     def save_market_snapshot(self, source: str, day: date, bars: list[dict]) -> int:
         rows = [(source, day.isoformat(), b["T"].upper(), b.get("c"), b.get("v"), b.get("vw")) for b in bars if b.get("T")]
         with self.conn:

@@ -214,6 +214,23 @@ trading day; the consolidated tape (Massive, Alpaca's SIP) carries none of it.
   a night belongs to the next day's daily bar (`session_hours` 4 for stocks). Blue Ocean has no
   1-second bars, so the nights show from the minute levels up.
 
+## CME Group alongside NYSE and Nasdaq (2026-10-27)
+
+`initialize` takes CME Group's four exchanges (XCME, XNYM, XCBT, XCEC; `--exchanges CME`) next to
+XNYS and XNAS: every futures product in the directory is watched as its continuous chart (`ES1!`)
+on every feed that collects futures (Massive), after the stocks in the fetch order. The directory
+has no futures volume (its market snapshot is the stocks': CL there is Colgate-Palmolive), so the
+best-known products go first (`initializer.MAJOR_FUTURES`), then by sector, event, power and
+single-stock contracts last. Codes the symbol rules cannot read as continuous (ending in digits:
+sports event swaps, single-stock futures, synthetic "price series") are left out and listed.
+
+All futures share one rate (Massive's free class: 5 requests a minute, at most 7,200 a day), and a
+run works one symbol at a time, so a run takes futures first and stops at `FUTURES_PER_RUN`
+requests (default 100, about 20 minutes); the stocks take the rest. The first `FUTURES_DAILY` (250)
+in the order and those picked are kept current each session; the rest are refreshed weekly. Their
+official session schedules are asked for those picked and the first 20; the others follow the
+calendar's CME rules.
+
 ## Schemes and replay (2026-10-25)
 
 **Schemes** are trading algorithms run over a stretch of time on the Analysis view: the highlight

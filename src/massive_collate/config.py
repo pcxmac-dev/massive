@@ -27,6 +27,8 @@ Settings come from environment variables, optionally loaded from a `.env` file
                       trades are kept, to build their bars)
     TICK_MIN_FREE_GB  tick backfill pauses when the disk has less free space (default: 250); below
                       a fifth of it no ticks are downloaded at all
+    FUTURES_PER_RUN   futures requests a sync may make per run (default: 100, about 20 minutes at the
+                      free class's 5 a minute): futures go first in a run and the stocks take the rest
     CHART_CACHE_MB    memory the chart app's caches may hold together (default: 1024): recent
                       windows, bricks and 30-minute bins; the databases stay on disk
     BARS_ONLY         on (default): the app works from bars alone and no command opens the feeds'
@@ -189,6 +191,8 @@ class Settings:
     bars_only: bool = True
     # CHART_CACHE_MB: every cache of the chart app together (gui/bars.py CACHE_SHARES).
     chart_cache_mb: int = 1024
+    # FUTURES_PER_RUN: the futures' share of a run (collector.FUTURES_PER_RUN).
+    futures_per_run: int = 100
     # MASSIVE_OFFLINE=1: nothing is fetched and no recorder starts (a test copy of the app on a
     # scratch database must never spend the real plan's requests: its own ledger would not know them).
     offline: bool = False
@@ -380,6 +384,7 @@ def load_settings(
         offline=str(merged.get("MASSIVE_OFFLINE", "")).strip().lower() in ("1", "true", "yes", "on"),
         bars_only=str(merged.get("BARS_ONLY", "on")).strip().lower() not in ("off", "0", "false", "no", "none"),
         chart_cache_mb=max(64, _default(_int_setting(merged, "CHART_CACHE_MB"), 1024)),
+        futures_per_run=_default(_int_setting(merged, "FUTURES_PER_RUN"), 100),
         env={n: merged[n] for n in variables() if merged.get(n)},
     )
 

@@ -313,22 +313,38 @@ def cmd_plan(args, settings: Settings) -> int:
 
 
 def cmd_initialize(args, settings: Settings) -> int:
-    """One-time: every listed stock of the exchanges onto the watchlist of every stock feed, most
-    traded first (initializer.py). Sends no requests; the hourly syncs then backfill them in
-    that order, within each feed's caps."""
+    """One-time: every listed stock of the exchanges onto the watchlist of every stock feed, and
+    every futures product of the CME Group exchanges among them (CME for all four) as its
+    continuous chart onto every futures feed, most traded first (initializer.py). Sends no
+    requests; the hourly syncs then backfill them in that order, within each feed's caps."""
     from . import initializer
 
     feeds = [name for name, p in providers().items() if "stock" in p.assets]
-    exchanges = tuple(e.strip().upper() for e in args.exchanges.split(",") if e.strip())
+    futures_feeds = [name for name, p in providers().items() if "future" in p.assets]
+    exchanges = tuple(dict.fromkeys(m for e in args.exchanges.split(",") if e.strip()
+                                    for m in (initializer.CME_GROUP if e.strip().upper() == "CME" else (e.strip().upper(),))))
+    would = "would be " if args.dry_run else ""
     with Store(settings.db_path) as store:
-        out = initializer.initialize(store, feeds, exchanges, by=args.by, dry_run=args.dry_run)
-    print(f"{out['listed']:,} listings on {', '.join(exchanges)} ({out['ranked']:,} with recent volume), "
-          f"ranked by {'traded value' if args.by == 'value' else 'shares traded'}")
-    print("most traded: " + ", ".join(out["top"]))
-    for feed, n in out["added"].items():
-        print(f"  {feed:8} {n:,} {'would be ' if args.dry_run else ''}added")
-    if out["listed"] == 0:
-        print("the directory has no listings for those exchanges yet: a sync fills it")
+        out = initializer.initialize(store, feeds, exchanges, by=args.by, dry_run=args.dry_run, futures_feeds=futures_feeds)
+    stocks = [e for e in exchanges if e not in initializer.CME_GROUP]
+    if stocks:
+        print(f"{out['listed']:,} listings on {', '.join(stocks)} ({out['ranked']:,} with recent volume), "
+              f"ranked by {'traded value' if args.by == 'value' else 'shares traded'}")
+        print("most traded: " + ", ".join(out["top"]))
+        for feed, n in out["added"].items():
+            print(f"  {feed:8} {n:,} {would}added")
+        if out["listed"] == 0:
+            print("the directory has no listings for those exchanges yet: a sync fills it")
+    f = out.get("futures")
+    if f is not None:
+        print(f"{f['listed']:,} futures products on " + ", ".join(f"{m} {n:,}" for m, n in f["byExchange"].items())
+              + " (CME Group), most traded first: " + ", ".join(f["top"][:12]))
+        for feed, n in f["added"].items():
+            print(f"  {feed:8} {n:,} continuous futures {would}added")
+        if f["unreadable"]:
+            print(f"  {len(f['unreadable'])} product codes left out (not readable as symbols): {', '.join(f['unreadable'][:10])}")
+        if f["listed"] == 0:
+            print("the directory has no futures products yet: a sync fills it")
     return 0
 
 
@@ -482,7 +498,7 @@ def _sync(args, settings: Settings) -> tuple[int, int]:
                                         feeds=feed_profiles(settings), only=tickers, published_only=True,
                                         audits=(settings.audits_per_run, settings.audits_random_per_run),
                                         on_item=lambda t: store.set_run_current(args._run_id, t),
-                                        directory_allowance=reserve_left)
+                                        directory_allowance=reserve_left, futures_per_run=settings.futures_per_run)
                 args._rows = result.rows
                 log(f"sync {name}: {result.rows} rows saved"
                     + (f", {result.skipped} symbols refreshed within {settings.refresh_hours:g} h left for later"
@@ -1380,9 +1396,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--ticker", default="AAPL", help="a symbol with long history (default AAPL)")
     s.set_defaults(func=cmd_plan)
 
-    s = sub.add_parser("initialize", help="one-time: every NYSE and Nasdaq listing onto the watchlist, "
-                                          "most traded first (no requests)")
-    s.add_argument("--exchanges", default="XNYS,XNAS", help="exchange MICs (default XNYS,XNAS)")
+    s = sub.add_parser("initialize", help="one-time: every NYSE and Nasdaq listing and every CME Group futures "
+                                          "product onto the watchlist, most traded first (no requests)")
+    s.add_argument("--exchanges", default="XNYS,XNAS,CME",
+                   help="exchange MICs; CME is CME Group's four (XCME, XNYM, XCBT, XCEC) (default XNYS,XNAS,CME)")
     s.add_argument("--by", choices=("value", "shares"), default="value",
                    help="rank by traded value (default) or shares traded")
     s.add_argument("--dry-run", action="store_true", help="show what would be added")

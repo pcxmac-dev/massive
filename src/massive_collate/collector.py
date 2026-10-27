@@ -406,6 +406,18 @@ def _queue_audit(store: Store, me: FeedProfile, feeds: dict[str, FeedProfile], t
 
 # -- futures -------------------------------------------------------------------
 
+# All futures share one rate (Massive's free class: 5 requests a minute, 7,200 a day), and a run
+# works one symbol at a time: with every CME Group product watched (initializer.CME_GROUP) they
+# would hold the stocks behind them for hours. So futures go first in a run, up to FUTURES_PER_RUN
+# requests (about 20 minutes at that rate: FUTURES_PER_RUN in the settings), and only the first
+# FUTURES_DAILY in the fetch order (the best-known products) and those picked are kept current each
+# session; the rest are refreshed weekly (FUTURES_WEEKLY_DAYS). Their official session schedules are
+# asked for those picked and the first FUTURES_SCHEDULES; the others follow the calendar's CME rules.
+FUTURES_PER_RUN = 100
+FUTURES_DAILY = 250
+FUTURES_WEEKLY_DAYS = 7
+FUTURES_SCHEDULES = 20
+
 ROLL_HORIZON_DAYS = 150  # contracts expiring this far ahead can matter for the roll
 CONTRACT_LEAD_DAYS = 120  # a contract is fetched from this long before its month (covers its time as front)
 ENDED_AFTER_DAYS = 5  # no session bar for this long: the contract has expired
@@ -1143,6 +1155,13 @@ def priority_requests(store: Store, now: datetime | None = None) -> dict[str, di
     return out
 
 
+def _futures_kept_current(watched: list[dict], order: dict[str, int], store: Store, now: datetime) -> set[str]:
+    """The futures updated each session: the first FUTURES_DAILY in the fetch order (the
+    best-known products: initializer.futures_rank) and those picked (opened, on a watchlist)."""
+    futures = sorted((w["ticker"] for w in watched if w["asset"] == "future"), key=lambda t: (order.get(t, len(order)), t))
+    return set(futures[:FUTURES_DAILY]) | (picked_symbols(store, now) & set(futures))
+
+
 def _next_item(pending: list[dict], store: Store, now: datetime, source: str = "",
                served: dict | None = None) -> tuple[dict, bool]:
     """The next symbol to work on, and whether it was asked for: a symbol opened in the chart
@@ -1170,7 +1189,7 @@ def sync(
     source: DataSource, store: Store, tier: Tier, now: datetime | None = None, log: Log = print,
     refresh_hours: float = 0.0, on_item: Callable[[str], None] | None = None, only: set[str] | None = None,
     directory_allowance: int | Callable[[], int] = 0, feeds: dict[str, FeedProfile] | None = None,
-    audits: tuple[int, int] = (0, 0), published_only: bool = False,
+    audits: tuple[int, int] = (0, 0), published_only: bool = False, futures_per_run: int = FUTURES_PER_RUN,
 ) -> SyncResult:
     """One scheduled run over the watchlist for a source.
 
@@ -1262,7 +1281,11 @@ def sync(
 
         if sweep_left:
             sweep()
-        pending = sorted(watched, key=lambda w: (backfilling(w), order.get(w["ticker"], len(order)), w["ticker"]))
+        # futures first: their share of the run is capped (FUTURES_PER_RUN), the stocks take the rest
+        pending = sorted(watched, key=lambda w: (w["asset"] != "future", backfilling(w), order.get(w["ticker"], len(order)),
+                                                 w["ticker"]))
+        futures_spent, futures_left = 0, 0  # this run's futures requests; futures left for the next run
+        futures_daily = _futures_kept_current(watched, order, store, now)
         paused_updates = updates_pause(store, now) if not archival else None
         held_back = 0 if paused_updates else None  # symbols whose update the pause left for later
         picked = picked_symbols(store, now) if paused_updates else set()
@@ -1323,6 +1346,14 @@ def sync(
                     held_back += 1  # updates paused: not picked, and not missing much
                     result.skipped += 1
                     continue
+                if asset == "future" and not urgent and only is None:
+                    if futures_spent >= futures_per_run:
+                        futures_left += 1  # this run's share of the futures rate is spent
+                        result.skipped += 1
+                        continue
+                    if synced and ticker not in futures_daily and now - synced < timedelta(days=FUTURES_WEEKLY_DAYS):
+                        result.skipped += 1  # a less traded future: refreshed weekly
+                        continue
                 if on_item:
                     on_item(ticker)
                 spent = source.requests_made
@@ -1331,9 +1362,11 @@ def sync(
                     try:
                         n = sync_future(source, store, item, floor, today, log)
                     except NotEntitled as e:
+                        futures_spent += source.requests_made - spent
                         log(f"{ticker}: futures refused by your plan ({e.message}); skipped"
                             + refusals.note(ticker, now, e.message))
                         continue
+                    futures_spent += source.requests_made - spent
                     refusals.clear(ticker)
                     result.rows += n
                     log(f"{ticker}: {n} rows ({source.requests_made - spent} requests)")
@@ -1439,6 +1472,9 @@ def sync(
         if held_back:
             log(f"{source.name}: {held_back:,} symbols' updates paused until {paused_updates['until'][:10]} "
                 f"(not picked, at most {UPDATES_GAP_DAYS} days behind)")
+        if futures_left:
+            log(f"{source.name}: {futures_spent:,} futures requests this run (FUTURES_PER_RUN {futures_per_run:,}); "
+                f"{futures_left:,} futures left for the next runs")
         if waiting:
             log(f"{source.name}: " + ", ".join(f"{n} {a} symbols" for a, n in sorted(waiting.items()))
                 + " not collected by this feed here (see `deps`: keys or plan)")
@@ -1550,6 +1586,19 @@ def fetch_news(source: DataSource, store: Store, now: datetime, log: Log = print
 
 
 
+def futures_for_schedules(store: Store, source: str) -> list[str]:
+    """The futures products whose official session schedules are asked for (one request each, at
+    the futures rate): those picked, and the first FUTURES_SCHEDULES in the fetch order."""
+    from .initializer import load_order
+
+    order = load_order(store)
+    futures = sorted((w for w in store.watchlist(source) if w["asset"] == "future"),
+                     key=lambda w: (order.get(w["ticker"], len(order)), w["ticker"]))
+    picked = picked_symbols(store)
+    chosen = [w for w in futures if w["ticker"] in picked] + futures[:FUTURES_SCHEDULES]
+    return sorted({w["source_ticker"] for w in chosen})
+
+
 def refresh_calendars(source: DataSource, store: Store, today: date, log: Log = print) -> int:
     """Weekly: the source's official upcoming market holidays and the futures schedules of every
     watched product (1 request each). They override the rule-based calendar, so unscheduled
@@ -1573,7 +1622,7 @@ def refresh_calendars(source: DataSource, store: Store, today: date, log: Log = 
         pass
     except (NotEntitled, SourceError) as e:
         log(f"calendar: trade condition rules not available ({e})")
-    products = sorted({w["source_ticker"] for w in store.watchlist(source.name) if w["asset"] == "future"})
+    products = futures_for_schedules(store, source.name)
     for product in products:
         try:
             n = store.save_futures_schedule(source.name, product, _guard_call(source.futures_schedule, product, today))

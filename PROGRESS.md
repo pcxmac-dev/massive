@@ -21,6 +21,11 @@ Working notes so work can resume in a fresh session. Newest first.
   bars through Alpaca (`boats` feed, free Basic plan, Alpaca's limits shared), the calendar's
   overnight, the chart's ETH+ON. Symbols go on the feed as they are opened in the chart (or with
   `watch add --every-feed`). Tiingo has it only as a paid add-on ($9/month): not used.
+- **CME Group tracked** (docs/ARCHITECTURE.md, "CME Group alongside NYSE and Nasdaq"): every
+  readable CME/NYMEX/CBOT/COMEX product as a continuous future, best-known first; futures capped
+  per run (FUTURES_PER_RUN), less traded ones weekly. Estimated 30-100 GB once filled (1-2 weeks).
+- **Next**: the Exchanges page (a scales icon on the rail): the tracked exchanges, their products,
+  insights on the right.
 
 ## State (2026-10-26, afternoon)
 
