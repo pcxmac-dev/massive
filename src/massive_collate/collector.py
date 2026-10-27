@@ -778,10 +778,17 @@ class Refusals:
 SYMBOLS_PER_MONTH = {name: p.symbols_per_month for name, p in providers().items() if p.symbols_per_month}
 
 
-def _monthly_symbol(store: Store, feed: str, ticker: str, now: datetime) -> bool:
+def monthly_cap(source: DataSource) -> int | None:
+    """The different symbols a month its plan allows: the source's own (its plugin sets it from
+    the plan: Tiingo's), else its plugin's `symbols_per_month`; None: no such cap."""
+    return getattr(source, "symbols_per_month", SYMBOLS_PER_MONTH.get(source.name))
+
+
+def _monthly_symbol(store: Store, feed: str, ticker: str, now: datetime, cap: int | None = -1) -> bool:
     """Whether `feed` may ask for `ticker` this month (recorded as asked when it may; one
-    transaction, so two processes cannot both take the last place)."""
-    cap = SYMBOLS_PER_MONTH.get(feed)
+    transaction, so two processes cannot both take the last place); `cap` the plan's (default:
+    the plugin's)."""
+    cap = SYMBOLS_PER_MONTH.get(feed) if cap == -1 else cap
     if cap is None:
         return True
     key = f"symbols:{feed}:{now.astimezone(timezone.utc):%Y-%m}"
@@ -1322,7 +1329,7 @@ def sync(
                         store.set_closed(source.name, ticker, now)
                         log(f"{ticker}: {source.name} has nothing to add (other feeds hold its history); closed")
                         continue
-                if not _monthly_symbol(store, source.name, ticker, now):  # Tiingo's free plan: 500 symbols a month
+                if not _monthly_symbol(store, source.name, ticker, now, monthly_cap(source)):  # Tiingo's Starter: 500 a month
                     capped += 1
                     continue
                 if not urgent and refusals.paused(ticker, now):  # refused run after run: left alone a while
@@ -1465,7 +1472,7 @@ def sync(
             log(f"{source.name}: {closed} symbols closed (archive complete), not asked")
         if capped:
             log(f"{source.name}: {capped} symbols wait for next month (its plan: "
-                f"{SYMBOLS_PER_MONTH[source.name]} different symbols a month)")
+                f"{monthly_cap(source)} different symbols a month)")
         if unlisted:
             log(f"{source.name}: {unlisted} stocks wait for a listing date from another feed (history is kept "
                 "from the current listing only)")

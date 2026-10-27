@@ -45,7 +45,7 @@ DAYS_A_YEAR = {"stock": 252, "index": 252, "fx": 260, "crypto": 365, "future": 2
 MINUTES_A_DAY = {"stock": 960, "index": 390, "fx": 1440, "crypto": 1440, "future": 1380}  # extended hours
 DEFAULT_CAPACITY = 2000.0  # requests a day, for a feed whose subscription is not known
 CACHE_S = 300.0
-SCAN_KEY = "capabilities:{}"  # a provider's last capability scan (cli `capabilities`): {at, results}
+SCAN_KEY = "capabilities:{}"  # a provider's last capability scan (cli `capabilities`): {at, results, plan}
 COUNTS_S = 30.0  # the symbols watched are counted again this often
 OPEN_END = 2**62  # the newest era runs on (ms)
 
@@ -233,6 +233,57 @@ def standing(store, feeds: dict[str, FeedProfile], now: datetime | None = None) 
     with _cache_lock:
         _cache[store] = hit
     return scheme
+
+
+# -- the plans the providers' scans found (each plugin refreshes its own plan info) -----------------
+
+def detected_plans(scans: dict) -> dict[str, str]:
+    """{plan variable: value} from the providers' last capability scans ({name: kv SCAN_KEY}), each
+    plugin's own plan variables only, in the providers' order (registry.Provider.run_scan)."""
+    from .sources import providers
+
+    out: dict[str, str] = {}
+    for name, p in providers().items():
+        plan = ((scans or {}).get(name) or {}).get("plan") or {}
+        for var, value in plan.items():
+            if var in p.plan_vars and value and var not in out:
+                out[var] = str(value)
+    return out
+
+
+def scans_at(db_path) -> dict:
+    """The providers' last capability scans held in a database, read without opening it for
+    writing (every command reads them at its start); {} when there is none yet."""
+    import json
+    import sqlite3
+    from pathlib import Path
+
+    path = Path(db_path)
+    if not path.exists():
+        return {}
+    try:
+        con = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+        try:
+            rows = con.execute("SELECT key, value FROM kv WHERE key LIKE 'capabilities:%'").fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return {}
+    out = {}
+    for key, value in rows:
+        try:
+            out[key.split(":", 1)[1]] = json.loads(value)
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+def apply_detected(settings):
+    """The settings with the plans the providers' scans found, where the user set none
+    (config.with_detected)."""
+    from .config import with_detected
+
+    return with_detected(settings, detected_plans(scans_at(settings.db_path)))
 
 
 def _days(d: float) -> str:

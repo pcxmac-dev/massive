@@ -6,8 +6,13 @@
     Every data provider is a plugin of the app (src/massive_collate/sources/registry.py). The
     script asks the app which there are (python -m massive_collate plugins --json: names only,
     never a key's value) and offers a menu: each provider, its keys and whether they are set.
-    Pick one to set or replace its keys, or to remove them; a provider added as a plugin appears
-    here by itself.
+    Pick one to set or replace its keys, or to remove them, to choose its plan, or to rescan it;
+    a provider added as a plugin appears here by itself.
+
+    Each plugin refreshes its own plan info: a rescan (python -m massive_collate capabilities
+    <name>, a few requests) asks the provider what the key really gets, and a plan it finds is used
+    wherever you have not set one. A plan you choose here always wins; Tiingo's API cannot tell
+    its plans apart, so its plan (TIINGO_PLAN) is only what you choose.
 
     A key is read with its input hidden: it is not shown on screen, not kept in the shell's
     history and not written to any file. It is saved where the app reads keys, the user's
@@ -27,22 +32,31 @@
 
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\set-key.ps1 -List
+
+.EXAMPLE
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\set-key.ps1 tiingo -Rescan
 #>
 param(
     [Parameter(Position = 0)]
     [string]$Name,     # a provider (tiingo) or one key's variable (TIINGO_API_KEY); without it, the menu
     [switch]$Remove,
     [switch]$List,     # show the providers and their keys, change nothing
+    [switch]$Rescan,   # with a provider: ask it again what the key gets (its capabilities and plan)
     [string]$Python    # the app's Python (default: the repository's .venv)
 )
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
 $Restart = 'Processes started from now on read it; restart the ones already running (the sync, the chart app).'
 
-function Get-Providers {
+function Get-Python {
     $py = $Python
     if (-not $py) { $py = Join-Path $Root '.venv\Scripts\python.exe' }
     if (-not (Test-Path $py)) { $py = 'python' }
+    $py
+}
+
+function Get-Providers {
+    $py = Get-Python
     Push-Location $Root
     try {
         $json = & $py -m massive_collate plugins --json
@@ -80,11 +94,45 @@ function Show-Providers($providers) {
         $note = ''
         if (@($p.keyless).Count -gt 0) { $note = '  ({0} without keys)' -f (@($p.keyless) -join ', ') }
         Write-Host ('  {0}. {1,-10} {2}{3}' -f ($i + 1), $p.title, $keys, $note)
+        foreach ($v in @($p.planVars | Where-Object { $_ -and @($_.choices).Count -gt 0 })) {
+            Write-Host ('     {0}={1} ({2})' -f $v.name, $v.value, (Get-Origin $v.origin))
+        }
     }
     if ($free.Count -gt 0) {
         Write-Host ('  -  {0}: no key needed' -f ((@($free) | ForEach-Object { $_.title }) -join ', '))
     }
     $keyed
+}
+
+function Get-Origin([string]$origin) {
+    switch ($origin) { 'you' { 'set by you' } 'scan' { 'found by its scan' } default { 'default' } }
+}
+
+function Set-Plan($p, $var) {
+    $choices = @($var.choices)
+    Write-Host ("{0} is {1} ({2}). Choices: {3}" -f $var.name, $var.value, (Get-Origin $var.origin), ($choices -join ', '))
+    if ($p.planNote) { Write-Host "Note: $($p.planNote)." }
+    $pick = (Read-Host "$($var.name) (a choice; 'scan' to leave it to the scan or the default; Enter keeps it)").Trim().ToLower()
+    if (-not $pick) { Write-Host "$($var.name) unchanged."; return }
+    if ($pick -eq 'scan') {
+        if (Remove-Key $var.name) { Write-Host $Restart } else { Write-Host "$($var.name) was not set by you." }
+        return
+    }
+    if ($choices -notcontains $pick) { Write-Host "Not one of: $($choices -join ', '). $($var.name) unchanged."; return }
+    [Environment]::SetEnvironmentVariable($var.name, $pick, 'User')
+    Write-Host "$($var.name)=$pick saved in your user environment variables."
+    Write-Host $Restart
+}
+
+function Invoke-Rescan($p) {
+    Write-Host "Asking $($p.title) what the key gets (a few requests, within its limits)..."
+    $py = Get-Python
+    Push-Location $Root
+    try {
+        & $py -m massive_collate capabilities $p.name
+    } finally {
+        Pop-Location
+    }
 }
 
 function Set-Key([string]$Name) {
@@ -137,14 +185,24 @@ function Edit-Provider($p) {
     Write-Host "$($p.title): $($p.about)"
     if ($p.signup) { Write-Host "Keys from $($p.signup)" }
     $names = (@($p.keys) | ForEach-Object { $_.name }) -join ', '
+    $plans = @($p.planVars | Where-Object { $_ -and @($_.choices).Count -gt 0 })
     Write-Host "  1. Set or replace $names (Enter at one keeps it)"
     Write-Host "  2. Remove $names"
+    for ($i = 0; $i -lt $plans.Count; $i++) {
+        Write-Host ('  {0}. Plan: {1}={2} ({3})' -f ($i + 3), $plans[$i].name, $plans[$i].value, (Get-Origin $plans[$i].origin))
+    }
+    $last = $plans.Count + 3
+    if ($p.scan) { Write-Host "  $last. Rescan: ask $($p.title) what the key gets (its capabilities and plan)" }
     $pick = Read-Host 'Choice (number; Enter to go back)'
     if ($pick -eq '1') {
         Set-ProviderKeys $p
     } elseif ($pick -eq '2') {
         $sure = Read-Host "Remove $($p.title)'s keys? (y/N)"
         if ($sure -match '^(y|yes)$') { Remove-ProviderKeys $p } else { Write-Host 'Nothing changed.' }
+    } elseif ($pick -match '^\d+$' -and [int]$pick -ge 3 -and [int]$pick -lt $last) {
+        Set-Plan $p $plans[[int]$pick - 3]
+    } elseif ($p.scan -and $pick -eq "$last") {
+        Invoke-Rescan $p
     }
 }
 
@@ -158,6 +216,11 @@ if ($List) {
 if ($Name) {
     $p = $providers | Where-Object { $_.name -eq $Name.ToLower() } | Select-Object -First 1
     if ($p) {
+        if ($Rescan) {
+            if (-not $p.scan) { Write-Host "$($p.title) has no capability scan."; exit 0 }
+            Invoke-Rescan $p
+            exit 0
+        }
         if (@($p.keys).Count -eq 0) {
             Write-Host "$($p.title) needs no key."
             exit 0

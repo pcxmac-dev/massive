@@ -161,6 +161,41 @@ A plugin that fails to load is left out and reported (`plugins`), never fatal.
   (asset class, resolution, market, from when, how fresh, bars a request) and its live streams. It
   comes from the plugin's declarations (`provides`, `plan_resolutions`, `per_request`, `streams`);
   a plugin whose plan says more amends it (`reporter`). The delivery scheme reads nothing else.
+- **Each plugin refreshes its own plan info** (the user, 2026-10-27). Its capability scan (`scan`) asks
+  the provider what the key really gets and may answer with the plan that shows (`registry.Scanned`:
+  values of its own `plan_vars` only). The scans are kept (kv `capabilities:<name>`: at, results,
+  plan) and every command applies the plans found wherever the user set none
+  (`sourcing.apply_detected`, `config.with_detected`: the user's own variable always wins; a value
+  the settings refuse is not applied). They run on each start of the chart app (`gui`, unless
+  `--no-rescan`; never on an offline copy), weekly at the start of a feed's sync, from the Plugins
+  view's Rescan, the key script's menu (`set-key.ps1 <name> -Rescan`) and `capabilities [name]`; a
+  scan takes no run lock (a few requests, inside the machine-wide rate windows and daily caps),
+  and a provider whose keys are not set is not scanned.
+  - Massive: its stocks plan from `plan_reach` (daily bars 3, 6, 11, 21 years back, 1-second bars,
+    trades, quotes; `config.tier_for`): `MASSIVE_TIER`. The other classes' plans are not probed: a
+    free class is held to 5 requests a minute, and a probe that took one for paid would lift that.
+  - Alpaca: the consolidated tape's latest 15 minutes are served on Algo Trader Plus and refused
+    on Basic (`AlpacaSource.recent_allowed`): `ALPACA_PLAN`. Blue Ocean shares Alpaca's.
+  - Tiingo: its API has no account endpoint and sends no rate-limit headers (checked 2026-10-27),
+    and Starter and Power reach the same data, so its scan finds what the key reaches but not the
+    plan (`plan_note`). `TIINGO_PLAN` (starter, the default, or power) sets its limits: Starter 45
+    requests an hour, 900 a day, 450 symbols a month (inside 50, 1,000 and 500); Power 9,500 an
+    hour, 95,000 a day, no monthly symbol cap. An unknown value is Starter.
+
+## The Plugins view (2026-10-27)
+
+A rail icon of a plug, below Fetcher and Live, opens every provider plugin (`gui/plugins.py`,
+`plugins.js`): on the left the plugins with keys and the public ones, each with its state (ready,
+keys not set, no key, killed) and its plan; in the middle the one picked: each plan variable, its
+value and where it came from (set by you, found by its scan, the default), what the last scan found
+and where your own setting disagrees with it, what its scan cannot tell; its limits (requests a
+day, the rate kept, a run, symbols a month, what its server publishes), what it can do on that
+plan, its live streams, and its last capability scan with a Rescan button; on the right its part in
+the delivery scheme (the eras it delivers and those it stands by for, its load in days of its
+limits), its requests today, the symbols it watches, its keys (set or not, never their values).
+`/api/plugins` (kept 10 s) reads the settings, the reports, the scans kept, the watchlist and the
+request ledger: no requests. `POST /api/plugins/rescan[?name=]` runs `capabilities` in a process of
+its own, one at a time; the plans it finds count in the app within SETTINGS_TTL_S.
 
 ## Which source delivers what (2026-10-27)
 
@@ -242,6 +277,8 @@ insight (open now or not and the next change, products by sector, how much is co
 freshly, the feeds, the delivery scheme's eras, the last session's movers) or, for a product
 picked, the symbol panel's statistics (`/api/info`) with a button to open its chart. Built from the
 watchlist and the directory only (`/api/venues`, kept 30 s; `/api/venue?id=`): no bars, no requests.
+Its grid applies only while it is shown (`main > .view.ex-view:not([hidden])`): with `!important` it
+outranked `main > .view[hidden]` and showed beside every other view (fixed 2026-10-27).
 
 ## Schemes and replay (2026-10-25)
 

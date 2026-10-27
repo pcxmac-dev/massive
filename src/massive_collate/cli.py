@@ -7,7 +7,7 @@ import random
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
@@ -118,8 +118,10 @@ def _budget(settings: Settings, store: Store, source: str) -> int:
 
 
 @contextmanager
-def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource, Store, Logger]]:
-    """Open the store, take the lock, build a source with a hard request cap, and audit the run."""
+def api_run(args, settings: Settings, command: str, lock: bool = True) -> Iterator[tuple[DataSource, Store, Logger]]:
+    """Open the store, take the lock, build a source with a hard request cap, and audit the run.
+    Without `lock` (a capability scan: a few requests) it runs beside a sync: the rate windows and
+    the daily caps are the machine's, held for every process alike."""
     settings = settings.for_source(args.source)  # each feed has its own plan, rate and caps
     log = Logger(settings.db_path.parent / "logs" / "massive-collate.log")
     if settings.offline:
@@ -127,8 +129,9 @@ def api_run(args, settings: Settings, command: str) -> Iterator[tuple[DataSource
             print(f"offline (MASSIVE_OFFLINE): nothing sent to {args.source}")
             yield None, store, log  # type: ignore[misc]
         return
-    with Store(settings.db_path) as store, run_lock(settings.db_path):
-        store.close_abandoned_runs()  # we hold the lock, so anything still "running" died
+    with Store(settings.db_path) as store, (run_lock(settings.db_path) if lock else nullcontext()):
+        if lock:
+            store.close_abandoned_runs()  # we hold the lock, so anything still "running" died
         from . import killswitch
 
         kill = killswitch.killed(store, args.source, "fetch")
@@ -870,8 +873,11 @@ def cmd_capabilities(args, settings: Settings) -> int:
         if p is None or p.scan is None:
             print(f"{name}: no capability scan")
             continue
+        if not p.served(settings):  # its keys not set: a scan would ask with none
+            print(f"{name}: not set up here ({p.key_hint or 'nothing it serves'}); not scanned")
+            continue
         args.source = name
-        with api_run(args, settings, "capabilities") as (source, store, log):
+        with api_run(args, settings, "capabilities", lock=False) as (source, store, log):
             if source is not None:
                 _scan(name, source, store, log)
     return 0
@@ -898,13 +904,17 @@ def _scan(name: str, source, store: Store, log, due_days: float | None = None) -
     if due_days is not None and not any(n for (feed, _), n in store.watch_counts().items() if feed == name):
         return  # a feed with nothing to do spends no request on its scan
     try:
-        results = [list(r) for r in p.scan(source)]
+        found = p.run_scan(source)
     except Exception as e:  # noqa: BLE001 - a scan must not stop the feed's run
         log(f"{name}: capability scan failed ({type(e).__name__}: {e})")
         return
-    store.kv_set(sourcing.SCAN_KEY.format(name), json.dumps({"at": now.isoformat(timespec="seconds"), "results": results}))
-    for what, ok, detail in results:
+    store.kv_set(sourcing.SCAN_KEY.format(name), json.dumps({"at": now.isoformat(timespec="seconds"),
+                                                             "results": [list(r) for r in found.results],
+                                                             "plan": dict(found.plan)}))
+    for what, ok, detail in found.results:
         log(f"{name}: {'yes' if ok else 'no '} {what}" + (f": {detail}" if detail else ""))
+    for var, value in found.plan.items():
+        log(f"{name}: plan found: {var}={value} (used wherever you have not set {var})")
 
 
 def _scan_table(result: collector.ScanResult) -> None:
@@ -1064,7 +1074,8 @@ def cmd_gui(args, settings: Settings) -> int:
     from .gui.server import serve
 
     serve(settings.db_path, port=args.port, open_browser=not args.no_browser,
-          priority=list(settings.source_priority), settings=settings, reload_settings=load_settings)
+          priority=list(settings.source_priority), settings=settings, reload_settings=load_settings,
+          rescan=not args.no_rescan)
     return 0
 
 
@@ -1379,8 +1390,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true", help="as JSON")
     s.set_defaults(func=cmd_sourcing)
 
-    s = sub.add_parser("capabilities", help="scan what each provider's plan really gives (a few requests each, "
-                                           "within its caps); shown in `sourcing`")
+    s = sub.add_parser("capabilities", help="scan what each provider's plan really gives and which plan that is "
+                                           "(a few requests each, within its caps; used where you set no plan); "
+                                           "shown in `sourcing` and the Plugins view")
     s.add_argument("name", nargs="?", help="one provider (default: every one with a scan)")
     s.set_defaults(func=cmd_capabilities)
 
@@ -1390,6 +1402,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("gui", help="open the chart app in your browser")
     s.add_argument("--port", type=int, default=8765)
     s.add_argument("--no-browser", action="store_true")
+    s.add_argument("--no-rescan", action="store_true",
+                   help="do not rescan the provider plugins' capabilities and plans at the start")
     s.set_defaults(func=cmd_gui)
 
     s = sub.add_parser("plan", help="find which Massive plan your key has (eight small requests)")
@@ -1538,7 +1552,10 @@ def main(argv: list[str] | None = None) -> int:
             if not getattr(args, "settings_optional", False):
                 raise
             return args.func(args, None)  # the providers are listed even with a wrong setting
+        from . import sourcing
         from .storage.feeds import set_tick_access
+
+        settings = sourcing.apply_detected(settings)  # each plugin's plan as its scan found it, unless you set it
 
         set_tick_access(not settings.bars_only)  # bars-only: no store this command opens reads ticks
         return args.func(args, settings)

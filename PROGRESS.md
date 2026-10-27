@@ -4,6 +4,11 @@ Working notes so work can resume in a fresh session. Newest first.
 
 ## State (2026-10-27)
 
+- **Plugins find their own plan; the Plugins view** (rail: a plug; docs/ARCHITECTURE.md, "Each
+  plugin refreshes its own plan info", "The Plugins view"): scans may name the plan (Massive's
+  stocks plan, Alpaca's), applied where the user set none; scans on each chart app start, weekly,
+  and from Rescan. Tiingo's plan is TIINGO_PLAN (starter or power): its API cannot tell. The
+  Exchanges view no longer shows beside other views.
 - **Providers are plugins** (docs/ARCHITECTURE.md, "Providers are plugins"; `sources/registry.py`,
   `sources/plugins/`): one module per provider holds its build, keys, plan, rate, markets and every
   fact the app asked about it by name; installed packages add providers through the

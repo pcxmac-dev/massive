@@ -12,6 +12,11 @@ What a plugin gives:
 - what it serves: asset classes (`assets`; `keyless` the ones it serves without keys), the market
   each is (`markets`), whether it carries a symbol (`carries`), and whether it is a closed archive.
 - its plan, rate window and caps (`view`, `rate`), and what its server publishes (`limits`).
+  It refreshes its own plan info: its capability scan (`scan`) asks the provider what the key
+  really gets and may answer with the plan that shows (`Scanned.plan`: values of its own
+  `plan_vars`), which the app applies wherever the user set none (config.with_detected). A
+  provider whose answers cannot tell its plans apart says so (`plan_note`); its plan is then
+  only what the user chose (`plan_choices`, offered by the key script and the Plugins view).
 - facts the rest of the app asks: its kind of data for the composite model, the exchange it is the
   reference for, the bars one request returns, a monthly symbol cap, the bulk symbols' resolution.
 - its capabilities (`provides`, `plan_resolutions`, `per_request`, `streams`), from which it reports
@@ -55,6 +60,14 @@ class KeyVar:
 
     def value(self, env: Mapping[str, str]) -> str | None:
         return next((env[n] for n in self.names if env.get(n)), None)
+
+
+@dataclass(frozen=True)
+class Scanned:
+    """A capability scan's answer: each thing asked (what, available, detail), and the plan the
+    answers show ({plan variable: value}; empty when they cannot tell the plans apart)."""
+    results: tuple[tuple[str, bool, str], ...]
+    plan: Mapping[str, str] = field(default_factory=dict)
 
 
 # -- the standard report every provider gives the delivery scheme (sourcing.py) ---------------------
@@ -138,6 +151,8 @@ class Provider:
     keyless: frozenset = frozenset()  # asset classes served without its keys (Alpaca: crypto)
     signup: str = ""  # where a key is made
     plan_vars: tuple[str, ...] = ()  # its plan's variables: read from the saved user variables like keys
+    plan_choices: Mapping[str, tuple[str, ...]] = field(default_factory=dict)  # plan variable -> its values (the default first)
+    plan_note: str = ""  # what its scan cannot tell about its plan (the user's choice is then the plan)
     options: tuple[str, ...] = ()  # its other variables (Settings.env)
     archival: bool = False  # a closed feed: each symbol filled once, then never asked again
     tier: "Tier | None" = None  # its plan, when it has one fixed plan
@@ -167,9 +182,10 @@ class Provider:
     carries: Callable[[object], bool] | None = None
     plan_resolutions: Callable[["Tier", str], tuple[str, ...]] | None = None  # what its plan gives per asset
     reporter: Callable[["Report", "Settings | None"], "Report"] | None = None  # amends its standard report
-    # Its capability scan (`capabilities`): a few requests asking what its plan really gives, each
-    # answer (what, available, detail); kept, and shown in its report.
-    scan: Callable[["DataSource"], list[tuple[str, bool, str]]] | None = None
+    # Its capability scan (`capabilities`; on each chart app start, weekly in the sync, Rescan in the
+    # Plugins view): a few requests asking what its plan really gives, each answer (what, available,
+    # detail), or a `Scanned` with the plan they show too; kept, and shown in its report.
+    scan: Callable[["DataSource"], "list[tuple[str, bool, str]] | Scanned"] | None = None
     origin: str = "built in"  # set when loaded: built in, or the package's entry point
 
     @property
@@ -232,6 +248,25 @@ class Provider:
         if self.plan_resolutions:
             return tuple(self.plan_resolutions(tier, asset))
         return tuple(self.provides.get(asset, ("day", "minute")))
+
+    def run_scan(self, source: "DataSource") -> Scanned:
+        """Its capability scan, its plan held to its own plan variables (a plugin sets no other's)."""
+        out = self.scan(source) if self.scan else ()
+        rows, plan = (out.results, out.plan) if isinstance(out, Scanned) else (out, {})
+        return Scanned(tuple((str(w), bool(ok), str(d)) for w, ok, d in rows),
+                       {k: str(v) for k, v in (plan or {}).items() if k in self.plan_vars and v})
+
+    def plan_state(self, settings: "Settings") -> list[dict]:
+        """Each of its plan variables: its value here and where it comes from (the user's own
+        setting, its scan, or the default when neither set it), its choices."""
+        mine = settings.variables or {}
+        found = settings.detected or {}
+        out = []
+        for v in self.plan_vars:
+            choices = list(self.plan_choices.get(v, ()))
+            out.append({"name": v, "value": mine.get(v) or found.get(v) or (choices[0] if choices else None),
+                        "origin": "you" if mine.get(v) else "scan" if found.get(v) else "default", "choices": choices})
+        return out
 
     def request_bars(self, resolution: str) -> int | None:
         """Bars one request returns (None: a symbol's whole history at once). Default: 1,000."""
@@ -403,10 +438,12 @@ def menu(settings: "Settings | None" = None) -> list[dict]:
     for p in providers().values():
         row = {"name": p.name, "title": p.title, "about": p.about, "signup": p.signup, "origin": p.origin,
                "archive": p.archival, "assets": sorted(p.assets), "keyless": sorted(p.keyless),
-               "keys": [{"name": k.name, "label": k.label, "aliases": list(k.aliases)} for k in p.keys]}
+               "keys": [{"name": k.name, "label": k.label, "aliases": list(k.aliases)} for k in p.keys],
+               "planChoices": [{"name": v, "choices": list(c)} for v, c in p.plan_choices.items()],
+               "planNote": p.plan_note, "scan": p.scan is not None}
         if settings is not None:
             served = p.served(settings)
             row.update(keysSet=p.keys_set(settings), serves=sorted(served) if served else [],
-                       plan=settings.for_source(p.name).tier.name)
+                       plan=settings.for_source(p.name).tier.name, planVars=p.plan_state(settings))
         out.append(row)
     return out

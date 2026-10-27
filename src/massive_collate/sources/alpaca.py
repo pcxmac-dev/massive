@@ -264,6 +264,19 @@ class AlpacaSource(DataSource):
             return False
         return True
 
+    def recent_allowed(self, ticker: str = "AAPL") -> bool:
+        """Whether the plan serves the consolidated tape's latest 15 minutes (Algo Trader Plus does,
+        Basic refuses them): one request for the last ten minutes, past the clip of `_window`."""
+        self._need_keys("stock")
+        now = self._now()
+        params = {"symbols": ticker, "timeframe": "1Min", "start": _rfc3339(now - timedelta(minutes=10)),
+                  "end": _rfc3339(now), "limit": 1, "feed": "sip"}
+        try:
+            self.client.get(self._path("stock", "bars"), params)
+        except NotEntitled:
+            return False
+        return True
+
     def latest_bar(self, ticker: str, since: date, asset: str = "stock", timespan: str = "minute") -> dict | None:
         page = next(iter(self.bar_pages(ticker, since, self._now().date(), timespan, descending=True,
                                         asset=asset, limit=1)), [])

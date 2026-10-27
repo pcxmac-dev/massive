@@ -16,6 +16,9 @@
      Datasets  research series drawn on one time axis: factors, CAPE, COT positioning (datasets.js)
      Fetcher   historical data (sessions before the current one); coloured while a run is active
      Live      current-session feeds; a red "recording" dot while live data is being recorded
+     Plugins   every data provider plugin (a feed or source): its plan and where that came from, its
+               limits and capabilities, its last capability scan with a Rescan, its part in the
+               delivery scheme (plugins.js)
      Resources the app's processes (CPU, memory, disk, connections), the machine's bandwidth, the
                disks and the data files (resources.js)
 
@@ -27,7 +30,7 @@
   // The watchlist sits beside whichever chart was showing (it has no chart content of its own).
   const VIEWS = { stock: 'chart', analysis: 'chart', trading: 'chart', watchlist: 'chart', markets: 'markets', news: 'news',
                   gov: 'gov', datasets: 'datasets', fetcher: 'fetcher', live: 'live', resources: 'resources',
-                  exchanges: 'exchanges' };
+                  exchanges: 'exchanges', plugins: 'plugins' };
 
   // -- rail --------------------------------------------------------------------------------
   function showPane(name, { toggle = true } = {}) {
@@ -83,6 +86,7 @@
     $('railDatasets').innerHTML = icon('scroll', RAIL_ICON);
     $('railResources').innerHTML = icon('chip', RAIL_ICON);
     $('railExchanges').innerHTML = icon('scales', RAIL_ICON);
+    $('railPlugins').innerHTML = icon('plug', RAIL_ICON);
     const running = !!activity?.running;
     const fresh = activity?.newData || 0;
     // its platter turns while a run fetches (.busy): redrawn only when it changes, or each poll would

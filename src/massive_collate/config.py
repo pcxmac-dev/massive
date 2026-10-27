@@ -199,6 +199,10 @@ class Settings:
     # The variables the provider plugins declare (their keys, plans and options), as read: a
     # plugin's own settings (sources/registry.py). Keys among them: never in a repr.
     env: Mapping[str, str] = field(default_factory=dict, compare=False, repr=False)
+    # Every variable they were read from (None: made directly, not read), and the plan variables
+    # the provider plugins' scans found and these settings apply (with_detected).
+    variables: "Mapping[str, str] | None" = field(default=None, compare=False, repr=False)
+    detected: Mapping[str, str] = field(default_factory=dict, compare=False, repr=False)
 
     # The settings a feed view was made from, so any view can switch to another feed.
     origin: "Settings | None" = field(default=None, compare=False, repr=False)
@@ -386,7 +390,25 @@ def load_settings(
         chart_cache_mb=max(64, _default(_int_setting(merged, "CHART_CACHE_MB"), 1024)),
         futures_per_run=_default(_int_setting(merged, "FUTURES_PER_RUN"), 100),
         env={n: merged[n] for n in variables() if merged.get(n)},
+        variables=dict(merged),
     )
+
+
+def with_detected(settings: Settings, plans: Mapping[str, str]) -> Settings:
+    """The settings with the plan variables the provider plugins' scans found (registry.Scanned),
+    each where the user set none: the user's own setting always wins. Settings made directly (no
+    `variables`) are kept as they are. A plan value no plugin knows is not applied."""
+    if settings.variables is None:
+        return settings
+    base = settings.variables
+    new = {k: str(v) for k, v in plans.items() if v and not base.get(k)}
+    if new == dict(settings.detected):
+        return settings
+    try:
+        out = load_settings(env={**base, **new}, env_file=None)
+    except ConfigError:
+        return settings  # a value its settings refuse: the plan stays as the user's settings have it
+    return replace(out, variables=base, detected=new)
 
 
 def _live_coins(value: str | None) -> tuple[str, ...]:

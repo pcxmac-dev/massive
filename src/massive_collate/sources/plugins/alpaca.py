@@ -1,11 +1,14 @@
-"""Alpaca (alpaca.markets): US stocks with keys (SIP from 2016, IEX live), crypto without."""
+"""Alpaca (alpaca.markets): US stocks with keys (SIP from 2016, IEX live), crypto without.
+
+Its scan finds the plan: Algo Trader Plus serves the consolidated tape's latest 15 minutes, Basic
+refuses them; it sets ALPACA_PLAN where you have not."""
 from __future__ import annotations
 
 from dataclasses import replace
 
-from ...config import ConfigError
+from ...config import ALPACA_TIERS, ConfigError
 from ..alpaca import TRADING_URLS, AlpacaClient, AlpacaSource
-from ..registry import KeyVar, Provider, limiter, machine_caps
+from ..registry import KeyVar, Provider, Scanned, limiter, machine_caps
 
 
 def build(settings, request_budget):
@@ -33,13 +36,21 @@ def markets(settings):
     return {"stock": a.feed if a else "sip", "crypto": "alpaca" if loc == "us" else "kraken"}
 
 
-def scan(source) -> list[tuple[str, bool, str]]:
-    """What the plan gives (one request each): the consolidated tape's minute bars, crypto's."""
+def scan(source) -> list[tuple[str, bool, str]] | Scanned:
+    """What the plan gives (one request each): the consolidated tape's minute bars, crypto's, and
+    with keys its latest 15 minutes, which tell the plans apart."""
     stocks = source.is_entitled("minute", "AAPL", "stock")
     crypto = source.is_entitled("minute", "BTCUSD", "crypto")
-    return [("stock minute bars, every exchange (SIP), from 2016", stocks,
-             "up to 15 minutes ago on Basic" if stocks else "refused (keys or plan)"),
+    rows = [("stock minute bars, every exchange (SIP), from 2016", stocks,
+             "" if stocks else "refused (keys or plan)"),
             ("crypto minute bars, no key", crypto, "")]
+    if not stocks:
+        return rows  # no keys, or refused: nothing tells the plan
+    recent = source.recent_allowed("AAPL")
+    plan = "algo_trader_plus" if recent else "basic"
+    rows.append(("stock bars of the latest 15 minutes (Algo Trader Plus)", recent,
+                 f"plan: {'Algo Trader Plus' if recent else 'Basic (free)'}"))
+    return Scanned(tuple(rows), {"ALPACA_PLAN": plan})
 
 
 PLUGIN = Provider(
@@ -49,6 +60,7 @@ PLUGIN = Provider(
           KeyVar("ALPACA_API_SECRET_KEY", "secret key", ("APCA_API_SECRET_KEY",))),
     keyless=frozenset({"crypto"}), signup="alpaca.markets: a paper account's API keys",
     plan_vars=("ALPACA_PLAN",), limits="Basic (free): 200 requests per minute; Algo Trader Plus: 10,000",
+    plan_choices={"ALPACA_PLAN": tuple(ALPACA_TIERS)},
     kind="exchange", kind_by_asset={"stock": "consolidated"},  # its stocks are the consolidated tape (SIP)
     venue_notes={"crypto": "one exchange's book (Kraken)"}, bulk_resolution="minute",
     provides={"stock": ("day", "minute"), "crypto": ("day", "minute")},  # no 1-second bars

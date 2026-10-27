@@ -2,9 +2,14 @@
 
 Its scan (`capabilities`, one request each) asks what else the account's plan gives: IEX's minute
 bars (one exchange), forex and crypto bars, and Blue Ocean's overnight bars (a paid add-on,
-2026-10-27: $9 a month; Alpaca's free plan has them: boats.py). Only the daily bars are collected."""
+2026-10-27: $9 a month; Alpaca's free plan has them: boats.py). Only the daily bars are collected.
+
+Its plan cannot be found that way: Tiingo's API has no account endpoint and sends no rate-limit
+headers (2026-10-27), and Starter and Power reach the same data, at other limits. TIINGO_PLAN
+names it (starter, the default, or power): the key script and the Plugins view offer it."""
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, timedelta
 
 from ...config import PUBLIC_FEEDS
@@ -15,13 +20,46 @@ from ..registry import KeyVar, Provider, limiter, machine_caps
 TIER, PER_RUN, PER_DAY = PUBLIC_FEEDS["tiingo"]
 BARS = "open,high,low,close,volume"
 
+# Tiingo's plans (tiingo.com/about/pricing, 2026-10-27), each kept a little inside: (plan, requests an
+# hour (a run's cap too: the sync runs hourly), a day, different symbols a month). Starter (free): 50 an
+# hour, 1,000 a day, 500 symbols, 1 GB a month; Power ($30 a month): 10,000 an hour, 100,000 a day,
+# every symbol (110,388), 40 GB a month.
+PLANS = {
+    "starter": (TIER, PER_RUN, PER_DAY, 450),
+    "power": (replace(TIER, name="tiingo-power"), 9_500, 95_000, None),
+}
+ALIASES = {"free": "starter"}
+PLAN_NOTE = ("Tiingo's API does not say which plan a key is on (no account endpoint, no rate-limit headers), "
+             "and Starter and Power reach the same data: its scan finds what the key reaches, TIINGO_PLAN "
+             "(starter or power) sets the limits")
+
+
+def plan_of(settings) -> str:
+    """TIINGO_PLAN's plan (an unknown value: Starter, the free plan's limits, never more)."""
+    name = (settings.env.get("TIINGO_PLAN") or "starter").strip().lower()
+    name = ALIASES.get(name, name)
+    return name if name in PLANS else "starter"
+
+
+def view(base):
+    tier, per_run, per_day, _ = PLANS[plan_of(base)]
+    return replace(base, tier=tier, max_requests_per_run=per_run, max_requests_per_day=per_day, origin=base)
+
+
+def reporter(report, settings):
+    if settings is None:
+        return report
+    return replace(report, limits=replace(report.limits, symbols_a_month=PLANS[plan_of(settings)][3]))
+
 
 def build(settings, request_budget):
     key = settings.tiingo_api_key
     headers = {"Authorization": f"Token {key}"} if key else {}
     client = PublicClient("https://api.tiingo.com", headers=headers, request_budget=request_budget,
                           rate_limiter=limiter("tiingo", settings, key))
-    return TiingoSource(machine_caps(client, "tiingo", settings, key), has_key=bool(key))
+    source = TiingoSource(machine_caps(client, "tiingo", settings, key), has_key=bool(key))
+    source.symbols_per_month = PLANS[plan_of(settings)][3]  # collector._monthly_symbol
+    return source
 
 
 def probes(today: date) -> list[tuple[str, str, dict]]:
@@ -66,11 +104,14 @@ PLUGIN = Provider(
     about="US stock daily bars from 1962 (a free account key)",
     keys=(KeyVar("TIINGO_API_KEY"),), signup="tiingo.com: a free account's API token",
     archival=True, tier=TIER, per_run=PER_RUN, per_day=PER_DAY,
-    limits="free plan: 50 requests per hour, 1,000 per day",
-    symbols_per_month=450,  # the free plan's 500 different symbols a month, a little inside
+    limits="Starter (free): 50 requests an hour, 1,000 a day, 500 symbols and 1 GB a month; "
+           "Power ($30 a month): 10,000 an hour, 100,000 a day, 40 GB a month",
+    symbols_per_month=450,  # Starter's 500 different symbols a month, a little inside (Power: PLANS)
+    plan_vars=("TIINGO_PLAN",), plan_choices={"TIINGO_PLAN": tuple(PLANS)}, plan_note=PLAN_NOTE,
+    view=view, reporter=reporter,
     provides={"stock": ("day",)}, per_request={"day": None},  # one request: a symbol's whole history
     has_keys=lambda s: bool(s.tiingo_api_key),
-    rate=lambda settings: (45, 3600.0),  # free plan: 50 an hour
+    rate=lambda settings: (PLANS[plan_of(settings)][1], 3600.0),  # Starter: 50 an hour
     markets=lambda settings: {"stock": "sip"},
     scan=scan,
 )

@@ -82,10 +82,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\set-key.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\set-key.ps1 tiingo
 ```
 
-Set your plan the same way, as a user environment variable (not a secret):
+Each plugin finds its own plan: its capability scan asks the provider what the key really gets
+(on each start of the chart app, weekly in the sync, or with Rescan in the app's Plugins view, the
+plug on the rail) and the plan it finds is used wherever you have not set one. Massive's stocks plan
+and Alpaca's are found that way; Tiingo's API cannot tell its plans apart, so pick it in the key
+script's menu (`TIINGO_PLAN`: starter or power). A plan you set yourself always wins, in the menu or
+as a user environment variable (not a secret):
 
 ```powershell
 [Environment]::SetEnvironmentVariable("MASSIVE_TIER", "free", "User")
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\set-key.ps1 tiingo -Rescan
 ```
 
 Data is stored in `~/MassiveData` (override the main file with `MASSIVE_DB`), with

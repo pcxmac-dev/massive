@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
 
-from .. import config, freshness, live
+from .. import config, freshness, live, sourcing
 from ..config import Settings, load_settings
 from ..storage import LayoutLimit, Store
 from . import activity, astro
@@ -124,6 +124,8 @@ class ChartApp:
         self._official_at: float | None = None  # when the official holidays were last applied (OFFICIAL_TTL_S)
         self._activity_rows: dict = {}  # activity.activity's symbol rows (SYMBOL_ROWS_TTL_S)
         self._feeds_summary: tuple[float, list] | None = None
+        self._plugins_cache: tuple[float, dict, bool] | None = None  # the Plugins view (PLUGINS_TTL_S)
+        self._rescan: tuple = (None, None)  # the capability rescan's process and {name, since, pid}
         self._deps_store, self._deps_lock = store.reader(), threading.Lock()  # dependency checks
         self._deps: tuple[float, dict] | None = None
         self._datasets_store, self._datasets_lock = store.reader(), threading.Lock()  # the datasets list
@@ -143,12 +145,17 @@ class ChartApp:
             if time.monotonic() - self._settings_at >= self.SETTINGS_TTL_S:
                 self._settings_at = time.monotonic()
                 saved = config.saved_user_keys()
+                settings = self._settings
                 if saved != self._saved_keys:
                     self._saved_keys = saved
-                    self._settings = self._reload_settings()
-                    # what was worked out from the old keys: the feeds, their states, the checks
+                    settings = self._reload_settings()
+                # each plugin's plan as its last scan found it, wherever the user set none
+                settings = config.with_detected(settings, sourcing.detected_plans(sourcing.scans_at(self.store.path)))
+                if settings is not self._settings:
+                    self._settings = settings
+                    # what was worked out from the old keys and plans: the feeds, their states, the checks
                     self._activity, self._activity_rows = {}, {}
-                    self._feeds_summary = self._deps = None
+                    self._feeds_summary = self._deps = self._plugins_cache = None
         return self._settings
 
     @contextmanager
@@ -601,6 +608,60 @@ class ChartApp:
         feeds = feed_profiles(self.settings)
         with self._lock:
             return venues.products(self.store, feeds, vid)
+
+    PLUGINS_TTL_S = 10.0  # the Plugins view's answer is kept this long (a rescan's end clears it)
+
+    def plugins(self) -> dict:
+        """The Plugins view (plugins.view): every provider plugin, its plan and where that came from,
+        its limits, capabilities and last scan, its part in the delivery scheme; the rescan going now."""
+        from ..sources import feed_profiles
+        from . import plugins
+
+        running = self._rescan_running()
+        hit = self._plugins_cache
+        if hit and time.monotonic() - hit[0] < self.PLUGINS_TTL_S and hit[2] == bool(running):
+            return hit[1]
+        settings = self.settings
+        feeds = feed_profiles(settings)
+        scans = sourcing.scans_at(self.store.path)
+        with self._lock:
+            scheme = sourcing.standing(self.store, feeds)
+            out = plugins.view(self.store, settings, feeds, scheme, scans, running)
+        self._plugins_cache = (time.monotonic(), out, bool(running))
+        return out
+
+    def _rescan_running(self) -> dict | None:
+        proc, info = self._rescan
+        if proc is None or proc.poll() is not None:
+            return None
+        return info
+
+    def start_rescan(self, name: str | None = None) -> dict:
+        """Run `capabilities` (one provider's scan, or every one set up here) in its own process: a
+        few requests each, within the feeds' machine-wide rate windows and daily caps, so it runs
+        beside a sync. The plans it finds count here within SETTINGS_TTL_S."""
+        from ..sources import providers
+
+        if self.settings.offline:
+            raise RuntimeError("offline (MASSIVE_OFFLINE): this copy of the app sends no requests")
+        if self._halted():
+            raise RuntimeError("fetching is halted: resume it first")
+        if name is not None and (name not in providers() or providers()[name].scan is None):
+            raise LookupError(f"{name} has no capability scan")
+        if self._rescan_running():
+            raise RuntimeError("a rescan is already running")
+        args = [sys.executable, "-m", "massive_collate", "capabilities", *([name] if name else [])]
+        proc = self._spawn(args)
+        self._rescan = (proc, {"name": name, "since": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                               "pid": proc.pid})
+        self._plugins_cache = None
+        return {"started": True, "name": name, "pid": proc.pid}
+
+    def _spawn(self, args: list[str]):
+        """A command of the app in its own windowless process (kept, so it is reaped)."""
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                stdin=subprocess.DEVNULL, creationflags=flags)
 
     def _spx_close(self) -> tuple[str, float] | None:
         """The S&P 500's newest daily close held (the circuit breakers' reference), or None."""
@@ -1417,6 +1478,12 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.priority(ticker), HTTPStatus.ACCEPTED)
                 if method == "POST" and parts == ["", "api", "fetching"]:
                     return self._json(app.set_fetching(body))
+                if method == "POST" and parts == ["", "api", "plugins", "rescan"]:
+                    name = parse_qs(urlparse(self.path).query).get("name", [None])[-1] or None
+                    try:
+                        return self._json(app.start_rescan(name), HTTPStatus.ACCEPTED)
+                    except RuntimeError as e:
+                        return self._json({"error": str(e)}, HTTPStatus.CONFLICT)
                 if method == "POST" and parts == ["", "api", "derive"]:
                     ticker = parse_qs(urlparse(self.path).query).get("ticker", [None])[-1]
                     if not ticker:
@@ -1513,6 +1580,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.resources(q.get("span", "recent")))
                 if url.path == "/api/venues":
                     return self._json(app.venues())
+                if url.path == "/api/plugins":
+                    return self._json(app.plugins())
                 if url.path == "/api/venue":
                     return self._json(app.venue(q.get("id", "")))
                 if url.path == "/api/markets":
@@ -1586,10 +1655,24 @@ def make_handler(app: ChartApp, port_ref: list[int]):
     return Handler
 
 
+RESCAN_AFTER_START_S = 10.0  # the start's rescan waits for the first pages' requests
+
+
 def serve(db_path: Path, port: int = 8765, open_browser: bool = True, priority: list[str] | None = None,
-          settings: Settings | None = None, reload_settings: Callable[[], Settings] | None = None) -> None:
+          settings: Settings | None = None, reload_settings: Callable[[], Settings] | None = None,
+          rescan: bool = False) -> None:
+    """The chart app. With `rescan` (the app started from the command line) every provider plugin
+    set up here scans its capabilities and plan again shortly after the start (ChartApp.start_rescan)."""
     store = Store(db_path, check_same_thread=False)
     app = ChartApp(store, priority, settings, reload_settings=reload_settings)
+    if rescan:
+        def rescan_now() -> None:
+            try:
+                app.start_rescan()
+            except (RuntimeError, LookupError) as e:  # offline, halted, one running: not this start
+                print(f"plugins not rescanned at the start: {e}", flush=True)
+
+        threading.Timer(RESCAN_AFTER_START_S, rescan_now).start()
     from . import world
     threading.Thread(target=world.warm, daemon=True).start()  # world calendars take a few seconds
     app.monitor.start()  # Resources: sampled in the background from now on
