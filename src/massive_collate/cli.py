@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -475,6 +475,9 @@ def _sync(args, settings: Settings) -> tuple[int, int]:
                 def reserve_left(store=store, name=name, feed=feed) -> int:
                     return max(0, feed.max_requests_per_day - collector.DAILY_RESERVE - store.requests_today(name))
 
+                if tickers is None:
+                    _scan(name, source, store, log, due_days=SCAN_DAYS)
+
                 result = collector.sync(source, store, feed.tier, log=log, refresh_hours=settings.refresh_hours,
                                         feeds=feed_profiles(settings), only=tickers, published_only=True,
                                         audits=(settings.audits_per_run, settings.audits_random_per_run),
@@ -828,13 +831,64 @@ def cmd_sourcing(args, settings: Settings) -> int:
     with Store(settings.db_path) as store:
         scheme = sourcing.standing(store, feeds)
         used = {name: store.requests_today(name) for name in feeds}
-    reports = sourcing.reports(feeds, scheme.today, settings)
+        scans = {name: store.kv_json(sourcing.SCAN_KEY.format(name), None) for name in feeds}
+    reports = sourcing.reports(feeds, scheme.today, settings, scans)
     if args.json:
         print(json.dumps({"reports": [{**r.as_dict(), "usedToday": used.get(n)} for n, r in reports.items()],
                           "scheme": scheme.as_dict()}, default=str))
         return 0
     print(sourcing.report(scheme, reports))
     return 0
+
+
+def cmd_capabilities(args, settings: Settings) -> int:
+    """Each provider's capability scan (its plugin's `scan`): a few requests asking what its plan
+    really gives, within its caps like any run; kept and shown in its report (`sourcing`)."""
+    import json
+
+    from . import sourcing
+
+    names = [args.name] if args.name else [n for n, p in providers().items() if p.scan]
+    for name in names:
+        p = providers().get(name)
+        if p is None or p.scan is None:
+            print(f"{name}: no capability scan")
+            continue
+        args.source = name
+        with api_run(args, settings, "capabilities") as (source, store, log):
+            if source is not None:
+                _scan(name, source, store, log)
+    return 0
+
+
+SCAN_DAYS = 7  # each provider's capabilities are scanned again this often, at the start of its sync
+
+
+def _scan(name: str, source, store: Store, log, due_days: float | None = None) -> None:
+    """Run a provider's capability scan and keep it (kv sourcing.SCAN_KEY); with `due_days` (a sync's),
+    only when the last is older and the feed has symbols to collect. A scan that fails is logged;
+    the run goes on."""
+    import json
+
+    from . import sourcing
+
+    p = providers().get(name)
+    if p is None or p.scan is None:
+        return
+    last = store.kv_json(sourcing.SCAN_KEY.format(name), None)
+    now = datetime.now().astimezone()
+    if due_days is not None and last and now - datetime.fromisoformat(last["at"]) < timedelta(days=due_days):
+        return
+    if due_days is not None and not any(n for (feed, _), n in store.watch_counts().items() if feed == name):
+        return  # a feed with nothing to do spends no request on its scan
+    try:
+        results = [list(r) for r in p.scan(source)]
+    except Exception as e:  # noqa: BLE001 - a scan must not stop the feed's run
+        log(f"{name}: capability scan failed ({type(e).__name__}: {e})")
+        return
+    store.kv_set(sourcing.SCAN_KEY.format(name), json.dumps({"at": now.isoformat(timespec="seconds"), "results": results}))
+    for what, ok, detail in results:
+        log(f"{name}: {'yes' if ok else 'no '} {what}" + (f": {detail}" if detail else ""))
 
 
 def _scan_table(result: collector.ScanResult) -> None:
@@ -1308,6 +1362,11 @@ def build_parser() -> argparse.ArgumentParser:
                                        "capabilities) and the plan by cost and capability (no requests)")
     s.add_argument("--json", action="store_true", help="as JSON")
     s.set_defaults(func=cmd_sourcing)
+
+    s = sub.add_parser("capabilities", help="scan what each provider's plan really gives (a few requests each, "
+                                           "within its caps); shown in `sourcing`")
+    s.add_argument("name", nargs="?", help="one provider (default: every one with a scan)")
+    s.set_defaults(func=cmd_capabilities)
 
     s = sub.add_parser("deps", help="check every external dependency (data feeds, calendars, icons, files)")
     s.set_defaults(func=cmd_deps)

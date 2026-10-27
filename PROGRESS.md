@@ -17,6 +17,10 @@ Working notes so work can resume in a fresh session. Newest first.
   plugin's standard report (plan, limits, capabilities, streams), eras unique or common per job and
   market, given to sources by cost (days of their limits) in the user's order; the fetcher follows
   it. `python -m massive_collate sourcing` shows it. Not done: a Fetcher panel for it.
+- **Overnight session** (docs/ARCHITECTURE.md, "The fourth session"): Blue Ocean's overnight minute
+  bars through Alpaca (`boats` feed, free Basic plan, Alpaca's limits shared), the calendar's
+  overnight, the chart's ETH+ON. Symbols go on the feed as they are opened in the chart (or with
+  `watch add --every-feed`). Tiingo has it only as a paid add-on ($9/month): not used.
 
 ## State (2026-10-26, afternoon)
 

@@ -33,6 +33,15 @@ def markets(settings):
     return {"stock": a.feed if a else "sip", "crypto": "alpaca" if loc == "us" else "kraken"}
 
 
+def scan(source) -> list[tuple[str, bool, str]]:
+    """What the plan gives (one request each): the consolidated tape's minute bars, crypto's."""
+    stocks = source.is_entitled("minute", "AAPL", "stock")
+    crypto = source.is_entitled("minute", "BTCUSD", "crypto")
+    return [("stock minute bars, every exchange (SIP), from 2016", stocks,
+             "up to 15 minutes ago on Basic" if stocks else "refused (keys or plan)"),
+            ("crypto minute bars, no key", crypto, "")]
+
+
 PLUGIN = Provider(
     name="alpaca", title="Alpaca", build=build, assets=frozenset({"stock", "crypto"}), order=10,
     about="US stocks (SIP from 2016, the session up to 15 min ago, IEX live) with keys; crypto without",
@@ -48,5 +57,5 @@ PLUGIN = Provider(
     missing_keys_note="keys not set: US stocks (SIP from 2016, IEX live), options and news wait for "
                       "ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY; crypto needs no key and is collected",
     missing_keys_chip="stocks need keys",
-    view=view, has_keys=lambda s: bool(s.alpaca and s.alpaca.has_keys), markets=markets,
+    view=view, has_keys=lambda s: bool(s.alpaca and s.alpaca.has_keys), markets=markets, scan=scan,
 )

@@ -604,7 +604,8 @@ class ChartApp:
         end = datetime.fromtimestamp(int(q["to"]) / 1000, timezone.utc)
         if end - start > timedelta(days=CALENDAR_MAX_DAYS):
             raise ValueError("calendar range is limited to 10 years")
-        return {"asset": asset, "sessions": symbol_sessions(self.engine.calendar(), asset, product, start, end)}
+        return {"asset": asset, "sessions": symbol_sessions(self.engine.calendar(), asset, product, start, end,
+                                                            q.get("session", "extended"))}
 
     @_heavy
     def future(self, q: dict[str, str]) -> dict:
@@ -1147,6 +1148,9 @@ class ChartApp:
             if not feeds:
                 raise LookupError(f"{ticker} is not on the watchlist")
             profiles = feed_profiles(self.settings)
+            if self._watch_everywhere(rows[0], profiles):  # a feed added since (Blue Ocean) takes it from now
+                rows = self.store.watchlist(ticker=ticker)
+                feeds = sorted({w["source"] for w in rows})
             tiers = {name: self.settings.for_source(name).tier for name in profiles if name in feeds}
             assets = {name: profiles[name].assets for name in tiers}  # a feed without its key serves nothing
             serving = any(r["source"] in tiers and r["asset"] in assets[r["source"]] for r in rows)
@@ -1178,6 +1182,23 @@ class ChartApp:
         with self._lock:
             collector.priority_started(self.store, ticker)
         return {**out, "state": "started", "pid": self._scan.pid}
+
+    def _watch_everywhere(self, row: dict, profiles: dict) -> bool:
+        """A stock opened in the chart goes on every set-up feed that can carry it and does not yet
+        (watching puts a symbol on every feed that can: one added since, such as Blue Ocean's
+        overnight feed, takes the symbols as they are opened). Returns whether any was added."""
+        from ..sources import supports
+        from ..symbols import resolve
+
+        if row["asset"] != "stock":
+            return False
+        held = {w["source"] for w in self.store.watchlist(ticker=row["ticker"])}
+        spec = resolve(f"{row['ticker']}::{row['exchange']}" if row.get("exchange") else row["ticker"])
+        added = [name for name, p in profiles.items()
+                 if name not in held and "stock" in p.assets and supports(name, spec)]
+        for name in added:
+            self.store.watch_spec(name, spec)
+        return bool(added)
 
     def exchanges(self) -> list[dict]:
         with self._lock:

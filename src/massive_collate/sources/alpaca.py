@@ -295,4 +295,31 @@ class AlpacaSource(DataSource):
                      active=r.get("status") == "active", details={**r, "source": "alpaca assets"})
 
 
-__all__ = ["AlpacaClient", "AlpacaSource"]
+class BoatsSource(AlpacaSource):
+    """Blue Ocean ATS's overnight session (20:00-04:00 ET) through Alpaca's market data
+    (`feed=boats`; on the free Basic plan, history up to 15 minutes ago): US stocks' minute bars
+    from the one venue that trades them overnight, a feed of its own. A window asked for gets only
+    its overnight bars (the venue has no others), so a day's request is that day's nights."""
+
+    name = "boats"
+
+    def __init__(self, client: AlpacaClient, realtime: bool = False,
+                 now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
+        super().__init__(client, feed="boats", realtime=realtime, now=now)
+
+    def serves(self, asset: str) -> bool:
+        return asset == "stock" and self.client.has_keys
+
+    def native_frames(self, asset: str) -> tuple[tuple[str, int], ...]:
+        return ()  # its 5-minute and hourly bars are built here from its minutes
+
+    def resolutions(self, asset: str) -> tuple[str, ...]:
+        return ("minute",) if asset == "stock" else ()
+
+    def _need_keys(self, asset: str) -> None:
+        if asset != "stock":
+            raise NotEntitled(0, f"Blue Ocean has no {asset} data")
+        super()._need_keys(asset)
+
+
+__all__ = ["AlpacaClient", "AlpacaSource", "BoatsSource"]

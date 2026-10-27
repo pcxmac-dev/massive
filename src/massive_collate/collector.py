@@ -784,6 +784,13 @@ def _monthly_symbol(store: Store, feed: str, ticker: str, now: datetime) -> bool
     return allowed
 
 
+def gives_days(source: DataSource, me: FeedProfile, asset: str = "stock") -> bool:
+    """Whether a feed delivers an asset class's daily bars (its plugin's capabilities): Blue Ocean's
+    overnight feed has minutes only, and its nights must not stand in for a stock's official days."""
+    p = providers().get(source.name)
+    return p is None or asset not in p.assets or "day" in p.resolutions_for(me.tier, asset)
+
+
 def _archive_gap(source: DataSource, store: Store, me: FeedProfile, feeds: dict[str, FeedProfile], item: dict,
                  floor: date, now: datetime) -> bool | None:
     """Whether a closed feed has history to fill for a stock: spans from its listing date that no
@@ -795,7 +802,7 @@ def _archive_gap(source: DataSource, store: Store, me: FeedProfile, feeds: dict[
         return None
     start = max(floor, listed)
     return any(_plan(store, me, feeds, ticker, "stock", ts, start, now, listed, retired_end(item))
-               for ts in dict.fromkeys((*source.resolutions("stock"), "day")))
+               for ts in dict.fromkeys((*source.resolutions("stock"), *(("day",) if gives_days(source, me) else ()))))
 
 
 # Daily bars before the minute backfill: one request brings a stock's whole daily history on the
@@ -1245,7 +1252,7 @@ def sync(
             return _backfilling(w, floors[w["asset"]]) or (not filling and _seconds_pending(w))
 
         served: dict = {}  # priority requests taken this run (each once)
-        sweep_left = DAILY_FIRST_PER_RUN if only is None and not archival and source.serves("stock") else 0
+        sweep_left = DAILY_FIRST_PER_RUN if only is None and not archival and source.serves("stock")             and gives_days(source, me) else 0
 
         def sweep() -> None:  # daily bars first (daily_first), until it stops for a symbol opened in the chart
             nonlocal sweep_left
@@ -1383,7 +1390,7 @@ def sync(
                 refusals.clear(ticker)
                 result.rows += n
                 store.set_backfilled(source.name, ticker, item_floor)  # every span it should hold is in
-                if resolution != "day":
+                if resolution != "day" and gives_days(source, me, asset):
                     try:  # official daily bars (closing auction included) for day/week/month charts
                         n_day = sync_bars(source, store, ticker, "day", item_floor, horizon, **span)
                     except NotEntitled:

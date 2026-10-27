@@ -677,6 +677,16 @@ const LEVEL_MS = { second: 1e3, minute: 6e4, hour: 36e5, day: 864e5, week: 6048e
 
 // Bars a calendar day holds at a level (as gui/window.py per_day): for series served whole
 // (continuous futures, the composite) whose metadata has no levels.
+// The sessions a stock's chart shows, in the order the ETH button steps through them: regular
+// hours; extended (pre-market and after-hours, 04:00-20:00); all four (the overnight session too,
+// 20:00-04:00 on Blue Ocean, from its own feed).
+const SESSIONS = ['regular', 'extended', 'all'];
+const SESSION_TEXT = {
+  regular: ['RTH', 'regular hours 09:30-16:00', 'ETH'],
+  extended: ['ETH', 'extended hours: pre-market 04:00, after-hours to 20:00', 'ETH'],
+  all: ['ETH+ON', 'all four sessions: overnight 20:00-04:00 (Blue Ocean), pre-market, regular, after-hours', 'ETH+ON'],
+};
+
 function perDayGuess(asset, p, session) {
   const days = asset === 'stock' || asset === 'index' ? 252 / 365 : asset === 'crypto' ? 1 : 5 / 7;
   if (['day', 'week', 'month', 'year'].includes(p.type)) {
@@ -684,7 +694,8 @@ function perDayGuess(asset, p, session) {
       : { day: 1, week: 1 / 7, month: 1 / 30.44, year: 1 / 365.25 }[p.type];
     return per / p.span;
   }
-  const minutes = asset === 'stock' ? (session === 'regular' ? 390 : 960) : asset === 'index' ? 390 : asset === 'crypto' ? 1440 : 1380;
+  const stock = { regular: 390, all: 1440 }[session] || 960;  // all four sessions: the overnight too
+  const minutes = asset === 'stock' ? stock : asset === 'index' ? 390 : asset === 'crypto' ? 1440 : 1380;
   return days * minutes * 6e4 / (LEVEL_MS[p.type] * p.span);
 }
 
@@ -695,7 +706,7 @@ function autoLevels() {
   const first = Date.parse(m.first), last = Date.parse(m.last);
   return (m.allPeriods || m.periods || []).filter((p) => p.available !== false).map((p) => ({
     type: p.type, span: p.span, first, last, label: `${p.span} ${LEVEL_NAMES[p.type]}`,
-    perDay: { regular: perDayGuess(m.asset, p, 'regular'), extended: perDayGuess(m.asset, p, 'extended') },
+    perDay: Object.fromEntries(SESSIONS.map((s) => [s, perDayGuess(m.asset, p, s)])),
   }));
 }
 
@@ -703,7 +714,7 @@ function currentLevel() {
   return autoLevels().find((lv) => lv.type === state.period.type && lv.span === state.period.span) || null;
 }
 
-const levelPerDay = (lv) => lv.perDay[state.session === 'extended' ? 'extended' : 'regular'] || lv.perDay.extended;
+const levelPerDay = (lv) => lv.perDay[state.session] || lv.perDay.extended;
 
 // The finest level whose candles for `days` of history fit the chart and whose data reaches back
 // to `fromMs` (a level with nothing that old is not shown for that window: candles grow instead).
@@ -2089,7 +2100,10 @@ function renderPeriods() {
 }
 
 function renderSession() {
-  $('ethBtn').classList.toggle('on', state.session === 'extended');
+  $('ethBtn').classList.toggle('on', state.session !== 'regular');
+  $('ethBtn').textContent = SESSION_TEXT[state.session]?.[2] || 'ETH';
+  $('ethBtn').title = `${SESSION_TEXT[state.session]?.[1] || ''}. Click: `
+    + `${SESSION_TEXT[SESSIONS[(SESSIONS.indexOf(state.session) + 1) % SESSIONS.length]][1]}`;
   $('unfilteredBtn').classList.toggle('on', state.unfiltered);
 }
 
@@ -2103,7 +2117,7 @@ $('unfilteredBtn').addEventListener('click', () => {
 });
 
 $('ethBtn').addEventListener('click', () => {
-  state.session = state.session === 'extended' ? 'regular' : 'extended';
+  state.session = SESSIONS[(SESSIONS.indexOf(state.session) + 1) % SESSIONS.length];
   prefs.set('session', state.session); markDirty();
   renderSession();
   chart.resetData();
@@ -2829,7 +2843,7 @@ function updateStatus(loaded) {
     `${k(m.rows)} rows`,
     `${d(m.first)}→${d(m.last)}`,
     `${m.pricePrecision}dp`,
-    state.session === 'extended' ? 'ETH' : 'RTH',
+    SESSION_TEXT[state.session]?.[0] || 'RTH',
     'ET',
     ...(lod ? [`×${state.lod}`] : []),
     ...(loaded !== undefined ? [`${k(loaded)} bars`] : []),
@@ -2841,7 +2855,7 @@ function updateStatus(loaded) {
     `feed: ${m.feeds.join(' > ')} (${m.base} data${m.hasDaily ? ' + official daily' : ''})`,
     `${m.rows.toLocaleString()} rows, ${m.first.slice(0, 10)} to ${m.last.slice(0, 10)}`,
     `price precision ${m.pricePrecision} decimals`,
-    state.session === 'extended' ? 'extended hours' : 'regular hours 09:30-16:00',
+    SESSION_TEXT[state.session]?.[1] || 'regular hours 09:30-16:00',
     'times US/Eastern',
     ...(lod ? [`zoomed out: each candle = ${state.lod} consecutive bars`] : []),
     ...(loaded !== undefined ? [`${loaded.toLocaleString()} bars loaded (scroll left for more)`] : []),

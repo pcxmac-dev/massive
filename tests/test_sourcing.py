@@ -85,8 +85,10 @@ def test_eras_are_unique_or_common_and_go_to_who_finishes_soonest():
     # limits finish those since 2016 sooner; and the minutes since 2016, with Massive's unique ones
     # before 2016 on it. The 1-second bars (job #3) push nothing of the jobs before them.
     assert days[2].sources[0] == "alpaca"
-    minutes = [e for e in scheme.eras if e.asset == "stock" and e.resolution == "minute"]
+    minutes = [e for e in scheme.eras if e.asset == "stock" and e.resolution == "minute" and e.market == "sip"]
     assert [(e.unique, e.sources[0]) for e in minutes] == [(True, "massive"), (False, "alpaca")]
+    nights = [e for e in scheme.eras if e.market == "boats"]  # Blue Ocean's overnight: its own market
+    assert [(e.resolution, e.unique, e.sources) for e in nights] == [("minute", True, ["boats"])]
     seconds = [e for e in scheme.eras if e.resolution == "second"]
     assert [(e.unique, e.sources) for e in seconds] == [(True, ["massive"])]
     assert [e.resolution for e in scheme.eras][:1] == ["day"] and scheme.eras[-1].resolution == "second"
@@ -95,7 +97,7 @@ def test_eras_are_unique_or_common_and_go_to_who_finishes_soonest():
     # The same at Massive's raised cap (200,000 a day, this machine's): 50,000 bars a request make it
     # the cheapest for all the common eras; Alpaca stands by (it takes over where Massive found nothing)
     big = sourcing.build(feed_profiles(_settings(MASSIVE_MAX_REQUESTS_PER_DAY="200000")), counts, TODAY)
-    assert [(e.resolution, e.sources[0]) for e in big.eras if e.asset == "stock"] == [
+    assert [(e.resolution, e.sources[0]) for e in big.eras if e.asset == "stock" and e.market == "sip"] == [
         ("day", "tiingo"), ("day", "massive"), ("day", "massive"), ("minute", "massive"), ("minute", "massive"),
         ("second", "massive")]
 

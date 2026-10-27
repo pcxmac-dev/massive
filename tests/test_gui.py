@@ -126,8 +126,10 @@ def test_engine_merged_feed(tmp_path):
         {"t": int(pd.Timestamp("2026-10-20 21:00", tz=ET).timestamp() * 1000), "o": 1, "h": 1, "l": 1, "c": 1, "v": 5}])
     eng = BarEngine(s, priority=["massive"])
     assert eng.sources_for("SPCX") == ["massive", "overnight"]
+    every = eng.bars(MERGED, "SPCX", "minute", 1, session="all", limit=10000)["bars"]
+    assert len(every) == 391  # all four sessions: the 21:00 bar is the overnight session's
     ext = eng.bars(MERGED, "SPCX", "minute", 1, session="extended", limit=10000)["bars"]
-    assert len(ext) == 391
+    assert len(ext) == 390  # extended hours end at 20:00
     reg = eng.bars(MERGED, "SPCX", "minute", 1, session="regular", limit=10000)["bars"]
     assert len(reg) == 390
 

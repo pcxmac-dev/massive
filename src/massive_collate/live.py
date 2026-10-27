@@ -41,7 +41,11 @@ STATUS_KEY = "live:status"
 OPEN_KEY = "live:open"  # {ticker: ms}: the symbols chart pages have open (gui/server.py notes them)
 WATCHLISTS_KEY = "ui:watchlists"  # the rail's lists of symbols (gui/server.py)
 IEX_FEED = "iex"
-PARTIAL_FEEDS = frozenset({IEX_FEED})  # one exchange's share of a market other feeds hold whole
+BOATS_FEED = "boats"  # Blue Ocean's overnight session (sources/plugins/boats.py)
+# One venue's bars, ranked last in a chart of all feeds: they show where no feed of the whole market
+# has bars (IEX: the session under way until a sync downloads it; Blue Ocean: the overnight session,
+# which the consolidated tape does not carry)
+PARTIAL_FEEDS = frozenset({IEX_FEED, BOATS_FEED})
 MAX_STOCKS = 30  # Alpaca Basic: symbols on its one real-time connection
 OPEN_FRESH_MS = 180_000  # a symbol is streamed this long after a page last said it has it open
 WANT_SECONDS = 5.0  # how often the stock symbols to stream are looked up

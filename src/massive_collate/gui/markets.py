@@ -2,7 +2,7 @@
 sessions of a symbol over a time range (for annotating sessions on the chart)."""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 from ..sessions import ET, ENERGY_FUTURES, EQUITY_FUTURES, MarketCalendar, nyse_holidays
 
@@ -116,12 +116,15 @@ def markets(cal: MarketCalendar, exchanges, watch: list[dict], now: datetime | N
     return {"now": now.isoformat(), "markets": out}
 
 
-def symbol_sessions(cal: MarketCalendar, asset: str, product: str | None, start: datetime, end: datetime) -> list[dict]:
+def symbol_sessions(cal: MarketCalendar, asset: str, product: str | None, start: datetime, end: datetime,
+                    session: str = "extended") -> list[dict]:
     """Sessions overlapping [start, end] for chart annotations: open/close and, for US stocks,
-    the regular hours inside them."""
+    the regular hours inside them; with all four sessions ("all"), each from the overnight open at
+    20:00 the evening before, and where its pre-market begins (extendedOpen, 04:00)."""
     out = []
+    overnight = session == "all" and asset == "stock"
     for s in cal.sessions(asset, (start - timedelta(days=2)).astimezone(ET).date(),
-                          (end + timedelta(days=2)).astimezone(ET).date(), product):
+                          (end + timedelta(days=2)).astimezone(ET).date(), product, overnight=overnight):
         if s.close < start or s.open > end:
             continue
         row = {"day": s.day.isoformat(), "open": int(s.open.timestamp() * 1000), "close": int(s.close.timestamp() * 1000)}
@@ -129,5 +132,7 @@ def symbol_sessions(cal: MarketCalendar, asset: str, product: str | None, start:
             reg = cal.regular_hours(s.day)
             if reg:
                 row["regularOpen"], row["regularClose"] = int(reg[0].timestamp() * 1000), int(reg[1].timestamp() * 1000)
+            if overnight:
+                row["extendedOpen"] = int(datetime.combine(s.day, time(4, 0), ET).timestamp() * 1000)
         out.append(row)
     return out

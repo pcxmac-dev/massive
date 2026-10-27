@@ -45,6 +45,7 @@ DAYS_A_YEAR = {"stock": 252, "index": 252, "fx": 260, "crypto": 365, "future": 2
 MINUTES_A_DAY = {"stock": 960, "index": 390, "fx": 1440, "crypto": 1440, "future": 1380}  # extended hours
 DEFAULT_CAPACITY = 2000.0  # requests a day, for a feed whose subscription is not known
 CACHE_S = 300.0
+SCAN_KEY = "capabilities:{}"  # a provider's last capability scan (cli `capabilities`): {at, results}
 COUNTS_S = 30.0  # the symbols watched are counted again this often
 OPEN_END = 2**62  # the newest era runs on (ms)
 
@@ -128,12 +129,14 @@ class Scheme:
                 "load": {k: round(v, 3) for k, v in self.load.items()}, "live": self.live}
 
 
-def reports(feeds: dict[str, FeedProfile], today: date, settings=None) -> dict:
-    """Every configured provider's standard report (sources.registry.Report), by name."""
+def reports(feeds: dict[str, FeedProfile], today: date, settings=None, scans: dict | None = None) -> dict:
+    """Every configured provider's standard report (sources.registry.Report), by name; `scans`:
+    their last capability scans (kv SCAN_KEY), shown in them."""
     from .sources import providers
 
     known = providers()
-    return {name: known[name].report(f, today, settings) for name, f in feeds.items() if name in known}
+    return {name: known[name].report(f, today, settings, (scans or {}).get(name))
+            for name, f in feeds.items() if name in known}
 
 
 def offers(feeds: dict[str, FeedProfile], today: date, entitled=None, scores: dict | None = None) -> list[Offer]:

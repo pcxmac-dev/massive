@@ -163,6 +163,27 @@ def regular_mask(index: pd.DatetimeIndex) -> np.ndarray:
     return (tod >= opens) & (tod < close)  # closed days: close -1
 
 
+def overnight_mask(index: pd.DatetimeIndex) -> np.ndarray:
+    """Which times are in the overnight session (20:00-04:00 ET: Blue Ocean's hours)."""
+    if len(index) == 0:
+        return np.zeros(0, dtype=bool)
+    hour = np.asarray(index.tz_convert(ET).hour, dtype=np.int64)
+    return (hour >= 20) | (hour < 4)
+
+
+def in_session(frame: pd.DataFrame, session: str, asset: str | None) -> pd.DataFrame:
+    """The bars a session shows: "regular" (09:30-16:00 ET), "extended" (a stock's 04:00-20:00: no
+    overnight bars), "all" (a stock's four sessions, overnight included). Around-the-clock markets
+    are drawn whole ("extended")."""
+    if frame.empty:
+        return frame
+    if session == "regular":
+        return regular_session(frame)
+    if session == "extended" and asset == "stock":
+        return frame[~overnight_mask(frame.index)]
+    return frame
+
+
 def _regular_close(d) -> time | None:
     """Regular-session close of a day by the exchange calendar, None when the market is shut."""
     from ..sessions import is_nyse_holiday, nyse_early_close
@@ -188,13 +209,14 @@ def _aggregate(groups) -> pd.DataFrame:
 
 def resample(
     frame: pd.DataFrame, period: str, span: int = 1, session: str = "regular", align_hours_to_open: bool = True,
-    utc_days: bool = False, session_hours: int = 0,
+    utc_days: bool = False, session_hours: int = 0, asset: str | None = None,
 ) -> pd.DataFrame:
-    """Aggregate a fine frame into bars. `session` is "regular" (09:30-16:00 ET) or "extended"."""
+    """Aggregate a fine frame into bars. `session` is "regular" (09:30-16:00 ET), "extended" or
+    "all" (in_session: with `asset` a stock, "extended" leaves out the overnight bars)."""
     if frame.empty:
         return frame.copy()
-    if session == "regular":
-        frame = regular_session(frame)
+    if session != "extended" or asset == "stock":
+        frame = in_session(frame, session, asset)
         if frame.empty:
             return frame.copy()
     return _aggregate(frame.groupby(bin_keys(frame.index, period, span, align_hours_to_open, utc_days, session_hours)))
@@ -317,8 +339,9 @@ INTERP_GAP_MS = 5 * 60_000  # minutes further apart than this are a gap: nothing
 
 
 def session_hours(s) -> int:
-    """Hours before midnight a series' day starts: futures trade CME sessions from 18:00 New York."""
-    return 6 if getattr(s, "asset", None) == "future" else 0
+    """Hours before midnight a series' day starts: futures trade CME sessions from 18:00 New York;
+    a stock's overnight session (from 20:00, shown with all four sessions) belongs to the next day."""
+    return {"future": 6, "stock": 4}.get(getattr(s, "asset", None), 0)
 
 
 def utc_days(s) -> bool:
@@ -704,7 +727,8 @@ class BarEngine:
         # Official daily bars come from whichever feed holds each day (one feed per span), so they
         # are combined day by day like the intraday bars, best-ranked feed first; then the daily-only
         # feeds' days.
-        dailies = [p.daily for p in parts if p.daily is not None and not p.daily.empty]
+        whole = [p for p in parts if p.source not in PARTIAL_FEEDS] or parts  # not one venue's nights for days
+        dailies = [p.daily for p in whole if p.daily is not None and not p.daily.empty]
         dailies += [p.frame for p in day_only if p is not finer[0] and not p.frame.empty]
         daily = merge_frames(dailies) if dailies else None
         return Series(
@@ -998,7 +1022,7 @@ class BarEngine:
                 self._bars.move_to_end(key)
                 return self._bars[key], used
         # range: from the finest data, not the chart interval
-        fine = (s.frame if session == "extended" else regular_session(s.frame)) if style.type == "range" else None
+        fine = in_session(s.frame, session, s.asset) if style.type == "range" else None
         out = transformed(base, used, fine)
         with self._lock:
             self._bars[key] = out
@@ -1008,7 +1032,7 @@ class BarEngine:
 
     def _built_days(self, s: Series, session: str) -> pd.DataFrame:
         """Daily bars built from the series' finer data, keyed like the official ones."""
-        frame = regular_session(s.frame) if session == "regular" else s.frame
+        frame = in_session(s.frame, session, s.asset)
         if frame.empty:
             return frame.copy()
         return _aggregate(frame.groupby(calendar_key(frame.index, "day", utc=utc_days(s), session_hours=session_hours(s))))
@@ -1032,7 +1056,7 @@ class BarEngine:
         out = bars.copy()
         out["q1"] = out["med"] = out["q3"] = np.nan
         if finer and not bars.empty:
-            sub = regular_session(s.frame) if session == "regular" else s.frame
+            sub = in_session(s.frame, session, s.asset)
             group = bars.index.get_indexer(bin_keys(sub.index, period, span, s.asset in ("stock", "index"), utc_days(s)))
             vol = sub["volume"].to_numpy(dtype=float)
             price = np.where(vol > 0, sub["turnover"].to_numpy(dtype=float) / np.where(vol > 0, vol, 1),
@@ -1335,7 +1359,7 @@ class BarEngine:
             bars = daily if period == "day" else _aggregate(daily.groupby(calendar_key(daily.index, period, utc=utc_days(s))))
             sent = period == "day" and s.source not in MODEL_SOURCES  # the composite's days are a model's
         else:
-            bars = resample(s.frame, period, span, session, align_hours_to_open=s.asset in ("stock", "index"),
+            bars = resample(s.frame, period, span, session, align_hours_to_open=s.asset in ("stock", "index"), asset=s.asset,
                             utc_days=utc_days(s), session_hours=session_hours(s))
             sent = period == s.kind and span == 1 and s.source not in MODEL_SOURCES  # a feed's own interval
             if not sent and period in ("second", "minute", "hour"):

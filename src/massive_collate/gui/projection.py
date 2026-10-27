@@ -71,7 +71,7 @@ def future_bar_starts_reference(cal: MarketCalendar, s: Series, product: str | N
         step = 1 if period == "second" else 60
         regular_only = s.asset == "stock" and session == "regular"
         minutes = cal.open_minutes(s.asset, last.to_pydatetime(), until, product, step_seconds=step,
-                                   extended=not regular_only)
+                                   extended=not regular_only, overnight=session == "all")
         if session == "regular" and s.asset in ("stock", "index"):
             minutes = regular_session(_daily_frame(minutes)).index  # the engine's own filter
         if period in CALENDAR:  # no official daily bars: calendar groups of the intraday frame
@@ -109,6 +109,7 @@ class SessionBins:
         self.offset = 570 * 60 if period == "hour" and s.asset in ("stock", "index") else 0
         self.zone = "UTC" if utc_days(s) else ET  # the engine's bins: UTC hours where days are UTC days
         self.regular = session == "regular" and s.asset in ("stock", "index")
+        self.overnight = session == "all" and s.asset == "stock"  # the four sessions: from 20:00 the evening before
         self.last_ns = int(last.value)
         # The first bar that can follow: the bin after the one holding the last real bar.
         own = wall_clock_bins(pd.DatetimeIndex([last]), period, span, self.offset, zone=self.zone)[0]
@@ -122,7 +123,8 @@ class SessionBins:
     def _extend(self, days: int) -> None:
         end = self.next_day + timedelta(days=days)
         extended = not (self.s.asset == "stock" and self.regular)
-        sessions = self.cal.sessions(self.s.asset, self.next_day, end, self.product, extended=extended)
+        sessions = self.cal.sessions(self.s.asset, self.next_day, end, self.product, extended=extended,
+                                     overnight=self.overnight)
         self.next_day = end + timedelta(days=1)
         for se in sessions:
             a, b = se.open, se.close

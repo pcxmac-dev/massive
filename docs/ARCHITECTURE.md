@@ -189,6 +189,30 @@ sourcing` shows the reports and the plan (no requests).
   each exchange its own crypto, Cboe its index files. At Massive's default 2,000 a day, Alpaca takes
   the bars since 2016.
 - The current session is the live streams' (only for the symbols open on a chart: `LIVE_STREAMS`).
+- **Capability scans.** A plugin may scan what its plan really gives (`scan`: a few requests);
+  each feed's sync runs it once a week (`cli.SCAN_DAYS`), `python -m massive_collate capabilities`
+  on demand, and its report shows the answers. Tiingo's (2026-10-27): daily bars, IEX's 1-minute
+  bars, forex and crypto bars on the free plan; Blue Ocean's overnight bars refused (a $9 a month
+  add-on). Only its daily bars are collected.
+
+## The fourth session: overnight (2026-10-27)
+
+US stocks trade overnight on Blue Ocean ATS, 20:00-04:00 ET, Sunday to Thursday nights before a
+trading day; the consolidated tape (Massive, Alpaca's SIP) carries none of it.
+
+- **Its feed:** `boats` (sources/plugins/boats.py, `BoatsSource`): Alpaca's market data with
+  `feed=boats`, minute bars, on the free Basic plan up to 15 minutes ago. Its own market, one
+  venue: ranked last in a chart of all feeds (live.PARTIAL_FEEDS, like IEX), so its bars show
+  where no feed of the whole market has any: the nights. It uses Alpaca's keys and shares Alpaca's
+  limits (one rate window and one daily cap, kept under Alpaca's name for the machine). It sends
+  no daily bars (`collector.gives_days`), and no feed of one venue's share gives a stock its days.
+  A stock opened in the chart goes on it (and on any other set-up feed that can carry it).
+- **The calendar** (sessions.py): `overnight_open(day)`; with `overnight`, a stock's session runs
+  from 20:00 the evening before. The collector's checks keep to 04:00-20:00.
+- **The chart**: the ETH button steps RTH, ETH (04:00-20:00, overnight left out), ETH+ON (all
+  four sessions: `session=all`). Overnight is shaded violet, pre-market blue, after-hours grey;
+  a night belongs to the next day's daily bar (`session_hours` 4 for stocks). Blue Ocean has no
+  1-second bars, so the nights show from the minute levels up.
 
 ## Schemes and replay (2026-10-25)
 

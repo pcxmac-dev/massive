@@ -5,7 +5,10 @@ checks and the tests. A trading *session* is one contiguous open period with a s
 
 - US stocks: 04:00-20:00 ET (extended hours) on NYSE trading days; 17:00 on early-close days.
   The regular session (09:30-16:00, 13:00 on early-close days) is what the chart shows unless
-  extended hours are on.
+  extended hours are on. Overnight, Blue Ocean ATS trades them 20:00-04:00 ET, Sunday to
+  Thursday nights before a trading day: with all four sessions shown (the chart's "all"), a
+  trading day's session runs from 20:00 the evening before. The collector's checks keep to
+  04:00-20:00 (the consolidated tape); the overnight feed fills its own nights.
 - US indices: 09:30-16:00 ET (13:00 on early-close days).
 - Spot FX: each weekday's session runs from 17:00 ET the evening before to 17:00 ET
   (so the week is Sunday 17:00 to Friday 17:00).
@@ -176,14 +179,21 @@ class MarketCalendar:
             return o[1].astimezone(ET), o[2].astimezone(ET)
         return _et(d, time(9, 30)), _et(d, time(13, 0) if nyse_early_close(d) else time(16, 0))
 
-    def stock_session(self, d: date, extended: bool = True) -> Session | None:
+    def stock_session(self, d: date, extended: bool = True, overnight: bool = False) -> Session | None:
         reg = self.regular_hours(d)
         if reg is None:
             return None
         if not extended:
             return Session(d, *reg)
         # Pre-market from 04:00; after-hours run four hours past the close (20:00, or 17:00).
-        return Session(d, _et(d, time(4, 0)), reg[1] + timedelta(hours=4))
+        # With `overnight`, from Blue Ocean's open the evening before.
+        return Session(d, self.overnight_open(d) if overnight else _et(d, time(4, 0)), reg[1] + timedelta(hours=4))
+
+    def overnight_open(self, d: date) -> datetime | None:
+        """When Blue Ocean's overnight session before trading day `d` opens: 20:00 ET the evening
+        before (Sunday to Thursday nights); None when `d` is not a trading day. It ends at 04:00
+        on `d`, where pre-market begins."""
+        return _et(d - timedelta(days=1), time(20, 0)) if self.is_trading_day(d) else None
 
     # -- futures ---------------------------------------------------------------------
     def future_sessions(self, product: str | None, d: date) -> list[Session]:
@@ -255,8 +265,9 @@ class MarketCalendar:
 
     # -- any asset ---------------------------------------------------------------------
     def sessions(self, asset: str, start: date, end: date, product: str | None = None,
-                 extended: bool = True) -> list[Session]:
-        """Sessions with session dates in [start, end], in order."""
+                 extended: bool = True, overnight: bool = False) -> list[Session]:
+        """Sessions with session dates in [start, end], in order (US stocks: with `overnight`,
+        each from Blue Ocean's open the evening before)."""
         out: list[Session] = []
         d = start
         while d <= end:
@@ -267,7 +278,7 @@ class MarketCalendar:
             elif asset == "crypto":
                 out.extend(self.crypto_session(d))
             else:
-                s = self.stock_session(d, extended=extended and asset == "stock") if asset == "stock" \
+                s = self.stock_session(d, extended=extended, overnight=overnight and extended) if asset == "stock" \
                     else self._index_session(d)
                 if s:
                     out.append(s)
@@ -287,14 +298,15 @@ class MarketCalendar:
         return False
 
     def open_minutes(self, asset: str, start: datetime, end: datetime, product: str | None = None,
-                     step_seconds: int = 60, extended: bool = True) -> pd.DatetimeIndex:
+                     step_seconds: int = 60, extended: bool = True, overnight: bool = False) -> pd.DatetimeIndex:
         """Start of every `step_seconds` interval in [start, end) during which the market is open,
         as US/Eastern timestamps (what a feed with a bar for every open interval would hold)."""
         start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
         step = step_seconds * 1_000_000_000
         chunks = []
         for s in self.sessions(asset, (start - timedelta(days=2)).astimezone(ET).date(),
-                               (end + timedelta(days=2)).astimezone(ET).date(), product, extended=extended):
+                               (end + timedelta(days=2)).astimezone(ET).date(), product, extended=extended,
+                               overnight=overnight):
             a, b = max(s.open, start), min(s.close, end)
             if a >= b:
                 continue

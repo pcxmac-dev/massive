@@ -100,7 +100,8 @@ def test_the_levels_say_where_each_starts_and_how_dense_it_is(store):
     assert names[0] == ("minute", 1) and ("year", 1) in names and ("second", 1) not in names  # no seconds held
     minute = levels[0]
     assert minute["first"] == _ms(f"{DAYS[0]} 04:00") and minute["label"] == "1 min"
-    assert minute["perDay"] == {"regular": pytest.approx(390 * 252 / 365), "extended": pytest.approx(960 * 252 / 365)}
+    assert minute["perDay"] == {"regular": pytest.approx(390 * 252 / 365), "extended": pytest.approx(960 * 252 / 365),
+                                "all": pytest.approx(1440 * 252 / 365)}  # the overnight session too
 
 
 def test_the_chart_opens_a_symbol_on_the_auto_path_without_its_history(store, monkeypatch):

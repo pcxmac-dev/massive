@@ -93,10 +93,13 @@ class Report:
     streams: tuple[tuple[str, str], ...] = ()  # (asset class, what its live stream is)
     kind: str = ""  # its kind of data (exchange, consolidated, official, vendor)
     notes: tuple[str, ...] = ()
+    scanned: tuple[tuple[str, bool, str], ...] = ()  # its last capability scan: (what, available, detail)
+    scanned_at: str | None = None
 
     def as_dict(self) -> dict:
         return {"source": self.source, "title": self.title, "plan": self.plan, "keysSet": self.keys_set,
-                "kind": self.kind, "notes": list(self.notes),
+                "kind": self.kind, "notes": list(self.notes), "scannedAt": self.scanned_at,
+                "scanned": [{"what": w, "available": ok, "detail": d} for w, ok, d in self.scanned],
                 "limits": {**self.limits.__dict__, "rate": list(self.limits.rate) if self.limits.rate else None},
                 "capabilities": [{**c.__dict__, "since": str(c.since)} for c in self.capabilities],
                 "streams": [{"asset": a, "what": w} for a, w in self.streams]}
@@ -117,6 +120,9 @@ class Report:
             out.append(f"    {c.asset:6} {c.resolution:6} {c.market:12} from {c.since}  {fresh:16} {bars}")
         out += [f"    {a:6} live   {w}" for a, w in self.streams]
         out += [f"    note: {n}" for n in self.notes]
+        if self.scanned_at:
+            out.append(f"    scanned {self.scanned_at[:16].replace('T', ' ')}:")
+            out += [f"      {'yes' if ok else 'no ':3} {w}" + (f": {d}" if d else "") for w, ok, d in self.scanned]
         return out
 
 
@@ -161,6 +167,9 @@ class Provider:
     carries: Callable[[object], bool] | None = None
     plan_resolutions: Callable[["Tier", str], tuple[str, ...]] | None = None  # what its plan gives per asset
     reporter: Callable[["Report", "Settings | None"], "Report"] | None = None  # amends its standard report
+    # Its capability scan (`capabilities`): a few requests asking what its plan really gives, each
+    # answer (what, available, detail); kept, and shown in its report.
+    scan: Callable[["DataSource"], list[tuple[str, bool, str]]] | None = None
     origin: str = "built in"  # set when loaded: built in, or the package's entry point
 
     @property
@@ -228,9 +237,10 @@ class Provider:
         """Bars one request returns (None: a symbol's whole history at once). Default: 1,000."""
         return self.per_request.get(resolution, DEFAULT_PER_REQUEST)
 
-    def report(self, profile, today, settings: "Settings | None" = None) -> Report:
+    def report(self, profile, today, settings: "Settings | None" = None, scanned: dict | None = None) -> Report:
         """Its standard report on this machine: `profile` is its coverage.FeedProfile (plan, asset
-        classes served, markets, capacity); `settings` add its caps and keys (the scheme needs neither)."""
+        classes served, markets, capacity); `settings` add its caps and keys (the scheme needs neither);
+        `scanned`, its last capability scan ({at, results})."""
         from ..collector import history_floor
         from ..coverage import latency
 
@@ -250,7 +260,9 @@ class Provider:
                         symbols_a_month=self.symbols_per_month, published=self.limits)
         out = Report(self.name, self.title, profile.tier.name, self.keys_set(settings) if settings is not None else None,
                      limits, tuple(caps), tuple((a, w) for a, w in self.streams.items() if a in profile.assets),
-                     self.kind, ("a closed archive: each symbol filled once, then not asked again",) if self.archival else ())
+                     self.kind, ("a closed archive: each symbol filled once, then not asked again",) if self.archival else (),
+                     tuple((str(w), bool(ok), str(d)) for w, ok, d in (scanned or {}).get("results", [])),
+                     (scanned or {}).get("at"))
         return self.reporter(out, settings) if self.reporter else out
 
 

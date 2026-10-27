@@ -100,7 +100,9 @@ def per_day(asset: str, period: str, span: int, session: str) -> float:
     if period in CALENDAR:
         return trading_days * {"day": 1, "week": 1 / 5, "month": 1 / 21, "year": 1 / 252}[period] / span \
             if asset in ("stock", "index") else {"day": 1, "week": 1 / 7, "month": 1 / 30.44, "year": 1 / 365.25}[period] / span
-    minutes = {"stock": 390 if session == "regular" else 960, "index": 390}.get(asset, 1440 if asset == "crypto" else 1380)
+    # a stock: 390 regular minutes, 960 with pre-market and after-hours, 1,440 with the overnight too
+    stock = {"regular": 390, "all": 1440}.get(session, 960)
+    minutes = {"stock": stock, "index": 390}.get(asset, 1440 if asset == "crypto" else 1380)
     return trading_days * minutes * 60_000 / (UNIT_MS[period] * span)
 
 
@@ -206,7 +208,7 @@ class WindowReader:
             if base is None:
                 continue
             out.append({"type": ts, "span": m, "first": int(base[0]), "last": int(base[1]),
-                        "perDay": {session: per_day(s.asset, ts, m, session) for session in ("regular", "extended")},
+                        "perDay": {session: per_day(s.asset, ts, m, session) for session in ("regular", "extended", "all")},
                         "label": level_label(ts, m)})
         self._levels[key] = (time.monotonic(), out)
         return out
@@ -346,7 +348,7 @@ class WindowReader:
         if merged is None or not len(merged):
             return _empty()
         own = period == base and span == 1
-        bars = resample(merged, period, span, session, align_hours_to_open=s.asset in ("stock", "index"),
+        bars = resample(merged, period, span, session, align_hours_to_open=s.asset in ("stock", "index"), asset=s.asset,
                         utc_days=utc_days(s), session_hours=session_hours(s))
         if own:
             return bars
@@ -376,7 +378,11 @@ class WindowReader:
 
     def _days(self, s, feeds) -> pd.DataFrame:
         """Every day of the series: the feeds' official daily bars first, the days built here where
-        none was sent (one feed per day, best first), dated as each market dates its days."""
+        none was sent (one feed per day, best first), dated as each market dates its days. Not the
+        days of a feed of one venue's share (IEX, Blue Ocean's nights) where a whole-market feed is there."""
+        from ..live import PARTIAL_FEEDS
+
+        feeds = [f for f in feeds if f not in PARTIAL_FEEDS] or feeds
         with self.engine.lock:
             parts = [frame_from_bars(df) for df in
                      (self.store.load_bars([s.ticker], "day", 1, source=f, filtered=_filtered()) for f in feeds)

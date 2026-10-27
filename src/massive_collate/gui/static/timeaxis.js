@@ -10,8 +10,9 @@
    as you scroll. Projected times are fetched ahead of the visible range in pages.
 
    Sessions are annotated on intraday charts: a dashed line where each session opens, shaded
-   pre-market (blue) and after-hours (grey) (US stocks with extended hours on), and a band along the top of
-   the current (or next) session. */
+   pre-market (blue) and after-hours (grey) (US stocks with extended hours on), overnight (violet:
+   with all four sessions on, 20:00-04:00 on Blue Ocean), and a band along the top of the current
+   (or next) session. */
 (() => {
   const store = chart._chartStore;
   if (!store || typeof store.dataIndexToTimestamp !== 'function') return;  // library changed: keep its default
@@ -159,7 +160,7 @@
     const a = store.dataIndexToTimestamp(Math.max(0, from));
     const b = store.dataIndexToTimestamp(Math.max(from + 1, to));
     if (!Number.isFinite(a) || !Number.isFinite(b)) return;
-    const key = `${state.source}|${state.ticker}`;
+    const key = `${state.source}|${state.ticker}|${state.session}`;  // all four sessions: each from 20:00 the evening before
     // The visible range with a screen's width either side, at most CALENDAR_DAYS: on a wider
     // range, the newest part of it.
     const span = Math.max(b - a, 864e5), most = CALENDAR_DAYS * 864e5;
@@ -169,7 +170,8 @@
     if (sess.pending) return;
     const want = `${key}|${Math.round(qFrom / 864e5)}|${Math.round(qTo / 864e5)}`;
     if (sess.failed?.want === want && Date.now() - sess.failed.at < CALENDAR_RETRY_MS) return;
-    sess.pending = api('/api/calendar', { source: state.source, ticker: state.ticker, from: Math.round(qFrom), to: Math.round(qTo) })
+    sess.pending = api('/api/calendar', { source: state.source, ticker: state.ticker, session: state.session,
+      from: Math.round(qFrom), to: Math.round(qTo) })
       .then((res) => {
         sess.key = key; sess.from = qFrom; sess.to = qTo; sess.list = res.sessions; sess.asset = res.asset; sess.failed = null;
         redraw();
@@ -200,20 +202,24 @@
       // pre-market a cool blue, after-hours grey: one shade for both made them hard to tell apart
       const preShade = dark ? 'rgba(10,32,96,0.45)' : 'rgba(20,60,170,0.13)';  // a deep navy
       const postShade = dark ? 'rgba(120,123,134,0.07)' : 'rgba(120,123,134,0.08)';
+      const nightShade = dark ? 'rgba(90,40,140,0.30)' : 'rgba(110,60,170,0.10)';  // overnight: a violet
+      const wide = state.session !== 'regular';  // extended hours or all four sessions
       const now = Date.now();
       const cur = currentSession(sess.list, now);
       ctx.save();
       for (const s of sess.list) {
         if (s.close < t0 || s.open > t1) continue;
         // Extended hours shading (US stocks with ETH on).
-        if (s.regularOpen && state.session === 'extended') {
-          for (const [a, b, shade] of [[s.open, s.regularOpen, preShade], [s.regularClose, s.close, postShade]]) {
+        if (s.regularOpen && wide) {
+          const pre = s.extendedOpen || s.open;  // with the overnight: pre-market from 04:00
+          for (const [a, b, shade] of [[s.open, s.extendedOpen || s.open, nightShade], [pre, s.regularOpen, preShade],
+            [s.regularClose, s.close, postShade]]) {
             const xa = xOf(a), xb = xOf(b);
             if (xb > xa) { ctx.fillStyle = shade; ctx.fillRect(xa, 0, xb - xa, bounding.height); }
           }
         }
         // Session break.
-        const x = Math.round(xOf(s.regularOpen && state.session !== 'extended' ? s.regularOpen : s.open)) + 0.5;
+        const x = Math.round(xOf(s.regularOpen && !wide ? s.regularOpen : s.open)) + 0.5;
         if (x > 0 && x < bounding.width) {
           ctx.strokeStyle = dark ? 'rgba(120,123,134,0.35)' : 'rgba(120,123,134,0.45)';
           ctx.setLineDash([3, 4]);
@@ -221,8 +227,8 @@
         }
       }
       if (cur && cur.close >= t0 && cur.open <= t1) {  // current (or next) session: a band along the top
-        const a = xOf(state.session === 'extended' || !cur.regularOpen ? cur.open : cur.regularOpen);
-        const b = xOf(state.session === 'extended' || !cur.regularClose ? cur.close : cur.regularClose);
+        const a = xOf(wide || !cur.regularOpen ? cur.open : cur.regularOpen);
+        const b = xOf(wide || !cur.regularClose ? cur.close : cur.regularClose);
         const live = cur.open <= now;
         ctx.setLineDash([]);
         ctx.fillStyle = live ? 'rgba(41,98,255,0.55)' : 'rgba(41,98,255,0.25)';
