@@ -14,10 +14,15 @@ from massive_collate.storage import Store
 
 @pytest.fixture(autouse=True)
 def no_saved_keys(monkeypatch):
-    """Tests never read the user's real API keys (saved user environment variables)."""
+    """Tests never read the user's real API keys: neither the saved user environment variables nor
+    the process's own (a shell started after the keys were saved has them), for every provider
+    plugin's keys and plans. A test that wants one sets it."""
     from massive_collate import config
+    from massive_collate.sources.registry import variables
 
     monkeypatch.setattr(config, "saved_user_keys", lambda: {})
+    for name in variables():
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)

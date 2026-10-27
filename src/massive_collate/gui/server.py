@@ -197,7 +197,7 @@ class ChartApp:
         each symbol's state without the per-symbol download plan (the Fetcher shows that)."""
         from collections import defaultdict
 
-        from ..composite import REFERENCE
+        from ..composite import reference
         from ..sources import feed_profiles
 
         # Its own connections and lock (a second or more for thousands of symbols): under the shared
@@ -245,7 +245,7 @@ class ChartApp:
             held = kinds.get(ticker, {})
             have = set(held) | {x["source"] for x in ws if x["asset"] == "future"}
             fine = {s for s, ks in held.items() if any(k in ("trades", "second") for k in ks)}
-            order = self.engine.rank_sources(have, fine, REFERENCE.get(w.get("asset") or "stock"), quality)
+            order = self.engine.rank_sources(have, fine, reference(w.get("asset") or "stock"), quality)
             feeds = [{"source": s, "data": sorted(held.get(s, []))} for s in order]
             state = _symbol_state(by_feed.get(ticker, {}), order)
             out.append({
@@ -529,9 +529,9 @@ class ChartApp:
             if row is None:
                 raise LookupError(f"{ticker} is not in the directory")
             spec = resolve(f"{row['ticker']}::{row['exchange']}" if row["kind"] == "stock" and row["exchange"] else row["ticker"])
-            from ..sources import BUILDERS, supports
+            from ..sources import providers, supports
 
-            for feed in BUILDERS:  # each span is still downloaded by one feed only
+            for feed in providers():  # each span is still downloaded by one feed only
                 if supports(feed, spec):
                     self.store.watch_spec(feed, spec)
         return {"watched": spec.ticker}
@@ -879,10 +879,10 @@ class ChartApp:
         # open page, and the symbol list and watchlists waited 17 s behind it), and one answer for the
         # polls that arrive within ACTIVITY_TTL_S of each other: one kept per feed, for the lines and
         # open symbol it was made for (free text in the key kept an answer for every value sent).
-        from ..sources import BUILDERS
+        from ..sources import providers
 
         source = q.get("source") or "massive"
-        source = source if source in BUILDERS else "massive"  # a feed this app has (a page may remember an old one)
+        source = source if source in providers() else "massive"  # a feed this app has (a page may remember an old one)
         lines = max(1, min(int(q.get("lines", 200)), 1000))
         focus = (q.get("open") or "").strip()
         focus = focus if 0 < len(focus) <= 32 else None
@@ -953,20 +953,21 @@ class ChartApp:
         return out
 
     def _feeds(self) -> list[dict]:
-        from ..sources import ARCHIVAL, BUILDERS, feed_profiles
+        from ..sources import feed_profiles, providers
 
         profiles = feed_profiles(self.settings)
         with self._lock:
             watch = self.store.watchlist()
         out = []
-        for name in BUILDERS:
+        for name, plugin in providers().items():
             p, s = profiles.get(name), self.settings.for_source(name)
-            keys = (self.settings.alpaca.has_keys if name == "alpaca" and self.settings.alpaca
-                    else bool(self.settings.tiingo_api_key) if name == "tiingo" else None)
             rows = [w for w in watch if w["source"] == name]
-            closed = name in ARCHIVAL and all(w.get("closed_at") for w in rows)
-            out.append({"name": name, "configured": p is not None, "assets": sorted(p.assets) if p else [],
-                        "plan": s.tier.name, "keys": keys, "archive": name in ARCHIVAL, "closed": closed})
+            closed = plugin.archival and all(w.get("closed_at") for w in rows)
+            out.append({"name": name, "title": plugin.title, "configured": p is not None,
+                        "assets": sorted(p.assets) if p else [], "plan": s.tier.name,
+                        "keys": plugin.keys_set(self.settings), "archive": plugin.archival, "closed": closed,
+                        "keysNote": plugin.missing_keys_note or f"key not set ({plugin.key_hint})",
+                        "keysChip": plugin.missing_keys_chip})
         return out
 
     def icon(self, ticker: str) -> tuple[str, bytes] | None:

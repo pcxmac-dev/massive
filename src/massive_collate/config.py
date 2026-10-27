@@ -148,17 +148,6 @@ PUBLIC_FEEDS: dict[str, tuple[Tier, int, int]] = {
 }
 ALPACA_CRYPTO_LOCS = ("us-1", "eu-1", "us")
 
-# What each server publishes, shown beside the window the app keeps (sources.rate_window).
-# Massive's depends on the plan: see TIERS.
-PUBLISHED_LIMITS: dict[str, str] = {
-    "alpaca": "Basic (free): 200 requests per minute; Algo Trader Plus: 10,000",
-    "bitstamp": "8,000 requests per 10 minutes",
-    "coinbase": "10 requests per second per IP (public endpoints)",
-    "bitfinex": "about 30 candle requests per minute",
-    "cboe": "none published (a public file server)",
-    "tiingo": "free plan: 50 requests per hour, 1,000 per day",
-}
-
 
 class ConfigError(Exception):
     pass
@@ -197,23 +186,20 @@ class Settings:
     # MASSIVE_OFFLINE=1: nothing is fetched and no recorder starts (a test copy of the app on a
     # scratch database must never spend the real plan's requests: its own ledger would not know them).
     offline: bool = False
+    # The variables the provider plugins declare (their keys, plans and options), as read: a
+    # plugin's own settings (sources/registry.py). Keys among them: never in a repr.
+    env: Mapping[str, str] = field(default_factory=dict, compare=False, repr=False)
 
     # The settings a feed view was made from, so any view can switch to another feed.
     origin: "Settings | None" = field(default=None, compare=False, repr=False)
 
     def for_source(self, name: str) -> "Settings":
-        """These settings as seen by one feed: its plan, rate and request caps."""
+        """These settings as seen by one feed: its plan, rate and request caps (its plugin's view)."""
+        from .sources.registry import get
+
         base = self.origin or self
-        if name in PUBLIC_FEEDS:
-            tier, per_run, per_day = PUBLIC_FEEDS[name]
-            if name in ("coinbase", "bitfinex") and base.crypto_venue_days:
-                tier = replace(tier, history_days=base.crypto_venue_days)
-            return replace(base, tier=tier, max_requests_per_run=per_run, max_requests_per_day=per_day, origin=base)
-        if name == "alpaca" and base.alpaca:
-            a = base.alpaca
-            return replace(base, tier=a.tier, max_requests_per_run=a.max_requests_per_run,
-                           max_requests_per_day=a.max_requests_per_day, origin=base)
-        return base
+        p = get(name)
+        return p.settings_view(base) if p else base
 
     def require_api_key(self) -> str:
         if not self.api_key:
@@ -294,12 +280,16 @@ def read_env_file(path: Path) -> dict[str, str]:
 
 
 # API keys set as user environment variables after a process started (the chart app, the runs it
-# starts) are not in its environment; on Windows they are read from the user's saved variables.
-KEY_NAMES = ("MASSIVE_API_KEY", "ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY", "APCA_API_KEY_ID",
-             "APCA_API_SECRET_KEY", "TIINGO_API_KEY")
-# Changed when a plan is bought (and its caps with it): read the same way.
-PLAN_NAMES = ("MASSIVE_TIER", *MASSIVE_CLASS_TIERS.values(), "MASSIVE_MAX_REQUESTS_PER_RUN",
-              "MASSIVE_MAX_REQUESTS_PER_DAY", "ALPACA_PLAN", "GOV_CONTACT")
+# starts) are not in its environment; on Windows they are read from the user's saved variables:
+# every provider plugin's keys and plan variables (sources/registry.py), and these.
+SAVED_NAMES = ("GOV_CONTACT",)
+
+
+def saved_names() -> tuple[str, ...]:
+    """The variables read from the user's saved ones: the plugins' keys, plans and options, and SAVED_NAMES."""
+    from .sources.registry import variables
+
+    return (*variables(), *SAVED_NAMES)
 
 
 def saved_user_keys() -> dict[str, str]:
@@ -312,7 +302,7 @@ def saved_user_keys() -> dict[str, str]:
 
         out = {}
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
-            for name in KEY_NAMES + PLAN_NAMES:
+            for name in saved_names():
                 try:
                     value, _ = winreg.QueryValueEx(key, name)
                 except FileNotFoundError:
@@ -355,6 +345,7 @@ def load_settings(
     per_run = _int_setting(merged, "MASSIVE_MAX_REQUESTS_PER_RUN")
     per_day = _int_setting(merged, "MASSIVE_MAX_REQUESTS_PER_DAY")
     refresh = _float_setting(merged, "MASSIVE_REFRESH_HOURS")  # hours, fractions too (0.5)
+    from .sources.registry import variables
 
     return Settings(
         api_key=merged.get("MASSIVE_API_KEY") or None,
@@ -382,6 +373,7 @@ def load_settings(
         offline=str(merged.get("MASSIVE_OFFLINE", "")).strip().lower() in ("1", "true", "yes", "on"),
         bars_only=str(merged.get("BARS_ONLY", "on")).strip().lower() not in ("off", "0", "false", "no", "none"),
         chart_cache_mb=max(64, _default(_int_setting(merged, "CHART_CACHE_MB"), 1024)),
+        env={n: merged[n] for n in variables() if merged.get(n)},
     )
 
 

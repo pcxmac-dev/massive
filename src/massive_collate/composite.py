@@ -4,7 +4,7 @@ Exchanges differ by a little (fees, who trades there, a premium venue); one cons
 that, and the extremes of a consolidation are set by whichever exchange printed furthest out. So
 each such asset gets two models next to the feeds' own data:
 
-- reference: one exchange's data, the gold standard (`REFERENCE`): Coinbase for crypto; for a US
+- reference: one exchange's data, the gold standard (`reference`): Coinbase for crypto; for a US
   stock its primary listing exchange (its opening and closing auctions are the official prices),
   built from exchange-tagged consolidated ticks when they are stored.
 - composite: per bar, every exchange's bar combined - open, high, low and close as the mean
@@ -28,20 +28,28 @@ import numpy as np
 import pandas as pd
 
 from . import provenance
+from .sources import providers
 
 DAY_MS = 86_400_000
 OUTLIER_BPS = 10.0  # a bar this far from the other exchanges' composite (and > 3 sd) stands out
 QUALITY_SCALE_BPS = 10.0  # median distance at which quality falls to 1/e
 QUALITY_DAYS = 30  # bars of the trailing window that set an exchange's quality
 
-# Gold standard per asset class: one exchange.
-REFERENCE = {"crypto": "coinbase"}
 # Quality before anything is measured, by provenance.
 PRIORS = {"exchange": 1.0, "official": 1.0, "consolidated": 0.9, "vendor": 0.9, "research": 0.85, "mirror": 0.8}
-FEED_KIND = {"massive": "consolidated", "alpaca": "exchange", "coinbase": "exchange", "bitfinex": "exchange",
-             "bitstamp": "exchange", "cboe": "official", "tiingo": "vendor", "composite": "consolidated"}
-# Where a feed's kind depends on the asset class: Alpaca's stocks are the consolidated tape (SIP).
-KIND_BY_ASSET = {("alpaca", "stock"): "consolidated"}
+
+
+def reference(asset: str) -> str | None:
+    """The feed of the gold-standard exchange for an asset class (its plugin's `reference_for`):
+    Coinbase for crypto."""
+    return next((name for name, p in providers().items() if asset in p.reference_for), None)
+
+
+def feed_kind(subject: str, asset: str) -> str:
+    """What a feed's data of an asset class is (its plugin's `kind`; Alpaca's stocks are the
+    consolidated tape); the composite model is a consolidation."""
+    p = providers().get(subject)
+    return p.kind_for(asset) if p else "consolidated" if subject == "composite" else "vendor"
 
 
 def exchange_feeds(feeds: dict, asset: str) -> dict[str, str]:
@@ -56,7 +64,7 @@ def exchange_feeds(feeds: dict, asset: str) -> dict[str, str]:
 
 def reference_feed(feeds: dict, asset: str, watched: set[str]) -> str | None:
     """The feed holding the gold-standard exchange for an asset class, if it is watched here."""
-    ref = REFERENCE.get(asset)
+    ref = reference(asset)
     return ref if ref in watched else None
 
 
@@ -65,8 +73,7 @@ def quality_of(store, subject: str, asset: str) -> float:
     q = store.quality(subject, asset)
     if q is not None:
         return q["score"]
-    kind = KIND_BY_ASSET.get((subject, asset)) or FEED_KIND.get(subject, "vendor")
-    return PRIORS.get(kind, 0.9)
+    return PRIORS.get(feed_kind(subject, asset), 0.9)
 
 
 def combine(bars: dict[str, pd.DataFrame], weights: dict[str, float]) -> pd.DataFrame:

@@ -2,6 +2,15 @@
 
 Working notes so work can resume in a fresh session. Newest first.
 
+## State (2026-10-27)
+
+- **Providers are plugins** (docs/ARCHITECTURE.md, "Providers are plugins"; `sources/registry.py`,
+  `sources/plugins/`): one module per provider holds its build, keys, plan, rate, markets and every
+  fact the app asked about it by name; installed packages add providers through the
+  `massive_collate.providers` entry points. `tools/set-key.ps1` is a menu of the plugins (set,
+  replace or remove a provider's keys); `python -m massive_collate plugins` lists them. Not moved
+  yet: the live recorder's streams. The chart app on 8765 and the live recorder run it once restarted.
+
 ## State (2026-10-26, afternoon)
 
 - **Review fixes merged** (CODE_REVIEW.md, "Implemented"); the sync and the chart app run them.

@@ -580,14 +580,14 @@ class BarEngine:
         A feed of one exchange's share of a market (IEX's trades) comes after every feed of the
         whole market, so a merged chart shows it only where none of them has bars (the current
         session, until a sync downloads it)."""
-        from ..composite import REFERENCE
+        from ..composite import reference as reference_of
 
         with self._lock:
             stored = [(s, k) for s, t, k in self.store.stored_series() if t == ticker.upper()]
             have = {s for s, _ in stored}
             rows = self.store.watchlist(ticker=ticker)
             have |= {w["source"] for w in rows if w["asset"] == "future"}  # continuous futures are stored under their contracts
-            reference = REFERENCE.get(next((w["asset"] for w in rows), "stock"))
+            reference = reference_of(next((w["asset"] for w in rows), "stock"))
             fine = {s for s, k in stored if k in ("trades", "second")}
             return self.rank_sources(have, fine, reference, self.quality or (lambda s: 1.0))
 

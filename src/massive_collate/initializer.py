@@ -22,8 +22,15 @@ BULK_KEY = "init:bulk"  # [ticker]: the symbols it added (kept at minute resolut
 # directory keeps BACPE), so they would be asked for under the wrong symbol: left out until the
 # directory keeps the case.
 SKIP_TYPES = ("PFD",)
-# Feeds with ticks take bulk symbols at minute resolution; the others collect what they have.
-BULK_RESOLUTION = {"massive": "minute", "alpaca": "minute"}
+
+
+def bulk_resolution(feed: str) -> str:
+    """Feeds with ticks take bulk symbols at minute resolution (their plugin's `bulk_resolution`);
+    the others collect what they have."""
+    from .sources import providers
+
+    p = providers().get(feed)
+    return p.bulk_resolution if p else "auto"
 
 
 def load_order(store) -> dict[str, int]:
@@ -52,7 +59,7 @@ def initialize(store, feeds: list[str], exchanges=EXCHANGES, by: str = "value", 
         bulk |= {t for tickers in new.values() for t in tickers if t not in watched}
         if not dry_run:
             for mic, tickers in new.items():  # one transaction per exchange
-                store.watch(feed, tickers, BULK_RESOLUTION.get(feed, "auto"), exchange=mic)
+                store.watch(feed, tickers, bulk_resolution(feed), exchange=mic)
     out = {"listed": len(ranked), "ranked": sum(r["measure"] is not None for r in ranked), "added": added,
            "top": [r["ticker"] for r in ranked[:20]], "exchanges": list(exchanges), "by": by}
     if not dry_run:

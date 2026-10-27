@@ -110,17 +110,19 @@ def checks(store: Store, settings, source: str = "massive", now: datetime | None
                      f"{len(rules)} tape condition codes with bar rules" if rules else "none stored yet",
                      "" if rules or not have_ticks else
                      "fetched weekly with the Massive sync; until then bars from ticks count every trade"))
-    from .sources import ARCHIVAL
+    from .sources import providers
 
-    for name in sorted(ARCHIVAL):
+    for name, p in sorted(providers().items()):
+        if not p.archival:
+            continue
         rows = store.watchlist(name)
         shut = sum(1 for w in rows if w.get("closed_at"))
-        keyless = name == "tiingo" and not getattr(settings, "tiingo_api_key", None)
+        keyless = p.keys_set(settings) is False
         status = "WARN" if keyless and rows else "OK"
         found = ("nothing watched" if not rows else "closed: archive complete" if shut == len(rows)
                  else f"{shut} of {len(rows)} symbols complete")
-        out.append(Check("Public archives", name, status, found + ("; TIINGO_API_KEY not set" if keyless else ""),
-                         "a free tiingo.com account key (TIINGO_API_KEY) adds stock daily history from 1962"
+        out.append(Check("Public archives", name, status, found + (f"; {p.key_hint} not set" if keyless else ""),
+                         f"set {p.key_hint} (from {p.signup or p.title}) for {p.about}"
                          if keyless and rows else ""))
     from .coverage import same_market
     from .sources import feed_profiles

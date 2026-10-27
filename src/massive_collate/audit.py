@@ -65,8 +65,13 @@ def allowance(source) -> int:
     """Requests a run's audits may use: AUDIT_SHARE of its cap, at least one audit."""
     cap = getattr(getattr(source, "client", None), "request_budget", None)
     return max(1, int(cap * AUDIT_SHARE)) if cap else 1
-# What each feed's crypto bars are (the same pair can be different markets).
-VENUES = {("massive", "crypto"): "consolidated across exchanges", ("alpaca", "crypto"): "one exchange's book (Kraken)"}
+def venue_note(feed: str, asset: str) -> str | None:
+    """What a feed's bars of an asset class are (its plugin's `venue_notes`): the same crypto pair
+    can be different markets."""
+    from .sources import providers
+
+    p = providers().get(feed)
+    return p.venue_notes.get(asset) if p else None
 
 
 def box(values) -> dict | None:
@@ -187,7 +192,7 @@ def audit_span(auditor, store, ticker: str, timespan: str, a: int, b: int, owner
     # Crypto feeds may cover different venues (consolidated vs one exchange): same prices, other volumes.
     report = compare(_stored(store, owner, ticker, timespan, a, b), theirs, STEP_MS.get(timespan, 60_000),
                      judge_volume=row["asset"] != "crypto")
-    venues = {f: VENUES.get((f, row["asset"])) for f in (owner, auditor.name)}
+    venues = {f: venue_note(f, row["asset"]) for f in (owner, auditor.name)}
     if row["asset"] == "crypto" and venues[owner] != venues[auditor.name]:
         # Not the same market: a consolidated price takes each minute's extremes across exchanges,
         # one exchange's book does not. The verdict stands; this says why highs/lows may differ.

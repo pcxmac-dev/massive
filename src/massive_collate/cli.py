@@ -18,7 +18,7 @@ from .storage.feeds import TicksBlocked
 from .errors import NotEntitled, SourceError
 from .sessions import ET
 from .symbols import resolve
-from .sources import ARCHIVAL, BUILDERS, DataSource, build_source, feed_profiles, supports
+from .sources import DataSource, build_source, feed_profiles, is_archive, providers, supports
 from .storage import Store, feeds_backup_dir
 
 TASK_NAME = "MassiveCollateSync"
@@ -238,7 +238,7 @@ def cmd_watch(args, settings: Settings) -> int:
             if args.action == "add":
                 store.watch_spec(args.source, spec, args.resolution)
                 if getattr(args, "every_feed", False):  # also on every other feed that can collect it
-                    for feed in BUILDERS:
+                    for feed in providers():
                         if feed != args.source and supports(feed, spec):
                             store.watch_spec(feed, spec, "auto")
             elif args.action == "remove":
@@ -317,9 +317,8 @@ def cmd_initialize(args, settings: Settings) -> int:
     traded first (initializer.py). Sends no requests; the hourly syncs then backfill them in
     that order, within each feed's caps."""
     from . import initializer
-    from .sources import SUPPORTED_ASSETS
 
-    feeds = [f for f in BUILDERS if "stock" in SUPPORTED_ASSETS.get(f, ())]
+    feeds = [name for name, p in providers().items() if "stock" in p.assets]
     exchanges = tuple(e.strip().upper() for e in args.exchanges.split(",") if e.strip())
     with Store(settings.db_path) as store:
         out = initializer.initialize(store, feeds, exchanges, by=args.by, dry_run=args.dry_run)
@@ -433,7 +432,7 @@ def cmd_gov(args, settings: Settings) -> int:
 def _sync(args, settings: Settings) -> tuple[int, int]:
     """The feeds' downloads: (exit code, feeds that ran)."""
     tickers = {t.upper() for t in getattr(args, "tickers", None) or []} or None
-    names = list(BUILDERS) if args.all_sources else [args.source]
+    names = list(providers()) if args.all_sources else [args.source]
     with Store(settings.db_path) as store:
         separated = store.kv_get("built-bars:separated:v1")
         _note_tier(store, settings, Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
@@ -595,7 +594,7 @@ def _derive(store: Store, tickers, log) -> int:
     from . import derive
 
     if not store.kv_get(SUPERSEDED_KEY):
-        for feed in BUILDERS:
+        for feed in providers():
             n = store.drop_superseded_built(feed)
             if n:
                 log(f"derive {feed}: {n:,} built bars replaced by the feed's own")
@@ -619,9 +618,8 @@ def cmd_kills(args, settings: Settings) -> int:
     from datetime import timedelta, timezone
 
     from . import killswitch
-    from .sources import BUILDERS
 
-    feeds = list(BUILDERS) + ["iex"]
+    feeds = list(providers()) + ["iex"]
     with Store(settings.db_path) as store:
         if args.action == "kill":
             kinds = killswitch.KINDS if args.kind == "both" else (args.kind,)
@@ -760,7 +758,7 @@ def _day(ms: int | None) -> str:
 
 def _feed_closed(settings: Settings, name: str) -> bool:
     """A closed feed (public archive) whose symbols are all closed, or that has none: nothing to ask."""
-    if name not in ARCHIVAL:
+    if not is_archive(name):
         return False
     with Store(settings.db_path) as store:
         rows = store.watchlist(name)
@@ -771,21 +769,48 @@ def cmd_feeds(args, settings: Settings) -> int:
     """Every feed, its state and plan; `reopen` lets a closed feed (or one of its symbols) fill again."""
     with Store(settings.db_path) as store:
         if args.action == "reopen":
-            if args.name not in BUILDERS:
+            if args.name not in providers():
                 print(f"unknown feed {args.name}")
                 return 1
             n = store.set_closed(args.name, resolve(args.ticker).ticker if args.ticker else None, None)
             print(f"{args.name}: {n} symbols reopened; the next sync fills what they still lack")
             return 0
         profiles = feed_profiles(settings)
-        for name in BUILDERS:
+        for name, p in providers().items():
             rows = store.watchlist(name)
             shut = sum(1 for w in rows if w.get("closed_at"))
-            kind = "closed feed (public archive)" if name in ARCHIVAL else "live feed"
+            kind = "closed feed (public archive)" if p.archival else "live feed"
             state = ("closed: archive complete" if rows and shut == len(rows) else "nothing watched" if not rows
-                     else f"{shut} of {len(rows)} symbols closed" if name in ARCHIVAL else "open")
+                     else f"{shut} of {len(rows)} symbols closed" if p.archival else "open")
             served = ", ".join(sorted(profiles[name].assets)) if name in profiles and profiles[name].assets else "-"
             print(f"{name:9} {kind:29} {settings.for_source(name).tier.name:16} serves: {served:28} {state}")
+    return 0
+
+
+def cmd_plugins(args, settings: Settings | None) -> int:
+    """The provider plugins (sources/registry.py): each one's keys, set or not (never their values),
+    what it serves here and where it came from; the ones that failed to load. --json: the same for
+    tools/set-key.ps1's menu (listed even when a setting is wrong: settings is None then)."""
+    import json
+
+    from .sources import registry
+
+    rows = registry.menu(settings)
+    left_out = registry.errors()
+    if args.json:
+        print(json.dumps({"providers": rows, "errors": [{"where": w, "why": why} for w, why in left_out]}))
+        return 0
+    for r in rows:
+        keys = ", ".join(k["name"] for k in r["keys"]) or "no key needed"
+        if r.get("keysSet") is not None:
+            keys += " (set)" if r["keysSet"] else f" (not set{': ' + ', '.join(r['keyless']) + ' only' if r['keyless'] else ''})"
+        serves = ", ".join(r.get("serves") or []) or "-"
+        print(f"{r['name']:9} {r['title']:10} {'archive' if r['archive'] else 'feed':8} {keys:58} serves: {serves}")
+        print(f"{'':9} {r['about']}" + (f"; keys from {r['signup']}" if r["signup"] else "")
+              + ("" if r["origin"] == "built in" else f" [{r['origin']}]"))
+    for where, why in left_out:
+        print(f"left out: {where}: {why}")
+    print("Set or remove a provider's keys: powershell -NoProfile -ExecutionPolicy Bypass -File .\\tools\\set-key.ps1")
     return 0
 
 
@@ -810,7 +835,7 @@ def cmd_scan(args, settings: Settings) -> int:
     With --all-sources every configured feed is scanned in turn (each only for its own spans)."""
     if getattr(args, "all_sources", False):
         for name in feed_profiles(settings):
-            if name in ARCHIVAL:
+            if is_archive(name):
                 continue  # closed feeds are not rechecked
             args.source = name
             _scan_one(args, settings)
@@ -1013,11 +1038,13 @@ def cmd_status(args, settings: Settings) -> int:
         s = store.summary(counts=args.counts)
         print(f"database: {s['db_path']} ({s['size_bytes'] / 1e6:.1f} MB)")
         print(f"feeds: {s['feeds_dir']} " + ", ".join(f"{k} {v / 1e9:.2f} GB" for k, v in s["feed_bytes"].items()))
-        for src in BUILDERS:
+        for src, p in providers().items():
             feed = settings.for_source(src)
             t = feed.tier
             history = f"from {t.history_start}" if t.history_start else f"{t.history_years or 'unlimited'} years"
-            keys = "" if src != "alpaca" or not settings.alpaca else                 f", keys {'set' if settings.alpaca.has_keys else 'not set (crypto only)'}"
+            has = p.keys_set(settings)
+            keys = "" if has is None else ", keys set" if has else \
+                f", keys not set ({', '.join(sorted(p.keyless))} only)" if p.keyless else ", key not set"
             print(f"{src}: plan {t.name}, {t.requests_per_minute or 'unlimited'} requests/min, history {history}, "
                   f"caps {feed.max_requests_per_run}/run {feed.max_requests_per_day}/day, "
                   f"requests today {store.requests_today(src)}{keys}")
@@ -1195,7 +1222,7 @@ def cmd_schedule(args, settings: Settings) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="massive_collate", description=__doc__)
-    p.add_argument("--source", default="massive", choices=sorted(BUILDERS), help="data source (default: massive)")
+    p.add_argument("--source", default="massive", choices=sorted(providers()), help="data source (default: massive)")
     sub = p.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("watch", help="manage the watchlist")
@@ -1227,7 +1254,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("ticker", nargs="?", help="a watched symbol (default: random stored sessions)")
     s.add_argument("--day", type=_date, help="the session to audit (default: a random one)")
     s.add_argument("--random", type=int, default=1, help="random sessions to audit when no ticker is given")
-    s.add_argument("--auditor", choices=sorted(BUILDERS), help="feed asked for the second copy (default: --source)")
+    s.add_argument("--auditor", choices=sorted(providers()), help="feed asked for the second copy (default: --source)")
     s.add_argument("--list", action="store_true", help="show recent audits instead of running one")
     s.add_argument("--daily", action="store_true",
                    help="fast audit: every stock's daily bars held from its listing date? (no requests)")
@@ -1249,6 +1276,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("name", nargs="?", help="reopen: the feed")
     s.add_argument("ticker", nargs="?", help="reopen: only this symbol")
     s.set_defaults(func=cmd_feeds)
+
+    s = sub.add_parser("plugins", help="the data providers (a plugin each): keys set or not, what each serves")
+    s.add_argument("--json", action="store_true", help="as JSON (tools/set-key.ps1's menu); no key's value")
+    s.set_defaults(func=cmd_plugins, settings_optional=True)
 
     s = sub.add_parser("deps", help="check every external dependency (data feeds, calendars, icons, files)")
     s.set_defaults(func=cmd_deps)
@@ -1397,7 +1428,12 @@ def main(argv: list[str] | None = None) -> int:
     if isinstance(getattr(args, "ticker", None), str) and args.command not in ("probe",):
         args.ticker = resolve(args.ticker).ticker  # data commands accept SPCX::NASDAQ, USDEUR, NQ1! ...
     try:
-        settings = load_settings()
+        try:
+            settings = load_settings()
+        except ConfigError:
+            if not getattr(args, "settings_optional", False):
+                raise
+            return args.func(args, None)  # the providers are listed even with a wrong setting
         from .storage.feeds import set_tick_access
 
         set_tick_access(not settings.bars_only)  # bars-only: no store this command opens reads ticks

@@ -134,10 +134,13 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
     only the first `detail` rows by relevance (`ranked`), and the `focus` tickers, get it (each
     marked `planned`); the others keep the estimate from what the feed holds itself."""
     from ..coverage import plan
-    from ..sources import feed_profiles
+    from ..sources import feed_profiles, providers
 
     today = now.date()
     profiles = feed_profiles(settings)
+    plugin = providers().get(source)
+    per_request = plugin.bars_per_request if plugin else None
+    keys_missing = bool(plugin and plugin.keys_set(settings) is False)
     settings = settings.for_source(source)
     me = profiles.get(source)
     holders = store.series_holders()  # once, not once a symbol
@@ -160,7 +163,7 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
         horizon = now if item["ticker"] in live_too else freshness.history_horizon(item["asset"], settings.tier, now)
         row = symbol_status(item, edges, floor, today, now, settings.tier, current,
                             store.probe(source, item["ticker"]), newest[1] if newest else None,
-                            10_000 if source == "alpaca" else None, horizon=horizon)
+                            per_request, horizon=horizon)
         if item.get("closed_at"):
             row.update(state="closed", requestsLeft=0, progress=1.0, note="archive complete: not asked again")
         elif item.get("retired_on"):
@@ -169,7 +172,7 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
         elif me is not None and item["asset"] != "future" and item["resolution"] != "trades" \
                 and item["asset"] not in me.assets:
             row.update(state="blocked", requestsLeft=0,
-                       note="keys not set" if source == "alpaca" else f"{source} has no {item['asset']} data here")
+                       note="keys not set" if keys_missing else f"{source} has no {item['asset']} data here")
         elif row["state"] != "fetching" and item["ticker"] in asked and (
                 item.get("synced_at") is None or item["synced_at"] < asked[item["ticker"]]["at"]) \
                 and collector.feed_needs(item, settings.tier, now):  # asked of this feed only if it has something
@@ -191,7 +194,7 @@ def symbol_rows(store: Store, settings: Settings, source: str, now: datetime, cu
         gaps = plan(store, me, profiles, item["ticker"], item["asset"], "minute", item_floor, now, item.get("listed_from"))
         missing_days = sum(b - a for a, b in gaps) / 86_400_000
         per_day = MINUTES_PER_DAY.get(item["asset"], 960) * (1 if item["asset"] == "crypto" else 5 / 7)
-        row["requestsLeft"] = math.ceil(missing_days * per_day / (10_000 if source == "alpaca" else BARS_PER_REQUEST))
+        row["requestsLeft"] = math.ceil(missing_days * per_day / (per_request or BARS_PER_REQUEST))
         row["gapDays"] = round(missing_days, 1)
         if row["state"] in ("queued", "backfilling") and missing_days < 1:
             row.update(state="current", progress=1.0)  # other feeds hold the rest
@@ -317,16 +320,15 @@ def limits(store: Store, settings: Settings, now: datetime) -> list[dict]:
     """Every server's limits beside what this machine keeps to and has used: the request window
     (and how full it is now, from the window runs share), the caps per run and per day, today's
     requests, and a wait in progress (a full window or a server's Retry-After) with its reason."""
-    from ..config import PUBLISHED_LIMITS
     from ..ratelimit import describe, load_times, wait_key, window_state
-    from ..sources import BUILDERS, rate_window
+    from ..sources import providers
 
     t = now.timestamp()
     rows = []
-    for name in BUILDERS:
+    for name, p in providers().items():
         feed = settings.for_source(name)
-        calls, period = rate_window(name, settings)
-        published = PUBLISHED_LIMITS.get(name) or (
+        calls, period = p.rate_window(settings)
+        published = p.limits or (  # Massive's depends on the plan
             f"{feed.tier.name} plan: {describe(feed.tier.requests_per_minute, 60.0)}")
         wait = store.kv_json(wait_key(name))
         used = store.requests_today(name)
@@ -340,10 +342,6 @@ def limits(store: Store, settings: Settings, now: datetime) -> list[dict]:
     return rows
 
 
-KEY_NAMES = {"massive": "MASSIVE_API_KEY", "tiingo": "TIINGO_API_KEY",
-             "alpaca": "ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY"}
-
-
 def health(store: Store, settings: Settings, now: datetime, limit_rows: list[dict], running: dict | None) -> list[dict]:
     """Each source's state, for the Fetcher view and the status bar, with why:
     - fetching: a run of it is going now;
@@ -354,20 +352,20 @@ def health(store: Store, settings: Settings, now: datetime, limit_rows: list[dic
     - done: a public archive with every symbol filled (not asked again);
     - ok: its last run went through (stopping at its per-run cap is how backfills go);
     - idle: it has not run yet."""
-    from ..sources import ARCHIVAL, BUILDERS, feed_profiles
+    from ..sources import feed_profiles, providers
 
     profiles = feed_profiles(settings)
     limits_by = {r["source"]: r for r in limit_rows}
     last = store.last_runs()
     t = now.timestamp()
     out = []
-    for name in BUILDERS:
+    for name, plugin in providers().items():
         p, lim, run = profiles.get(name), limits_by.get(name, {}), last.get(name)
         msg = (run or {}).get("message") or ""
         if settings.offline:
             state, why = "off", "this copy of the app is offline (MASSIVE_OFFLINE): it fetches nothing"
         elif p is None or not p.assets:
-            state, why = "off", f"key not set ({KEY_NAMES.get(name, 'key')})"
+            state, why = "off", f"key not set ({plugin.key_hint or 'key'})"
         elif kill := killswitch.killed(store, name, "fetch", now):
             state, why = "killed", (f"killed until {kill['until'][11:16]} UTC (strike {kill.get('strikes', 1)}): "
                                     f"{kill['why'][:140]}; `kills release {name}` lifts it")
@@ -381,7 +379,7 @@ def health(store: Store, settings: Settings, now: datetime, limit_rows: list[dic
             state, why = "limited", f"the server rate-limited the last run: {msg[:160]}"
         elif lim.get("wait") and lim["wait"].get("until", 0) - t > 30:
             state, why = "limited", f"waiting {round(lim['wait']['until'] - t)} s: {lim['wait'].get('reason', '')}"
-        elif name in ARCHIVAL and all(w.get("closed_at") for w in store.watchlist(name)) and store.watchlist(name):
+        elif plugin.archival and all(w.get("closed_at") for w in store.watchlist(name)) and store.watchlist(name):
             state, why = "done", "archive complete: every symbol filled, not asked again"
         elif run is None:
             state, why = "idle", "has not run yet"

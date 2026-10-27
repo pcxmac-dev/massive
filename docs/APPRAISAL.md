@@ -55,7 +55,8 @@ watchlist and the catalog; a read-only connection per server thread (WAL allows 
 archive, futures, stocks, audits and directory; `cli._sync` runs feeds one after another under one
 run lock. Limits are per feed already, so per-feed locks are safe; pick due symbols in SQL.
 
-7. **One registry per feed** (medium): a feed's facts live in eight places (`sources/__init__.py`
+7. **One registry per feed** (medium; done 2026-10-27: providers are plugins, `sources/registry.py`,
+docs/ARCHITECTURE.md; the live streams still apart): a feed's facts live in eight places (`sources/__init__.py`
 `rate_window`, `BUILDERS`, `ARCHIVAL`, `SUPPORTED_ASSETS`, `supports`, `feed_profiles`, `markets`;
 `composite.py`; `config.py`; `live.py`; `gui/bars.py`). One `FeedSpec` each.
 

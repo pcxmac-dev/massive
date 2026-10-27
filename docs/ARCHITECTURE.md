@@ -124,6 +124,38 @@ live recorder, whose "what changed since" read every bar's `stored_at`, had read
   (private bytes, working set) and disk reads, apart from Windows' file cache: active (held) and
   standby (handed back whenever anything needs it, counted as available).
 
+## Providers are plugins (2026-10-27)
+
+Every data provider the fetcher uses is a plugin: one `Provider` record (`sources/registry.py`)
+holding everything the app knows about it, so nothing else names a provider to decide how to treat
+it. The built-in ones are `sources/plugins/` (Massive, Alpaca, Bitstamp, Coinbase, Bitfinex, Cboe,
+Tiingo), one module each defining `PLUGIN`; their data-source classes stay in `sources/massive.py`,
+`alpaca.py` and `public.py`. A module added to `sources/plugins/` is found on the next start; a
+provider shipped as its own package registers under the entry point group `massive_collate.providers`.
+A plugin that fails to load is left out and reported (`plugins`), never fatal.
+
+- **What a plugin gives.** `build(settings, request_budget)` returns its `DataSource` with its
+  limiter and caps (`registry.limiter`, `machine_caps`, `public_client` help). Facts: its keys
+  (`KeyVar`, aliases too) and where to get them, its plan variables, the asset classes it collects
+  and those it serves without keys, whether it is a closed archive, what its server publishes, its
+  kind of data for the composite model, the exchange it is the reference for, its audits' venue
+  notes, bars per request, a monthly symbol cap, the bulk symbols' resolution, its Fetcher hints.
+- **Callbacks** where a fact depends on the settings: `view` (its plan and caps: `Settings.for_source`),
+  `rate` (its limiter's window), `has_keys`, `serves` (None: not set up here at all), `markets`
+  (which market each asset class is) and `carries` (its own list of symbols). Left out, each takes a
+  default: a plan from `tier`/`per_run`/`per_day`, the plan's rate a minute, keys set when every
+  key's variable is, each asset class its own market.
+- **Keys and settings.** Keys stay in the user's environment variables only. `Settings.env` holds
+  the variables the plugins declare (never in a repr), read like the built-ins' from the saved user
+  variables too (`config.saved_names`). `tools/set-key.ps1` asks the app for the plugins
+  (`python -m massive_collate plugins --json`: names and whether set, never a value) and offers a
+  menu per provider: set, replace or remove its keys, typed hidden.
+- **Read everywhere from the registry**: the sync's feed list and `--source` choices, feed profiles
+  and the one-download-per-span rule, the Fetcher's tabs, rows, limits and health, `status`, `feeds`,
+  `deps`, the composite model's reference and priors, audits, the initializer, the monthly caps.
+  Not yet: the live recorder's streams (`live.STREAMS`, Alpaca's IEX stream) and Massive's own
+  commands (`plan`, the plan-change check).
+
 ## Schemes and replay (2026-10-25)
 
 **Schemes** are trading algorithms run over a stretch of time on the Analysis view: the highlight

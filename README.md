@@ -69,11 +69,15 @@ python -m pip install -e ".[dev]"
 
 Save each API key with `tools/set-key.ps1`: it asks for the key with the input hidden (not shown,
 not kept in the shell's history, not written to a file) and saves it as a user environment variable,
-where the app reads keys. Without a name it lists the keys and marks the ones already set; `-Remove`
-deletes one. Restart running processes (the sync, the chart app) after setting a key.
+where the app reads keys. Without a name it shows a menu of the data providers (each a plugin of the
+app, so a new provider appears by itself), their keys and which are set: pick one to set, replace or
+remove its keys. With a provider's name (`tiingo`) or one key's variable (`TIINGO_API_KEY`) it goes
+straight there; `-Remove` deletes, `-List` only shows. Restart running processes (the sync, the
+chart app) after setting a key. `python -m massive_collate plugins` lists the same providers.
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\set-key.ps1 TIINGO_API_KEY
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\set-key.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\set-key.ps1 tiingo
 ```
 
 Set your plan the same way, as a user environment variable (not a secret):

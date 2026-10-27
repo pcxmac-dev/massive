@@ -21,6 +21,7 @@ from .errors import BudgetExhausted, NotEntitled, Paused, RateLimited, SourceErr
 from . import freshness
 from .futures import candidate_contracts, roll_schedule
 from .coverage import STEP_MS, FeedProfile, frame_parts, frontier_ms, has_open_time, ms, plan, second_floor
+from .sources import is_archive, providers
 from .sources.base import DataSource
 from .symbols import ASSETS
 from .storage import Store
@@ -759,9 +760,10 @@ class Refusals:
             self._save()
 
 
-# Feeds whose plan limits how many different symbols a month may be asked for (Tiingo's free plan:
-# 500): kept a little inside, taken in the watchlist's order (the most traded first).
-SYMBOLS_PER_MONTH = {"tiingo": 450}
+# Feeds whose plan limits how many different symbols a month may be asked for (their plugin's
+# `symbols_per_month`; Tiingo's free plan: 500, kept a little inside), taken in the watchlist's
+# order (the most traded first).
+SYMBOLS_PER_MONTH = {name: p.symbols_per_month for name, p in providers().items() if p.symbols_per_month}
 
 
 def _monthly_symbol(store: Store, feed: str, ticker: str, now: datetime) -> bool:
@@ -951,16 +953,14 @@ def feed_needs(row: dict, tier: Tier, now: datetime) -> bool:
     """Whether a feed has something to fetch now for its watchlist `row`: history it still lacks,
     or data its plan has published since its last sync (the same rule the sync skips by: nothing
     new can exist out of session, or before an end-of-day plan's release; a retired symbol,
-    nothing after its last listed day). A closed archive (sources.ARCHIVAL) fills each symbol once,
+    nothing after its last listed day). A closed archive (sources.is_archive) fills each symbol once,
     in its own order, and has nothing current: one it has not visited yet does not count (SPCX
     read "next in line" for hours for Tiingo's turn, with every other feed up to date)."""
-    from .sources import ARCHIVAL
-
     synced, end = row.get("synced_at"), retired_end(row)
     if row.get("closed_at"):
         return False
     if synced is None:
-        return row["source"] not in ARCHIVAL
+        return not is_archive(row["source"])
     return _backfilling(row, history_floor(tier, now.astimezone(ET).date(), row["asset"])) or (
         _due(row["asset"], tier, synced, now, 0.0) and (end is None or synced < end))
 
