@@ -113,6 +113,23 @@ def test_always_streams_every_coin_from_the_start(tmp_path):
     assert rec._streamed(coinbase, T0, {}) == {"BTCUSD": T0, "ETHUSD": T0}
 
 
+def test_the_recorder_builds_only_what_it_recorded(tmp_path, monkeypatch):
+    """With nothing streamed it reads nothing: it rebuilt every coin's frames each minute, so it read
+    what the sync's backfill changed (0.5 to 1 GB a minute with no stream connected)."""
+    from massive_collate import derive
+
+    calls = []
+    monkeypatch.setattr(derive, "run", lambda store, sources=None, tickers=None, log=None: calls.append(tickers) or 7)
+    rec = live.Recorder(tmp_path / "m.db", coins=("BTC", "ETH"), sources=("coinbase",), log=lambda *_: None,
+                        connect=lambda url: None, selected_only=True)
+    with Store(tmp_path / "m.db", ticks=True) as store:
+        assert rec.derive_recorded(store) == 0 and calls == []  # nothing recorded: nothing read
+        rec._buffer[("coinbase", "BTCUSD")].append(live._trade((T0 + 1_000) * 1_000_000, 1, "100.5", "0.1", 1))
+        rec.flush(store, now_ms=T0 + 5_000)
+        assert rec.derive_recorded(store) == 7 and calls == [{"BTCUSD"}]  # only the pair it streamed
+        assert rec.derive_recorded(store) == 0 and len(calls) == 1
+
+
 def test_the_status_says_idle_not_down(tmp_path, capsys):
     from massive_collate import cli
 

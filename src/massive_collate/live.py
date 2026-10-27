@@ -344,6 +344,7 @@ class Recorder:
         self._rules: dict[str, tuple[float, dict, str]] = {}  # feed -> (read at, its condition rules, their digest)
         self._derivations: dict[tuple[str, str, int, str | None], int] = {}  # (feed, symbol, day, rules digest) -> id
         self._built: dict[int, int] = defaultdict(int)
+        self._touched: set[str] = set()  # symbols with trades stored since the last derive_recorded
         if self.connect is None:
             from .wsclient import WebSocket
 
@@ -676,6 +677,7 @@ class Recorder:
                 store.add_coverage(source, ticker, timespan, lo, now_ms, origin="ticks")
             for did in dids:
                 store.set_derivation_rows(did, self._built[did])
+            self._touched.add(ticker)
             last = next((t for t in reversed(trades) if not t.get("withdrawn")), None)
             with self._lock:
                 pair = self._status[source]["pairs"].setdefault(ticker, {"trades": 0})
@@ -726,10 +728,7 @@ class Recorder:
                         break
                     total += self.flush(store)
                     if time.time() - last_derive > DERIVE_SECONDS:
-                        from . import derive
-
-                        derive.run(store, sources={s.source for s in self.streams},
-                                   tickers={f"{c}USD" for c in self.coins} | set(self._wanted), log=lambda *_: None)
+                        self.derive_recorded(store)
                         last_derive = time.time()
                 except Exception as e:  # noqa: BLE001 - a locked database, say: logged, the trades kept, tried again
                     self.log(f"live: {type(e).__name__}: {e}; trying again")
@@ -741,6 +740,22 @@ class Recorder:
                 self.flush(store)
             except Exception as e:  # noqa: BLE001
                 self.log(f"live: the last flush failed: {e}")
+
+    def derive_recorded(self, store) -> int:
+        """Build the frames above a minute for the symbols this recorder stored trades of since it
+        last did: nothing streamed, nothing read. (It rebuilt every coin's each minute, and so read
+        what the sync's backfill changed, 0.5 to 1 GB a minute with no stream connected; the sync
+        builds what it downloads itself.) Returns bars built."""
+        touched, self._touched = self._touched, set()
+        if not touched:
+            return 0
+        from . import derive
+
+        try:
+            return derive.run(store, sources={s.source for s in self.streams}, tickers=touched, log=lambda *_: None)
+        except Exception:
+            self._touched |= touched  # tried again with the next
+            raise
 
     def holds_locks(self) -> bool:
         """Whether every lock this recorder took still names it."""
