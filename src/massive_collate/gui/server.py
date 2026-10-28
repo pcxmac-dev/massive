@@ -143,6 +143,7 @@ class ChartApp:
         self._open_noted: dict[str, int] = {}  # ticker -> ms it was last noted open (note_open)
         self._derive_proc: subprocess.Popen | None = None  # a build started by start_derive
         self._gov_db, self._gov_lock = None, threading.Lock()  # gov/gov.db, opened on first use
+        self._recheck: tuple | None = None  # a publisher's limits recheck: (thread, {name, since})
         self._paper, self._paper_lock = None, threading.RLock()  # the paper account (paper), opened on first use
         self._monitor, self._monitor_lock = None, threading.Lock()  # the Resources view's sampler, made on first use
 
@@ -575,6 +576,60 @@ class ChartApp:
                 self._gov_db = gov.GovDB(gov.db_path(self.store.path))
             return gov.view(self._gov_db, contact_set=bool(self.settings.gov_contact), spx_close=self._spx_close())
 
+    def publishers(self) -> list[dict]:
+        """The publisher plugins for the Plugins view (publications.view): each one's state, feeds,
+        scrape checks, limits as last verified, schedule. Read from gov/gov.db and the kills: no requests."""
+        from .. import gov, publications
+
+        with self._gov_lock:
+            if self._gov_db is None:
+                self._gov_db = gov.GovDB(gov.db_path(self.store.path))
+            with self._lock:
+                return publications.view(self._gov_db, self.settings, self.store)
+
+    def start_recheck(self, name: str) -> dict:
+        """Verify a publisher's limits now (publications.recheck_now) in a thread: robots.txt read
+        again and each feed asked once, never within its floor."""
+        from .. import publications
+        from ..sources import publishers
+
+        if self.settings.offline:
+            raise RuntimeError("offline (MASSIVE_OFFLINE): this copy of the app sends no requests")
+        if name not in publishers():
+            raise LookupError(f"no publisher named {name}")
+        if self._recheck and self._recheck[0].is_alive():
+            raise RuntimeError("a recheck is already running")
+        log = _log_to(self.store.path)
+
+        def run() -> None:
+            try:
+                if publications.recheck_now(self.settings, name, log) is None:
+                    log(f"publications: {name}: not rechecked (not set up here, or another reader held the lock)")
+            except Exception as e:  # noqa: BLE001 - logged; the view shows the last findings kept
+                log(f"publications: {name}: recheck failed ({type(e).__name__}: {e})")
+            finally:
+                self._plugins_cache = None
+        t = threading.Thread(target=run, name=f"recheck-{name}", daemon=True)
+        self._recheck = (t, {"name": name, "since": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+        self._plugins_cache = None
+        t.start()
+        return {"started": True, "name": name}
+
+    def _recheck_running(self) -> dict | None:
+        return self._recheck[1] if self._recheck and self._recheck[0].is_alive() else None
+
+    def pause_publisher(self, name: str, on: bool) -> dict:
+        """Pause a publisher by hand (until resumed), or resume it."""
+        from .. import publications
+        from ..sources import publishers
+
+        if name not in publishers():
+            raise LookupError(f"no publisher named {name}")
+        with self._lock:
+            kill = publications.pause(self.store, name, on)
+        self._plugins_cache = None
+        return {"name": name, "paused": bool(on), "kill": kill}
+
     @property
     def monitor(self):
         """The Resources view's sampler (resources.Monitor): it samples in the background once
@@ -628,8 +683,9 @@ class ChartApp:
         from . import plugins
 
         running = self._rescan_running()
+        rechecking = self._recheck_running()
         hit = self._plugins_cache
-        if hit and time.monotonic() - hit[0] < self.PLUGINS_TTL_S and hit[2] == bool(running):
+        if hit and time.monotonic() - hit[0] < self.PLUGINS_TTL_S and hit[2] == (bool(running), bool(rechecking)):
             return hit[1]
         settings = self.settings
         feeds = feed_profiles(settings)
@@ -637,7 +693,9 @@ class ChartApp:
         with self._lock:
             scheme = sourcing.standing(self.store, feeds)
             out = plugins.view(self.store, settings, feeds, scheme, scans, running)
-        self._plugins_cache = (time.monotonic(), out, bool(running))
+        out["publishers"] = self.publishers()
+        out["rechecking"] = rechecking
+        self._plugins_cache = (time.monotonic(), out, (bool(running), bool(rechecking)))
         return out
 
     def _rescan_running(self) -> dict | None:
@@ -1587,6 +1645,17 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                         return self._json(app.start_rescan(name), HTTPStatus.ACCEPTED)
                     except RuntimeError as e:
                         return self._json({"error": str(e)}, HTTPStatus.CONFLICT)
+                if method == "POST" and parts[:3] == ["", "api", "plugins"] and parts[3:] in (["recheck"], ["pause"]):
+                    q = parse_qs(urlparse(self.path).query)
+                    name = q.get("name", [""])[-1]
+                    try:
+                        if parts[3] == "recheck":
+                            return self._json(app.start_recheck(name), HTTPStatus.ACCEPTED)
+                        return self._json(app.pause_publisher(name, q.get("on", ["1"])[-1] == "1"))
+                    except LookupError as e:
+                        return self._json({"error": str(e)}, HTTPStatus.NOT_FOUND)
+                    except RuntimeError as e:
+                        return self._json({"error": str(e)}, HTTPStatus.CONFLICT)
                 if method == "POST" and parts == ["", "api", "derive"]:
                     ticker = parse_qs(urlparse(self.path).query).get("ticker", [None])[-1]
                     if not ticker:
@@ -1764,6 +1833,13 @@ def make_handler(app: ChartApp, port_ref: list[int]):
             self._send(HTTPStatus.OK, target.read_bytes(), ctype)
 
     return Handler
+
+
+def _log_to(db_path):
+    """The app's log (logs/massive-collate.log beside the database), as the fetcher writes it."""
+    from ..cli import Logger
+
+    return Logger(Path(db_path).parent / "logs" / "massive-collate.log")
 
 
 RESCAN_AFTER_START_S = 10.0  # the start's rescan waits for the first pages' requests

@@ -26,12 +26,25 @@ def no_saved_keys(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def no_agency_requests(monkeypatch):
-    """Tests never read the agencies' real feeds: a full `sync` ends with the Gov fetch
-    (cli._fetch_gov); test_gov.py drives gov.fetch with fake answers instead."""
-    from massive_collate import cli
+def no_found_limits(monkeypatch):
+    """A feed's limiter keeps inside the limit its server's headers gave on its last scan, read
+    from the database the settings name (registry.found_per_minute): tests never read the real
+    one's; test_plugins.py tests the reading on its own."""
+    from massive_collate.sources import registry
 
-    monkeypatch.setattr(cli, "_fetch_gov", lambda settings, log, minutes=None: None)
+    monkeypatch.setattr(registry, "found_per_minute", lambda name, settings: None)
+
+
+@pytest.fixture(autouse=True)
+def no_agency_requests(monkeypatch):
+    """Tests never read the publishers' real feeds: the hourly sync without a recorder reads them
+    (cli._fetch_gov, publications.run_due), and the Plugins view's Recheck (recheck_now);
+    test_publications.py drives publications.Reader with fake answers instead."""
+    from massive_collate import cli, publications
+
+    monkeypatch.setattr(cli, "_fetch_gov", lambda settings, log, force=False: None)
+    monkeypatch.setattr(publications, "run_due", lambda settings, log, force=False, now=None: None)
+    monkeypatch.setattr(publications, "recheck_now", lambda settings, name, log, wait_s=30.0: None)
 
 
 @pytest.fixture(autouse=True)

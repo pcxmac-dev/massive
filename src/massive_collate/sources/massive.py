@@ -23,6 +23,9 @@ PAGE_LIMIT = 50000
 # and then (a 429 stops the run and kills the feed's fetching for a while), never sooner than asked.
 RETRY_WAIT_MAX = 300.0
 WAIT_SLICE = 2.0  # a wait before trying again is slept in slices this long, so a pause ends it
+# The rate-limit headers servers send (Alpaca's X-RateLimit-*: a minute's; the IETF draft's RateLimit-*)
+LIMIT_HEADERS = ("X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset",
+                 "RateLimit-Limit", "RateLimit-Remaining", "RateLimit-Reset", "RateLimit-Policy")
 
 
 class SameHostSession(requests.Session):
@@ -79,6 +82,9 @@ class MassiveClient:
         # Asked as each request goes, counting it: False once the machine's requests on this key
         # today have reached the daily cap (every database on the machine counts: MachineLedger).
         self.take_day: Callable[[], bool] | None = None
+        # The rate-limit headers its server last sent (LIMIT_HEADERS): the capability scan checks
+        # the rate kept against them (Provider.run_scan).
+        self.limits_seen: dict[str, str] = {}
 
     def get(self, path_or_url: str, params: dict[str, Any] | None = None) -> dict:
         resp = self._request(path_or_url, params)
@@ -136,6 +142,8 @@ class MassiveClient:
                     self.on_retry(delay, 0)
                 self._wait(delay)
                 continue
+            sent = getattr(resp, "headers", None) or {}
+            self.limits_seen.update({h: str(sent[h]) for h in LIMIT_HEADERS if sent.get(h)})
             retryable = resp.status_code == 429 or resp.status_code >= 500
             if not retryable or attempt == self._max_retries:
                 break

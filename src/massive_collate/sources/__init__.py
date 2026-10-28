@@ -7,7 +7,7 @@ from ..coverage import FeedProfile
 from .base import RESOLUTIONS, DataSource
 from .alpaca import AlpacaClient, AlpacaSource
 from .massive import MassiveClient, MassiveSource
-from .registry import KeyVar, Provider, minute_window, providers, rate_window
+from .registry import KeyVar, Provider, minute_window, providers, publishers, rate_window
 
 
 def provider(name: str) -> Provider:
@@ -68,4 +68,4 @@ def build_source(name: str, settings: Settings, request_budget: int | None = Non
 
 __all__ = ["RESOLUTIONS", "DataSource", "MassiveClient", "MassiveSource", "AlpacaClient", "AlpacaSource",
            "KeyVar", "Provider", "providers", "provider", "is_archive", "build_source", "feed_profiles", "supports",
-           "markets", "rate_window", "minute_window"]
+           "markets", "rate_window", "minute_window", "publishers"]

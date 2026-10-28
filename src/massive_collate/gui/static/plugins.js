@@ -6,13 +6,20 @@
    scan with a Rescan; on the right its part in the delivery scheme (the eras it delivers or stands
    by for), its requests today, the symbols it watches, its keys (set or not, never their values).
    Each plugin refreshes its own plan info: a rescan asks the provider what the key really gets.
-   Asked again every minute while shown, every few seconds while a rescan runs. */
+   Below them the publishers (news and publications: publications.py), each an agency's or a
+   vendor's plugin: its feeds with their last and next reads, its release schedule, its scrape
+   checks, its limits as last verified with a Recheck, and a Pause.
+   Asked again every minute while shown, every few seconds while a rescan or recheck runs. */
 (() => {
   const box = document.getElementById('viewPlugins');
   const { esc } = window.MassiveIcons;
   let data = null, sel = null, note = '', timer = null;
 
-  const STATE = { ready: 'ready', partly: 'keys not set', 'no key': 'no key', killed: 'killed' };
+  const STATE = { ready: 'ready', partly: 'keys not set', 'no key': 'no key', killed: 'killed', paused: 'paused',
+                  refused: 'refused', failing: 'failing', waiting: 'waiting', off: 'not set up' };
+  const FEED_STATE = { ok: 'read', unchanged: 'unchanged', waiting: 'waiting', failed: 'failed', refused: 'refused',
+                       'not asked yet': 'not asked yet' };
+  const PUB = 'pub:';  // a publisher's id in the list (its name may be a feed's too)
   const ORIGIN = { you: 'set by you', scan: 'found by its scan', default: 'default' };
   const JOBS = { day: 'daily bars', minute: '1-minute', second: '1-second' };
   const num = (n) => (n == null ? '–' : Number(n).toLocaleString('en-US', { maximumFractionDigits: 1 }));
@@ -30,6 +37,15 @@
   const chip = (state) => `<span class="ex-state pl-${esc(state.replace(' ', '-'))}">${esc(STATE[state] || state)}</span>`;
   const tile = (title, big, small) => `<div class="tile"><h5>${title}</h5><div class="big">${big}</div><small>${small}</small></div>`;
   const plugin = () => data?.plugins.find((p) => p.name === sel) || null;
+  const publisher = () => (sel?.startsWith(PUB) ? data?.publishers?.find((p) => PUB + p.name === sel) || null : null);
+  const etTime = (iso) => new Date(iso).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
+  const etDay = (iso) => new Date(iso).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric' });
+  const until = (iso) => {
+    if (!iso) return '–';
+    const m = (Date.parse(iso) - Date.now()) / 6e4;
+    return m <= 1 ? 'now' : m < 90 ? `in ${Math.round(m)} min` : m < 48 * 60 ? `in ${(m / 60).toFixed(1)} h` : `in ${Math.round(m / 1440)} days`;
+  };
+  const every = (m) => (m >= 60 ? `${num(m / 60)} h` : `${num(m)} min`);
   const tierOf = (p) => p.plan.vars.find((v) => v.choices.length) || null;
 
   async function load() {
@@ -37,10 +53,10 @@
     if (document.body.dataset.view !== 'plugins' || document.hidden) return;
     try {
       data = await api('/api/plugins');
-      if (!sel || !data.plugins.some((p) => p.name === sel)) sel = data.plugins[0]?.name || null;
+      if (!sel || !(data.plugins.some((p) => p.name === sel) || publisher())) sel = data.plugins[0]?.name || null;
     } catch (err) { showError(err); }
     render();
-    timer = setTimeout(load, data?.running ? 4_000 : 60_000);
+    timer = setTimeout(load, data?.running || data?.rechecking ? 4_000 : 60_000);
   }
 
   async function rescan(name) {
@@ -51,6 +67,17 @@
       const out = await res.json().catch(() => ({}));
       note = res.ok ? `Rescan started: ${name ? plugin()?.title || name : 'every plugin set up here'} (a few requests each).`
         : out.error || res.statusText;
+    } catch (err) { note = String(err.message || err); }
+    render();
+    setTimeout(load, 1_000);
+  }
+
+  async function post(path, done) {
+    note = '';
+    try {
+      const res = await fetch(path, { method: 'POST', headers: WRITE_HEADERS, body: '{}' });
+      const out = await res.json().catch(() => ({}));
+      note = res.ok ? done : out.error || res.statusText;
     } catch (err) { note = String(err.message || err); }
     render();
     setTimeout(load, 1_000);
@@ -69,9 +96,13 @@
           <span class="ex-count">${esc(plan)}${p.scan.running ? ' · scanning…' : ''}</span></button>`;
       }).join('');
     }).join('');
+    const pubs = (data.publishers || []).map((p) => `<button type="button" class="ex-venue${PUB + p.name === sel ? ' active' : ''}" data-plugin="${esc(PUB + p.name)}" title="${esc(p.about)}">
+          <span class="ex-name">${esc(p.title)}</span>${chip(p.state)}
+          <span class="ex-count">${esc(p.kind === 'vendor' ? `on ${p.account}'s key` : `${p.feeds.length} feed${p.feeds.length === 1 ? '' : 's'}`)} · every ${esc(every(Math.min(...p.feeds.map((f) => f.every))))}</span></button>`).join('');
+    const news = pubs ? `<h4 class="ex-group">News and publications</h4>${pubs}` : '';
     const left = data.errors.length ? `<h4 class="ex-group">Left out</h4>${data.errors.map((e) => `
       <div class="pl-error"><b>${esc(e.where)}</b><div class="p-muted small">${esc(e.why)}</div></div>`).join('')}` : '';
-    return groups + left;
+    return groups + news + left;
   }
 
   // -- middle: the plugin picked -------------------------------------------------------------
@@ -128,7 +159,71 @@
       ${rows ? `<table class="act-table ex-mini"><tbody>${rows}</tbody></table>` : ''}`;
   }
 
+  // -- a publisher (news and publications) ------------------------------------------------------
+  function pubMainHtml(p) {
+    const feeds = p.feeds.map((f) => `<tr><td><b>${esc(f.title)}</b><div class="p-muted small">${esc(f.host || f.agency)}</div></td>
+        <td>${esc(every(f.every))}</td><td><span class="pl-fstate pl-f-${esc(f.state.replace(/ /g, '-'))}">${esc(FEED_STATE[f.state] || f.state)}</span></td>
+        <td>${f.at ? ago(f.at) : 'never'}</td><td>${p.state === 'paused' ? 'paused' : f.next ? until(f.next) : '–'}</td>
+        <td class="p-muted pl-msg">${esc(f.message || '')}</td></tr>`).join('');
+    const moments = p.moments.length ? `<div class="small">Today's release reads (ET): ${p.moments.map((m) => esc(etTime(m))).join(' · ')}</div>` : '';
+    const cal = p.calendar.length ? `<table class="act-table ex-mini"><tbody>${p.calendar.map((c) => `<tr><td>${esc(etDay(c.when))}</td>
+        <td>${esc(etTime(c.when))} ET</td><td>${esc(c.what)}</td></tr>`).join('')}</tbody></table>` : '';
+    const pol = p.policy;
+    const robots = p.robots.map((r) => `<div class="small"><code>${esc(r.host)}</code> robots.txt: ${r.status == null ? 'not read yet'
+      : r.status === 200 ? `read ${ago(r.at)}${r.delayMinutes ? `, asks ${num(r.delayMinutes)} min between requests` : ''}`
+      : r.status >= 400 && r.status < 500 ? `none published to this reader (HTTP ${r.status}), read as allowing all · ${ago(r.at)}`
+      : `did not answer ${ago(r.at)}: nothing read from the host until it does`}${r.allows === false ? ' · <span class="down">disallows a feed: not read</span>' : ''}</div>`).join('');
+    const checks = [
+      pol.hosts.length ? `Only ${pol.hosts.map((h) => `<code>${esc(h)}</code>`).join(', ')}, over HTTPS; a redirect elsewhere is not followed` : `Through ${esc(p.account)}'s client: its rate window, daily cap and kills`,
+      `Never these sites, whose terms bar programs: ${pol.blocked.map(esc).join(', ')}`,
+      'Feeds and APIs only: an answer that is not XML or JSON is refused, never read as a page',
+      `A feed at most every ${esc(every(p.floorMinutes))}${p.floorMinutes > pol.minMinutes ? ` (its hosts ask for that; its own is ${esc(every(pol.minMinutes))})` : ''}, whatever its schedule asks`,
+      `At most ${num(pol.perDay)} requests a day, robots.txt included: ${num(p.requestsToday)} today`,
+      'Conditional requests (an unchanged feed sends nothing back); a refusal (401, 403, 429) holds it off 6 h, or the Retry-After if longer',
+      pol.contact ? (pol.contactSet ? 'Your GOV_CONTACT goes in its User-Agent, as it asks (to it only)' : 'It asks automated readers to identify: waiting for GOV_CONTACT (your name and email)')
+        : 'No contact sent: it does not ask for one',
+    ].map((c) => `<li>${c}</li>`).join('');
+    const rc = p.recheck;
+    const seen = rc?.limitsSeen ? Object.entries(rc.limitsSeen) : [];
+    const acct = rc?.account ? `<div class="small">${esc(rc.account.title)}'s limits: ${esc(rate(rc.account.rate))}, ${num(rc.account.perDay)} a day${rc.account.published ? ` (its server: ${esc(rc.account.published)})` : ''}</div>` : '';
+    const busy = data.rechecking?.name === p.name;
+    const can = !data.offline && !data.rechecking && p.state !== 'off';
+    return `<h4>Feeds</h4><table class="act-table ex-mini pl-feeds"><thead><tr><th>Feed</th><th>Every</th><th>State</th><th>Last read</th><th>Next</th><th></th></tr></thead>
+        <tbody>${feeds}</tbody></table>
+      ${moments || cal ? `<h4>Schedule</h4>${moments}${cal}` : ''}
+      <h4>Scrape checks</h4><ul class="pl-checks small">${checks}</ul>${robots}
+      <h4 class="pl-scan-head"><span>Limits, verified</span>
+        <button type="button" data-recheck="${esc(p.name)}"${can ? '' : ' disabled'} title="${esc(data.offline ? 'This offline copy of the app sends no requests'
+          : 'Read its robots.txt again and ask each feed once (never within its floor), keeping the rate-limit headers its servers send')}">${busy ? 'Rechecking…' : 'Recheck'}</button></h4>
+      <div class="p-muted small">${rc ? `Last verified ${ago(rc.at)}` : 'Not verified yet'}: weekly, and here.</div>
+      ${acct}${(rc?.notes || []).map((n) => `<div class="small">${esc(n)}</div>`).join('')}
+      ${seen.length ? `<table class="act-table ex-mini"><tbody>${seen.map(([k, h]) => `<tr><td>${esc(k)}</td><td class="p-muted">${
+        esc(Object.entries(h).filter(([n]) => n !== 'at').map(([n, v]) => `${n}: ${v}`).join(' · '))}</td></tr>`).join('')}</tbody></table>` : ''}`;
+  }
+
+  function pubSideHtml(p) {
+    const paused = p.state === 'paused';
+    const used = p.policy.perDay ? Math.min(100, (p.requestsToday / p.policy.perDay) * 100) : 0;
+    return `<h3>${esc(p.title)} ${chip(p.state)}</h3>
+      <div class="p-muted small">${esc(p.about)}${p.origin !== 'built in' ? ` · ${esc(p.origin)}` : ''}</div>
+      ${p.kill ? `<div class="pl-warn">${paused ? 'Paused by you' : `Stopped until ${esc(p.kill.until?.slice(0, 16).replace('T', ' '))} UTC: ${esc(p.kill.why)}`}</div>` : ''}
+      <div class="tiles ex-tiles">
+        ${tile('Requests today', num(p.requestsToday), `of ${num(p.policy.perDay)} a day`)}
+        ${tile('Floor', every(p.floorMinutes), 'between reads of a feed')}
+        ${tile('Feeds', num(p.feeds.length), p.kind === 'vendor' ? `on ${esc(p.account)}'s key` : 'official, keyless')}
+        ${tile('Verified', p.recheck ? ago(p.recheck.at) : 'never', 'its limits')}
+      </div>
+      <div class="pl-usage" title="${num(p.requestsToday)} of ${num(p.policy.perDay)} requests today"><i style="width:${used.toFixed(1)}%"></i></div>
+      <h4>Reading</h4>
+      <button type="button" data-pause="${esc(p.name)}" data-on="${paused ? '0' : '1'}"${data.offline || (p.kill && !paused) ? ' disabled' : ''}>${paused ? 'Resume' : 'Pause'}</button>
+      <div class="p-muted small">${paused ? 'Nothing is read until you resume it.' : 'Pausing stops its reads until you resume it.'}</div>
+      ${p.policy.terms ? `<h4>Terms</h4><div class="small">${esc(p.policy.terms)}</div>` : ''}
+      ${p.policy.termsUrl ? `<div class="p-muted small"><a href="${esc(p.policy.termsUrl)}" target="_blank" rel="noopener noreferrer">${esc(p.policy.termsUrl.replace(/^https:\/\//, ''))}</a></div>` : ''}`;
+  }
+
   function mainHtml() {
+    const pub = publisher();
+    if (pub) return pubMainHtml(pub);
     const p = plugin();
     if (!p) return '<div class="empty">No plugin found.</div>';
     return `${planHtml(p)}${limitsHtml(p)}${capabilitiesHtml(p)}${scanHtml(p)}
@@ -137,6 +232,8 @@
 
   // -- right: its part in the delivery scheme, its usage, its keys ---------------------------
   function sideHtml() {
+    const pub = publisher();
+    if (pub) return pubSideHtml(pub);
     const p = plugin();
     if (!p) return '';
     const u = p.usage;
@@ -164,29 +261,36 @@
 
   function render() {
     if (!data) { box.innerHTML = '<div class="empty">Loading the plugins…</div>'; return; }
-    const p = plugin();
+    const p = plugin(), pub = publisher();
     const scrolled = box.querySelector('.ex-list')?.scrollTop || 0;
     const setUp = data.plugins.filter((x) => x.configured && x.state !== 'no key').length;
+    const head = pub ? `publisher · ${pub.kind === 'vendor' ? `a vendor's headlines, on ${pub.account}'s key` : 'official feeds'} · ${pub.feeds.length} feed${pub.feeds.length === 1 ? '' : 's'}`
+      : p ? `${p.archive ? 'closed archive' : 'feed'} · ${p.kind} data · ${p.assets.join(', ')}` : '';
     box.innerHTML = `
       <div class="ex-venues"><div class="view-head"><div><h2>Plugins</h2>
-        <div class="p-muted small">${num(data.plugins.length)} providers · ${num(setUp)} set up</div></div></div>
+        <div class="p-muted small">${num(data.plugins.length)} providers · ${num(setUp)} set up · ${num((data.publishers || []).length)} publishers</div></div></div>
         <button type="button" class="pl-all" data-rescan="*"${data.offline || data.running ? ' disabled' : ''}
           title="${data.offline ? 'This offline copy of the app sends no requests' : 'Every plugin set up here asks its provider again (a few requests each)'}">${data.running ? 'Scanning…' : 'Rescan all'}</button>
         ${note ? `<div class="p-muted small pl-note-line">${esc(note)}</div>` : ''}
         ${listHtml()}</div>
-      <div class="ex-list"><div class="view-head"><div><h2>${esc(p?.title || '')}</h2>
-        <div class="p-muted small">${esc(p ? `${p.archive ? 'closed archive' : 'feed'} · ${p.kind} data · ${p.assets.join(', ')}` : '')}</div></div></div>${mainHtml()}</div>
+      <div class="ex-list"><div class="view-head"><div><h2>${esc(pub?.title || p?.title || '')}</h2>
+        <div class="p-muted small">${esc(head)}</div></div></div>${mainHtml()}</div>
       <aside class="ex-side">${sideHtml()}</aside>`;
     box.querySelector('.ex-list').scrollTop = scrolled;
   }
 
   box.addEventListener('click', (e) => {
-    const t = e.target.closest('[data-plugin],[data-rescan]');
+    const t = e.target.closest('[data-plugin],[data-rescan],[data-recheck],[data-pause]');
     if (!t || t.disabled) return;
     if (t.dataset.plugin && t.dataset.plugin !== sel) {
       sel = t.dataset.plugin; render();
     } else if (t.dataset.rescan) {
       rescan(t.dataset.rescan === '*' ? null : t.dataset.rescan);
+    } else if (t.dataset.recheck) {
+      post(`/api/plugins/recheck?name=${encodeURIComponent(t.dataset.recheck)}`, `Recheck started: ${publisher()?.title || t.dataset.recheck}.`);
+    } else if (t.dataset.pause) {
+      const on = t.dataset.on === '1';
+      post(`/api/plugins/pause?name=${encodeURIComponent(t.dataset.pause)}&on=${on ? 1 : 0}`, on ? 'Paused.' : 'Resumed.');
     }
   });
   window.addEventListener('massive:view', (e) => { if (e.detail.view === 'plugins') load(); else clearTimeout(timer); });

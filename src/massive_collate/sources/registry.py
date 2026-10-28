@@ -38,6 +38,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Callable, Iterable, Mapping
 
 from ..ratelimit import MachineLedger, RateLimiter
+from .publisher import Publisher
 
 if TYPE_CHECKING:
     from ..config import Settings, Tier
@@ -71,6 +72,10 @@ class Scanned:
     results: tuple[tuple[str, bool, str], ...]
     plan: Mapping[str, str] = field(default_factory=dict)
     alike: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    # its limits verified (run_scan): the rate-limit headers its server sent, the limit a minute
+    # they give, the window kept ({seen, perMinute, kept}); a server limit below the window kept
+    # is used from then on (rate_window)
+    limits: Mapping[str, object] = field(default_factory=dict)
 
 
 # -- the standard report every provider gives the delivery scheme (sourcing.py) ---------------------
@@ -255,13 +260,36 @@ class Provider:
             return tuple(self.plan_resolutions(tier, asset))
         return tuple(self.provides.get(asset, ("day", "minute")))
 
-    def run_scan(self, source: "DataSource") -> Scanned:
-        """Its capability scan, its plan held to its own plan variables (a plugin sets no other's)."""
+    def run_scan(self, source: "DataSource", settings: "Settings | None" = None) -> Scanned:
+        """Its capability scan, its plan held to its own plan variables (a plugin sets no other's),
+        and its limits verified: the rate-limit headers its server sent on the scan's requests,
+        against the window its limiter keeps (with `settings`)."""
         out = self.scan(source) if self.scan else ()
         rows, plan, alike = (out.results, out.plan, out.alike) if isinstance(out, Scanned) else (out, {}, {})
         plan = {k: str(v) for k, v in (plan or {}).items() if k in self.plan_vars and v}
-        return Scanned(tuple((str(w), bool(ok), str(d)) for w, ok, d in rows), plan,
-                       {k: tuple(str(x) for x in v) for k, v in (alike or {}).items() if k in plan})
+        rows = [(str(w), bool(ok), str(d)) for w, ok, d in rows]
+        limits = self.limits_found(source, settings)
+        rows.append(limits.pop("row"))
+        return Scanned(tuple(rows), plan, {k: tuple(str(x) for x in v) for k, v in (alike or {}).items() if k in plan},
+                       limits)
+
+    def limits_found(self, source, settings: "Settings | None" = None) -> dict:
+        """Its server's rate limit from the headers it sent (source.client.limits_seen), a minute's,
+        beside the window kept: {seen, perMinute, kept, row} (row: the scan's line for it)."""
+        seen = dict(getattr(getattr(source, "client", None), "limits_seen", None) or {})
+        per_minute = server_per_minute(seen)
+        kept = list(self.rate_window(settings)) if settings is not None else None
+        kept_pm = kept[0] * 60 / kept[1] if kept and kept[0] else None
+        if per_minute is None:
+            row = ("its server's rate limit", True, "not sent in its answers: its own published limits are kept"
+                   + (f" ({self.limits})" if self.limits else ""))
+        elif kept_pm is None or kept_pm <= per_minute:
+            row = ("its server's rate limit", True, f"{per_minute:,} a minute"
+                   + (f"; {kept_pm:,.0f} a minute kept, inside it" if kept_pm else ""))
+        else:
+            row = ("its server's rate limit", False, f"{per_minute:,} a minute: fewer than the {kept_pm:,.0f} kept; "
+                   "its server's is used from now on (a little inside it)")
+        return {"seen": seen, "perMinute": per_minute, "kept": kept, "row": row}
 
     def plan_state(self, settings: "Settings") -> list[dict]:
         """Each of its plan variables: its value here and where it comes from (the user's own
@@ -298,7 +326,7 @@ class Provider:
         limits = Limits(profile.capacity if profile.capacity is not None else float(view.max_requests_per_day if view else 0),
                         per_day=view.max_requests_per_day if view else None,
                         per_run=view.max_requests_per_run if view else None,
-                        rate=self.rate_window(settings) if settings is not None else None,
+                        rate=rate_window(self.name, settings) if settings is not None else None,  # its server's lower one too
                         symbols_a_month=self.symbols_per_month, published=self.limits)
         out = Report(self.name, self.title, profile.tier.name, self.keys_set(settings) if settings is not None else None,
                      limits, tuple(caps), tuple((a, w) for a, w in self.streams.items() if a in profile.assets),
@@ -343,29 +371,76 @@ def public_client(name: str, base_url: str, settings: "Settings", request_budget
 
 def rate_window(name: str, settings: "Settings") -> tuple[int | None, float]:
     """The window each feed's limiter keeps: (requests, seconds). A little inside what each
-    server publishes (Provider.limits) so a limiter never meets a refusal."""
+    server publishes (Provider.limits) so a limiter never meets a refusal; and inside the limit its
+    server's own headers gave on its last capability scan, when that is lower (verified weekly)."""
     p = get(name)
     if p is None:
         rpm = settings.for_source(name).tier.requests_per_minute
         return rpm, minute_window(rpm)
-    return p.rate_window(settings)
+    n, seconds = p.rate_window(settings)
+    found = found_per_minute(name, settings)
+    if found and n and n * 60 / seconds > found * SERVER_SHARE:
+        n = max(1, int(found * SERVER_SHARE * seconds / 60))
+    return n, seconds
+
+
+SERVER_SHARE = 0.95  # of a server's own limit, when it is below the window a plugin keeps
+
+
+def server_per_minute(seen: Mapping[str, str]) -> int | None:
+    """A minute's limit from a server's rate-limit headers: X-RateLimit-Limit (a minute's, as
+    Alpaca's), or the IETF draft's RateLimit-Limit with its RateLimit-Policy window ("100;w=60")."""
+    def number(text) -> float | None:
+        try:
+            return float(str(text).split(",")[0].split(";")[0].strip())
+        except (TypeError, ValueError):
+            return None
+    low = {k.lower(): v for k, v in seen.items()}
+    if number(low.get("x-ratelimit-limit")):
+        return int(number(low["x-ratelimit-limit"]))
+    limit = number(low.get("ratelimit-limit"))
+    if limit:
+        window = next((float(p.split("=", 1)[1]) for p in str(low.get("ratelimit-policy", "")).split(";")
+                       if p.strip().startswith("w=")), 60.0)
+        return int(limit * 60 / window) if window > 0 else None
+    return None
+
+
+def found_per_minute(name: str, settings: "Settings") -> int | None:
+    """The limit a minute its server's headers gave on its last capability scan (kept in the
+    database it serves), or None."""
+    path = getattr(settings, "db_path", None)
+    return scan_limit(path, name) if path else None
+
+
+def scan_limit(db_path, name: str) -> int | None:
+    """The limit a minute kept with a feed's last capability scan in a database, or None."""
+    from ..sourcing import scans_at
+
+    try:
+        return (scans_at(db_path).get(name, {}).get("limits") or {}).get("perMinute")
+    except Exception:  # a database being moved: the plugin's own window
+        return None
 
 
 # -- the registry ----------------------------------------------------------------------------------
 
 _lock = threading.RLock()
 _providers: dict[str, Provider] | None = None
+_publishers: dict[str, Publisher] = {}
 _errors: list[tuple[str, str]] = []
 
 
-def _plugins_in(module, origin: str) -> list[Provider]:
-    if isinstance(module, Provider):
+def _plugins_in(module, origin: str) -> list[Provider | Publisher]:
+    """A module's plugins: its feed (`PLUGIN`, `PLUGINS`: Providers) and its publishers
+    (`PUBLISHER`, `PUBLISHERS`: sources.publisher.Publisher), at least one of them."""
+    if isinstance(module, (Provider, Publisher)):
         return [replace(module, origin=origin)]
-    found = list(getattr(module, "PLUGINS", ()))
-    if isinstance(getattr(module, "PLUGIN", None), Provider):
-        found.append(module.PLUGIN)
-    if not found or not all(isinstance(p, Provider) for p in found):
-        raise TypeError("defines no PLUGIN (a sources.registry.Provider)")
+    found = list(getattr(module, "PLUGINS", ())) + list(getattr(module, "PUBLISHERS", ()))
+    found += [p for p in (getattr(module, "PLUGIN", None), getattr(module, "PUBLISHER", None))
+              if isinstance(p, (Provider, Publisher))]
+    if not found or not all(isinstance(p, (Provider, Publisher)) for p in found):
+        raise TypeError("defines no PLUGIN (a sources.registry.Provider) nor PUBLISHER (a sources.publisher.Publisher)")
     return [replace(p, origin=origin) for p in found]
 
 
@@ -381,9 +456,15 @@ def _entry_points() -> Iterable:
 def discover() -> tuple[dict[str, Provider], list[tuple[str, str]]]:
     """Every provider plugin: the built-in modules, then the installed packages' entry points.
     Returns (providers by name in their order, [(where, why)] for the ones left out)."""
+    providers_, _, errors_ = discover_all()
+    return providers_, errors_
+
+
+def discover_all() -> tuple[dict[str, Provider], dict[str, Publisher], list[tuple[str, str]]]:
+    """The providers and the publishers (both by name, in their order), and the plugins left out."""
     from . import plugins
 
-    found: list[Provider] = []
+    found: list[Provider | Publisher] = []
     errors: list[tuple[str, str]] = []
     for info in sorted(pkgutil.iter_modules(plugins.__path__), key=lambda m: m.name):
         where = f"{plugins.__name__}.{info.name}"
@@ -398,12 +479,23 @@ def discover() -> tuple[dict[str, Provider], list[tuple[str, str]]]:
         except Exception as e:
             errors.append((where, f"{type(e).__name__}: {e}"))
     out: dict[str, Provider] = {}
+    pubs: dict[str, Publisher] = {}
+    keys: dict[str, str] = {}  # a feed's key -> its publisher (keys name the state kept)
     for p in sorted(found, key=lambda p: (p.order, p.name)):
-        if p.name in out:
-            errors.append((p.origin, f"a second provider named {p.name!r}: the first kept ({out[p.name].origin})"))
+        mine = pubs if isinstance(p, Publisher) else out
+        if p.name in out or p.name in pubs:
+            first = (out.get(p.name) or pubs[p.name]).origin
+            kind = "publisher" if isinstance(p, Publisher) else "provider"
+            errors.append((p.origin, f"a second {kind} named {p.name!r}: the first kept ({first})"))
             continue
-        out[p.name] = p
-    return out, errors
+        if isinstance(p, Publisher):
+            clash = next((f.key for f in p.feeds if f.key in keys), None)
+            if clash:
+                errors.append((p.origin, f"publisher {p.name!r}: feed {clash!r} is {keys[clash]!r}'s already"))
+                continue
+            keys.update({f.key: p.name for f in p.feeds})
+        mine[p.name] = p
+    return out, pubs, errors
 
 
 def providers() -> dict[str, Provider]:
@@ -411,9 +503,18 @@ def providers() -> dict[str, Provider]:
     global _providers
     with _lock:
         if _providers is None:
-            _providers, found_errors = discover()
+            _providers, found, found_errors = discover_all()
+            _publishers.clear()
+            _publishers.update(found)
             _errors[:] = found_errors
         return _providers
+
+
+def publishers() -> dict[str, Publisher]:
+    """The publisher plugins by name, in their order (found with the providers)."""
+    with _lock:
+        providers()
+        return dict(_publishers)
 
 
 def reload() -> dict[str, Provider]:

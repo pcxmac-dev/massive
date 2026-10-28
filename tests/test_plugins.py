@@ -3,6 +3,7 @@ about them, and a provider from an installed package is found, built, keyed and 
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date
 from types import SimpleNamespace
 
@@ -197,3 +198,57 @@ def test_plugin_tiers_keep_their_history_start():
 
     tiingo = load_settings(env={}, env_file=None).for_source("tiingo").tier
     assert history_floor(tiingo, date(2026, 10, 27)) == date(1962, 1, 1)
+
+
+# -- each feed's limits, verified by its capability scan ----------------------------------------------
+def test_a_servers_rate_limit_headers_are_read_as_a_minutes_limit():
+    assert registry.server_per_minute({"X-RateLimit-Limit": "200", "X-RateLimit-Remaining": "199"}) == 200
+    assert registry.server_per_minute({"ratelimit-limit": "10", "RateLimit-Policy": "10;w=1"}) == 600
+    assert registry.server_per_minute({"RateLimit-Limit": "100"}) == 100  # no window said: a minute
+    assert registry.server_per_minute({}) is None and registry.server_per_minute({"X-RateLimit-Limit": "x"}) is None
+
+
+def test_the_client_keeps_the_rate_limit_headers_its_server_sends():
+    from massive_collate.sources.massive import MassiveClient
+
+    class Answer:
+        status_code, headers = 200, {"X-RateLimit-Limit": "200", "X-RateLimit-Remaining": "17", "Server": "x"}
+
+        def json(self):
+            return {}
+
+    client = MassiveClient("k", session=SimpleNamespace(get=lambda *a, **k: Answer()))
+    client.get("/v1/x")
+    assert client.limits_seen == {"X-RateLimit-Limit": "200", "X-RateLimit-Remaining": "17"}
+
+
+def test_the_scan_verifies_the_rate_kept_against_its_servers_and_the_lower_is_used(monkeypatch):
+    settings = load_settings(env={"ALPACA_API_KEY_ID": "i", "ALPACA_API_SECRET_KEY": "s"}, env_file=None)
+    alpaca = provider("alpaca")
+    n, s = alpaca.rate_window(settings)
+    kept_pm = n * 60 / s
+    lower = SimpleNamespace(client=SimpleNamespace(limits_seen={"X-RateLimit-Limit": str(int(kept_pm // 2))}))
+    bare = replace(alpaca, scan=None)  # its own scan's requests left out: only the limits row
+    found = bare.run_scan(lower, settings)
+    row = found.results[-1]
+    assert row[0] == "its server's rate limit" and row[1] is False and "used from now on" in row[2]
+    assert found.limits["perMinute"] == int(kept_pm // 2) and found.limits["kept"] == [n, s]
+    # the limiter keeps a little inside the server's lower limit from then on
+    monkeypatch.setattr(registry, "found_per_minute", lambda name, st: int(kept_pm // 2) if name == "alpaca" else None)
+    m, t = rate_window("alpaca", settings)
+    assert m * 60 / t <= int(kept_pm // 2) * registry.SERVER_SHARE and t == s
+    assert rate_window("tiingo", settings) == provider("tiingo").rate_window(settings)  # the others untouched
+    # none sent: its own published limits kept
+    quiet = bare.run_scan(SimpleNamespace(client=SimpleNamespace(limits_seen={})), settings)
+    assert quiet.results[-1][1] is True and "not sent" in quiet.results[-1][2] and quiet.limits["perMinute"] is None
+
+
+def test_the_limit_found_is_read_from_the_scan_kept_in_the_database(tmp_path):
+    from massive_collate import sourcing
+    from massive_collate.storage import Store
+
+    with Store(tmp_path / "m.db") as store:
+        store.kv_set(sourcing.SCAN_KEY.format("alpaca"), json.dumps({"at": "2026-10-28T12:00:00", "results": [],
+                                                                     "limits": {"perMinute": 150}}))
+    assert registry.scan_limit(tmp_path / "m.db", "alpaca") == 150
+    assert registry.scan_limit(tmp_path / "m.db", "tiingo") is None and registry.scan_limit(tmp_path / "none.db", "x") is None

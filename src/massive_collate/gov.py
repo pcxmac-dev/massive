@@ -12,11 +12,14 @@
 - The New York Fed: the federal funds target range, the effective rate and SOFR, from its
   markets API.
 
-All are official feeds made for programs, keyless; each is asked at most every REFRESH_MINUTES,
-with conditional requests, by the sync's closing pass (cli.after_sync). FINRA's own website terms
-bar robots and use with AI programs, so nothing is read from finra.org: its rule changes arrive
-through the Federal Register and the Gov view links to finra.org. Stored in a file of its own
-(gov/gov.db beside the main database).
+All are official feeds made for programs, keyless. Each agency is a publisher plugin of its own
+(sources/plugins/fed.py, nyfed.py, sec.py, bls.py, fedreg.py), read on its own schedule under its
+scrape checks by publications.py (the recorder's thread); this module parses what they send and
+keeps it. FINRA's own website terms bar robots and use with AI programs, so nothing is read from
+finra.org (publications.BLOCKED_HOSTS): its rule changes arrive through the Federal Register and
+the Gov view links to finra.org. Stored in a file of its own (gov/gov.db beside the main
+database), with each feed's state, each publisher's requests a day, the hosts' robots.txt and each
+publisher's last limits recheck.
 
 The current regulatory parameters (parameters) are the rates above, each with its date, and rule
 parameters with the rule they come from; a rule change shows as the newest Federal Register
@@ -25,25 +28,17 @@ document for that rule.
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
-import time
 import xml.etree.ElementTree as ET_XML
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Callable
 
-import requests
+from .sources.publisher import Feed
 
 USER_AGENT = "massive-collate/1 (personal research)"
-REFRESH_MINUTES = 60  # each source at most this often
-FAILED_RETRY_MINUTES = 10  # a source that failed (no answer, an error) is asked again sooner
-REFUSED_MINUTES = 6 * 60  # a source that refused (401, 403, 429) waits this long, or its Retry-After if longer
-RETRY_WAIT_S = 2.0  # a dropped connection is tried once more after this
 KEEP = 200  # items kept per source, newest first
-TIMEOUT_S = 20
+Source = Feed  # a feed an agency publishes (sources/publisher.py)
 
 FEDREG_AGENCIES = {  # the Federal Register's agency slugs -> the name shown
     "securities-and-exchange-commission": "SEC", "commodity-futures-trading-commission": "CFTC",
@@ -53,38 +48,10 @@ FINRA_TITLE = "Financial Industry Regulatory Authority"
 WAITING = "asks automated readers to identify themselves: set GOV_CONTACT (your name and email) to read it"
 
 
-@dataclass(frozen=True)
-class Source:
-    key: str
-    agency: str
-    title: str
-    url: str
-    kind: str = "rss"  # rss | fedreg | nyfed
-    contact: bool = False  # the agency asks automated readers to identify themselves (GOV_CONTACT)
-
-
 FEDREG_URL = ("https://www.federalregister.gov/api/v1/documents.json?per_page=100&order=newest"
               + "".join(f"&conditions[agencies][]={a}" for a in FEDREG_AGENCIES)
               + "".join(f"&fields[]={f}" for f in ("title", "type", "publication_date", "html_url", "agencies",
                                                     "document_number")))
-SOURCES = (
-    Source("fed-press", "Fed", "Press releases", "https://www.federalreserve.gov/feeds/press_all.xml"),
-    Source("fed-speeches", "Fed", "Speeches and testimony",
-           "https://www.federalreserve.gov/feeds/speeches_and_testimony.xml"),
-    Source("sec-press", "SEC", "Press releases", "https://www.sec.gov/news/pressreleases.rss", contact=True),
-    Source("sec-suspensions", "SEC", "Trading suspensions",
-           "https://www.sec.gov/enforcement-litigation/trading-suspensions/rss", contact=True),
-    Source("bls-empsit", "BLS", "Employment Situation", "https://www.bls.gov/feed/empsit.rss"),
-    Source("bls-cpi", "BLS", "Consumer Price Index", "https://www.bls.gov/feed/cpi.rss"),
-    Source("bls-ppi", "BLS", "Producer Price Index", "https://www.bls.gov/feed/ppi.rss"),
-    Source("bls-jolts", "BLS", "Job openings and labor turnover", "https://www.bls.gov/feed/jolts.rss"),
-    Source("fedreg", "Federal Register", "Rules and notices: SEC (FINRA, exchanges), CFTC, Fed, Treasury",
-           FEDREG_URL, "fedreg"),
-    Source("nyfed-effr", "New York Fed", "Effective federal funds rate and target range",
-           "https://markets.newyorkfed.org/api/rates/unsecured/effr/last/1.json", "nyfed"),
-    Source("nyfed-sofr", "New York Fed", "SOFR", "https://markets.newyorkfed.org/api/rates/secured/sofr/last/1.json",
-           "nyfed"),
-)
 
 LINKS = (  # read by people, never fetched here
     ("FINRA rules", "https://www.finra.org/rules-guidance/rulebooks/finra-rules"),
@@ -125,6 +92,29 @@ CREATE TABLE IF NOT EXISTS fetches (
     etag      TEXT,
     modified  TEXT,
     ok_at     TEXT             -- last answered
+);
+CREATE TABLE IF NOT EXISTS requests (   -- each publisher's requests a day (UTC), robots.txt included
+    publisher TEXT NOT NULL,
+    day       TEXT NOT NULL,
+    n         INTEGER NOT NULL,
+    PRIMARY KEY (publisher, day)
+);
+CREATE TABLE IF NOT EXISTS robots (     -- each host's robots.txt as last read (status 0: no answer)
+    host      TEXT PRIMARY KEY,
+    at        TEXT NOT NULL,
+    status    INTEGER NOT NULL,
+    body      TEXT
+);
+CREATE TABLE IF NOT EXISTS rechecks (   -- each publisher's last limits recheck (JSON findings)
+    publisher TEXT PRIMARY KEY,
+    at        TEXT NOT NULL,
+    findings  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS limits_seen ( -- the rate-limit headers each feed's server last sent (JSON)
+    publisher TEXT NOT NULL,
+    feed      TEXT NOT NULL,
+    seen      TEXT NOT NULL,
+    PRIMARY KEY (publisher, feed)
 );
 """
 
@@ -194,6 +184,41 @@ class GovDB:
         r = self.conn.execute("SELECT day, value, lo, hi FROM rates WHERE series=? ORDER BY day DESC LIMIT 1",
                               (series,)).fetchone()
         return {"day": r[0], "value": r[1], "lo": r[2], "hi": r[3]} if r else None
+
+    # -- the publishers' requests, robots.txt and limits (publications.py) ---------------------------
+    def count_request(self, publisher: str, day: str, n: int = 1) -> None:
+        with self.conn:
+            self.conn.execute("INSERT INTO requests VALUES (?, ?, ?) ON CONFLICT (publisher, day) "
+                              "DO UPDATE SET n = n + excluded.n", (publisher, day, n))
+
+    def requests_on(self, publisher: str, day: str) -> int:
+        r = self.conn.execute("SELECT n FROM requests WHERE publisher=? AND day=?", (publisher, day)).fetchone()
+        return int(r[0]) if r else 0
+
+    def robots_get(self, host: str) -> dict | None:
+        r = self.conn.execute("SELECT at, status, body FROM robots WHERE host=?", (host,)).fetchone()
+        return {"at": r[0], "status": r[1], "body": r[2]} if r else None
+
+    def robots_set(self, host: str, at: datetime, status: int, body: str) -> None:
+        with self.conn:
+            self.conn.execute("INSERT OR REPLACE INTO robots VALUES (?, ?, ?, ?)", (host, at.isoformat(), status, body))
+
+    def recheck_get(self, publisher: str) -> dict | None:
+        r = self.conn.execute("SELECT findings FROM rechecks WHERE publisher=?", (publisher,)).fetchone()
+        return json.loads(r[0]) if r else None
+
+    def recheck_set(self, publisher: str, findings: dict) -> None:
+        with self.conn:
+            self.conn.execute("INSERT OR REPLACE INTO rechecks VALUES (?, ?, ?)",
+                              (publisher, findings["at"], json.dumps(findings)))
+
+    def limits_seen(self, publisher: str, feed: str, seen: dict) -> None:
+        with self.conn:
+            self.conn.execute("INSERT OR REPLACE INTO limits_seen VALUES (?, ?, ?)", (publisher, feed, json.dumps(seen)))
+
+    def limits_kept(self, publisher: str) -> dict[str, dict]:
+        return {r[0]: json.loads(r[1]) for r in
+                self.conn.execute("SELECT feed, seen FROM limits_seen WHERE publisher=?", (publisher,))}
 
 
 # -- reading the feeds -------------------------------------------------------------------------
@@ -271,7 +296,7 @@ def parse_nyfed(data: dict) -> dict | None:
             "lo": r.get("targetRateFrom"), "hi": r.get("targetRateTo")}
 
 
-# -- fetching ----------------------------------------------------------------------------------
+# -- the answers --------------------------------------------------------------------------------
 def _retry_after_minutes(value: str | None) -> float:
     """A Retry-After header in minutes (seconds or an HTTP date); 0 when absent or unreadable."""
     if not value:
@@ -283,87 +308,6 @@ def _retry_after_minutes(value: str | None) -> float:
             return max(0.0, (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds() / 60)
         except (TypeError, ValueError):
             return 0.0
-
-
-def due(db: GovDB, now: datetime, minutes: int = REFRESH_MINUTES) -> list[Source]:
-    """The sources not asked within `minutes` (FAILED_RETRY_MINUTES for one whose last try failed)."""
-    seen = db.fetched()
-
-    def wait(f: dict) -> timedelta:
-        if f["status"] == "refused":  # held off: the agency said no (or slow down), as long as it asked
-            held = re.search(r"wait (\d+) min", f.get("message") or "")
-            return timedelta(minutes=max(minutes, float(held.group(1)) if held else REFUSED_MINUTES))
-        return timedelta(minutes=min(minutes, FAILED_RETRY_MINUTES) if f["status"] == "failed" else minutes)
-    return [s for s in SOURCES if s.key not in seen or now - datetime.fromisoformat(seen[s.key]["at"]) >= wait(seen[s.key])]
-
-
-def fetch(db: GovDB, now: datetime, contact: str | None = None, log: Callable[[str], None] = print,
-          session: requests.Session | None = None, minutes: int = REFRESH_MINUTES,
-          sleep: Callable[[float], None] = time.sleep) -> int:
-    """Ask every due source once (conditional requests: an unchanged feed sends nothing back).
-    Sources that want a contact wait without one. Returns requests sent."""
-    session = session or requests.Session()
-    seen, sent, new = db.fetched(), 0, 0
-    for s in due(db, now, minutes):
-        if s.contact and not contact:
-            db.note(s.key, now, "waiting", f"{s.agency} {WAITING}")
-            continue
-        # the contact goes only to the agencies that ask automated readers for one
-        headers = {"User-Agent": f"{USER_AGENT} {contact}" if contact and s.contact else USER_AGENT,
-                   "Accept-Encoding": "gzip, deflate"}
-        prev = seen.get(s.key, {})
-        if prev.get("etag"):
-            headers["If-None-Match"] = prev["etag"]
-        if prev.get("modified"):
-            headers["If-Modified-Since"] = prev["modified"]
-        r = None
-        for attempt in (1, 2):  # a dropped connection: once more
-            sent += 1
-            try:
-                # a source sent the contact follows no redirect: the User-Agent would go with it to the
-                # other host (requests drops only Authorization); a moved feed reads as failed instead
-                r = session.get(s.url, headers=headers, timeout=TIMEOUT_S, allow_redirects=not s.contact)
-                break
-            except (requests.ConnectionError, requests.Timeout) as e:
-                error = e
-                if attempt == 1:
-                    sleep(RETRY_WAIT_S)
-            except requests.RequestException as e:
-                error = e
-                break
-        if r is None:
-            db.note(s.key, now, "failed", f"no answer: {type(error).__name__}")
-            continue
-        if r.status_code == 304:
-            db.note(s.key, now, "unchanged")
-            continue
-        if r.status_code in (401, 403, 429):  # a refusal: not asked again for hours, never every few minutes
-            after = _retry_after_minutes(r.headers.get("Retry-After"))
-            db.note(s.key, now, "refused", f"HTTP {r.status_code}; wait {max(after, REFUSED_MINUTES):.0f} min")
-            log(f"gov: {s.agency} {s.title}: refused (HTTP {r.status_code}); asked again in {max(after, REFUSED_MINUTES) / 60:.0f} h")
-            continue
-        if r.status_code != 200:
-            db.note(s.key, now, "failed", f"HTTP {r.status_code}")
-            log(f"gov: {s.agency} {s.title}: HTTP {r.status_code}")
-            continue
-        try:
-            if s.kind == "nyfed":
-                rate = parse_nyfed(r.json())
-                if rate and rate["day"]:
-                    db.save_rate(rate["series"], rate["day"], rate["value"], rate["lo"], rate["hi"], now)
-                n = 0
-            else:
-                items = parse_fedreg(r.json()) if s.kind == "fedreg" else parse_rss(r.content, s)
-                n = db.save_items(s.key, items, now)
-        except (ValueError, ET_XML.ParseError) as e:
-            db.note(s.key, now, "failed", f"unreadable answer: {e}"[:200])
-            continue
-        new += n
-        db.note(s.key, now, "ok", f"{n} new" if s.kind != "nyfed" else None,
-                etag=r.headers.get("ETag") or "", modified=r.headers.get("Last-Modified") or "")
-    if sent:
-        log(f"gov: {sent} requests, {new} new items")
-    return sent
 
 
 # -- what the Gov view shows -------------------------------------------------------------------
@@ -413,15 +357,42 @@ def parameters(db: GovDB, spx_close: tuple[str, float] | None = None) -> list[di
     return out
 
 
-def view(db: GovDB, contact_set: bool, spx_close: tuple[str, float] | None = None) -> dict:
-    """Everything the Gov view shows: items newest first, parameters, each source's state, links."""
+def upcoming(publishers, today, now: datetime | None = None) -> list[dict]:
+    """The publishers' next scheduled releases (their calendars: the FOMC's decisions and minutes),
+    soonest first: [{when, what, publisher}]; with `now`, only those still to come."""
+    out = [{**c, "publisher": p.title} for p in publishers.values() if p.calendar for c in p.calendar(today)
+           if now is None or datetime.fromisoformat(c["when"]) > now]
+    return sorted(out, key=lambda c: datetime.fromisoformat(c["when"]))
+
+
+def view(db: GovDB, contact_set: bool, spx_close: tuple[str, float] | None = None, publishers=None,
+         today=None) -> dict:
+    """Everything the Gov view shows: items newest first, parameters (with the next FOMC decision),
+    each agency feed's state, the next scheduled releases, links. `publishers`: the official
+    publisher plugins (sources.publishers(); their feeds are the sources)."""
+    from .sources import publishers as registered
+
+    pubs = {n: p for n, p in (publishers if publishers is not None else registered()).items() if p.kind == "official"}
+    now = None if today else datetime.now(timezone.utc)  # a day given (tests): that day's whole calendar
+    today = today or now.date()
     seen = db.fetched()
     sources = []
-    for s in SOURCES:
-        f = seen.get(s.key)
-        state = "waiting" if s.contact and not contact_set else (f or {}).get("status") or "not asked yet"
-        sources.append({"key": s.key, "agency": s.agency, "title": s.title, "state": state,
-                        "message": f"{s.agency} {WAITING}" if state == "waiting" else (f or {}).get("message"),
-                        "at": (f or {}).get("at"), "okAt": (f or {}).get("ok_at")})
-    return {"items": db.items(), "parameters": parameters(db, spx_close), "sources": sources,
-            "links": [{"title": t, "url": u} for t, u in LINKS], "refreshMinutes": REFRESH_MINUTES}
+    for p in pubs.values():
+        for s in p.feeds:
+            f = seen.get(s.key)
+            state = "waiting" if p.policy.contact and not contact_set else (f or {}).get("status") or "not asked yet"
+            sources.append({"key": s.key, "agency": s.agency, "title": s.title, "state": state, "publisher": p.name,
+                            "every": s.every_minutes,
+                            "message": f"{s.agency} {WAITING}" if state == "waiting" else (f or {}).get("message"),
+                            "at": (f or {}).get("at"), "okAt": (f or {}).get("ok_at")})
+    next_ = upcoming(pubs, today, now)
+    params = parameters(db, spx_close)
+    fomc = next((c for c in next_ if c.get("kind") == "fomc-decision"), None)
+    if fomc:
+        when = datetime.fromisoformat(fomc["when"])
+        params.insert(min(1, len(params)), {
+            "name": "Next FOMC decision", "value": f"{when:%a} {when.day} {when:%b %Y}, 2:00 p.m. ET"
+            + (" (with projections)" if fomc.get("projections") else ""),
+            "source": "Federal Reserve: FOMC calendar", "link": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"})
+    return {"items": db.items(), "parameters": params, "sources": sources, "upcoming": next_[:6],
+            "links": [{"title": t, "url": u} for t, u in LINKS]}

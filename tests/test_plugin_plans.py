@@ -32,7 +32,9 @@ def test_a_scan_answers_with_rows_or_with_the_plan_they_show_and_sets_only_its_o
     original = alpaca.scan
     try:
         object.__setattr__(alpaca, "scan", lambda src: [("x", 1, None)])
-        assert alpaca.run_scan(source) == Scanned((("x", True, "None"),), {})
+        found = alpaca.run_scan(source)
+        assert found.results[:-1] == (("x", True, "None"),) and found.plan == {}
+        assert found.results[-1][0] == "its server's rate limit"  # its limits verified with every scan
         object.__setattr__(alpaca, "scan", lambda src: Scanned((("x", True, ""),),
                                                                {"ALPACA_PLAN": "algo_trader_plus", "MASSIVE_TIER": "advanced"}))
         assert alpaca.run_scan(source).plan == {"ALPACA_PLAN": "algo_trader_plus"}  # never another plugin's
@@ -113,7 +115,7 @@ def test_massive_finds_its_stocks_plan_and_leaves_the_other_classes_to_you():
     source = type("Source", (), {"plan_reach": lambda self, ticker: reach})()
     found = providers()["massive"].run_scan(source)
     assert found.plan == {"MASSIVE_TIER": "developer"}
-    assert found.results[-1] == ("stocks plan: developer", True, "10 years of history")
+    assert found.results[-2] == ("stocks plan: developer", True, "10 years of history")  # then its limits row
     assert "MASSIVE_TIER_FUTURES" in massive.PLAN_NOTE and "5 requests a minute" in massive.PLAN_NOTE
 
 
@@ -218,7 +220,8 @@ def test_a_scan_keeps_the_plan_it_found(store):
     finally:
         object.__setattr__(alpaca, "scan", original)
     kept = store.kv_json(sourcing.SCAN_KEY.format("alpaca"))
-    assert kept["plan"] == {"ALPACA_PLAN": "basic"} and kept["results"] == [["x", True, ""]]
+    assert kept["plan"] == {"ALPACA_PLAN": "basic"} and kept["results"][:-1] == [["x", True, ""]]
+    assert kept["limits"] == {"seen": {}, "perMinute": None, "kept": None}  # no settings given: no window to set beside
     assert "alpaca: plan found: ALPACA_PLAN=basic (used wherever you have not set ALPACA_PLAN)" in lines
 
 

@@ -1,13 +1,17 @@
 """Massive (massive.com): stocks, indices, currencies, crypto and futures, one plan per asset class.
 
 Its scan finds the stocks plan from what the key may ask for (MassiveSource.plan_reach) and sets
-MASSIVE_TIER where you have not. The other classes' plans are not probed (PLAN_NOTE)."""
+MASSIVE_TIER where you have not. The other classes' plans are not probed (PLAN_NOTE).
+
+Its headlines are a publisher of its own (PUBLISHER, read by publications.py every 30 minutes),
+on this feed's key and limits."""
 from __future__ import annotations
 
 from ...config import MASSIVE_CLASS_TIERS, TIERS, asset_tier, tier_for
 from ...ratelimit import MachineLedger, RateLimiter
 from ...symbols import ASSETS
 from ..massive import PAGE_LIMIT, MassiveClient, MassiveSource
+from ..publisher import Feed, Policy, Publisher
 from ..registry import KeyVar, Provider, Scanned, limiter, machine_caps, minute_window
 
 # plan_reach's answers, and the plans that have each (config.tier_for)
@@ -67,4 +71,31 @@ PLUGIN = Provider(
     has_keys=lambda s: bool(s.api_key),
     serves=lambda s: frozenset(ASSETS) if s.api_key else None,  # not set up at all without its key
     markets=lambda s: {"stock": "sip", "index": "index", "fx": "otc", "crypto": "consolidated", "future": "cme"},
+)
+
+NEWS_DAYS = 2  # the first read reaches this far back
+
+
+def read_headlines(ctx) -> int:
+    """Massive's newest headlines (one request, on Massive's limits: its rate window, daily cap and
+    kills), into the main database's news for the News view and the globe's ticker. Returns how many."""
+    from datetime import datetime, timedelta, timezone
+
+    source = build(ctx.settings.for_source("massive"), 1)
+    source.client.on_request = lambda n: (ctx.store.count_request("massive", now=ctx.now), ctx.count(1))
+    newest = ctx.store.latest_news_ms("massive")
+    since = datetime.fromtimestamp(newest / 1000, timezone.utc) if newest else ctx.now - timedelta(days=NEWS_DAYS)
+    n = ctx.store.save_news("massive", source.news(since, 100))
+    ctx.store.kv_set("news:massive", ctx.now.isoformat())  # the Fetcher's "Headlines" row reads when
+    return n
+
+
+PUBLISHER = Publisher(
+    name="massive-news", title="Massive headlines", order=300, kind="vendor", account="massive",
+    about="news headlines for the News view and the globe's ticker, on Massive's key and limits",
+    feeds=(Feed("massive-news", "Massive", "Headlines", "https://api.massive.com/v2/reference/news", "headlines",
+                every_minutes=30, moments=False),),
+    policy=Policy(min_minutes=30, per_day=60, terms="your Massive plan's terms; one request a read",
+                  terms_url="https://massive.com/terms"),
+    read=read_headlines,
 )

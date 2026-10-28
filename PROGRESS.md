@@ -4,6 +4,18 @@ Working notes so work can resume in a fresh session. Newest first.
 
 ## State (2026-10-27)
 
+- **News and publications are plugins (2026-10-28, the user's request):** each agency a publisher
+  plugin of its own (`sources/plugins/fed.py`, `nyfed.py`, `sec.py`, `bls.py`, `fedreg.py`;
+  `sources/publisher.py`), Massive's headlines a `PUBLISHER` in its own module. Read by
+  `publications.py` in the recorder's own thread, on each one's schedule (the Fed every 30 min and
+  at the FOMC's 2:00 p.m. releases; BLS at 8:30; the New York Fed after its publications), never
+  behind the hourly derive pass (which had skipped the agencies for two days); the hourly sync reads
+  them only when no recorder runs. Scrape checks before every request (own hosts over HTTPS, blocked
+  sites, feeds only, robots.txt, floors, daily caps, conditional requests, Retry-After, no redirect
+  off its hosts, nothing to the SEC without GOV_CONTACT); each one's limits verified weekly and with
+  Recheck on the Plugins view (a "News and publications" group, with Pause). The feeds' capability
+  scans verify their servers' rate-limit headers too; a lower server limit is used from then on.
+  FOMC dates for 2026-2027 are in fed.py: add 2028 when the Fed publishes it.
 - **Code audit (2026-10-28):** six reviews of the whole package; the critical and high findings fixed
   (no more deletes on a listing change, kills per account with Retry-After, keys trimmed and never
   logged, Blue Ocean's night horizon, profiles across tabs, paper orders). The open ones, by area:

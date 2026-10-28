@@ -306,11 +306,11 @@ def test_a_rate_limit_in_the_weekly_scan_stops_the_run_and_other_failures_do_not
     class Limited:
         scan = True
 
-        def run_scan(self, source):
+        def run_scan(self, source, settings=None):
             raise RateLimited(429, "slow down", 600)
 
     class Odd(Limited):
-        def run_scan(self, source):
+        def run_scan(self, source, settings=None):
             raise ValueError("an answer it could not read")
 
     monkeypatch.setattr(cli, "providers", lambda: {"x": Limited()})

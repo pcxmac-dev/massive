@@ -143,7 +143,7 @@ def test_tiingo_scans_its_plan_and_reports_the_blue_ocean_add_on(store):
 
     cli._scan("tiingo", source, store, lambda *_: None)
     kept = store.kv_json(sourcing.SCAN_KEY.format("tiingo"))
-    assert [r[1] for r in kept["results"]] == [True, True, False, True, True, True, True]
+    assert [r[1] for r in kept["results"]][:-1] == [True, True, False, True, True, True, True]  # then its limits
     calls = len(source.client.paths)
     cli._scan("tiingo", source, store, lambda *_: None, due_days=7)  # scanned a moment ago: not again
     assert len(source.client.paths) == calls

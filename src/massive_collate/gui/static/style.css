@@ -562,6 +562,10 @@ main > .view[hidden] { display: none; }
 .gov-param-value { font-size: 15px; font-weight: 600; margin: 2px 0 4px; font-variant-numeric: tabular-nums; }
 .gov-param-value.long { font-size: 12.5px; font-weight: 500; line-height: 1.35; }
 .gov-levels { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; font-variant-numeric: tabular-nums; margin-bottom: 2px; }
+/* the cards' rule links: the accent mixed toward the text colour, readable on dark and light cards
+   alike (the browser's own blue, and the bare accent, were too dark on the dark card) */
+.gov-param a, .gov-sources a, .pl-view .ex-side a { color: color-mix(in srgb, var(--accent) 55%, var(--text)); text-decoration: none; }
+.gov-param a:hover, .gov-sources a:hover, .pl-view .ex-side a:hover { text-decoration: underline; }
 .gov-list .src.gov-src { color: var(--text); }
 .gov-note { margin: 6px 0; flex: none; }
 table.gov-sources { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -920,4 +924,14 @@ main > .view.ex-view:not([hidden]) { display: grid; }
 .pl-usage { height: 6px; border-radius: 3px; background: var(--panel); margin: 8px 0 2px; overflow: hidden; }
 .pl-usage i { display: block; height: 100%; background: var(--accent); }
 .pl-view code { font-size: 11px; }
+/* a publisher (news and publications): its feeds' states, its scrape checks */
+.ex-state.pl-paused, .ex-state.pl-waiting, .ex-state.pl-off { color: var(--muted); border-color: var(--border); }
+.ex-state.pl-refused, .ex-state.pl-failing { color: var(--down); border-color: var(--down); }
+.pl-fstate { white-space: nowrap; }
+.pl-f-ok, .pl-f-unchanged { color: var(--up); }
+.pl-f-failed, .pl-f-refused { color: var(--down); }
+.pl-f-waiting, .pl-f-not-asked-yet { color: var(--muted); }
+.pl-feeds td.pl-msg { white-space: normal; overflow-wrap: anywhere; }
+.pl-checks { margin: 0 0 6px; padding-left: 18px; }
+.pl-checks li { margin: 2px 0; overflow-wrap: anywhere; }
 @media (max-width: 1100px) { .ex-view { grid-template-columns: 200px minmax(0, 1fr); } .ex-side { grid-column: 1 / -1; border-left: none; border-top: 1px solid var(--border); } }

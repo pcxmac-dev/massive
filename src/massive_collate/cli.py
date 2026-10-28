@@ -410,6 +410,10 @@ def dispatch(settings: Settings, log=None) -> int:
     log(f"sync: started {', '.join(started) or 'no feed'}, each in a process of its own"
         + (f"; fetching already: {', '.join(going)}" if going else "")
         + (f"; not set up here: {', '.join(unset)}" if unset else ""))
+    # the publishers' due feeds: the recorder reads them as they fall due; this pass catches any it
+    # missed (no recorder, or one from before it read them). One reader at a time (their lock), and a
+    # feed read lately is not due, so nothing is read twice.
+    _fetch_gov(settings, log)
     return len(started) + len(going)
 
 
@@ -448,26 +452,21 @@ def after_sync(args, settings: Settings) -> bool:
                 from . import datasets
 
                 datasets.fetch(store, log=logger, only_started=True)
-        if args.all_sources and not tickers and not settings.offline:  # the agencies' news and rates, when due
-            _fetch_gov(settings, logger)
     finally:
         proc.release(lock)
     return True
 
 
-def _fetch_gov(settings: Settings, log, minutes: int | None = None) -> None:
-    """The Fed's, the SEC's, BLS's, the Federal Register's and the New York Fed's newest (gov.py):
-    each source at most hourly; a failure is logged and never fails the run."""
-    from . import gov
+def _fetch_gov(settings: Settings, log, force: bool = False) -> None:
+    """The publisher plugins' due feeds (publications.py: the agencies, a vendor's headlines), each
+    on its own schedule and under its scrape checks (`force`: every feed its floor allows); a
+    failure is logged and never fails the caller."""
+    from . import publications
 
-    db = gov.GovDB(gov.db_path(settings.db_path))
     try:
-        gov.fetch(db, datetime.now(timezone.utc), contact=settings.gov_contact, log=log,
-                  minutes=gov.REFRESH_MINUTES if minutes is None else minutes)
-    except Exception as e:  # noqa: BLE001 - the agencies' feeds are extras: the run's data is in
-        log(f"gov: failed ({type(e).__name__}: {e})")
-    finally:
-        db.close()
+        publications.run_due(settings, log, force=force)
+    except Exception as e:  # noqa: BLE001 - the publications are extras: the run's data is in
+        log(f"publications: failed ({type(e).__name__}: {e})")
 
 
 def cmd_updates(args, settings: Settings) -> int:
@@ -489,15 +488,16 @@ def cmd_updates(args, settings: Settings) -> int:
 
 
 def cmd_gov(args, settings: Settings) -> int:
-    """Fetch the agencies' due feeds now (gov.py; the sync does it after each full run) and list
-    each source's state."""
+    """Read the publishers' due feeds now (publications.py; the recorder reads them on their own
+    schedules, the hourly sync when no recorder runs; --all: every feed its floor allows) and list
+    each agency feed's state."""
     from . import gov
 
     if settings.offline:
         print("this copy of the app is offline (MASSIVE_OFFLINE): nothing is fetched")
     else:
         _fetch_gov(settings, Logger(settings.db_path.parent / "logs" / "massive-collate.log"),
-                   minutes=0 if getattr(args, "all", False) else gov.REFRESH_MINUTES)
+                   force=bool(getattr(args, "all", False)))
     db = gov.GovDB(gov.db_path(settings.db_path))
     try:
         for s in gov.view(db, contact_set=bool(settings.gov_contact))["sources"]:
@@ -559,7 +559,7 @@ def _sync(args, settings: Settings) -> tuple[int, int]:
                     return max(0, feed.max_requests_per_day - collector.DAILY_RESERVE - store.requests_today(name))
 
                 if tickers is None:
-                    _scan(name, source, store, log, due_days=SCAN_DAYS)
+                    _scan(name, source, store, log, due_days=SCAN_DAYS, settings=settings)
 
                 result = collector.sync(source, store, feed.tier, log=log, refresh_hours=settings.refresh_hours,
                                         feeds=feed_profiles(settings), only=tickers, published_only=True,
@@ -672,7 +672,7 @@ def cmd_live(args, settings: Settings) -> int:
     boats = live.BoatsPoller(build_source("tiingo", settings).client) if live.boats_live(settings) else None
     recorder = live.Recorder(settings.db_path, coins=settings.live_coins, stock_keys=live.stock_keys(settings),
                              locks=locks, log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"),
-                             selected_only=settings.live_selected_only, boats=boats)
+                             selected_only=settings.live_selected_only, boats=boats, publications=settings)
     try:
         recorder.run()
     except KeyboardInterrupt:
@@ -951,14 +951,14 @@ def cmd_capabilities(args, settings: Settings) -> int:
         args.source = name
         with api_run(args, settings, "capabilities", lock=False) as (source, store, log):
             if source is not None:
-                _scan(name, source, store, log)
+                _scan(name, source, store, log, settings=settings)
     return 0
 
 
 SCAN_DAYS = 7  # each provider's capabilities are scanned again this often, at the start of its sync
 
 
-def _scan(name: str, source, store: Store, log, due_days: float | None = None) -> None:
+def _scan(name: str, source, store: Store, log, due_days: float | None = None, settings: Settings | None = None) -> None:
     """Run a provider's capability scan and keep it (kv sourcing.SCAN_KEY); with `due_days` (a sync's),
     only when the last is older and the feed has symbols to collect. A scan that fails is logged;
     the run goes on."""
@@ -976,7 +976,7 @@ def _scan(name: str, source, store: Store, log, due_days: float | None = None) -
     if due_days is not None and not any(n for (feed, _), n in store.watch_counts().items() if feed == name):
         return  # a feed with nothing to do spends no request on its scan
     try:
-        found = p.run_scan(source)
+        found = p.run_scan(source, settings)
     except (RateLimited, Unauthorized):
         raise  # the server said stop: the run ends and the feed is killed (api_run), not asked on at once
     except Exception as e:  # noqa: BLE001 - a scan must not stop the feed's run
@@ -985,7 +985,8 @@ def _scan(name: str, source, store: Store, log, due_days: float | None = None) -
     store.kv_set(sourcing.SCAN_KEY.format(name), json.dumps({"at": now.isoformat(timespec="seconds"),
                                                              "results": [list(r) for r in found.results],
                                                              "plan": dict(found.plan),
-                                                             "alike": {k: list(v) for k, v in found.alike.items()}}))
+                                                             "alike": {k: list(v) for k, v in found.alike.items()},
+                                                             "limits": dict(found.limits)}))
     for what, ok, detail in found.results:
         log(f"{name}: {'yes' if ok else 'no '} {what}" + (f": {detail}" if detail else ""))
     for var, value in found.plan.items():

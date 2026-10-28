@@ -2,8 +2,9 @@
 /* Gov view (rail icon: a state house): what the government and the regulators publish (gov.py).
    The current regulatory parameters first (policy rates with their dates, rule parameters with the
    rule and its newest Federal Register document), then the agencies' newest, filtered by agency
-   (FINRA: its rule filings, from the Federal Register), then each source's state and pages to
-   read at the agencies. Fetched by the sync, at most hourly per source; read here every minute. */
+   (FINRA: its rule filings, from the Federal Register), the next scheduled releases, then each
+   source's state and pages to read at the agencies. Each agency is a publisher plugin, read by the
+   recorder on its own schedule under its scrape checks (the Plugins view); read here every minute. */
 (() => {
   const box = document.getElementById('viewGov');
   const { esc, safeUrl } = window.MassiveIcons;
@@ -54,7 +55,7 @@
     box.innerHTML = `
       <div class="view-head"><div><h2>Government &amp; regulators</h2>
         <div class="p-muted small">The Fed, the SEC, BLS, the Federal Register (SEC with FINRA's and the exchanges' rule filings, CFTC, Fed,
-          Treasury) and the New York Fed's rates: official feeds, each asked at most every ${data.refreshMinutes} minutes by the fetcher.</div></div>
+          Treasury) and the New York Fed's rates: official feeds, each agency a plugin read on its own schedule (Plugins view).</div></div>
         <div class="view-actions"><input id="govSearch" type="search" placeholder="Filter" value="${esc(query)}"></div></div>
       <h3 class="gov-h">Current regulatory parameters</h3>
       <div class="gov-params">${data.parameters.map(parameter).join('')}</div>
@@ -65,7 +66,9 @@
           <span class="src gov-src">${esc(it.agency)}${it.tags.map((t) => ` <span class="chip">${esc(t)}</span>`).join('')}</span>
           <div class="news-main">${link(it.title, it.url)}
             <div class="p-muted small">${esc(it.kind || '')} · ${esc(when(it.published))}</div></div>
-        </div>`).join('') : `<div class="empty">${data.items.length ? 'Nothing matches.' : "Nothing yet: the fetcher's next run reads the agencies' feeds."}</div>`}</div>
+        </div>`).join('') : `<div class="empty">${data.items.length ? 'Nothing matches.' : "Nothing yet: the recorder reads the agencies' feeds shortly."}</div>`}</div>
+      ${data.upcoming?.length ? `<h3 class="gov-h">Scheduled</h3><div class="table-wrap"><table class="gov-sources"><tbody>
+        ${data.upcoming.map((c) => `<tr><td>${esc(when(c.when))}</td><td>${esc(c.what)}</td><td class="p-muted">${esc(c.publisher)}</td></tr>`).join('')}</tbody></table></div>` : ''}
       <h3 class="gov-h">Sources</h3>
       ${waiting.length ? `<div class="p-muted small gov-note">${esc(waiting[0].message)} (as a user environment variable, like the keys).</div>` : ''}
       <div class="table-wrap"><table class="gov-sources"><thead><tr><th>Agency</th><th>Feed</th><th>State</th><th>Last answered</th></tr></thead><tbody>

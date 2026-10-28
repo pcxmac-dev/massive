@@ -1265,7 +1265,6 @@ def sync(
             sync_exchanges(source, store, log)
             if refresh_calendars(source, store, today, log):
                 freshness.use_official(store)  # this week's official schedules, from here on
-            fetch_news(source, store, now, log)
             from .gui.world import PROXIES
             fetch_market_moves(source, store, now, PROXIES, log)
         # Keep complete symbols current first; backfills take what budget is left, in the fetch
@@ -1519,7 +1518,7 @@ def sync(
 
 
 CALENDAR_REFRESH_DAYS = 7
-NEWS_REFRESH_MINUTES = 30
+NEWS_REFRESH_MINUTES = 30  # a vendor's headlines (its publisher plugin, publications.py): this often
 
 
 def fetch_market_moves(source: DataSource, store: Store, now: datetime, proxies: list[str], log: Log = print,
@@ -1580,25 +1579,6 @@ def fetch_market_moves(source: DataSource, store: Store, now: datetime, proxies:
             log(f"market moves: {d} not published yet")
         d -= timedelta(days=1)
     return used
-
-
-def fetch_news(source: DataSource, store: Store, now: datetime, log: Log = print) -> int:
-    """Newest headlines (one request, at most every 30 minutes) for the announcements ticker."""
-    key = f"news:{source.name}"
-    last = store.kv_get(key)
-    if last and (now - datetime.fromisoformat(last)).total_seconds() < NEWS_REFRESH_MINUTES * 60:
-        return 0
-    newest = store.latest_news_ms(source.name)
-    since = datetime.fromtimestamp(newest / 1000, timezone.utc) if newest else now - timedelta(days=2)
-    try:
-        n = store.save_news(source.name, _guard_call(source.news, since, 100))
-        log(f"news: {n} headlines")
-    except NotImplementedError:
-        pass
-    except (NotEntitled, SourceError) as e:
-        log(f"news: not available ({e})")
-    store.kv_set(key, now.isoformat())
-    return 1
 
 
 

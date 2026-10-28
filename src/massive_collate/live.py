@@ -436,6 +436,9 @@ class Recorder:
     # and stocks open on a chart or on the rail's watchlists.
     selected_only: bool = False
     boats: object = None  # BoatsPoller: Blue Ocean's night under way from Tiingo (boats_live)
+    # the settings the publisher plugins are read with (publications.py), in a thread of its own;
+    # None: not read here
+    publications: object = field(default=None, repr=False)
 
     def __post_init__(self):
         self.streams = [STREAMS[s](dynamic=self.selected_only) for s in self.sources] if self.coins else []
@@ -815,6 +818,7 @@ class Recorder:
         # streams whose symbols change, or the poller of Blue Ocean's nights (it follows the charts)
         follows = any(getattr(s, "dynamic", False) for s in self.streams) or self.boats is not None
         boats, boats_at = self._start_boats(), time.monotonic()
+        pubs, pubs_at = self._start_publications(), time.monotonic()
         # the one process that opens tick files in bars-only mode: it records the streams' trades
         with Store(self.db_path, ticks=True) as store:
             total, last_log, last_derive, last_want, last_lock = 0, time.time(), time.time(), 0.0, time.time()
@@ -833,6 +837,8 @@ class Recorder:
                     self._supervise(threads, restarts, time.monotonic())  # a stream thread that ended: again
                     if boats is not None and not boats.is_alive() and time.monotonic() - boats_at > MAX_BACKOFF:
                         boats, boats_at = self._start_boats(), time.monotonic()  # the poller's thread ended: again
+                    if pubs is not None and not pubs.is_alive() and time.monotonic() - pubs_at > MAX_BACKOFF:
+                        pubs, pubs_at = self._start_publications(), time.monotonic()
                     if follows and time.time() - last_want > WANT_SECONDS:
                         now_ms = int(time.time() * 1000)
                         self.set_wanted(wanted_stocks(store, now_ms, watchlists=not self.selected_only),
@@ -872,6 +878,44 @@ class Recorder:
         except Exception:
             self._touched |= touched  # tried again with the next
             raise
+
+    # -- the publisher plugins (publications.py) --------------------------------------------------------
+    def _start_publications(self) -> threading.Thread | None:
+        if self.publications is None:
+            return None
+        t = threading.Thread(target=self._publications_loop, name="publications", daemon=True)
+        t.start()
+        return t
+
+    def _publications_loop(self) -> None:
+        """The publishers' due feeds, each on its own schedule (the FOMC's 2:00 p.m. statement read
+        at 2:00:20), in this thread with its own connections: a slow agency never holds up a flush.
+        One reader on the machine at a time (its lock, taken for each pass); the settings read again
+        when the saved keys change (a contact set)."""
+        from . import config, gov, proc, publications
+        from .storage import Store
+
+        settings, saved = self.publications, config.saved_user_keys()
+        lock = publications.lock_path(self.db_path)
+        gdb = gov.GovDB(gov.db_path(self.db_path))
+        try:
+            with Store(self.db_path) as store:
+                while not self.stop.is_set():
+                    wait = publications.STEP_MAX_S
+                    try:
+                        if config.saved_user_keys() != saved:
+                            settings, saved = config.load_settings(), config.saved_user_keys()
+                        if proc.acquire(lock):
+                            try:
+                                wait = publications.Reader(gdb, settings, store, log=self.log).step(
+                                    datetime.now(timezone.utc))
+                            finally:
+                                proc.release(lock)
+                    except Exception as e:  # noqa: BLE001 - the network, a locked file: logged, tried again
+                        self.log(f"live: publications: {type(e).__name__}: {e}")
+                    self.stop.wait(wait)
+        finally:
+            gdb.close()
 
     # -- Blue Ocean's night, live from Tiingo (BoatsPoller) ------------------------------------------
     def _start_boats(self) -> threading.Thread | None:
