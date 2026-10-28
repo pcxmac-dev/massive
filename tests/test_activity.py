@@ -175,10 +175,33 @@ def test_the_status_keeps_its_symbol_rows_a_while_and_rebuilds_them_when_another
         first = act.activity(s, settings, db, rows_cache=cache, rows_ttl_s=60)
         again = act.activity(s, settings, db, rows_cache=cache, rows_ttl_s=60)
         assert len(built) == 1 and again["symbols"] == first["symbols"]  # kept: each build seeks every feed file
-        monkeypatch.setattr(act, "lock_owner", lambda _db: 1234)  # a run fetching AAPL now
+        monkeypatch.setattr(act, "fetching_feeds", lambda _db: {"massive": 1234})  # a run fetching AAPL now
         run = s.start_run("massive", "sync")
         s.set_run_current(run, "AAPL")
         act.activity(s, settings, db, rows_cache=cache, rows_ttl_s=60)
         assert built == [None, "AAPL"]  # another symbol being fetched: built again at once
         act.activity(s, settings, db)  # no cache: built every time (tests, the command line)
         assert len(built) == 3
+
+
+def test_the_fetcher_shows_every_feed_fetching_side_by_side(tmp_path):
+    import os
+
+    from massive_collate import proc
+
+    db = tmp_path / "massive.db"
+    settings = load_settings(env={"MASSIVE_DB": str(db), "MASSIVE_API_KEY": "k"}, env_file=None)
+    with Store(db, check_same_thread=False) as s:
+        s.watch_spec("massive", resolve("AAPL"))
+        dead = s.start_run("bitstamp", "sync")  # its process died: no lock held
+        for feed, ticker in (("massive", "AAPL"), ("alpaca", "SPCX")):
+            s.set_run_current(s.start_run(feed, "sync"), ticker)
+            proc.run_lock_path(db, feed).write_text(str(os.getpid()))
+        for _ in range(30):  # the quick feeds' runs since: Massive's pass is older than the newest 25
+            s.finish_run(s.start_run("coinbase", "sync"), 0, 0, "ok", "")
+        out = act.activity(s, settings, db, source="alpaca", now=datetime.now(timezone.utc))
+    assert {f["source"]: f["current"] for f in out["fetching"]} == {"massive": "AAPL", "alpaca": "SPCX"}
+    assert out["running"] and out["live"]["source"] == "alpaca"  # this feed's own run
+    states = {h["source"]: h["state"] for h in out["health"]}
+    assert states["massive"] == states["alpaca"] == "fetching"
+    assert next(r for r in out["runs"] if r["id"] == dead)["status"] == "abandoned"

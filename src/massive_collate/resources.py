@@ -99,16 +99,21 @@ REMOTES = 6  # remote endpoints listed per process (the busiest)
 
 def role_of(command: str) -> tuple[str, str, str]:
     """(role, label, args) of a massive_collate command line: `gui` is the chart app, `sync` the
-    fetcher (with --tickers, a run for symbols opened in the chart), `live` the live recorder."""
+    fetcher (with --source NAME --only, one feed's run: the feeds run side by side; with
+    --tickers, a run for symbols opened in the chart), `live` the live recorder."""
     words = command.replace('"', " ").split()
     try:
         args = words[words.index("massive_collate") + 1:]
     except ValueError:
         return "other", "Python", ""
-    sub = args[0] if args else ""
+    feed = args[1] if args[:1] == ["--source"] and len(args) > 1 else None
+    rest = args[2:] if feed else args  # the options before the command
+    sub = rest[0] if rest else ""
     label = ROLES.get(sub, f"{sub or 'massive_collate'} command")
-    if sub == "sync" and "--tickers" in args:
+    if sub == "sync" and "--tickers" in rest:
         label = "Fetcher: run for opened symbols"
+    elif sub == "sync" and feed and "--only" in rest:
+        label = f"Fetcher: {feed}"
     if sub == "gui" and "--port" in args[:-1]:
         label += f" · port {args[args.index('--port') + 1]}"
     return sub or "other", label, " ".join(args)

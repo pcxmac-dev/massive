@@ -85,6 +85,12 @@ def no_recorders(monkeypatch, tmp_path):
 
     monkeypatch.setattr(server, "subprocess", SimpleNamespace(
         Popen=no_spawn, DEVNULL=subprocess.DEVNULL, PIPE=subprocess.PIPE, CREATE_NO_WINDOW=0))
+    # Nor from the command line: the hourly sync starts each feed's run in a process of its own
+    # (cli.start_feed), and a test's `sync` once started five, which sent Alpaca two requests on the
+    # user's keys. A test that wants to see which would start replaces start_feed.
+    from massive_collate import cli
+
+    monkeypatch.setattr(cli, "start_feed", lambda name: no_spawn(["--source", name, "sync", "--only"]))
 
 
 class FakeResponse:

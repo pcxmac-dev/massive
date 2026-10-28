@@ -89,16 +89,16 @@ def test_opening_a_symbol_starts_a_run_for_it_or_queues_it_behind_the_running_on
         pid = 4242
 
     monkeypatch.setattr(server.subprocess, "Popen", lambda args, **kw: started.append(args) or Proc())
-    monkeypatch.setattr(server.activity, "lock_owner", lambda path: None)
+    monkeypatch.setattr(server.activity, "fetching_feeds", lambda path: {})
     app = ChartApp(store)
     first = app.priority("spcx")
     assert first["state"] == "started" and first["feeds"] == ["alpaca", "massive"]
     assert started[0][-3:] == ["sync", "--tickers", "SPCX"]
     assert app.priority("SPCX")["state"] == "recent" and len(started) == 1  # opened again within minutes
-    monkeypatch.setattr(server.activity, "lock_owner", lambda path: 99)  # a sync is running
+    monkeypatch.setattr(server.activity, "fetching_feeds", lambda path: {"massive": 99, "alpaca": 98})  # both fetching
     monkeypatch.setattr(app, "PRIORITY_COOLDOWN", 0)
-    assert app.priority("SPCX")["state"] == "queued" and len(started) == 1  # it takes the symbol next
-    monkeypatch.setattr(server.activity, "lock_owner", lambda path: None)
+    assert app.priority("SPCX")["state"] == "queued" and len(started) == 1  # their runs take the symbol next
+    monkeypatch.setattr(server.activity, "fetching_feeds", lambda path: {})
     monkeypatch.setattr(app, "PRIORITY_COOLDOWN", 300)
     assert app.priority("SPCX")["state"] == "started" and len(started) == 2  # the run ended: its turn now
     with pytest.raises(LookupError):
@@ -286,7 +286,7 @@ def test_opening_an_up_to_date_symbol_asks_for_nothing(tmp_path, monkeypatch):
     store.watch("massive", ["SPCX"], "minute", exchange="XNAS")
     store.set_backfilled("massive", "SPCX", collector.history_floor(TIERS["free"], dt(2026, 10, 25).date(), "stock"))
     store.set_synced("massive", "SPCX", dt(2026, 10, 24, 9, 0, tzinfo=ET))  # after Friday's session was released
-    monkeypatch.setattr(server.activity, "lock_owner", lambda path: 99)  # a long sync is running
+    monkeypatch.setattr(server.activity, "fetching_feeds", lambda path: {"massive": 99})  # a long sync is running
     monkeypatch.setattr(server.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("started")))
 
     class Sunday(dt):
@@ -313,7 +313,7 @@ def test_an_opened_symbol_waits_only_for_the_feeds_with_something_to_fetch(tmp_p
         store.watch(feed, ["SPCX"], "minute", exchange="XNAS")
     store.set_backfilled("massive", "SPCX", collector.history_floor(FREE, dt(2026, 10, 25).date(), "stock"))
     store.set_synced("massive", "SPCX", dt(2026, 10, 24, 9, 0, tzinfo=ET))  # after Friday's session was released
-    monkeypatch.setattr(server.activity, "lock_owner", lambda path: 99)  # a long sync is running
+    monkeypatch.setattr(server.activity, "fetching_feeds", lambda path: {"massive": 99})  # Massive's long pass
     monkeypatch.setattr(server.subprocess, "Popen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("started")))
     clock = {"now": dt(2026, 10, 26, 3, 0, tzinfo=timezone.utc)}  # Sunday 23:00 ET
 
@@ -330,4 +330,26 @@ def test_an_opened_symbol_waits_only_for_the_feeds_with_something_to_fetch(tmp_p
     clock["now"] = dt(2026, 10, 27, 15, 0, tzinfo=timezone.utc)  # Tuesday: Monday's session is out
     out = app.priority("SPCX")
     assert out["state"] == "queued" and out["need"] == ["massive"]
+    store.close()
+
+
+def test_an_opened_symbol_starts_on_the_idle_feeds_while_another_feeds_pass_goes_on(tmp_path, monkeypatch):
+    # SPCX waited hours behind Massive's pass for Alpaca's and Blue Ocean's turns, one run at a time:
+    # the feeds run side by side now, and a feed it needs that is not fetching takes it at once
+    store = Store(tmp_path / "m.db", check_same_thread=False)
+    for feed in ("massive", "alpaca"):
+        store.watch(feed, ["SPCX"], "minute", exchange="XNAS")
+    started = []
+
+    class Proc:
+        pid = 4242
+
+    monkeypatch.setattr(server.subprocess, "Popen", lambda args, **kw: started.append(args) or Proc())
+    monkeypatch.setattr(server.activity, "fetching_feeds", lambda path: {"massive": 99})  # Massive's long pass
+    app = ChartApp(store)
+    assert app.priority("SPCX")["state"] == "started" and started[0][-3:] == ["sync", "--tickers", "SPCX"]
+    assert app._symbol_run[0] == "SPCX"  # the page sees its own run end, not every feed's
+    monkeypatch.setattr(app, "PRIORITY_COOLDOWN", 0)
+    monkeypatch.setattr(server.activity, "fetching_feeds", lambda path: {None: 99})  # the data being moved
+    assert app.priority("SPCX")["state"] == "queued" and len(started) == 1
     store.close()

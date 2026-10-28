@@ -181,7 +181,7 @@ def test_nothing_is_sent_to_a_killed_feed(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(requests.Session, "get", lambda *a, **k: pytest.fail("a request was sent"))
     assert cli.main(["watch", "add", "SPCX"]) == 0
     assert cli.main(["kills", "kill", "massive", "--kind", "fetch", "--hours", "2", "--why", "testing"]) == 0
-    assert cli.main(["sync"]) == 0
+    assert cli.main(["--source", "massive", "sync", "--only"]) == 0  # its run, as the hourly sync starts it
     with Store(tmp_path / "data" / "m.db") as s:
         assert s.feed_events("massive")[0]["outcome"] == "skipped"
     capsys.readouterr()

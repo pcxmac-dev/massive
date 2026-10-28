@@ -45,10 +45,16 @@ def log_tail(path: Path, lines: int = 200) -> list[str]:
 
 
 def lock_owner(db_path: Path) -> int | None:
-    """Process id holding the run lock, if a run is in progress (its owner alive, the same process)."""
-    from ..proc import holder
+    """Process id holding a run lock, if any run is in progress (its owner alive, the same process)."""
+    return next(iter(fetching_feeds(db_path).values()), None)
 
-    return holder(db_path.with_suffix(".lock"))
+
+def fetching_feeds(db_path: Path) -> dict[str | None, int]:
+    """The feeds being fetched now: {feed: process id}, None when the whole database is locked
+    (proc.run_holders: the feeds run side by side, one run each)."""
+    from ..proc import run_holders
+
+    return run_holders(db_path)
 
 
 def _iso(v) -> str | None:
@@ -342,7 +348,7 @@ def limits(store: Store, settings: Settings, now: datetime) -> list[dict]:
     return rows
 
 
-def health(store: Store, settings: Settings, now: datetime, limit_rows: list[dict], running: dict | None) -> list[dict]:
+def health(store: Store, settings: Settings, now: datetime, limit_rows: list[dict], running: list[dict] | None) -> list[dict]:
     """Each source's state, for the Fetcher view and the status bar, with why:
     - fetching: a run of it is going now;
     - limited: today's requests are used up, the server rate-limited its last run, or it is
@@ -369,8 +375,8 @@ def health(store: Store, settings: Settings, now: datetime, limit_rows: list[dic
         elif kill := killswitch.killed(store, name, "fetch", now):
             state, why = "killed", (f"killed until {kill['until'][11:16]} UTC (strike {kill.get('strikes', 1)}): "
                                     f"{kill['why'][:140]}; `kills release {name}` lifts it")
-        elif running and running.get("source") == name:
-            state, why = "fetching", f"running now: {running.get('requests') or 0:,} requests"
+        elif going := next((r for r in running or () if r.get("source") == name), None):  # the runs going now
+            state, why = "fetching", f"running now: {going.get('requests') or 0:,} requests"
         elif lim.get("leftToday") == 0:
             state, why = "limited", f"today's {lim.get('perDay', 0):,} requests are used; resets at 00:00 UTC"
         elif run and run["status"] == "error":
@@ -432,15 +438,21 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
     settings = settings.for_source(source)  # the feed's own plan, rate and caps
     floor = history_floor(settings.tier, today)
 
-    runs = store.runs(25)
-    owner = lock_owner(db_path)
-    live = next((r for r in runs if r["status"] == "running"), None) if owner else None
-    current = live["current"] if live and live["source"] == source else None
+    # The feeds run side by side: a long pass (Massive's takes hours) stays listed among the newest
+    # runs, and a run is going while its feed's lock is held (the whole database's: every feed's).
+    recent = store.runs(25)
+    runs = [*recent, *(r for r in store.runs_going() if r["id"] not in {x["id"] for x in recent})]
+    held = fetching_feeds(db_path)
+    alive = [r for r in runs if r["status"] == "running" and (r["source"] in held or None in held)]
+    going = {r["id"] for r in alive}
+    mine = next((r for r in alive if r["source"] == source), None)
+    live = mine or (alive[0] if alive else None)  # this feed's run, else the newest going
+    current = mine["current"] if mine else None
     for r in runs:
         start, end = _utc(r["started_at"]), _utc(r["finished_at"])
         r["seconds"] = round(((end or now) - start).total_seconds()) if start else None
-        if r["status"] == "running" and not owner:
-            r["status"] = "abandoned"  # the process died; the next run marks it so in the database
+        if r["status"] == "running" and r["id"] not in going:
+            r["status"] = "abandoned"  # the process died; the feed's next run marks it so in the database
 
     focus_set = frozenset({focus.upper()}) if focus else frozenset()
     key = (source, current, focus_set)
@@ -463,7 +475,7 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
     left = sum(s["requestsLeft"] for s in every)
     per_day = settings.max_requests_per_day
     limit_rows = limits(store, settings.origin or settings, now)
-    sources_health = health(store, settings.origin or settings, now, limit_rows, live)
+    sources_health = health(store, settings.origin or settings, now, limit_rows, alive)
     rpm = settings.tier.requests_per_minute
     return {
         "now": now.isoformat(), "source": source,
@@ -473,7 +485,8 @@ def activity(store: Store, settings: Settings, db_path: Path, source: str = "mas
         },
         "today": {"requests": used, "remaining": max(0, per_day - used)},
         "running": live is not None,
-        "live": live,
+        "live": live,  # this feed's run, else the newest going
+        "fetching": [{k: r[k] for k in ("source", "command", "current", "requests", "seconds")} for r in alive],
         "scanning": bool(live and live["command"].startswith("scan")),
         "newData": counts.get("new", 0),
         "backfill": {

@@ -64,6 +64,8 @@ def test_each_program_is_named_from_its_command_line():
     assert res.role_of(GUI)[:2] == ("gui", "Chart app · port 8765")
     assert res.role_of(SYNC)[:2] == ("sync", "Fetcher (sync)")
     assert res.role_of(SYNC + " --tickers SPCX")[1] == "Fetcher: run for opened symbols"
+    assert res.role_of("pythonw.exe -m massive_collate --source alpaca sync --only --fetch-only")[:2] == (
+        "sync", "Fetcher: alpaca")  # one feed's run: the feeds run side by side
     assert res.role_of(LIVE)[:2] == ("live", "Live recorder")
     assert res.role_of("python -m massive_collate audit --daily")[:2] == ("audit", "audit command")
     assert res.is_app(SYNC) and not res.is_app("python -m pytest")

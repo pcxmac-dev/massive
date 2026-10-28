@@ -51,9 +51,11 @@ watchlist and the catalog; a read-only connection per server thread (WAL allows 
 ~2.4 M rows a stock). First bound it (`_BoundedCache` exists); then serve pages through
 `bars_window` and read coarse frames from what `derive.py` stores.
 
-6. **Split the collector by job; feeds in parallel** (large): `collector.sync` mixes reference,
-archive, futures, stocks, audits and directory; `cli._sync` runs feeds one after another under one
-run lock. Limits are per feed already, so per-feed locks are safe; pick due symbols in SQL.
+6. **Split the collector by job; feeds in parallel** (large; feeds in parallel done 2026-10-27: a
+run lock per feed, `cli.run_lock(db, feed)`; the hourly sync starts each feed not fetching in a
+process of its own, `cli.dispatch`, and builds the derived frames once an hour; a symbol opened in
+the chart fetches at once on the feeds it needs that are not fetching): `collector.sync` still mixes
+reference, archive, futures, stocks, audits and directory; pick due symbols in SQL.
 
 7. **One registry per feed** (medium; done 2026-10-27: providers are plugins, `sources/registry.py`,
 docs/ARCHITECTURE.md; the live streams still apart): a feed's facts live in eight places (`sources/__init__.py`

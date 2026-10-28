@@ -26,7 +26,7 @@
   let filter = 'all';
   let timer = null;
   let followLog = true;
-  let wasRunning = false;
+  let wasFetching = new Set();  // the feeds fetching at the last poll
   let scanNote = '';
   // The status bar's job: { ticker, phase: 'checking' | 'waiting' | 'downloading' | 'done' | 'current' | 'error', ... }
   let job = null;
@@ -109,11 +109,12 @@
       if (!res.ok) throw new Error(String(res.status));
       data = await res.json();
       window.dispatchEvent(new CustomEvent('massive:activity', { detail: data }));
-      if (wasRunning && !data.running) {
-        window.dispatchEvent(new CustomEvent('massive:run-finished', { detail: data }));
-        finishJob();
-      }
-      wasRunning = data.running;
+      // The feeds run side by side: any feed's run ending may have brought new data, and the opened
+      // symbol's own run ends on its own (Massive's pass goes on beside it for hours).
+      const going = new Set((data.fetching || []).map((f) => f.source));
+      if ([...wasFetching].some((f) => !going.has(f))) window.dispatchEvent(new CustomEvent('massive:run-finished', { detail: data }));
+      wasFetching = going;
+      if (job?.phase === 'downloading' && (!data.running || data.symbolRun?.ticker === job.ticker && !data.symbolRun.going)) finishJob();
       advanceJob();
       render();
       pollFailed = false;
@@ -143,10 +144,14 @@
     const last = data.runs.find((r) => r.status !== 'running');
     const d = data.derive, p = data.paused;
     if (data.running) {
-      const live = data.live;
-      const cap = live.source === data.source ? ` of ${num(data.plan.maxPerRun)}` : '';
-      return `<span class="dot on"></span><b>Running ${esc(live.command)}</b> <span class="p-muted">(${esc(live.source)})</span>
-        — ${live.current ? `fetching <b>${esc(live.current)}</b>` : 'starting'} · ${num(live.requests)}${cap} requests · ${dur(live.seconds)}`;
+      const going = data.fetching?.length ? data.fetching : [data.live];  // the feeds run side by side, one run each
+      const one = (r) => `${r.current ? `fetching <b>${esc(r.current)}</b>` : 'starting'} · ${num(r.requests)}${
+        r.source === data.source ? ` of ${num(data.plan.maxPerRun)}` : ''} requests · ${dur(r.seconds)}`;
+      if (going.length > 1) {
+        return `<span class="dot on"></span><b>Running ${going.length} feeds</b> — ${going.map((r) => `<b>${esc(r.source)}</b> ${one(r)}`).join('; ')}`;
+      }
+      const live = going[0];
+      return `<span class="dot on"></span><b>Running ${esc(live.command)}</b> <span class="p-muted">(${esc(live.source)})</span> — ${one(live)}`;
     }
     if (d) {  // after a run: frames built from what arrived (nothing fetched meanwhile)
       return `<span class="dot on"></span><b>Building derived frames</b> — ${esc(d.source)}:${esc(d.ticker)}, `
@@ -213,8 +218,10 @@
 
   function finishJob() {
     if (!job || job.phase !== 'downloading') return;
-    // The symbol's run went over every feed holding it: one run record per feed.
-    const runs = data.runs.filter((r) => String(r.command).startsWith('sync') && Date.parse(r.started_at) >= job.since - 5000);
+    // The symbol's run went over every feed holding it that was not fetching: one run record per feed
+    // that took it (others' runs go on beside it).
+    const runs = data.runs.filter((r) => String(r.command).startsWith('sync') && r.current === job.ticker
+      && r.status !== 'running' && Date.parse(r.started_at) >= job.since - 5000);
     const bad = runs.find((r) => r.status !== 'ok');
     job = !runs.length || bad
       ? { ticker: job.ticker, phase: 'error', message: bad ? `${bad.source}: ${bad.status} ${bad.message || ''}` : 'run ended', since: Date.now() }
@@ -226,23 +233,23 @@
   function renderStatusBar() {
     const text = el('netText'), bar = el('netBar');
     let msg = '', progress = null, busy = false, cls = '', title = '';
-    const running = data?.running;
+    const running = data?.running, fetching = data?.fetching || [];
     if (job && job.ticker === state.ticker) {
       const t = esc(job.ticker);
+      const on = fetching.filter((f) => f.current === job.ticker).map((f) => f.source);  // the feeds fetching it now
       if (job.phase === 'checking') { msg = `${t}: checking…`; busy = true; }
-      else if (job.phase === 'waiting' && data?.live?.current === job.ticker) {
-        msg = `${t}: updating on ${esc(data.live.source)}${waitNote()}`;
+      else if (job.phase === 'waiting' && on.length) {
+        msg = `${t}: updating on ${esc(on.join(', '))}${waitNote()}`;
         busy = true;
       } else if (job.phase === 'waiting') {
-        // Named: the feeds with something to fetch for it (need). The run takes it on their turn, so
-        // "next in line · coinbase is fetching" read as if Coinbase, which has no SPCX, were about to.
-        const now = data?.live?.source, need = job.need || [];
-        msg = now && need.includes(now) ? `${t}: next on ${esc(now)}${waitNote()}`
-          : `${t}: waiting for ${need.length ? esc(need.join(', ')) : 'its feeds'}${now ? ` · ${esc(now)} is fetching` : ''}${waitNote()}`;
+        // Named: the feeds with something to fetch for it (need), each fetching now, so its run takes
+        // it next; "next in line · coinbase is fetching" read as if Coinbase, which has no SPCX, were about to.
+        const busyFeeds = fetching.map((f) => f.source), need = job.need || [];
+        msg = need.length && need.every((f) => busyFeeds.includes(f)) ? `${t}: next on ${esc(need.join(', '))}${waitNote()}`
+          : `${t}: waiting for ${need.length ? esc(need.join(', ')) : 'its feeds'}${busyFeeds.length ? ` · ${esc(busyFeeds.join(', '))} fetching` : ''}${waitNote()}`;
         busy = true;
       } else if (job.phase === 'downloading') {
-        msg = running ? `${t}: updating on ${esc(data.live.source)}${job.feeds.length > 1 ? ` (${job.feeds.length} feeds)` : ''} · ${num(data.live.requests)} req${waitNote()}`
-          : `${t}: starting…`;
+        msg = on.length ? `${t}: updating on ${esc(on.join(', '))}${waitNote()}` : `${t}: starting…`;
         busy = true;
       } else if (job.phase === 'done') {
         msg = `${t}: +${num(job.rows)} rows from ${job.feedCount} feed${job.feedCount === 1 ? '' : 's'}`;
@@ -255,7 +262,8 @@
       else if (job.phase === 'fetching') { msg = `${t}: fetching`; busy = true; }
       else if (job.phase === 'error') { msg = `${t}: fetch failed`; cls = 'bad'; title = job.message; }
     } else if (running) {
-      msg = `Fetcher${data.live.current ? `: ${esc(data.live.current)}` : ''} · ${num(data.live.requests)} req`;
+      msg = fetching.length > 1 ? `Fetcher: ${num(fetching.length)} feeds · ${num(fetching.reduce((n, f) => n + (f.requests || 0), 0))} req`
+        : `Fetcher${data.live.current ? `: ${esc(data.live.current)}` : ''} · ${num(data.live.requests)} req`;
       busy = true;
     }
     // Background fetching paused by the button: the open symbol's own fetches still go.
@@ -352,7 +360,7 @@
       const wait = l.wait ? Math.max(0, Math.round(l.wait.until - t)) : 0;
       const next = wait ? `<span class="warn">in ${wait} s</span> <div class="sub">${esc(l.wait.reason)}</div>`
         : full ? `<span class="warn">in ${Math.ceil(w.freeIn)} s</span> <div class="sub">window full</div>` : 'now';
-      const live = data.running && data.live.source === l.source;
+      const live = (data.fetching || []).some((f) => f.source === l.source);  // every feed fetching now
       return `<tr class="${live ? 'live' : ''}"><td><b>${esc(l.source)}</b><div class="sub">${esc(l.plan)}</div></td>
         <td>${status}</td><td>${esc(l.published)}</td><td>${esc(l.keptTo)}</td>
         <td>${w.allowed ? `${meter(w.used / w.allowed, full ? 'warn' : '')}<div class="sub">${num(w.used)} of ${num(w.allowed)} in the last ${w.periodSeconds >= 3600 ? 'hour' : 'minute'}</div>` : '<span class="sub">no limit</span>'}</td>

@@ -86,22 +86,39 @@ from .proc import pid_alive  # noqa: E402,F401  (kept here for callers that impo
 _HELD: set[str] = set()  # run locks this process holds
 
 
+class Busy(SystemExit):
+    """The run lock is another process's: a run of that feed (or a move of the data) is going on."""
+
+
 @contextmanager
-def run_lock(db_path: Path) -> Iterator[None]:
-    """Only one downloading run at a time, so two runs can never double the request rate. The
-    lock names its owner by id and start (proc.py): a run that crashed, or whose id the system
-    gave to another process since, does not hold it; one that is alive does, however long it
-    has run (a laptop asleep mid-sync wakes holding it)."""
+def run_lock(db_path: Path, feed: str | None = None) -> Iterator[None]:
+    """One downloading run per feed at a time (`feed`), so two runs can never double a feed's
+    requests or fetch its symbols twice, while different feeds fetch side by side: their limits
+    are the machine's, every process counting in the same windows (ratelimit.MachineLedger), and
+    each writes a file of its own. One lock for every feed made the symbol opened in the chart wait
+    hours behind Massive's pass for Alpaca's and Blue Ocean's turns. Without `feed`, the whole
+    database's: a move of the data, which no run may write through; taken only while no feed's run
+    holds its lock, and a feed's run gives way to it (each checks the other after taking its own,
+    so the two never both go on). The locks name their owners by id and start (proc.py): a run
+    that crashed, or whose id the system gave to another process since, does not hold one; one
+    that is alive does, however long it has run (a laptop asleep mid-sync wakes holding it)."""
     from . import proc
 
-    lock = db_path.with_suffix(".lock")
-    if str(lock) in _HELD:  # this process holds it already (a whole sync holds it across its feeds)
+    lock, whole = proc.run_lock_path(db_path, feed), proc.run_lock_path(db_path)
+    if str(lock) in _HELD:  # this process holds it already
         yield
         return
     if not proc.acquire(lock):
-        raise SystemExit(f"another run is in progress (lock file {lock}); exiting")
+        raise Busy(f"another run is in progress (lock file {lock}); exiting")
     _HELD.add(str(lock))
     try:
+        if feed is not None and str(whole) not in _HELD and proc.holder(whole) is not None:
+            raise Busy(f"the whole database is locked (lock file {whole}): its data is being moved, or a run "
+                       "from before the feeds ran apart is going on; exiting")
+        if feed is None:
+            busy = sorted(f for f, pid in proc.run_holders(db_path).items() if f is not None and pid != os.getpid())
+            if busy:
+                raise Busy(f"feeds are fetching ({', '.join(busy)}); exiting")
         yield
     finally:
         _HELD.discard(str(lock))
@@ -129,9 +146,9 @@ def api_run(args, settings: Settings, command: str, lock: bool = True) -> Iterat
             print(f"offline (MASSIVE_OFFLINE): nothing sent to {args.source}")
             yield None, store, log  # type: ignore[misc]
         return
-    with Store(settings.db_path) as store, (run_lock(settings.db_path) if lock else nullcontext()):
+    with Store(settings.db_path) as store, (run_lock(settings.db_path, args.source) if lock else nullcontext()):
         if lock:
-            store.close_abandoned_runs()  # we hold the lock, so anything still "running" died
+            store.close_abandoned_runs(args.source)  # we hold its lock, so a run of it still "running" died
         from . import killswitch
 
         kill = killswitch.killed(store, args.source, "fetch")
@@ -352,17 +369,59 @@ def cmd_initialize(args, settings: Settings) -> int:
 
 
 def cmd_sync(args, settings: Settings) -> int:
-    """Sync every configured feed (or just --source), each within its own limits, holding the
-    run lock while it downloads (released between feeds, another run could take it and this one
-    would stop). With --tickers, those symbols only, on every feed (the chart opened them).
-    Then, with the run lock released, the composites and derived frames from what arrived
-    (after_sync): they fetch nothing, and held the lock for most of an hour, so the chart's
-    requests for the symbol it opened waited and the Fetcher read idle while the run was busy."""
-    with run_lock(settings.db_path):
-        code, ran = _sync(args, settings)
-    if ran:
+    """Sync the feeds, each within its own limits and holding its own run lock while it downloads.
+    The hourly sync (every feed, no --tickers) starts each feed not fetching already in a process
+    of its own (dispatch) and does not wait for them: Massive's pass takes hours, and every other
+    feed waited for it. With --only, the feed given by --source, here. With --tickers (the chart
+    opened them), those symbols only, on every feed not fetching now, one after another; a feed
+    that is fetching takes them next in its own run. Then, outside the run locks, the composites
+    and derived frames from what arrived (after_sync): they fetch nothing; once an hour for the
+    hourly sync, not after each feed's run (--fetch-only, as dispatch starts them)."""
+    code, ran = _sync(args, settings)
+    if ran and not getattr(args, "fetch_only", False):
         after_sync(args, settings)
     return code
+
+
+def dispatch(settings: Settings, log=None) -> int:
+    """The hourly sync's feeds: a run of each feed set up here that is not fetching already, each in
+    a process of its own (start_feed), not waited for; a closed archive is not started. Returns how
+    many feeds are fetching after it (started now, or going on from before)."""
+    from . import proc
+
+    log = log or Logger(settings.db_path.parent / "logs" / "massive-collate.log")
+    if settings.offline:
+        log("sync: offline (MASSIVE_OFFLINE): no feed started")
+        return 0
+    busy = proc.run_holders(settings.db_path)
+    if None in busy:
+        log("sync: the whole database is locked (its data is being moved, or a run from before the feeds ran "
+            "apart is going on); no feed started")
+        return 0
+    profiles = feed_profiles(settings)
+    started, unset = [], []
+    for name in providers():
+        if not (profiles.get(name) and profiles[name].assets):
+            unset.append(name)  # not set up here (its key): nothing it could fetch
+        elif name not in busy and not _feed_closed(settings, name):  # not fetching already, nor a filled archive
+            start_feed(name)
+            started.append(name)
+    going = sorted(n for n in busy if n)
+    log(f"sync: started {', '.join(started) or 'no feed'}, each in a process of its own"
+        + (f"; fetching already: {', '.join(going)}" if going else "")
+        + (f"; not set up here: {', '.join(unset)}" if unset else ""))
+    return len(started) + len(going)
+
+
+def start_feed(name: str) -> int:
+    """Start feed `name`'s run (`--source NAME sync --only --fetch-only`) in a process of its own,
+    without a window, outliving this one. Returns its process id."""
+    exe = Path(sys.executable)
+    quiet = exe.with_name("pythonw.exe") if os.name == "nt" and exe.with_name("pythonw.exe").exists() else exe
+    flags = 0x00000008 | 0x00000200 if os.name == "nt" else 0  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    return subprocess.Popen([str(quiet), "-m", "massive_collate", "--source", name, "sync", "--only", "--fetch-only"],
+                            creationflags=flags, close_fds=True, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).pid
 
 
 POST_LOCK = "post.lock"  # beside the database: one pass of composites and derived frames at a time
@@ -470,9 +529,14 @@ def _sync(args, settings: Settings) -> tuple[int, int]:
             else f"sync: background fetching paused by you until {paused['until'][11:16]} UTC; not run")
         return 0, 0
     if not separated:  # one-off: bars built from ticks before they were kept apart from the feeds' own
-        with run_lock(settings.db_path), Store(settings.db_path) as store:
-            store.separate_built_bars(log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
-            store.kv_set("built-bars:separated:v1", datetime.now().isoformat(timespec="seconds"))
+        try:
+            with run_lock(settings.db_path), Store(settings.db_path) as store:
+                store.separate_built_bars(log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"))
+                store.kv_set("built-bars:separated:v1", datetime.now().isoformat(timespec="seconds"))
+        except Busy:  # a feed is fetching: done by a later sync, with every feed at rest
+            pass
+    if args.all_sources and tickers is None:  # the hourly sync: each feed in a process of its own
+        return 0, dispatch(settings)
     ran, errors = 0, []
     saved = config.saved_user_keys()
     for name in names:
@@ -508,6 +572,11 @@ def _sync(args, settings: Settings) -> tuple[int, int]:
                        if result.skipped else "")
                     + (f" (stopped: {result.stopped})" if result.stopped else ""))
             ran += 1
+        except Busy:
+            if tickers is None:
+                raise  # this feed's run (--only) is going already
+            Logger(settings.db_path.parent / "logs" / "massive-collate.log")(
+                f"sync {name}: fetching already; its run takes {', '.join(sorted(tickers))} next")
         except ConfigError as e:
             errors.append(f"{name}: {e}")  # feed not configured on this machine
         except Exception as e:  # noqa: BLE001 - recorded as this feed's run error (api_run); the next feeds go on
@@ -1346,6 +1415,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="sync only the feed given by --source instead of all configured feeds")
     s.add_argument("--tickers", nargs="+", metavar="TICKER",
                    help="only these watched symbols, on every feed holding them, before anything else")
+    s.add_argument("--fetch-only", action="store_true",
+                   help="download only: no composites or derived frames after (the hourly sync builds them)")
     s.set_defaults(func=cmd_sync, all_sources=True)
 
     s = sub.add_parser("scan", help="check which symbols should have new data (free); --probe asks the source")
