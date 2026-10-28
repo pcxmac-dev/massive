@@ -1251,7 +1251,8 @@ class ChartApp:
             need = [name for name in tiers if name in found]  # the feeds it waits for, in their ranked order
             if serving and not self.settings.offline and not self._halted() and not need:
                 # up to date on every feed: nothing new can exist yet (out of session, or not released)
-                due = [e.next_due for e in (expected(r["asset"], tiers[r["source"]], now) for r in rows
+                due = [e.next_due for e in (expected(freshness.hours(r["source"], r["asset"]), tiers[r["source"]], now)
+                                            for r in rows
                                             if r["source"] in tiers) if e.next_due]
                 return {"ticker": ticker, "feeds": feeds, "state": "current",
                         "nextDue": min(due).isoformat() if due else None}

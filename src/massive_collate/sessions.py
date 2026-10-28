@@ -267,7 +267,8 @@ class MarketCalendar:
     def sessions(self, asset: str, start: date, end: date, product: str | None = None,
                  extended: bool = True, overnight: bool = False) -> list[Session]:
         """Sessions with session dates in [start, end], in order (US stocks: with `overnight`,
-        each from Blue Ocean's open the evening before)."""
+        each from Blue Ocean's open the evening before). `asset` "overnight": Blue Ocean's nights
+        alone, 20:00 the evening before to 04:00 (its feed's own hours: freshness.FEED_HOURS)."""
         out: list[Session] = []
         d = start
         while d <= end:
@@ -277,6 +278,9 @@ class MarketCalendar:
                 out.extend(self.fx_session(d))
             elif asset == "crypto":
                 out.extend(self.crypto_session(d))
+            elif asset == "overnight":
+                if (opens := self.overnight_open(d)) is not None:
+                    out.append(Session(d, opens, _et(d, time(4, 0))))
             else:
                 s = self.stock_session(d, extended=extended, overnight=overnight and extended) if asset == "stock" \
                     else self._index_session(d)

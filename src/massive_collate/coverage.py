@@ -164,7 +164,7 @@ def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, ass
     from .collector import history_floor
 
     today = now.astimezone(ET).date()
-    lo, hi = day_start_ms(floor), frontier_ms(asset, me.tier, now, timespan)
+    lo, hi = day_start_ms(floor), frontier_ms(freshness.hours(me.name, asset), me.tier, now, timespan)
     gaps = [(lo, hi)] if lo < hi else []
     # Held: what a feed of the same market sent. Bars built here from ticks do not count: the
     # feed's own bars replace them when they arrive (received over derived).
@@ -210,7 +210,8 @@ def plan(store, me: FeedProfile, feeds: dict[str, FeedProfile], ticker: str, ass
             p_floor = history_floor(peer.tier, today, asset)
             if listed_from:
                 p_floor = max(p_floor, listed_from)
-            window = intersect([(day_start_ms(p_floor), frontier_ms(asset, peer.tier, now, timespan))], ahead)
+            edge = frontier_ms(freshness.hours(peer.name, asset), peer.tier, now, timespan)
+            window = intersect([(day_start_ms(p_floor), edge)], ahead)
             gaps = subtract(gaps, subtract(window, empty(peer.name)))
     step = STEP_MS.get(timespan, 60_000)
     return [(a, b) for a, b in gaps if b - a >= step]
