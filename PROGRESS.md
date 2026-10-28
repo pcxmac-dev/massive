@@ -4,6 +4,14 @@ Working notes so work can resume in a fresh session. Newest first.
 
 ## State (2026-10-27)
 
+- **Profiles** (no passwords, the user's choice): a login page (`login.html`, a Vitruvian Man) picks
+  or makes one; each keeps its own watchlists (`live.watchlists_key`), layouts (markups), preferences
+  (the page's, under `mc:p<id>:`) and register of the stocks it opened (`visits`; the watchlist
+  panel's "Visited"). "Default" holds what came before; a new one starts empty. The fetcher follows
+  the signed-in profile's watchlists (the one signed in last). The rail's foot shows the profile;
+  a click signs out.
+- **Blue Ocean queued**: every watched stock (7,885) is on the `boats` feed; its history fills
+  within Alpaca's limits, the signed-in profile's watchlists first.
 - **Feeds in parallel** (docs/APPRAISAL.md #6): a run lock per feed (`massive-fetch-<feed>.lock`;
   `massive.lock` is now the whole database's, for moves of the data). The hourly sync starts each
   feed that is set up and not fetching in a process of its own, does not wait for them, and builds

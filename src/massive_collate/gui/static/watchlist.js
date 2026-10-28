@@ -1,16 +1,19 @@
 // Watchlist (right rail, beside the chart): quick access to symbols, as TradingView's. "Collected"
 // lists every symbol with data here, grouped by class (what is streaming live first) with its
 // exchange, last price and change; your own lists (saved in the database, /api/watchlists) keep
-// the symbols you add in your order. A click opens the symbol on the chart.
+// the symbols you add in your order; "Visited" is the profile's register, every symbol it opened,
+// the latest first (/api/register). A click opens the symbol on the chart.
 (() => {
   'use strict';
 
   const $ = (id) => document.getElementById(id);
   const { symbolIcon, esc } = window.MassiveIcons;
   const COLLECTED = '__collected__';
+  const VISITED = '__visited__';  // the profile's register
   const GROUPS = [['live', 'Live now'], ['stock', 'Stocks'], ['index', 'Indices'], ['future', 'Futures'],
                   ['fx', 'Currencies'], ['crypto', 'Crypto']];
   let lists = [];  // [{ name, tickers: [] }]
+  let visits = [];  // the register: [{ ticker, first_at, last_at, count }], the latest first
   let current = prefs.get('watchlist', COLLECTED);
   let query = '';
   let sort = prefs.get('watchSort', { key: 'symbol', dir: 1 });
@@ -26,8 +29,13 @@
     try {
       lists = (await api('/api/watchlists')).lists || [];
     } catch { lists = []; }
-    if (current !== COLLECTED && !lists.some((l) => l.name === current)) current = COLLECTED;
+    await loadVisits();
+    if (current !== COLLECTED && current !== VISITED && !lists.some((l) => l.name === current)) current = COLLECTED;
     render();
+  }
+
+  async function loadVisits() {
+    try { visits = (await api('/api/register')).visits || []; } catch { /* kept as it was */ }
   }
 
   // One save at a time, each sending the lists as they are when it goes: two at once could reach the
@@ -100,10 +108,16 @@
     const mine = lists.find((l) => l.name === current);
     const th = (key, label, cls = '') => `<th class="${cls}" data-sort="${key}">${label}${sort.key === key ? (sort.dir > 0 ? ' ▲' : ' ▼') : ''}</th>`;
     const options = [`<option value="${COLLECTED}">Collected (${symbols.length})</option>`,
+      `<option value="${VISITED}">Visited (${visits.length})</option>`,
       ...lists.map((l) => `<option value="${esc(l.name)}">${esc(l.name)} (${l.tickers.length})</option>`),
       '<option value="__new__">New list…</option>'].join('');
     let body;
-    if (!mine) {
+    if (current === VISITED) {
+      const entries = visits.map((v) => bySym.get(v.ticker)).filter((s) => s && match(s)).map((sym) => ({ sym, q: quote(sym) }));
+      if (sort.key !== 'order') entries.sort(compare);
+      body = entries.length ? `<tbody>${entries.map((e) => row(e, false)).join('')}</tbody>`
+        : `<tbody><tr><td colspan="4" class="p-muted w-empty">${visits.length ? 'Nothing matches.' : 'Nothing visited yet: every symbol you open is noted here.'}</td></tr></tbody>`;
+    } else if (!mine) {
       const live = new Set(window.Activity?.data?.liveFeeds?.liveTickers || []);
       body = GROUPS.map(([key, label]) => {
         const entries = symbols.filter((s) => (key === 'live' ? live.has(s.ticker) : s.asset === key && !live.has(s.ticker)) && match(s))
@@ -137,7 +151,7 @@
     }
     shownHead = head;
     box.innerHTML = `${head}${body}</table></div>`;
-    $('watchList').value = mine ? mine.name : COLLECTED;
+    $('watchList').value = mine ? mine.name : current === VISITED ? VISITED : COLLECTED;
   }
 
   // A light refresh of prices without losing the filter's focus.
@@ -210,7 +224,11 @@
   });
 
   window.addEventListener('massive:view', (e) => { if (e.detail?.pane === 'watchlist') render(); });
-  window.addEventListener('massive:symbol', refresh);
+  window.addEventListener('massive:symbol', () => {
+    refresh();
+    // the opened symbol goes in the register (the chart's priority request notes it): read it again
+    setTimeout(() => loadVisits().then(() => { if (current === VISITED) { shownHead = ''; refresh(); } }), 1500);
+  });
   window.addEventListener('massive:activity', refresh);  // live prices with every activity poll
   window.Watchlist = { render, load };
   load();

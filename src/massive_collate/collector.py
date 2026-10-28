@@ -1044,10 +1044,10 @@ def set_updates_pause(store: Store, days: float | None, now: datetime | None = N
 
 def picked_symbols(store: Store, now: datetime | None = None) -> set[str]:
     """The symbols the user picked: opened in the chart lately (priority requests) or on one of
-    their watchlists (the rail's lists)."""
-    from .live import WATCHLISTS_KEY
+    the signed-in profile's watchlists (the rail's lists)."""
+    from .live import active_watchlists
 
-    lists = store.kv_json(WATCHLISTS_KEY, [])
+    lists = active_watchlists(store)
     on_lists = {str(t).upper() for lst in lists if isinstance(lst, dict) for t in lst.get("tickers") or []}
     return on_lists | set(priority_requests(store, now))
 
@@ -1096,10 +1096,11 @@ def big_movers(store: Store, source: str, tickers: list[str], top: int = MOVERS)
 
 
 def watchlist_tickers(store: Store) -> list[str]:
-    """The tickers on the user's watchlists (the rail's lists), in list order."""
-    from .live import WATCHLISTS_KEY
+    """The tickers on the signed-in profile's watchlists (the rail's lists), in list order: the
+    fetcher takes them first (fetch_order)."""
+    from .live import active_watchlists
 
-    lists = store.kv_json(WATCHLISTS_KEY, [])
+    lists = active_watchlists(store)
     return list(dict.fromkeys(str(t).upper() for lst in lists if isinstance(lst, dict) for t in lst.get("tickers") or []))
 
 

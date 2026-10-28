@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Massive Charts: sign in</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<!-- The login page (no passwords): pick a profile or make one. Each keeps its own watchlists,
+     markups, preferences and register of the stocks it opened (gui/server.py serves this page in
+     place of the app to a browser that has not chosen a profile). -->
+<body class="login-page">
+  <main class="login">
+    <div id="loginIcon" class="login-icon" aria-hidden="true"></div>
+    <h1>Massive Charts</h1>
+    <p class="p-muted">Choose your profile</p>
+    <div id="profileList" class="login-profiles" role="list"></div>
+    <form id="newProfile" class="login-new" autocomplete="off">
+      <input id="newName" type="text" maxlength="40" placeholder="New profile name" aria-label="New profile name">
+      <button type="submit">Create</button>
+    </form>
+    <p id="loginError" class="login-error" role="alert"></p>
+  </main>
+  <script src="icons.js"></script>
+  <script src="login.js"></script>
+</body>
+</html>

@@ -21,6 +21,13 @@ def _layout_name(name: str) -> str:
     return name
 
 
+def _profile_name(name: str) -> str:
+    name = " ".join((name or "").split())
+    if not name or len(name) > 40:
+        raise ValueError("a profile's name must be 1-40 characters")
+    return name
+
+
 class AppStateStore:
     """Store methods: the chart app's saved layouts, the log of runs and the small key-value table."""
 
@@ -57,33 +64,112 @@ class AppStateStore:
         self._wrote()
         return value
 
-    # -- chart layouts (saved markups) --------------------------------------
+    # -- profiles (no passwords) -------------------------------------------------
+    # Each keeps its own watchlists (live.watchlists_key), layouts, preferences (the page's, under a
+    # prefix of its own) and register of the stocks it opened (visits). The first, "Default", holds
+    # what came before profiles; a new one starts empty. The fetcher follows the signed-in one's
+    # watchlists (the one signed in last: ACTIVE_PROFILE_KEY).
+
+    FIRST_PROFILE = 1
+    ACTIVE_PROFILE_KEY = "profiles:active"
+
+    def profiles(self) -> list[dict]:
+        """Every profile, the most recently signed in first."""
+        self._first_profile()
+        cur = self.conn.execute("SELECT id, name, created_at, seen_at FROM profiles "
+                                "ORDER BY seen_at IS NULL, seen_at DESC, id")
+        return [{"id": i, "name": n, "created_at": c, "seen_at": s} for i, n, c, s in cur]
+
+    def profile(self, profile_id: int) -> dict | None:
+        self._first_profile()
+        row = self.conn.execute("SELECT id, name, created_at, seen_at FROM profiles WHERE id=?",
+                                (profile_id,)).fetchone()
+        return dict(zip(("id", "name", "created_at", "seen_at"), row)) if row else None
+
+    def _first_profile(self) -> None:
+        if self.conn.execute("SELECT 1 FROM profiles LIMIT 1").fetchone() is None:
+            with self.conn:
+                self.conn.execute("INSERT OR IGNORE INTO profiles (id, name, created_at) VALUES (?, ?, ?)",
+                                  (self.FIRST_PROFILE, "Default", _now()))
+
+    def create_profile(self, name: str) -> dict:
+        name = _profile_name(name)
+        self._first_profile()
+        with self.conn:
+            if self.conn.execute("SELECT 1 FROM profiles WHERE name=? COLLATE NOCASE", (name,)).fetchone():
+                raise ValueError(f"a profile named {name} already exists")
+            cur = self.conn.execute("INSERT INTO profiles (name, created_at) VALUES (?, ?)", (name, _now()))
+        return self.profile(cur.lastrowid)
+
+    def rename_profile(self, profile_id: int, name: str) -> dict | None:
+        name = _profile_name(name)
+        with self.conn:
+            if self.conn.execute("SELECT 1 FROM profiles WHERE name=? COLLATE NOCASE AND id<>?",
+                                 (name, profile_id)).fetchone():
+                raise ValueError(f"a profile named {name} already exists")
+            n = self.conn.execute("UPDATE profiles SET name=? WHERE id=?", (name, profile_id)).rowcount
+        return self.profile(profile_id) if n else None
+
+    def sign_in(self, profile_id: int) -> dict | None:
+        """The profile using the app now: its seen time, and the fetcher follows its watchlists."""
+        found = self.profile(profile_id)
+        if found is None:
+            return None
+        with self.conn:
+            self.conn.execute("UPDATE profiles SET seen_at=? WHERE id=?", (_now(), profile_id))
+        self.kv_set(self.ACTIVE_PROFILE_KEY, json.dumps(profile_id))
+        return self.profile(profile_id)
+
+    def active_profile(self) -> int:
+        """The profile signed in last (the first when none has been)."""
+        pid = self.kv_json(self.ACTIVE_PROFILE_KEY, None)
+        return pid if isinstance(pid, int) and self.profile(pid) else self.FIRST_PROFILE
+
+    def visit(self, profile_id: int, ticker: str, now: datetime | None = None) -> None:
+        """Note a stock opened in the chart in the profile's register."""
+        at = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO visits (profile, ticker, first_at, last_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (profile, ticker) DO UPDATE SET last_at=excluded.last_at, count=count + 1",
+                (profile_id, ticker.upper(), at, at))
+
+    def visits(self, profile_id: int, limit: int = 1000) -> list[dict]:
+        """A profile's register, the most recently opened first."""
+        cur = self.conn.execute("SELECT ticker, first_at, last_at, count FROM visits WHERE profile=? "
+                                "ORDER BY last_at DESC, ticker LIMIT ?", (profile_id, limit))
+        return [{"ticker": t, "first_at": f, "last_at": la, "count": c} for t, f, la, c in cur]
+
+    # -- chart layouts (saved markups): each profile's own ----------------------
 
     MAX_LAYOUTS = 5
 
-    def list_layouts(self) -> list[dict]:
-        cur = self.conn.execute("SELECT id, name, updated_at FROM layouts ORDER BY touched DESC, id DESC")
+    def list_layouts(self, profile: int = 1) -> list[dict]:
+        cur = self.conn.execute("SELECT id, name, updated_at FROM layouts WHERE profile=? "
+                                "ORDER BY touched DESC, id DESC", (profile,))
         return [{"id": i, "name": n, "updated_at": u} for i, n, u in cur]
 
-    def get_layout(self, layout_id: int) -> dict | None:
-        row = self.conn.execute("SELECT id, name, data, updated_at FROM layouts WHERE id=?", (layout_id,)).fetchone()
+    def get_layout(self, layout_id: int, profile: int = 1) -> dict | None:
+        row = self.conn.execute("SELECT id, name, data, updated_at FROM layouts WHERE id=? AND profile=?",
+                                (layout_id, profile)).fetchone()
         if row is None:
             return None
         return {"id": row[0], "name": row[1], "data": json.loads(row[2]), "updated_at": row[3]}
 
-    def create_layout(self, name: str, data: dict) -> dict:
+    def create_layout(self, name: str, data: dict, profile: int = 1) -> dict:
         name = _layout_name(name)
         with self.conn:
-            count = self.conn.execute("SELECT COUNT(*) FROM layouts").fetchone()[0]
+            count = self.conn.execute("SELECT COUNT(*) FROM layouts WHERE profile=?", (profile,)).fetchone()[0]
             if count >= self.MAX_LAYOUTS:
                 raise LayoutLimit(f"at most {self.MAX_LAYOUTS} layouts; delete one first")
             cur = self.conn.execute(
-                "INSERT INTO layouts (name, data, updated_at, touched) "
-                "VALUES (?, ?, ?, (SELECT COALESCE(MAX(touched), 0) + 1 FROM layouts))",
-                (name, json.dumps(data), _now_precise()))
-        return self.get_layout(cur.lastrowid)
+                "INSERT INTO layouts (name, data, updated_at, touched, profile) "
+                "VALUES (?, ?, ?, (SELECT COALESCE(MAX(touched), 0) + 1 FROM layouts), ?)",
+                (name, json.dumps(data), _now_precise(), profile))
+        return self.get_layout(cur.lastrowid, profile)
 
-    def update_layout(self, layout_id: int, name: str | None = None, data: dict | None = None) -> dict | None:
+    def update_layout(self, layout_id: int, name: str | None = None, data: dict | None = None,
+                      profile: int = 1) -> dict | None:
         sets = ["updated_at=?", "touched=(SELECT COALESCE(MAX(touched), 0) + 1 FROM layouts)"]
         params: list = [_now_precise()]
         if name is not None:
@@ -93,12 +179,13 @@ class AppStateStore:
             sets.append("data=?")
             params.append(json.dumps(data))
         with self.conn:
-            n = self.conn.execute(f"UPDATE layouts SET {', '.join(sets)} WHERE id=?", (*params, layout_id)).rowcount
-        return self.get_layout(layout_id) if n else None
+            n = self.conn.execute(f"UPDATE layouts SET {', '.join(sets)} WHERE id=? AND profile=?",
+                                  (*params, layout_id, profile)).rowcount
+        return self.get_layout(layout_id, profile) if n else None
 
-    def delete_layout(self, layout_id: int) -> bool:
+    def delete_layout(self, layout_id: int, profile: int = 1) -> bool:
         with self.conn:
-            return self.conn.execute("DELETE FROM layouts WHERE id=?", (layout_id,)).rowcount > 0
+            return self.conn.execute("DELETE FROM layouts WHERE id=? AND profile=?", (layout_id, profile)).rowcount > 0
 
     # -- runs / audit ------------------------------------------------------
 

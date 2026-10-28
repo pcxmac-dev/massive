@@ -117,6 +117,19 @@
     const b = e.target.closest('button[data-pane]');
     if (b) showPane(b.dataset.pane);
   });
+  // The rail's foot: the signed-in profile (its initial); a click signs out to the login page, where
+  // another is picked or made.
+  fetch('/api/profiles').then((r) => r.json()).then(({ profiles = [], current }) => {
+    const me = profiles.find((p) => p.id === current);
+    if (!me) return;
+    $('railProfile').textContent = me.name.slice(0, 1).toUpperCase();
+    $('railProfile').title = `Profile: ${me.name}. Click to switch to another profile.`;
+  }).catch(() => {});
+  $('railProfile').addEventListener('click', async () => {
+    try {
+      await fetch('/api/profiles/sign-out', { method: 'POST', headers: { 'X-Massive-Charts': '1', 'Content-Type': 'application/json' }, body: '{}' });
+    } finally { location.replace('/'); }  // the login page
+  });
   // The status line spans the open view's own area, in every view and at every size: not under the
   // rail on its right (a scrollbar widens the rail on a short window), nor under the chart's drawing
   // tools on its left (a strip at the view's left edge: it starts where the chart does).
