@@ -119,6 +119,24 @@ CREATE TABLE IF NOT EXISTS instrument_details (
     PRIMARY KEY (source, ticker)
 );
 
+-- Profiles (no passwords): each keeps its own watchlists, layouts (markups), preferences and
+-- register of the stocks it opened. The first holds what came before profiles.
+CREATE TABLE IF NOT EXISTS profiles (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    seen_at    TEXT                  -- last signed in
+);
+
+CREATE TABLE IF NOT EXISTS visits (  -- a profile's register: every stock it opened in the chart
+    profile  INTEGER NOT NULL,
+    ticker   TEXT NOT NULL,
+    first_at TEXT NOT NULL,
+    last_at  TEXT NOT NULL,
+    count    INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (profile, ticker)
+);
+
 CREATE TABLE IF NOT EXISTS layouts (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT NOT NULL,
@@ -324,6 +342,8 @@ MIGRATIONS = [
     ("watchlist", "rank", "INTEGER NOT NULL DEFAULT 1"),
     # Save order: clocks can tie (Windows), a counter cannot.
     ("layouts", "touched", "INTEGER NOT NULL DEFAULT 0"),
+    # The profile a layout belongs to (those from before profiles: the first).
+    ("layouts", "profile", "INTEGER NOT NULL DEFAULT 1"),
     # The symbol a running sync is working on, for the on-screen activity view.
     ("runs", "current", "TEXT"),
     # Last scan: when the source was asked for its newest bar, and what it had (ms).

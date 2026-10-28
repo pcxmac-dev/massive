@@ -398,3 +398,17 @@ def test_tables_wrap_their_text_rather_than_scroll_sideways():
     note = css.split(".act-table .sub {", 1)[1].split("}", 1)[0]
     assert "ellipsis" not in note and "max-width" not in note  # notes shown whole, wrapped
     assert "white-space: nowrap" in css.split(".act-table .num {", 1)[1].split("}", 1)[0]  # numbers on one line
+
+
+def test_profiles_have_a_login_page_and_keep_their_own_preferences():
+    login = _js("login.html")
+    assert 'src="login.js"' in login and 'id="profileList"' in login and 'id="newProfile"' in login
+    assert "icon('vitruvian', 140)" in _js("login.js")  # Leonardo's Vitruvian Man (the user)
+    assert "vitruvian:" in _js("icons.js")
+    app = _js("app.js")
+    assert "const PREFS_PREFIX = PROFILE === 1 ? 'mc:' : `mc:p${PROFILE}:`;" in app  # each profile its own
+    assert "localStorage.getItem(PREFS_PREFIX + key)" in app and "localStorage.setItem(PREFS_PREFIX + key" in app
+    assert "PROFILE === 1 && i < localStorage.length" in app  # a new profile imports no old markups
+    assert 'id="railProfile"' in _js("index.html") and "/api/profiles/sign-out" in _js("panels.js")
+    watch = _js("watchlist.js")
+    assert "api('/api/register')" in watch and "Visited (${visits.length})" in watch  # the register

@@ -302,6 +302,30 @@ dialog::backdrop { background: rgba(0, 0, 0, .5); }
 #rail button.active::before { content: ""; position: absolute; left: -4px; top: 10px; bottom: 10px; width: 2px;
   border-radius: 1px; background: var(--accent); }
 #rail hr { width: 70%; border: 0; border-top: 1px solid var(--border); margin: 4px auto; }
+/* The signed-in profile at the rail's foot (its initial, in a circle); a click goes to the login page. */
+#rail .rail-profile { font-weight: 600; font-size: 15px; color: var(--text); }
+#rail .rail-profile::after { content: ""; position: absolute; inset: 9px; border: 1.5px solid var(--muted); border-radius: 50%; }
+
+/* The login page (login.html): the Vitruvian Man, the profiles, a new one. */
+body.login-page { display: grid; place-items: center; min-height: 100%; background: var(--bg); color: var(--text);
+  font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+.login { width: min(360px, calc(100vw - 32px)); padding: 28px 24px; text-align: center; background: var(--panel);
+  border: 1px solid var(--border); border-radius: 10px; }
+.login h1 { margin: 10px 0 2px; font-size: 20px; font-weight: 600; }
+.login-icon { color: #c8a46e; display: grid; place-items: center; }  /* Leonardo's ink */
+.login-icon svg * { vector-effect: non-scaling-stroke; }  /* fine lines, as drawn, at any size */
+.login-profiles { display: flex; flex-direction: column; gap: 6px; margin: 16px 0 12px; text-align: left; }
+.login-profile { display: grid; grid-template-columns: 32px 1fr; grid-template-rows: auto auto; column-gap: 10px;
+  align-items: center; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; text-align: left; }
+.login-profile:hover, .login-profile.current { border-color: var(--accent); background: var(--hover); }
+.login-avatar { grid-row: span 2; width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--accent); color: #fff; font-weight: 600; }
+.login-name { font-weight: 600; overflow-wrap: anywhere; }
+.login-seen { font-size: 11px; }
+.login-new { display: flex; gap: 6px; }
+.login-new input { flex: 1; min-width: 0; border-color: var(--border); background: var(--bg); cursor: text; }
+.login-new button { border-color: var(--accent); color: var(--accent); }
+.login-error { color: var(--down); min-height: 1.4em; margin: 8px 0 0; }
 /* Rail icons are grey unless selected, then blue (busy or not: the spinning badge says so). The
    Live icon is the exception: red and pulsing while live data arrives (liveicon.js), blue with a
    whitish pulse when selected. The Stock icon is the symbol's own logo: a grey ring, blue selected. */

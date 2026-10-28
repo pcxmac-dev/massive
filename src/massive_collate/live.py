@@ -39,8 +39,18 @@ LIVE_COINS =("BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LTC", "LINK")
 RECORDER_KEY = "live-recorder"
 STATUS_KEY = "live:status"
 OPEN_KEY = "live:open"  # {ticker: ms}: the symbols chart pages have open (gui/server.py notes them)
-WATCHLISTS_KEY = "ui:watchlists"  # the rail's lists of symbols (gui/server.py)
+WATCHLISTS_KEY = "ui:watchlists"  # the rail's lists of symbols (gui/server.py): the first profile's
 IEX_FEED = "iex"
+
+
+def watchlists_key(profile: int) -> str:
+    """Where a profile's watchlists are kept (the first profile keeps the key from before profiles)."""
+    return WATCHLISTS_KEY if profile == 1 else f"{WATCHLISTS_KEY}:{profile}"
+
+
+def active_watchlists(store) -> list:
+    """The signed-in profile's watchlists (the one signed in last): they set the fetcher's order."""
+    return store.kv_json(watchlists_key(store.active_profile()), [])
 BOATS_FEED = "boats"  # Blue Ocean's overnight session (sources/plugins/boats.py)
 # One venue's bars, ranked last in a chart of all feeds: they show where no feed of the whole market
 # has bars (IEX: the session under way until a sync downloads it; Blue Ocean: the overnight session,
@@ -304,7 +314,7 @@ def wanted_stocks(store, now_ms: int, watchlists: bool = True) -> tuple[str, ...
     noted first), then, with `watchlists` (LIVE_STREAMS=always), the rail's watchlists in their
     order. Only symbols collected as stocks."""
     out = open_symbols(store, now_ms)
-    for lst in store.kv_json(WATCHLISTS_KEY, []) if watchlists else ():
+    for lst in active_watchlists(store) if watchlists else ():
         out += (lst.get("tickers") or []) if isinstance(lst, dict) else []
     out = [t.upper() for t in out if isinstance(t, str) and 0 < len(t) <= 32]
     stocks = (t for t in dict.fromkeys(out) if any(w["asset"] == "stock" for w in store.watchlist(ticker=t)))

@@ -58,6 +58,8 @@ FEEDS_TTL_S = 60.0  # the feeds' summary (configuration and the watchlist) kept 
 DEPS_TTL_S = 60.0  # the dependency checks' answer is kept this long
 MAX_BODY = 5 * 1024 * 1024
 WRITE_HEADER = "X-Massive-Charts"
+PROFILE_COOKIE = "mc_profile"  # the profile this browser signed in as (no passwords: profiles keep things apart)
+FIRST_PROFILE = 1  # the profile holding what came before profiles; the default without a cookie
 # Chart data built at once (bars, level 2 profiles, projections, range statistics): each holds a
 # window's frames, up to MAX_LIMIT bars; the rest wait their turn, then are answered busy.
 HEAVY_REQUESTS = 2
@@ -870,20 +872,54 @@ class ChartApp:
         with self._paper_lock:
             return self.paper.reset(body.get("cash", 100_000), body.get("feeBps", 0))
 
-    # -- watchlists (the rail's lists of symbols) --------------------------------
-    WATCHLISTS_KEY = live.WATCHLISTS_KEY  # the live recorder streams their stocks
+    # -- profiles (no passwords: each keeps its own watchlists, layouts, preferences, register) --
+
+    def profiles(self, current: int | None = None) -> dict:
+        with self._lock:
+            return {"profiles": self.store.profiles(), "current": current}
+
+    def profile_exists(self, profile_id: int) -> bool:
+        with self._lock:
+            return self.store.profile(profile_id) is not None
+
+    def create_profile(self, body: dict) -> dict:
+        """A new profile: an empty watchlist, no layouts, the page's own preferences."""
+        with self._lock:
+            return self.store.create_profile(str(body.get("name", "")))
+
+    def rename_profile(self, profile_id: int, body: dict) -> dict:
+        with self._lock:
+            found = self.store.rename_profile(profile_id, str(body.get("name", "")))
+        if found is None:
+            raise LookupError(f"no profile {profile_id}")
+        return found
+
+    def sign_in(self, profile_id: int) -> dict:
+        """The profile using the app now: the fetcher follows its watchlists."""
+        with self._lock:
+            found = self.store.sign_in(profile_id)
+        if found is None:
+            raise LookupError(f"no profile {profile_id}")
+        return found
+
+    def register(self, profile: int) -> dict:
+        """The profile's register: every stock it opened in the chart, the latest first."""
+        with self._lock:
+            return {"visits": self.store.visits(profile)}
+
+    # -- watchlists (the rail's lists of symbols): each profile's own ------------------
     MAX_LISTS, MAX_LIST_TICKERS = 50, 1000
 
-    def watchlists(self) -> dict:
+    def watchlists(self, profile: int = 1) -> dict:
         with self._lock:
-            raw = self.store.kv_get(self.WATCHLISTS_KEY)
+            raw = self.store.kv_get(live.watchlists_key(profile))
         try:
             lists = json.loads(raw) if raw else []
         except ValueError:
             lists = []
         return {"lists": lists if isinstance(lists, list) else []}
 
-    def save_watchlists(self, body: dict) -> dict:
+    def save_watchlists(self, body: dict, profile: int = 1) -> dict:
         """Replace the lists: [{name, tickers}], names unique (1-40 characters), tickers in order."""
         lists = body.get("lists")
         if not isinstance(lists, list) or len(lists) > self.MAX_LISTS:
@@ -900,42 +936,42 @@ class ChartApp:
             names.add(name)
             out.append({"name": name, "tickers": list(dict.fromkeys(t.strip().upper() for t in tickers))})
         with self._lock:
-            self.store.kv_set(self.WATCHLISTS_KEY, json.dumps(out))
+            self.store.kv_set(live.watchlists_key(profile), json.dumps(out))
         return {"lists": out}
 
-    # -- layouts (saved markups) ----------------------------------------------
+    # -- layouts (saved markups): each profile's own ----------------------------------
 
-    def layouts(self) -> dict:
+    def layouts(self, profile: int = 1) -> dict:
         with self._lock:
-            return {"layouts": self.store.list_layouts(), "max": self.store.MAX_LAYOUTS}
+            return {"layouts": self.store.list_layouts(profile), "max": self.store.MAX_LAYOUTS}
 
-    def layout(self, layout_id: int) -> dict:
+    def layout(self, layout_id: int, profile: int = 1) -> dict:
         with self._lock:
-            found = self.store.get_layout(layout_id)
+            found = self.store.get_layout(layout_id, profile)
         if found is None:
             raise LookupError(f"no layout {layout_id}")
         return found
 
-    def create_layout(self, body: dict) -> dict:
+    def create_layout(self, body: dict, profile: int = 1) -> dict:
         data = body.get("data", {})
         if not isinstance(data, dict):
             raise ValueError("data must be an object")
         with self._lock:
-            return self.store.create_layout(str(body.get("name", "")), data)
+            return self.store.create_layout(str(body.get("name", "")), data, profile)
 
-    def update_layout(self, layout_id: int, body: dict) -> dict:
+    def update_layout(self, layout_id: int, body: dict, profile: int = 1) -> dict:
         data = body.get("data")
         if data is not None and not isinstance(data, dict):
             raise ValueError("data must be an object")
         with self._lock:
-            found = self.store.update_layout(layout_id, body.get("name"), data)
+            found = self.store.update_layout(layout_id, body.get("name"), data, profile)
         if found is None:
             raise LookupError(f"no layout {layout_id}")
         return found
 
-    def delete_layout(self, layout_id: int) -> dict:
+    def delete_layout(self, layout_id: int, profile: int = 1) -> dict:
         with self._lock:
-            if not self.store.delete_layout(layout_id):
+            if not self.store.delete_layout(layout_id, profile):
                 raise LookupError(f"no layout {layout_id}")
         return {"deleted": layout_id}
 
@@ -1221,13 +1257,13 @@ class ChartApp:
 
     PRIORITY_COOLDOWN = 300  # seconds: a symbol opened again sooner is not asked for again
 
-    def priority(self, ticker: str) -> dict:
-        """The chart opened `ticker`: every feed holding it updates it before anything else.
-        While a feed it needs (`need`) is not fetching, a run for that symbol alone starts now
-        (`sync --tickers`: gaps and new data on each such feed, only what each plan has published);
-        on a feed that is fetching, the request waits in the database and that feed's run takes the
-        symbol next. Within every feed's limits either way: one fetching process per feed at a time
-        (its run lock), and limiters that share their window across processes."""
+    def priority(self, ticker: str, profile: int | None = None) -> dict:
+        """The chart opened `ticker`: every feed holding it updates it before anything else, and it
+        goes in `profile`'s register (visits). While a feed it needs (`need`) is not fetching, a run
+        for that symbol alone starts now (`sync --tickers`: gaps and new data on each such feed, only
+        what each plan has published); on a feed that is fetching, the request waits in the database
+        and that feed's run takes the symbol next. Within every feed's limits either way: one fetching
+        process per feed at a time (its run lock), and limiters that share their window across processes."""
         from .. import collector
 
         from ..freshness import expected
@@ -1240,6 +1276,8 @@ class ChartApp:
             feeds = sorted({w["source"] for w in rows})
             if not feeds:
                 raise LookupError(f"{ticker} is not on the watchlist")
+            if profile is not None:
+                self.store.visit(profile, ticker, now)
             profiles = feed_profiles(self.settings)
             if self._watch_everywhere(rows[0], profiles):  # a feed added since (Blue Ocean) takes it from now
                 rows = self.store.watchlist(ticker=ticker)
@@ -1387,14 +1425,30 @@ def make_handler(app: ChartApp, port_ref: list[int]):
         def log_message(self, fmt, *args):  # keep the console quiet
             pass
 
-        def _send(self, status: int, body: bytes, ctype: str) -> None:
+        def _send(self, status: int, body: bytes, ctype: str, headers: dict | None = None) -> None:
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(body)
+
+        def _profile(self) -> int | None:
+            """The profile this browser signed in as (its PROFILE_COOKIE), if it still exists."""
+            for part in (self.headers.get("Cookie") or "").split(";"):
+                name, _, value = part.strip().partition("=")
+                if name == PROFILE_COOKIE and value.isdigit() and app.profile_exists(int(value)):
+                    return int(value)
+            return None
+
+        def _signed_in(self, data, profile_id: int | None) -> None:
+            """Answer with the profile cookie set (signed in) or cleared (None: signed out)."""
+            cookie = (f"{PROFILE_COOKIE}={profile_id}; Path=/; SameSite=Strict; Max-Age=31536000"
+                      if profile_id else f"{PROFILE_COOKIE}=; Path=/; SameSite=Strict; Max-Age=0")
+            self._send(HTTPStatus.OK, json.dumps(data).encode(), "application/json", {"Set-Cookie": cookie})
 
         def _stream(self, q: dict[str, str]) -> None:
             if not q.get("since"):
@@ -1469,6 +1523,18 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 if not isinstance(body, dict):
                     raise ValueError("body must be a JSON object")
                 parts = urlparse(self.path).path.rstrip("/").split("/")
+                me = self._profile() or FIRST_PROFILE  # without a cookie (the command line, tests): the first
+                if parts[:3] == ["", "api", "profiles"]:
+                    if method == "POST" and len(parts) == 3:
+                        return self._json(app.create_profile(body), HTTPStatus.CREATED)
+                    if method == "POST" and parts[3:] == ["sign-in"]:
+                        found = app.sign_in(int(body.get("id", 0)))
+                        return self._signed_in(found, found["id"])
+                    if method == "POST" and parts[3:] == ["sign-out"]:
+                        return self._signed_in({"signedOut": True}, None)
+                    if method == "PUT" and len(parts) == 4:
+                        return self._json(app.rename_profile(int(parts[3]), body))
+                    return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
                 if method == "POST" and parts == ["", "api", "watch"]:
                     ticker = parse_qs(urlparse(self.path).query).get("ticker", [None])[-1]
                     if not ticker:
@@ -1477,12 +1543,12 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 if method == "POST" and parts == ["", "api", "updates-pause"]:
                     return self._json(app.set_updates_pause(body))
                 if method == "PUT" and parts == ["", "api", "watchlists"]:
-                    return self._json(app.save_watchlists(body))
+                    return self._json(app.save_watchlists(body, me))
                 if method == "POST" and parts == ["", "api", "priority"]:
                     ticker = parse_qs(urlparse(self.path).query).get("ticker", [None])[-1]
                     if not ticker:
                         return self._json({"error": "ticker is required"}, HTTPStatus.BAD_REQUEST)
-                    return self._json(app.priority(ticker), HTTPStatus.ACCEPTED)
+                    return self._json(app.priority(ticker, me), HTTPStatus.ACCEPTED)
                 if method == "POST" and parts == ["", "api", "fetching"]:
                     return self._json(app.set_fetching(body))
                 if method == "POST" and parts == ["", "api", "plugins", "rescan"]:
@@ -1518,13 +1584,13 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 if parts[:3] != ["", "api", "layouts"]:
                     return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
                 if method == "POST" and len(parts) == 3:
-                    return self._json(app.create_layout(body), HTTPStatus.CREATED)
+                    return self._json(app.create_layout(body, me), HTTPStatus.CREATED)
                 if len(parts) == 4:
                     layout_id = int(parts[3])
                     if method == "PUT":
-                        return self._json(app.update_layout(layout_id, body))
+                        return self._json(app.update_layout(layout_id, body, me))
                     if method == "DELETE":
-                        return self._json(app.delete_layout(layout_id))
+                        return self._json(app.delete_layout(layout_id, me))
                 return self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
             except LayoutLimit as e:
                 return self._json({"error": str(e)}, HTTPStatus.CONFLICT)
@@ -1554,12 +1620,18 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 return
             q = {k: v[-1] for k, v in parse_qs(url.query).items()}
             try:
+                signed = self._profile()
+                me = signed or FIRST_PROFILE  # without a cookie (the command line, tests): the first
+                if url.path == "/api/profiles":
+                    return self._json(app.profiles(signed))
+                if url.path == "/api/register":
+                    return self._json(app.register(me))
                 if url.path == "/api/layouts":
-                    return self._json(app.layouts())
+                    return self._json(app.layouts(me))
                 if url.path == "/api/watchlists":
-                    return self._json(app.watchlists())
+                    return self._json(app.watchlists(me))
                 if url.path.startswith("/api/layouts/"):
-                    return self._json(app.layout(int(url.path.rsplit("/", 1)[1])))
+                    return self._json(app.layout(int(url.path.rsplit("/", 1)[1]), me))
                 if url.path == "/api/symbols":
                     return self._json(app.symbols())
                 if url.path == "/api/meta":
@@ -1651,6 +1723,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
 
         def _static(self, path: str) -> None:
             rel = "index.html" if path in ("", "/") else path.lstrip("/")
+            if rel == "index.html" and self._profile() is None:
+                rel = "login.html"  # no profile chosen in this browser: pick or make one first
             target = (STATIC / rel).resolve()
             if STATIC.resolve() not in target.parents or not target.is_file():
                 return self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")

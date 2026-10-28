@@ -8,13 +8,18 @@ const PAGE = 20000;  // bars per request; zooming/scrolling out loads older page
 const POLL_MS = 60_000;
 const LIVE_POLL_MS = 2_000;  // a symbol streaming live (live.py) is polled this often
 
-// -- per-viewer preferences (localStorage; the app works without it) --------
+// -- per-profile preferences (localStorage; the app works without it) --------
+// The profile signed in (its cookie, set on the login page): each keeps its own preferences, the
+// first those from before profiles ('mc:'), any other under a prefix of its own (a new one starts
+// with none).
+const PROFILE = Number((document.cookie.match(/(?:^|;\s*)mc_profile=(\d+)/) || [])[1] || 1);
+const PREFS_PREFIX = PROFILE === 1 ? 'mc:' : `mc:p${PROFILE}:`;
 const prefs = {
   get(key, fallback) {
-    try { const v = localStorage.getItem('mc:' + key); return v === null ? fallback : JSON.parse(v); }
+    try { const v = localStorage.getItem(PREFS_PREFIX + key); return v === null ? fallback : JSON.parse(v); }
     catch { return fallback; }
   },
-  set(key, value) { try { localStorage.setItem('mc:' + key, JSON.stringify(value)); } catch { /* ignore */ } },
+  set(key, value) { try { localStorage.setItem(PREFS_PREFIX + key, JSON.stringify(value)); } catch { /* ignore */ } },
 };
 
 const state = {
@@ -2802,7 +2807,8 @@ function saveOnLeave(closing) {
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveOnLeave(false); });
 window.addEventListener('pagehide', () => saveOnLeave(true));
 
-// First run: create "Default" from what this browser had before layouts existed.
+// First run: create "Default" from what this browser had before layouts existed (the first profile
+// only: another starts with no markups).
 async function ensureLayout() {
   await refreshLayoutList();
   if (layout.list.length) {
@@ -2813,7 +2819,7 @@ async function ensureLayout() {
   }
   const drawings = {};
   try {
-    for (let i = 0; i < localStorage.length; i++) {
+    for (let i = 0; PROFILE === 1 && i < localStorage.length; i++) {
       const key = localStorage.key(i);
       if (key && key.startsWith('mc:drawings:')) drawings[key.slice(12)] = JSON.parse(localStorage.getItem(key));
     }
