@@ -53,7 +53,12 @@ def eligibility(trades: pd.DataFrame, rules: dict) -> tuple[np.ndarray, np.ndarr
             for code in (str(conds[i]).split(",") if fam else ()):
                 if code in REGULAR:
                     continue
-                rule = BAR_RULES.get((fam, code)) or rules.get((fam, code))
+                # the feed's own rules first (Store.condition_rules folds the overrides in, by letter
+                # or by Massive's numeric id); the overrides alone where they hold nothing for it.
+                # Overrides first, Massive's id 4 (bunched) read as the letter 4 (derivatively priced).
+                rule = rules.get((fam, code))
+                if rule is None:
+                    rule = BAR_RULES.get((fam, code))
                 if rule is None:
                     unknown.add(f"{fam or '?'}:{code}")
                     continue

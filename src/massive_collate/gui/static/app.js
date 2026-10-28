@@ -2499,13 +2499,17 @@ const layout = {
 };
 
 // `keepalive`: the request outlives the page (closing it); the browser takes at most 64 KiB so.
+// Writes say which profile this page loaded as: signed in as another in another tab since (or
+// signed out), the server refuses them (409, reload) rather than write over that profile's own.
+const WRITE_HEADERS = { 'Content-Type': 'application/json', 'X-Massive-Charts': '1', 'X-Massive-Profile': String(PROFILE) };
+
 async function apiWrite(method, path, body, { keepalive = false } = {}) {
   const res = await fetch(path, {
-    method, keepalive,
-    headers: { 'Content-Type': 'application/json', 'X-Massive-Charts': '1' },
+    method, keepalive, headers: WRITE_HEADERS,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await res.json();
+  if (res.status === 409 && data.reload) location.reload();  // this page's profile is not the one signed in now
   if (!res.ok) throw new Error(data.error || res.statusText);
   return data;
 }

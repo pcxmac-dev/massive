@@ -32,7 +32,8 @@ import pandas as pd
 
 from ..calc.derivatives import Model, apply_model, segments
 from .bars import (CALENDAR, COLUMNS, MERGED, MODEL_SOURCES, PERIOD_SECONDS, PRICE_BASED, TIME_TYPES, Series, Style,
-                   _aggregate, _filtered, _regular_close, _SizedCache, bar_end, bin_keys, calendar_key, decimals, epoch_ms,
+                   _aggregate, _BoundedCache, _filtered, _regular_close, _SizedCache, bar_end, bin_keys, calendar_key,
+                   decimals, epoch_ms,
                    frame_from_bars, merge_frames, model_info, resample, session_hours, style_used, to_records,
                    transformed, utc_days, ET)
 
@@ -44,6 +45,7 @@ UNIT_MS = {"second": 1_000, "minute": 60_000, "hour": 3_600_000, "day": 86_400_0
 BASE = {"second": "second", "minute": "minute", "hour": "minute"}  # the stored bars a level is built from
 PAGE = 2000  # bars per page, about three screens of candles at their narrowest
 LEVELS_TTL_S = 60.0
+LEVELS_KEPT = 256  # symbols' levels held at once (the chart's open ones and those opened last)
 # Price-based charts (Renko, Kagi, line break, point & figure, range) are built whole: each brick
 # depends on every one before it. From the finest level whose whole history is at most BRICK_ROWS
 # bars, read from at most BRICK_READ base bars, reaching back to within COVER_MS of the series'
@@ -152,7 +154,9 @@ class WindowReader:
 
     def __init__(self, engine):
         self.engine = engine
-        self._levels: dict[tuple, tuple[float, list]] = {}
+        # (source, ticker) and ("rows", ...) -> (made at, levels), for the symbols opened last (a plain
+        # dict kept one for every symbol, made-up ones too, for the life of the app)
+        self._levels: dict[tuple, tuple[float, list]] = _BoundedCache(LEVELS_KEPT)
         self._bricks = _SizedCache(engine.budget("bricks"), 16)
         self._bricks_lock = threading.Lock()
         self._rollup = _SizedCache(engine.budget("rollup"), 50_000)  # (feeds, ticker, month) -> (built at, 30-minute bins)

@@ -564,7 +564,8 @@ def cot_markets(store) -> list[dict]:
             m["openInterest"] = last.get(r["series"])
     newest = max((m["last"] or 0 for m in markets.values()), default=0)
     current = newest - 21 * 86_400_000  # reported within three weeks of the newest report
-    return sorted(markets.values(), key=lambda m: (-(m["last"] or 0 >= current), -(m["openInterest"] or 0), m["name"]))
+    # still reported first (the comparison whole: `m["last"] or 0 >= current` read `m["last"] or (0 >= current)`)
+    return sorted(markets.values(), key=lambda m: (-int((m["last"] or 0) >= current), -(m["openInterest"] or 0), m["name"]))
 
 
 def values(store, name: str, series: list[str], as_of: int | None = None) -> dict[str, dict]:

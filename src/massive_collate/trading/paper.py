@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     stop_px     REAL,
     tif         TEXT    NOT NULL,   -- day | gtc
     placed_at   INTEGER NOT NULL,   -- ms
-    status      TEXT    NOT NULL,   -- working | filled | cancelled | expired
+    status      TEXT    NOT NULL,   -- working | filled | cancelled | expired | rejected
     done_at     INTEGER,            -- ms: when it filled (the bar it filled in), was cancelled or expired
     fill_px     REAL,
     fee         REAL,
@@ -156,6 +156,9 @@ class PaperBook:
             raise ValueError("a symbol is needed")
         now = now_ms or _now()
         acct = self.account()["id"]
+        # a series it cannot fill from (the composite, a continuous future) is refused here, not
+        # stored to break every later match (ValueError, as the route answers 400)
+        self.bars_after(source or "*", ticker, now, now)
         with self.conn:
             oid = self.conn.execute(
                 "INSERT INTO paper_orders (account, ticker, source, side, qty, type, limit_px, stop_px, tif, placed_at, "
@@ -198,22 +201,29 @@ class PaperBook:
             # past them (`read`) for a fill they already allow.
             at = o["looked_to"] or o["placed_at"]
             read, steady, hit = at, True, None
-            while read < until and hit is None:
-                bars, step = self.bars_after(o["source"], o["ticker"], read, until)
-                if bars.empty:
-                    break
-                hit = fill_in(o, bars)
-                t = bars["t"].to_numpy(dtype="int64")
-                final = t + step <= now
-                if "settled" in bars:
-                    final &= bars["settled"].to_numpy(dtype=bool)
-                lead = len(final) if final.all() else int(np.argmin(final))  # the bars over and settled, from the first
-                if steady and lead:
-                    at = int(t[lead - 1]) + step
-                steady = steady and lead == len(final)
-                read = int(t[-1]) + 1
-                if len(bars) < MATCH_PAGE:
-                    break
+            try:
+                while read < until and hit is None:
+                    bars, step = self.bars_after(o["source"], o["ticker"], read, until)
+                    if bars.empty:
+                        break
+                    hit = fill_in(o, bars)
+                    t = bars["t"].to_numpy(dtype="int64")
+                    final = t + step <= now
+                    if "settled" in bars:
+                        final &= bars["settled"].to_numpy(dtype=bool)
+                    lead = len(final) if final.all() else int(np.argmin(final))  # the bars over and settled, from the first
+                    if steady and lead:
+                        at = int(t[lead - 1]) + step
+                    steady = steady and lead == len(final)
+                    read = int(t[-1]) + 1
+                    if len(bars) < MATCH_PAGE:
+                        break
+            except ValueError:  # a series it can no longer fill from: this order only, the rest still match
+                with self.conn:
+                    self.conn.execute("UPDATE paper_orders SET status='rejected', done_at=? WHERE id=? AND status='working'",
+                                      (now, o["id"]))
+                continue
+            stored = self.stored_to(o["source"], o["ticker"]) if end is not None and now >= end else None
             with self.conn:
                 if hit is not None:
                     t, px = hit
@@ -221,9 +231,10 @@ class PaperBook:
                     self.conn.execute("UPDATE paper_orders SET status='filled', done_at=?, fill_px=?, fee=?, looked_to=? "
                                       "WHERE id=? AND status='working'", (t, px, fee, at, o["id"]))
                     filled += 1
-                elif end is not None and now >= end and (at >= end or (self.stored_to(o["source"], o["ticker"]) or 0) >= end):
+                elif end is not None and now >= end and (at >= end or stored is None or stored >= end):
                     # the close has passed and the bars up to it are stored (looked at to the close,
-                    # or the series goes on past it): not before, or a fill they allow would be missed
+                    # or the series goes on past it): not before, or a fill they allow would be missed;
+                    # nothing stored for it at all (a mistyped symbol): no bar can fill it
                     self.conn.execute("UPDATE paper_orders SET status='expired', done_at=?, looked_to=? WHERE id=? "
                                       "AND status='working'", (end, at, o["id"]))
                 else:

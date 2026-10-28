@@ -59,6 +59,9 @@ DEPS_TTL_S = 60.0  # the dependency checks' answer is kept this long
 MAX_BODY = 5 * 1024 * 1024
 WRITE_HEADER = "X-Massive-Charts"
 PROFILE_COOKIE = "mc_profile"  # the profile this browser signed in as (no passwords: profiles keep things apart)
+# The profile a page loaded as, sent with its writes: a tab left open as one profile while another
+# tab signed in as a second (or out) wrote its lists over the second's (the cookie names the newest)
+PROFILE_HEADER = "X-Massive-Profile"
 FIRST_PROFILE = 1  # the profile holding what came before profiles; the default without a cookie
 # Chart data built at once (bars, level 2 profiles, projections, range statistics): each holds a
 # window's frames, up to MAX_LIMIT bars; the rest wait their turn, then are answered busy.
@@ -132,6 +135,11 @@ class ChartApp:
         self._deps: tuple[float, dict] | None = None
         self._datasets_store, self._datasets_lock = store.reader(), threading.Lock()  # the datasets list
         self._symbols_store, self._symbols_lock = store.reader(), threading.RLock()  # the symbol list
+        # The profiles there are, for the cookie every request carries: checked under the shared
+        # lock, every chart and status request waited behind whatever held it (profile_exists)
+        self._profiles_store, self._profiles_lock = store.reader(), threading.Lock()
+        self._profile_ids: set[int] = set()
+        self._profile_ids_at = float("-inf")
         self._open_noted: dict[str, int] = {}  # ticker -> ms it was last noted open (note_open)
         self._derive_proc: subprocess.Popen | None = None  # a build started by start_derive
         self._gov_db, self._gov_lock = None, threading.Lock()  # gov/gov.db, opened on first use
@@ -878,14 +886,25 @@ class ChartApp:
         with self._lock:
             return {"profiles": self.store.profiles(), "current": current}
 
+    PROFILE_IDS_TTL_S = 5.0  # an id not held is looked for again at most this often
+
     def profile_exists(self, profile_id: int) -> bool:
-        with self._lock:
-            return self.store.profile(profile_id) is not None
+        """Whether a profile is there (the cookie of every request): from the ids held, read again
+        through a connection of its own, never under the shared lock."""
+        if profile_id in self._profile_ids:
+            return True
+        with self._profiles_lock:
+            if time.monotonic() - self._profile_ids_at >= self.PROFILE_IDS_TTL_S:
+                self._profile_ids = self._profiles_store.profile_ids()
+                self._profile_ids_at = time.monotonic()
+        return profile_id in self._profile_ids
 
     def create_profile(self, body: dict) -> dict:
         """A new profile: an empty watchlist, no layouts, the page's own preferences."""
         with self._lock:
-            return self.store.create_profile(str(body.get("name", "")))
+            made = self.store.create_profile(str(body.get("name", "")))
+        self._profile_ids = self._profile_ids | {made["id"]}
+        return made
 
     def rename_profile(self, profile_id: int, body: dict) -> dict:
         with self._lock:
@@ -931,7 +950,7 @@ class ChartApp:
             if not 1 <= len(name) <= 40 or name in names:
                 raise ValueError("each list needs a name of 1-40 characters, not used by another list")
             if not isinstance(tickers, list) or len(tickers) > self.MAX_LIST_TICKERS \
-                    or not all(isinstance(t, str) and 0 < len(t) <= 32 for t in tickers):
+                    or not all(isinstance(t, str) and 0 < len(t.strip()) <= 32 for t in tickers):  # "  " is none
                 raise ValueError(f"tickers must be at most {self.MAX_LIST_TICKERS} symbols")
             names.add(name)
             out.append({"name": name, "tickers": list(dict.fromkeys(t.strip().upper() for t in tickers))})
@@ -1440,7 +1459,8 @@ def make_handler(app: ChartApp, port_ref: list[int]):
             """The profile this browser signed in as (its PROFILE_COOKIE), if it still exists."""
             for part in (self.headers.get("Cookie") or "").split(";"):
                 name, _, value = part.strip().partition("=")
-                if name == PROFILE_COOKIE and value.isdigit() and app.profile_exists(int(value)):
+                # decimal digits only, of a size SQLite holds ('²' passed isdigit and failed int)
+                if name == PROFILE_COOKIE and value.isdecimal() and len(value) <= 9 and app.profile_exists(int(value)):
                     return int(value)
             return None
 
@@ -1515,7 +1535,10 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 return
             if self.headers.get(WRITE_HEADER) != "1":
                 return self._send(HTTPStatus.FORBIDDEN, b"missing request header", "text/plain")
-            length = int(self.headers.get("Content-Length") or 0)
+            raw_length = self.headers.get("Content-Length") or "0"
+            length = int(raw_length) if raw_length.isdecimal() else -1  # not a size: refused, never read
+            if length < 0:
+                return self._json({"error": "bad Content-Length"}, HTTPStatus.BAD_REQUEST)
             if length > MAX_BODY:
                 return self._json({"error": "request too large"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
             try:
@@ -1524,6 +1547,11 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     raise ValueError("body must be a JSON object")
                 parts = urlparse(self.path).path.rstrip("/").split("/")
                 me = self._profile() or FIRST_PROFILE  # without a cookie (the command line, tests): the first
+                page = self.headers.get(PROFILE_HEADER)
+                if page is not None and page != str(me) and parts[:3] != ["", "api", "profiles"]:
+                    # the page loaded as another profile than this browser is signed in as now
+                    return self._json({"error": "this page is another profile's: reload it", "reload": True},
+                                      HTTPStatus.CONFLICT)
                 if parts[:3] == ["", "api", "profiles"]:
                     if method == "POST" and len(parts) == 3:
                         return self._json(app.create_profile(body), HTTPStatus.CREATED)

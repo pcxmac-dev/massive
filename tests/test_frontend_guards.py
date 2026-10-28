@@ -366,8 +366,10 @@ def test_the_page_follows_every_feed_fetching_side_by_side():
     page = _js("activity.js")
     poll = page.split("async function pollOnce()", 1)[1].split("\n  }\n", 1)[0]
     assert "!going.has(f)" in poll  # any feed's run ending may have brought new data
-    # the opened symbol's own run ends on its own: Massive's pass goes on beside it for hours
-    assert "data.symbolRun?.ticker === job.ticker && !data.symbolRun.going" in poll
+    # the opened symbol's own run ends on its own: Massive's pass goes on beside it for hours; it is
+    # over once seen going and ended, not on the poll 400 ms after the start (before its lock and row)
+    assert "const mine = data.symbolRun?.ticker === job.ticker;" in poll and "if (mine && data.symbolRun.going) job.seen = true;" in poll
+    assert "job.seen ? !(mine && data.symbolRun.going) : !data.running && Date.now() - job.since > RUN_START_GRACE_MS" in poll
     assert "wasRunning" not in page and "(data.fetching || []).some((f) => f.source === l.source)" in page
     assert "Running ${going.length} feeds" in page.split("function statusLine()", 1)[1].split("\n  }\n", 1)[0]
 

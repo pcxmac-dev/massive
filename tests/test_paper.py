@@ -105,6 +105,35 @@ def test_a_day_order_expires_at_the_close_and_a_good_till_cancelled_one_does_not
         book.cancel(gtc["id"])
 
 
+def test_a_series_it_cannot_fill_from_is_refused_and_one_gone_bad_breaks_no_other_order(book):
+    tape = book.tape
+    after = tape.after
+
+    def reading(source, ticker, at, until):
+        if source == "composite" or ticker == "GONE":
+            raise ValueError("paper orders fill from the chart's own series")
+        return after(source, ticker, at, until)
+
+    book.bars_after = reading
+    with pytest.raises(ValueError):
+        book.place("SPCX", "composite", "buy", 1, "market", now_ms=T0)
+    assert book.summary(T0)["orders"] == []  # refused before it was stored
+    bad = book.place("GOOD", "*", "buy", 1, "market", now_ms=T0)
+    good = book.place("SPCX", "*", "buy", 1, "market", now_ms=T0)
+    book.conn.execute("UPDATE paper_orders SET ticker='GONE' WHERE id=?", (bad["id"],))  # its series can no longer be read
+    tape.add(1, 10, 10, 10, 10)
+    book.match(T0 + 2 * MIN)
+    assert book.order(bad["id"])["status"] == "rejected" and book.order(good["id"])["status"] == "filled"
+
+
+def test_a_day_order_for_a_symbol_with_nothing_stored_expires_at_the_close(book):
+    typo = book.place("AAPPL", "*", "buy", 1, "limit", limit=1.0, now_ms=T0)
+    book.match(_ms("2026-10-14 15:59"))
+    assert book.order(typo["id"])["status"] == "working"
+    book.match(_ms("2026-10-14 16:01"))
+    assert book.order(typo["id"])["status"] == "expired"  # no bar can fill it: not working for ever
+
+
 def test_positions_at_average_cost_with_realized_and_unrealized(book):
     book.reset(10_000, fee_bps=10, now_ms=T0 - MIN)
     prices = [100, 110, 90, 95]

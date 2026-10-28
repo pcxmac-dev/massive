@@ -320,7 +320,9 @@ def fetch(db: GovDB, now: datetime, contact: str | None = None, log: Callable[[s
         for attempt in (1, 2):  # a dropped connection: once more
             sent += 1
             try:
-                r = session.get(s.url, headers=headers, timeout=TIMEOUT_S)
+                # a source sent the contact follows no redirect: the User-Agent would go with it to the
+                # other host (requests drops only Authorization); a moved feed reads as failed instead
+                r = session.get(s.url, headers=headers, timeout=TIMEOUT_S, allow_redirects=not s.contact)
                 break
             except (requests.ConnectionError, requests.Timeout) as e:
                 error = e

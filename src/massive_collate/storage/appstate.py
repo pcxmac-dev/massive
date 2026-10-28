@@ -86,6 +86,10 @@ class AppStateStore:
                                 (profile_id,)).fetchone()
         return dict(zip(("id", "name", "created_at", "seen_at"), row)) if row else None
 
+    def profile_ids(self) -> set[int]:
+        """The profiles there are, by id: a read only (the first is made where it is first asked for)."""
+        return {self.FIRST_PROFILE} | {int(i) for (i,) in self.conn.execute("SELECT id FROM profiles")}
+
     def _first_profile(self) -> None:
         if self.conn.execute("SELECT 1 FROM profiles LIMIT 1").fetchone() is None:
             with self.conn:

@@ -139,3 +139,58 @@ def test_only_a_stock_you_open_goes_in_the_register_not_one_the_page_opened(tmp_
     finally:
         httpd.shutdown()
         store.close()
+
+
+def test_a_page_of_another_profile_cannot_write_and_odd_cookies_or_lengths_are_refused(tmp_path):
+    import socket
+
+    from massive_collate.storage import Store
+
+    store = Store(tmp_path / "m.db", check_same_thread=False)  # the server's threads share it
+    app = ChartApp(store)
+    two = app.create_profile({"name": "Two"})["id"]
+    three = app.create_profile({"name": "Three"})["id"]
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app, [0]))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    port = httpd.server_address[1]
+
+    def ask(method, path, body=None, cookie=None, page=None):
+        c = HTTPConnection("127.0.0.1", port)
+        headers = {"Host": f"127.0.0.1:{port}", "X-Massive-Charts": "1", "Content-Type": "application/json"}
+        if cookie:
+            headers["Cookie"] = cookie
+        if page is not None:
+            headers[server.PROFILE_HEADER] = str(page)
+        c.request(method, path, body=json.dumps(body) if body is not None else None, headers=headers)
+        r = c.getresponse()
+        return r.status, r.read()
+
+    try:
+        lists = {"lists": [{"name": "Mine", "tickers": ["SPCX"]}]}
+        # a tab loaded as Two, while another tab signed in as Three: refused, Three's lists untouched
+        status, answer = ask("PUT", "/api/watchlists", lists, cookie=f"mc_profile={three}", page=two)
+        assert status == 409 and json.loads(answer)["reload"] is True
+        assert json.loads(ask("GET", "/api/watchlists", cookie=f"mc_profile={three}")[1]) == {"lists": []}
+        assert ask("PUT", "/api/watchlists", lists, cookie=f"mc_profile={two}", page=two)[0] == 200  # its own
+        assert ask("PUT", "/api/watchlists", lists, page=two)[0] == 409  # signed out since: not the first's either
+        bad = {"lists": [{"name": "Blank", "tickers": ["  "]}]}
+        assert ask("PUT", "/api/watchlists", bad, cookie=f"mc_profile={two}", page=two)[0] == 400
+        # a cookie no profile can be ('²' is a digit to isdigit, not to int; too big for SQLite): signed out
+        assert b"login.js" in ask("GET", "/", cookie="mc_profile=²")[1]
+        assert b"login.js" in ask("GET", "/", cookie="mc_profile=99999999999999999999")[1]
+        # a Content-Length that is not a size: an answer, not a dropped connection or a hung thread
+        with socket.create_connection(("127.0.0.1", port)) as s:
+            s.sendall(f"PUT /api/watchlists HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Massive-Charts: 1\r\n"
+                      "Content-Length: -5\r\n\r\n".encode())
+            assert b" 400 " in s.recv(200).split(b"\r\n")[0]
+        # the cookie is checked without the shared lock: the page answers while something holds it
+        app._profile_ids, app._profile_ids_at = set(), float("-inf")  # read again: still not under the lock
+        with app._lock:
+            got = []
+            t = threading.Thread(target=lambda: got.append(ask("GET", "/", cookie=f"mc_profile={three}")))
+            t.start()
+            t.join(5)
+        assert got and got[0][0] == 200 and b'id="railProfile"' in got[0][1]  # the app, as Three
+    finally:
+        httpd.shutdown()
+        store.close()

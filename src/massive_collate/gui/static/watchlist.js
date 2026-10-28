@@ -187,6 +187,7 @@
         await save();
         return;
       }
+      shownHead = null;  // cancelled, or a name in use: drawn whole, the picker back on the list shown
     } else {
       current = e.target.value;
       prefs.set('watchlist', current);

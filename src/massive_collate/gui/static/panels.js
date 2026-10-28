@@ -127,7 +127,10 @@
   }).catch(() => {});
   $('railProfile').addEventListener('click', async () => {
     try {
-      await fetch('/api/profiles/sign-out', { method: 'POST', headers: { 'X-Massive-Charts': '1', 'Content-Type': 'application/json' }, body: '{}' });
+      // markups not saved yet go first, as when the page closes: signed out, they went as the first
+      // profile's and were refused (no such layout), lost
+      if (layout.dirty && layout.current) await saveLayout({ leaving: true }).catch(() => {});
+      await fetch('/api/profiles/sign-out', { method: 'POST', headers: WRITE_HEADERS, body: '{}' });
     } finally { location.replace('/'); }  // the login page
   });
   // The status line spans the open view's own area, in every view and at every size: not under the

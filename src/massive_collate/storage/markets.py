@@ -49,10 +49,11 @@ class MarketsStore:
         trades. A feed whose reference this is (Massive) marks its trades with the reference's
         numeric ids: each takes the rule of the letter it stands for, overrides included
         (ticks.BAR_RULES), so a Massive odd lot sets no high or low. Any other feed (Alpaca) marks
-        them with the tapes' letters. The two are never mixed: some letters are digits, and with one
-        key for both, the letter '2' overwrote Massive's 2 (Average Price Trade), whose prints then
-        set the highs and lows of bars built from Massive's trades (NVDA after hours: $177 to $251
-        in one minute at $231)."""
+        them with the tapes' letters, the overrides folded in here too. The two are never mixed: some
+        letters are digits, and with one key for both, the letter '2' overwrote Massive's 2 (Average
+        Price Trade), whose prints then set the highs and lows of bars built from Massive's trades
+        (NVDA after hours: $177 to $251 in one minute at $231). The rules made here come first in
+        ticks.eligibility, so the letter '4' (derivatively priced) never stands for Massive's id 4."""
         from ..ticks import BAR_RULES
 
         rows = self.conn.execute("SELECT source, id, cta, utp, high_low, open_close, volume FROM conditions").fetchall()
@@ -64,7 +65,7 @@ class MarketsStore:
                 if numeric and source == feed:
                     out[(fam, str(cid))] = BAR_RULES.get((fam, letter), flags) if letter else flags
                 elif not numeric and letter:
-                    out[(fam, letter)] = flags
+                    out[(fam, letter)] = BAR_RULES.get((fam, letter), flags)
         return out
 
     # -- official calendars --------------------------------------------------

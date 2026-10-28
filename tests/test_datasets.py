@@ -391,3 +391,20 @@ def test_shiller_dates_in_every_format_the_files_have_used():
     d = datasets._shiller_date
     assert [d("2026-09-01"), d("1871.01"), d("1871.1"), d("1871.04166"), d("1871.95833")] == [
         date(2026, 9, 1), date(1871, 1, 1), date(1871, 10, 1), date(1871, 1, 1), date(1871, 12, 1)]
+
+
+def test_cot_markets_still_reported_first_then_by_open_interest():
+    week = 7 * 86_400_000
+    newest = 1_790_000_000_000
+    rows = [("A", newest, 100), ("B", newest - week, 900), ("C", newest - 5 * week, 5000)]  # C: no longer reported
+
+    class Held:
+        def dataset_last_values(self, provider, name):
+            return {f"{c}:open_interest": oi for c, _, oi in rows}
+
+        def dataset_series(self, provider, name):
+            return [{"series": f"{c}:open_interest", "title": f"{c} MARKET: open interest", "first_ts": 0,
+                     "last_ts": last} for c, last, _ in rows]
+
+    # B missed the newest report (a week behind) yet is still reported: largest open interest first
+    assert [m["code"] for m in datasets.cot_markets(Held())] == ["B", "A", "C"]

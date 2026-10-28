@@ -53,7 +53,7 @@ class Agencies:
     def __init__(self, etag_304=False):
         self.calls, self.etag_304 = [], etag_304
 
-    def get(self, url, headers=None, timeout=None):
+    def get(self, url, headers=None, timeout=None, allow_redirects=True):
         self.calls.append((url, dict(headers or {})))
         if self.etag_304 and (headers or {}).get("If-None-Match"):
             return Resp(304)
@@ -104,6 +104,23 @@ def test_a_fetch_reads_every_source_once_the_sec_waits_for_a_contact():
     sec = [h for u, h in http2.calls if "sec.gov" in u]
     assert len(sec) == 2 and all(h["User-Agent"].endswith("Pat Example pat@example.com") for h in sec)
     assert all(h["User-Agent"] == gov.USER_AGENT for u, h in http2.calls if "sec.gov" not in u)
+
+
+def test_a_source_sent_the_contact_follows_no_redirect():
+    class Recording(Agencies):
+        def __init__(self):
+            super().__init__()
+            self.follows = {}
+
+        def get(self, url, headers=None, timeout=None, allow_redirects=True):
+            self.follows[url] = allow_redirects
+            return super().get(url, headers, timeout)
+
+    http = Recording()
+    gov.fetch(GovDB(None), NOW, contact="Pat Example pat@example.com", log=lambda *_: None, session=http)
+    # the User-Agent carrying the contact would go with a redirect to another host
+    assert all(not f for u, f in http.follows.items() if "sec.gov" in u) and any("sec.gov" in u for u in http.follows)
+    assert all(f for u, f in http.follows.items() if "sec.gov" not in u)
 
 
 def test_requests_are_conditional_and_an_unchanged_feed_keeps_its_items():
@@ -167,7 +184,7 @@ def test_a_dropped_connection_is_tried_once_more_and_a_failure_again_in_ten_minu
     import requests
 
     class Flaky(Agencies):
-        def get(self, url, headers=None, timeout=None):
+        def get(self, url, headers=None, timeout=None, allow_redirects=True):
             if "bls.gov" in url:
                 self.calls.append((url, dict(headers or {})))
                 raise requests.ConnectionError("dropped")
@@ -190,7 +207,7 @@ def test_a_dropped_connection_is_tried_once_more_and_a_failure_again_in_ten_minu
 
 def test_a_refusal_is_not_asked_again_for_hours():
     class Refusing(Agencies):
-        def get(self, url, headers=None, timeout=None):
+        def get(self, url, headers=None, timeout=None, allow_redirects=True):
             if "bls.gov" in url:
                 self.calls.append((url, dict(headers or {})))
                 return Resp(403)

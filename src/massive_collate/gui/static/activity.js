@@ -87,9 +87,9 @@
       + `${seg('newer', newer, 'Newer data to fetch')}</span>`;
   }
 
-  // The Fetcher view shows one feed at a time; the choice is remembered on this machine.
-  let feed = 'massive';
-  try { feed = localStorage.getItem('fetcherFeed') || 'massive'; } catch { /* private window */ }
+  // The Fetcher view shows one feed at a time; the choice is remembered, each profile its own.
+  let feed = prefs.get('fetcherFeed', 'massive');
+  const RUN_START_GRACE_MS = 15_000;  // a run started for the opened symbol shows within this (its lock and row)
 
   // One poll at a time, and one timer: a call while one is on its way gets that one's answer (each
   // view switch called poll() and started another loop of polls, never stopped: 9 in 20 s).
@@ -114,7 +114,14 @@
       const going = new Set((data.fetching || []).map((f) => f.source));
       if ([...wasFetching].some((f) => !going.has(f))) window.dispatchEvent(new CustomEvent('massive:run-finished', { detail: data }));
       wasFetching = going;
-      if (job?.phase === 'downloading' && (!data.running || data.symbolRun?.ticker === job.ticker && !data.symbolRun.going)) finishJob();
+      if (job?.phase === 'downloading') {
+        // The symbol's run is over once seen going and then ended, or when none is going a while after
+        // it was started (a quick run between two polls): not at once, as the poll 400 ms after the
+        // start comes before the run has its lock and its row ("fetch failed" while it was starting).
+        const mine = data.symbolRun?.ticker === job.ticker;
+        if (mine && data.symbolRun.going) job.seen = true;
+        if (job.seen ? !(mine && data.symbolRun.going) : !data.running && Date.now() - job.since > RUN_START_GRACE_MS) finishJob();
+      }
       advanceJob();
       render();
       pollFailed = false;
@@ -191,7 +198,7 @@
     if (visit) state.picked = null;
     let next = null;
     try {
-      const res = await fetch(`/api/priority?ticker=${encodeURIComponent(ticker)}${visit ? '&visit=1' : ''}`, { method: 'POST', headers: { 'X-Massive-Charts': '1' } });
+      const res = await fetch(`/api/priority?ticker=${encodeURIComponent(ticker)}${visit ? '&visit=1' : ''}`, { method: 'POST', headers: WRITE_HEADERS });
       const body = await res.json().catch(() => ({}));
       if (res.status !== 404) {  // 404: not on the watchlist, nothing to fetch
         if (!res.ok) throw new Error(body.error || res.statusText);
@@ -468,7 +475,7 @@
     const b = e.target.closest('[data-feed]');
     if (!b || b.dataset.feed === feed) return;
     feed = b.dataset.feed;
-    try { localStorage.setItem('fetcherFeed', feed); } catch { /* not kept */ }
+    prefs.set('fetcherFeed', feed);
     poll();
   });
 
