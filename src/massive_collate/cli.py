@@ -650,7 +650,8 @@ def cmd_live(args, settings: Settings) -> int:
         print(f"recorder: {'running' if live.running(settings.db_path) else 'not running'}, last beat {beat or 'never'}")
         for source, st in (json.loads(raw)["streams"] if raw else {}).items():
             pairs = ", ".join(f"{t} {p['trades']:,}" for t, p in sorted(st.get("pairs", {}).items()))
-            state = "connected" if st.get("connected") else "idle: nothing of it open on a chart" if st.get("idle") \
+            state = "connected" if st.get("connected") \
+                else "idle: " + (st.get("note") or "nothing of it open on a chart") if st.get("idle") \
                 else "down: " + str(st.get("error"))
             print(f"  {source:9} {state}  {pairs}")
         return 0

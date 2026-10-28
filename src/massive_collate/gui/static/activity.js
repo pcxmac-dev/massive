@@ -626,7 +626,7 @@
       const head = `<tr><td><b>${esc(src)}</b></td><td colspan="4">${s.connected
         ? `<span class="rec on"></span> connected${s.since ? ` · since ${when(s.since)}` : ''}${s.symbols
           ? ` · ${s.symbols.length} symbol${s.symbols.length === 1 ? '' : 's'}` : ''}`
-        : s.idle ? `<span class="state">idle</span> <span class="sub">nothing of it open on a chart: not connected</span>`
+        : s.idle ? `<span class="state">idle</span> <span class="sub">${esc(s.note || 'nothing of it open on a chart: not connected')}</span>`
         : `<span class="state run-error">down</span> <span class="sub">${esc(s.error || '')}</span>`}</td></tr>`;
       return [head, ...pairs.map(([t, p]) => `
         <tr class="has-data" data-ticker="${esc(t)}"><td></td><td><b>${esc(t)}</b>${live.liveTickers?.includes(t) ? ' <span class="state fresh">live</span>' : ''}</td>

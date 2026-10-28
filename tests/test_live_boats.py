@@ -67,13 +67,16 @@ def test_a_night_open_stores_the_minutes_over_and_builds_the_forming_one(tmp_pat
 def test_nothing_is_asked_by_day_while_killed_or_with_nothing_open(tmp_path, store):
     rec, poller = _recorder(tmp_path, now=datetime(2026, 10, 28, 12, 0, tzinfo=ET))
     assert rec.boats_step(store) == live.BOATS_IDLE_SECONDS and poller.client.asked == []
-    assert not rec._status[live.TIINGO_BOATS]["connected"]
+    status = rec._status[live.TIINGO_BOATS]
+    assert not status["connected"] and status["idle"] and status["note"].startswith("by day")  # idle, not "down"
     rec, poller = _recorder(tmp_path)
     killswitch.strike(store, "tiingo", "fetch", "HTTP 429", now=TUE_2305 - timedelta(minutes=1))
     assert rec.boats_step(store) == live.BOATS_IDLE_SECONDS and poller.client.asked == []  # Tiingo's kill is its own
+    assert rec._status[live.TIINGO_BOATS]["note"] == "paused: HTTP 429"
     rec, poller = _recorder(tmp_path)
     rec.set_wanted(())
     assert rec.boats_step(store) == live.BOATS_IDLE_SECONDS and poller.client.asked == []
+    assert rec._status[live.TIINGO_BOATS]["idle"] and rec._status[live.TIINGO_BOATS]["note"] is None
 
 
 def test_tiingo_names_and_times_are_read():
@@ -100,4 +103,5 @@ def test_a_429_kills_tiingos_fetching_and_its_forex_with_it(tmp_path):
         kill = killswitch.killed(store, "tiingo", "fetch")
         assert kill and "live Blue Ocean" in kill["why"]
         assert killswitch.killed(store, "tiingofx", "fetch")  # the same key: not asked by the other feed either
-    assert not rec._status[live.TIINGO_BOATS]["connected"]
+    status = rec._status[live.TIINGO_BOATS]
+    assert not status["connected"] and not status["idle"] and "too many requests" in status["error"]  # down, with why

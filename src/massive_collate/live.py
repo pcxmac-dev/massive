@@ -897,11 +897,11 @@ class Recorder:
                 except (RateLimited, Unauthorized) as e:  # the server said stop: Tiingo's fetching is killed, this with it
                     killswitch.strike(store, p.account, "fetch", f"live Blue Ocean: {e}", log=self.log,
                                       at_least_s=killswitch.retry_after_s(e))
-                    self._boats_off(f"stopped: {e}")
+                    self._boats_off(f"stopped: {e}", down=True)
                 except NotEntitled as e:  # the plan has no Blue Ocean (the add-on): not asked again for an hour
                     p.refused_until = time.monotonic() + BOATS_REFUSED_SECONDS
                     self.log(f"live: Tiingo refused Blue Ocean ({e}); asked again in an hour")
-                    self._boats_off("refused by the plan")
+                    self._boats_off("refused by the plan", down=True)
                 except Exception as e:  # noqa: BLE001 - the network, a locked database: logged, tried again
                     self.log(f"live: Blue Ocean from Tiingo: {type(e).__name__}: {e}")
                 self.stop.wait(wait)
@@ -916,9 +916,14 @@ class Recorder:
         night = p.night(now)
         with self._lock:
             wanted = tuple(self._wanted)
-        if night is None or not wanted or killswitch.killed(store, p.account, "fetch", now) \
-                or time.monotonic() < p.refused_until:
-            self._boats_off(None if night else "by day: Blue Ocean trades 20:00-04:00 ET, Sunday to Thursday nights")
+        kill = night is not None and wanted and killswitch.killed(store, p.account, "fetch", now)
+        if night is None or not wanted or kill or time.monotonic() < p.refused_until:
+            if night is None:
+                self._boats_off("by day: Blue Ocean trades 20:00-04:00 ET, Sunday to Thursday nights")
+            elif not wanted or kill:
+                self._boats_off(f"paused: {kill['why']}" if kill else None)
+            else:
+                self._boats_off("refused by the plan", down=True)
             return BOATS_IDLE_SECONDS
         if time.monotonic() - p.quotes_at >= BOATS_QUOTE_SECONDS:
             p.quotes_at = time.monotonic()
@@ -972,9 +977,12 @@ class Recorder:
                 {"url": f"https://api.tiingo.com/boats/{BoatsPoller.symbol(ticker)}/prices"}, span)
         return self._derivations[key]
 
-    def _boats_off(self, note: str | None) -> None:
+    def _boats_off(self, note: str | None, down: bool = False) -> None:
+        """Not polling: idle (by day, nothing open, paused on Tiingo's limits) with a note of why, or
+        down with the error (status and the Activity view show either)."""
         with self._lock:
-            self._status[TIINGO_BOATS].update(connected=False, note=note, pairs={}, symbols=[])
+            self._status[TIINGO_BOATS].update(connected=False, idle=not down, note=None if down else note,
+                                              error=note if down else None, pairs={}, symbols=[])
 
     def holds_locks(self) -> bool:
         """Whether every lock this recorder took still names it."""
