@@ -62,9 +62,11 @@ def view(base):
 
 
 def reporter(report, settings):
-    if settings is None:
-        return report
-    return replace(report, limits=replace(report.limits, symbols_a_month=PLANS[plan_of(settings)][3]))
+    """Its plan's symbols a month: TIINGO_PLAN's, or without the settings (the delivery scheme's
+    reports) the plan its tier names: a paid plan's report said Starter's 450 to the scheme."""
+    plan = plan_of(settings) if settings is not None else next(
+        (name for name, p in PLANS.items() if p[0].name == report.plan), "starter")
+    return replace(report, limits=replace(report.limits, symbols_a_month=PLANS[plan][3]))
 
 
 def build(settings, request_budget):

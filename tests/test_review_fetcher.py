@@ -302,6 +302,20 @@ def test_a_live_futures_contract_is_up_to_date_on_a_monday_with_fridays_session(
     assert [c for c in src.bar_calls if c[3] == "day"] == []  # Friday's is the session before Monday's
 
 
+def test_a_contract_a_decade_older_never_keeps_this_decades_namesake_unasked(store):
+    from massive_collate.symbols import resolve
+
+    monday = datetime(2026, 10, 26, 12, 0, tzinfo=ET)
+    day = lambda d, v: {"t": ms(datetime(d.year, d.month, d.day, tzinfo=ET)), "o": 1, "h": 1, "l": 1, "c": 1, "v": v}  # noqa: E731
+    src = FakeSource(entitled=("minute",))
+    src.bars = {("NQZ6", "day"): [day(date(2026, 10, 23), 700)], ("NQZ6", "minute"): []}
+    store.watch_spec("fake", resolve("NQ1!"))
+    store.set_contract("fake", "NQ", "NQZ6", date(2016, 12, 1), "ended", date(2016, 12, 16), date(2017, 1, 3))
+    sync(src, store, FREE, monday, log=_log)
+    assert any(c[0] == "NQZ6" and c[3] == "day" for c in src.bar_calls)  # December 2026 asked under its name
+    assert {c["month"] for c in store.contracts("fake", "NQ") if c["ticker"] == "NQZ6"} == {date(2026, 12, 1)}
+
+
 def test_one_symbols_refusal_leaves_the_class_entitlement_alone(store):
     from massive_collate.errors import NotEntitled
 

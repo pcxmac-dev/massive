@@ -66,7 +66,11 @@ below worked through.
   SQL; Tiingo's 500 symbols a month are counted per key on the machine, its forex with them; a
   symbol taken off a watchlist mid-run is skipped, not the run ended; Tiingo's scan takes a paid
   plan only from news articles; a replay reads from the data's first bar; FX centres' hours use
-  the zone's real offsets; `/api/future` caps its offset.
+  the zone's real offsets; `/api/future` caps its offset; a 24/7 asset's finished UTC day counts at
+  once; a release not in at the first sync after it is asked for again hourly for six hours
+  (`collector._late`); the delivery scheme sees a paid Tiingo plan's symbols (none capped); the
+  recorder's status keeps only the symbols streamed now; a futures contract a decade older (ESZ6,
+  2016) no longer keeps this decade's namesake unasked (the table still keeps one row per name).
 
 ## Open
 
@@ -81,15 +85,13 @@ Most severe first within each area.
 ### Live data
 - `live.py` / `cli.cmd_live`: the recorder never rereads its settings (keys, LIVE_STOCKS, LIVE_STREAMS).
 - `app.js` / `server.py` `/api/stream`: one open stream per tab, six per host: polls queue behind them.
-- `live.py` `_status[...]["pairs"]`: grows with every symbol streamed (the Blue Ocean poller's does not).
 - `live.py`: trades missed while the IEX stream reconnects are never recovered.
 - `server.py` stream check through the heavy-request cap: a refused stream polls `/api/bars` for good.
 
 ### Fetcher core
-- `coverage.frontier_ms` (day bars, 24/7 assets): a finished UTC day counted a day late.
-- `collector.py` futures: one-digit-year tickers (ESZ6) collide across decades in `futures_contracts`.
-- `collector._due`: an end-of-day frontier not published at the first try waits for the next publication.
-- `sourcing.offers`: built without settings, so Tiingo's plan does not reach the delivery scheme.
+- `collector.py` futures: `futures_contracts` keeps one row per ticker, so a one-digit-year name
+  (ESZ6) holds the newest decade's contract only; a history floor more than ten years back would
+  lose the older one's roll. Key the table by contract month (a table rebuild).
 - Resume "with an overlap audit" (the owner's principle) is not implemented: a fill resumes exactly
   at the ledger's edge (safe, but the seam is not audited).
 

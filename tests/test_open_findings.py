@@ -127,6 +127,74 @@ def test_a_symbol_taken_off_the_watchlist_during_a_run_is_skipped_not_the_run_en
     assert collector._watch_row(store, "massive", "AAPL", said.append) is None and "taken off" in said[0]
 
 
+def test_the_delivery_scheme_sees_a_paid_tiingo_plan_without_a_monthly_cap():
+    from datetime import date
+
+    from massive_collate import sourcing
+    from massive_collate.config import load_settings
+    from massive_collate.sources import feed_profiles
+
+    for plan, cap in (("power", None), ("starter", 450)):
+        settings = load_settings(env={"TIINGO_API_KEY": "k", "TIINGO_PLAN": plan}, env_file=None)
+        feeds = {n: f for n, f in feed_profiles(settings).items() if n == "tiingo"}
+        offers = sourcing.offers(feeds, date(2026, 10, 28))
+        assert offers and {o.symbols_a_day for o in offers} == {cap / 30 if cap else None}, plan
+
+
+def test_the_recorders_status_keeps_only_the_symbols_streamed_now(tmp_path):
+    import json
+
+    rec = live.Recorder(tmp_path / "m.db", coins=(), stock_keys=("PKTESTKEY", "test-secret"),
+                        log=lambda *_: None, connect=lambda url: None)
+    rec.streams[0].confirmed = frozenset({"AAPL"})
+    heard = _ms("2026-10-23 10:00")
+    rec._since["iex"], rec._subs["iex"], rec._heard["iex"] = heard, {"AAPL": heard}, heard + 60_000
+    rec._status["iex"]["pairs"] = {"OLD": {"trades": 5}}  # streamed earlier, closed since
+    rec._buffer[("iex", "AAPL")].append(_trade((heard + 1000) * 1_000_000, 1, 230.0))
+    with Store(tmp_path / "m.db") as store:
+        rec.flush(store, now_ms=heard + 60_000)
+        assert set(json.loads(store.kv_get(live.STATUS_KEY))["streams"]["iex"]["pairs"]) == {"AAPL"}
+
+
+def test_a_finished_utc_day_of_a_round_the_clock_asset_counts_at_once(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+
+    from massive_collate import coverage, freshness
+    from massive_collate.config import TIERS
+
+    last = datetime(2026, 10, 28, 23, 59, tzinfo=timezone.utc)  # an end-of-day plan's newest: the day's last minute
+    monkeypatch.setattr(freshness, "expected", lambda asset, tier, now: SimpleNamespace(latest=last))
+    monkeypatch.setattr(freshness, "settle", lambda tier, asset: timedelta(0))
+    end = coverage.frontier_ms("crypto", TIERS["free"], datetime(2026, 10, 29, 6, tzinfo=timezone.utc), "day")
+    assert end == int(datetime(2026, 10, 29, tzinfo=timezone.utc).timestamp() * 1000)  # the 28th is in
+    last = datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc)  # mid-day: the 28th still forming
+    assert coverage.frontier_ms("crypto", TIERS["free"], datetime(2026, 10, 28, 13, tzinfo=timezone.utc), "day") == \
+        int(datetime(2026, 10, 28, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def test_a_release_not_in_at_the_first_sync_after_it_is_asked_again_hourly(store):
+    from datetime import date, datetime, timedelta, timezone
+
+    from massive_collate import collector, freshness
+    from massive_collate.config import TIERS
+
+    tier = TIERS["free"]
+    assert freshness.plan_delay(tier, "stock").kind == "eod"
+    synced = freshness._eod_ready(date(2026, 10, 26)) + timedelta(minutes=10)  # just after Monday's release was due
+    day = lambda d: {"t": int(datetime(d.year, d.month, d.day, tzinfo=freshness.ET).timestamp() * 1000),  # noqa: E731
+                     "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}
+    store.upsert_bars("massive", "AAPL", "day", 1, [day(date(2026, 10, 23))])  # Friday's: Monday's not in yet
+    late = lambda now: collector._late(store, "massive", "AAPL", "stock", tier, synced, now)  # noqa: E731
+    assert not late(synced + timedelta(minutes=30))  # an hour between asks
+    assert late(synced + timedelta(hours=1))
+    store.upsert_bars("massive", "AAPL", "day", 1, [day(date(2026, 10, 26))])
+    assert not late(synced + timedelta(hours=1))  # in now
+    long_after = freshness._eod_ready(date(2026, 10, 26)) + timedelta(hours=7)
+    assert not collector._late(store, "massive", "MSFT", "stock", tier, long_after, long_after + timedelta(hours=2))
+    assert not collector._late(store, "massive", "AAPL", "stock", TIERS["advanced"], synced, synced + timedelta(hours=2))
+
+
 def test_a_pruned_bar_hides_only_the_version_pruned(store):
     t = _ms("2026-10-20 10:00")
     bar = {"t": t, "o": 1, "h": 9, "l": 1, "c": 1, "v": 1}

@@ -85,7 +85,10 @@ def frontier_ms(asset: str, tier: Tier, now: datetime, timespan: str) -> int:
         tz = timezone.utc if asset in UTC_DAY_ASSETS else ET
         t = exp.latest.astimezone(tz)
         start = datetime.combine(t.date(), time(0), tz)
-        complete = not freshness.CALENDAR.is_open(asset, exp.latest + timedelta(minutes=1))
+        after = exp.latest + timedelta(minutes=1)
+        # over once its market closes, or once its last minute is in (a 24/7 asset's UTC day never
+        # closes: its finished day waited for the next one's)
+        complete = after.astimezone(tz).date() > t.date() or not freshness.CALENDAR.is_open(asset, after)
         return ms(start + timedelta(days=1)) if complete else ms(start)
     step = STEP_MS.get(timespan, 60_000)
     if step > 60_000:  # a coarser frame (5 minutes, an hour): only its bars that are complete

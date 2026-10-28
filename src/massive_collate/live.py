@@ -813,7 +813,10 @@ class Recorder:
         with self._lock:
             for s in self.streams:
                 if getattr(s, "dynamic", False):
-                    self._status[s.source]["symbols"] = sorted(set(subs.get(s.source, {})) & s.confirmed)
+                    st = self._status[s.source]
+                    st["symbols"] = sorted(set(subs.get(s.source, {})) & s.confirmed)
+                    # only those streamed now: the status (written each flush) grew with every symbol ever opened
+                    st["pairs"] = {t: v for t, v in st.get("pairs", {}).items() if t in subs.get(s.source, {})}
             status = json.loads(json.dumps(self._status))
             wanted = list(self._wanted)
             coins = [t[:-3] for t in self._wanted_coins] if self.selected_only else list(self.coins)

@@ -463,7 +463,9 @@ def sync_future(
                    default=today - timedelta(days=1))
     saved = 0
     for month, tickers in candidate_contracts(product, floor - timedelta(days=31), horizon):
-        recs = [known[t] for t in tickers if t in known]
+        # a record is this month's only when its month is this one: a one-digit year names a contract
+        # each decade (ESZ6: December 2016 and 2026), and the older one ended kept the new one unasked
+        recs = [known[t] for t in tickers if t in known and known[t]["month"] == month]
         if any(r["state"] == "ended" for r in recs):
             continue
         live = next((r for r in recs if r["state"] == "live"), None)
@@ -474,12 +476,14 @@ def sync_future(
                 and all(r["checked"] and (today - r["checked"]).days < LISTING_RECHECK_DAYS for r in recs):
             continue  # every naming tried, not trading yet: look again next week
         # The working ticker if known; otherwise each naming (one-digit year, then two) until one has data.
-        options = [live["ticker"]] if live else [t for t in tickers if known.get(t, {}).get("state") != "missing"]
+        options = [live["ticker"]] if live else [t for t in tickers if t not in known or known[t]["month"] != month
+                                                 or known[t]["state"] != "missing"]
         for t in options:
             stored = store.bar_range(source.name, t, "day")
             if stored and _ms_to_date(stored[1]) >= previous:
                 break  # live and already up to date today
-            start = _ms_to_date(stored[1]) if stored else max(floor, month - timedelta(days=CONTRACT_LEAD_DAYS))
+            # never before this contract's lead: bars stored under its name may be a decade's older one's
+            start = max(_ms_to_date(stored[1]) if stored else floor, floor, month - timedelta(days=CONTRACT_LEAD_DAYS))
             end = min(today, month + timedelta(days=62))
             if start > end:
                 store.set_contract(source.name, product, t, month, "pending", None, today)
@@ -999,6 +1003,26 @@ def _due(asset: str, tier: Tier, synced: datetime, now: datetime, refresh_hours:
     return freshness.expected(asset, tier, now).latest != freshness.expected(asset, tier, synced).latest
 
 
+LATE_RETRY_HOURS = 6  # a release not in at the first sync after it is asked for again (hourly) this long
+
+
+def _late(store: Store, feed: str, ticker: str, hours: str, tier: Tier, synced: datetime, now: datetime) -> bool:
+    """Whether a release a whole-session plan published (end of day, a UTC day) was not in yet at
+    the sync just after it was due, and is worth asking for again: the sync ran within
+    LATE_RETRY_HOURS of it, an hour has passed since, and the stored days stop short of it (it
+    waited for the next day's release). One index seek; never for a plan that publishes as it goes."""
+    if freshness.plan_delay(tier, hours).kind not in ("eod", "utc_day") or now - synced < timedelta(hours=1):
+        return False
+    latest = freshness.expected(hours, tier, synced).latest
+    if latest is None or freshness.expected(hours, tier, synced - timedelta(hours=LATE_RETRY_HOURS)).latest == latest:
+        return False  # due long before that sync: it was in, or asking again hourly would not bring it
+    stored = store.bar_range(feed, ticker, "day")
+    zone = timezone.utc if freshness.plan_delay(tier, hours).kind == "utc_day" else ET
+    # a day bar's date whether the feed stamps it at New York's midnight or UTC's: noon UTC after either
+    return stored is None or datetime.fromtimestamp(stored[1] / 1000 + 43_200, timezone.utc).date() \
+        < latest.astimezone(zone).date()
+
+
 def feed_needs(row: dict, tier: Tier, now: datetime) -> bool:
     """Whether a feed has something to fetch now for its watchlist `row`: history it still lacks,
     or data its plan has published since its last sync (the same rule the sync skips by: nothing
@@ -1368,7 +1392,8 @@ def sync(
                 horizon = at if urgent or only is not None or ticker in on_lists \
                     else freshness.history_horizon(hours, tier, at)
                 if (only is None or published_only) and synced and not backfilling(item) and not _due(
-                        hours, tier, synced, horizon, 0.0 if urgent or only is not None else refresh_hours):
+                        hours, tier, synced, horizon, 0.0 if urgent or only is not None else refresh_hours) \
+                        and not _late(store, source.name, ticker, hours, tier, synced, horizon):
                     # nothing new published since its last sync (a symbol still backfilling is never skipped)
                     if urgent or only is not None:  # opened in the chart: checked, nothing new; its request is met
                         store.set_synced(source.name, ticker, at)
