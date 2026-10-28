@@ -177,10 +177,20 @@ A plugin that fails to load is left out and reported (`plugins`), never fatal.
   - Alpaca: the consolidated tape's latest 15 minutes are served on Algo Trader Plus and refused
     on Basic (`AlpacaSource.recent_allowed`): `ALPACA_PLAN`. Blue Ocean shares Alpaca's.
   - Tiingo: its API has no account endpoint and sends no rate-limit headers (checked 2026-10-27),
-    and Starter and Power reach the same data, so its scan finds what the key reaches but not the
-    plan (`plan_note`). `TIINGO_PLAN` (starter, the default, or power) sets its limits: Starter 45
-    requests an hour, 900 a day, 450 symbols a month (inside 50, 1,000 and 500); Power 9,500 an
-    hour, 95,000 a day, no monthly symbol cap. An unknown value is Starter.
+    but its News API is the paid plans' only (the pricing table: Starter no, Power and Commercial
+    yes), so the scan's News request tells them apart: served, a paid plan; refused (401, 403),
+    Starter; anything else, nothing. Power and Commercial reach the same data, so a paid key is
+    taken for Power, the lower limits (`Scanned.alike` names Commercial as the same answers: your
+    `TIINGO_PLAN=commercial` is not shown as disagreeing). The scan also asks for daily, IEX minute,
+    Blue Ocean (an add-on), forex and crypto bars, and the fundamentals add-on for ROKU (the Dow 30
+    are free to evaluate; without it Tiingo answers "Free and Power plans are limited to the DOW
+    30"). Seven requests. `TIINGO_PLAN` sets its limits, a little inside what Tiingo publishes: starter
+    (the default; free) 45 requests an hour, 900 a day, 450 symbols a month (of 50, 1,000, 500);
+    power (individuals, $30 a month) 9,500 an hour, 95,000 a day (of 10,000, 100,000); commercial
+    (a business's internal use, up to two developers, $50 a month; `business` too) 19,000 an hour,
+    142,500 a day (of 20,000, 150,000); neither paid plan caps the symbols a month. Enterprise and
+    redistribution are priced by Tiingo's sales with no published limits, so they are not offered.
+    An unknown value is Starter.
 
 ## The Plugins view (2026-10-27)
 

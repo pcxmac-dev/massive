@@ -36,11 +36,13 @@ def _plan(p, settings, scan: dict | None) -> dict:
     """Its plan here: each plan variable with its origin (you, its scan, the default), what its last
     scan found, where that and your own setting disagree, and what its scan cannot tell."""
     found = (scan or {}).get("plan") or {}
+    alike = {k: list(v) for k, v in ((scan or {}).get("alike") or {}).items()}
     mine = settings.variables or {}
     vars_ = p.plan_state(settings)
     differs = [{"name": v, "yours": mine[v], "found": found[v]} for v in found
-               if mine.get(v) and str(mine[v]).strip().lower() != str(found[v]).strip().lower()]
-    return {"tier": settings.for_source(p.name).tier.name, "vars": vars_, "found": found,
+               if mine.get(v) and str(mine[v]).strip().lower() not in
+               {str(x).strip().lower() for x in (found[v], *alike.get(v, ()))}]
+    return {"tier": settings.for_source(p.name).tier.name, "vars": vars_, "found": found, "alike": alike,
             "differs": differs, "note": p.plan_note}
 
 

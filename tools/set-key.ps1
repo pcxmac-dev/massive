@@ -12,7 +12,7 @@
     Each plugin refreshes its own plan info: a rescan (python -m massive_collate capabilities
     <name>, a few requests) asks the provider what the key really gets, and a plan it finds is used
     wherever you have not set one. A plan you choose here always wins; Tiingo's API cannot tell
-    its plans apart, so its plan (TIINGO_PLAN) is only what you choose.
+    its plans apart (starter, power, commercial), so its plan (TIINGO_PLAN) is only what you choose.
 
     A key is read with its input hidden: it is not shown on screen, not kept in the shell's
     history and not written to any file. It is saved where the app reads keys, the user's

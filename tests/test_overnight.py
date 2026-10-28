@@ -136,14 +136,14 @@ def test_tiingo_scans_its_plan_and_reports_the_blue_ocean_add_on(store):
             return [{"close": 1}] * 3
 
     source = type("Source", (), {"client": Client()})()
-    found = tiingo.scan(source, today=date(2026, 10, 27))
-    assert [ok for _, ok, _ in found] == [True, True, False, True, True]
+    found = tiingo.scan(source, today=date(2026, 10, 27)).results
+    assert [ok for _, ok, _ in found] == [True, True, False, True, True, True, True]
     assert "BOATS entitlement" in found[2][2] and found[4][2] == "2 bars for 2026-10-26"
     assert source.client.paths[2] == "/boats/AAPL/prices"
 
     cli._scan("tiingo", source, store, lambda *_: None)
     kept = store.kv_json(sourcing.SCAN_KEY.format("tiingo"))
-    assert [r[1] for r in kept["results"]] == [True, True, False, True, True]
+    assert [r[1] for r in kept["results"]] == [True, True, False, True, True, True, True]
     calls = len(source.client.paths)
     cli._scan("tiingo", source, store, lambda *_: None, due_days=7)  # scanned a moment ago: not again
     assert len(source.client.paths) == calls

@@ -65,9 +65,12 @@ class KeyVar:
 @dataclass(frozen=True)
 class Scanned:
     """A capability scan's answer: each thing asked (what, available, detail), and the plan the
-    answers show ({plan variable: value}; empty when they cannot tell the plans apart)."""
+    answers show ({plan variable: value}; empty when they cannot tell the plans apart). `alike`:
+    the other values the same answers would come from ({variable: (values)}: Tiingo's Power and
+    Commercial reach the same data), the plan found being the one with the lowest limits."""
     results: tuple[tuple[str, bool, str], ...]
     plan: Mapping[str, str] = field(default_factory=dict)
+    alike: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 # -- the standard report every provider gives the delivery scheme (sourcing.py) ---------------------
@@ -252,9 +255,10 @@ class Provider:
     def run_scan(self, source: "DataSource") -> Scanned:
         """Its capability scan, its plan held to its own plan variables (a plugin sets no other's)."""
         out = self.scan(source) if self.scan else ()
-        rows, plan = (out.results, out.plan) if isinstance(out, Scanned) else (out, {})
-        return Scanned(tuple((str(w), bool(ok), str(d)) for w, ok, d in rows),
-                       {k: str(v) for k, v in (plan or {}).items() if k in self.plan_vars and v})
+        rows, plan, alike = (out.results, out.plan, out.alike) if isinstance(out, Scanned) else (out, {}, {})
+        plan = {k: str(v) for k, v in (plan or {}).items() if k in self.plan_vars and v}
+        return Scanned(tuple((str(w), bool(ok), str(d)) for w, ok, d in rows), plan,
+                       {k: tuple(str(x) for x in v) for k, v in (alike or {}).items() if k in plan})
 
     def plan_state(self, settings: "Settings") -> list[dict]:
         """Each of its plan variables: its value here and where it comes from (the user's own

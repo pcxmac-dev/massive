@@ -127,14 +127,85 @@ def test_tiingos_plan_is_your_choice_and_sets_its_limits():
     assert providers()["tiingo"].rate_window(starter) == (45, 3600.0)
     assert providers()["tiingo"].rate_window(power) == (9_500, 3600.0)
     assert power.for_source("tiingo").tier.name == "tiingo-power"
-    for env, plan in (({"TIINGO_PLAN": "free"}, "starter"), ({"TIINGO_PLAN": "gold"}, "starter")):
-        assert tiingo.plan_of(load_settings(env={**keys, **env}, env_file=None)) == plan  # never more than Starter
+    commercial = load_settings(env={**keys, "TIINGO_PLAN": "commercial"}, env_file=None)
+    view = commercial.for_source("tiingo")  # a business's: 20,000 an hour, 150,000 a day, kept inside
+    assert (view.tier.name, view.max_requests_per_run, view.max_requests_per_day) == ("tiingo-commercial", 19_000, 142_500)
+    assert providers()["tiingo"].rate_window(commercial) == (19_000, 3600.0)
+    assert collector.monthly_cap(build_source("tiingo", commercial)) is None
+    for env, plan in (({"TIINGO_PLAN": "free"}, "starter"), ({"TIINGO_PLAN": "Business"}, "commercial"),
+                      ({"TIINGO_PLAN": "gold"}, "starter")):
+        assert tiingo.plan_of(load_settings(env={**keys, **env}, env_file=None)) == plan  # unknown: never more than Starter
+    assert providers()["tiingo"].plan_choices == {"TIINGO_PLAN": ("starter", "power", "commercial")}
+    published = {"starter": (50, 1_000), "power": (10_000, 100_000), "commercial": (20_000, 150_000)}
+    for name, (_, per_hour, per_day, _) in tiingo.PLANS.items():  # each a little inside what Tiingo publishes
+        assert per_hour <= published[name][0] * 0.95 and per_day <= published[name][1] * 0.95
     assert collector.monthly_cap(build_source("tiingo", starter)) == 450
     assert collector.monthly_cap(build_source("tiingo", power)) is None
     reports = sourcing.reports(feed_profiles(power), date(2026, 10, 27), power)
     assert reports["tiingo"].limits.symbols_a_month is None and reports["tiingo"].plan == "tiingo-power"
     assert sourcing.reports(feed_profiles(starter), date(2026, 10, 27), starter)["tiingo"].limits.symbols_a_month == 450
     assert "no account endpoint, no rate-limit headers" in tiingo.PLAN_NOTE
+
+
+class _TiingoClient:
+    def __init__(self, news):
+        self.news, self.paths = news, []
+
+    def get(self, path, params):
+        self.paths.append(path)
+        if path == "/tiingo/news":
+            if isinstance(self.news, Exception):
+                raise self.news
+            return [{"title": "x"}]
+        if path.startswith(("/boats/", "/tiingo/fundamentals/")):
+            raise NotEntitled(403, "not on your plan")
+        return [{"close": 1}]
+
+
+def test_tiingos_scan_tells_starter_from_a_paid_plan_by_the_news_api(store):
+    from massive_collate.errors import SourceError
+    from massive_collate.sources.plugins import tiingo
+
+    tiingo_p = providers()["tiingo"]
+    paid = tiingo_p.run_scan(type("S", (), {"client": _TiingoClient(news=None)})())
+    assert paid.plan == {"TIINGO_PLAN": "power"} and paid.alike == {"TIINGO_PLAN": ("commercial",)}
+    news = next(r for r in paid.results if r[0] == tiingo.NEWS)
+    assert news == (tiingo.NEWS, True, "served: a paid plan, Power or Commercial (the same data)")
+    fundamentals = next(r for r in paid.results if r[0] == tiingo.FUNDAMENTALS)
+    assert fundamentals[1] is False and "ROKU" in tiingo.FUNDAMENTALS  # outside the Dow 30, free to evaluate
+    refused = tiingo_p.run_scan(type("S", (), {"client": _TiingoClient(NotEntitled(403, "no news on Starter"))})())
+    assert refused.plan == {"TIINGO_PLAN": "starter"} and refused.alike == {}
+    failed = tiingo_p.run_scan(type("S", (), {"client": _TiingoClient(SourceError(500, "server error"))})())
+    assert failed.plan == {}  # neither served nor refused: nothing told
+    client = _TiingoClient(news=None)
+    tiingo_p_source = type("S", (), {"client": client})()
+    assert client.paths == [] and len(tiingo.probes(date(2026, 10, 27))) == 7
+
+    lines = []
+    cli._scan("tiingo", tiingo_p_source, store, lines.append)
+    kept = store.kv_json(sourcing.SCAN_KEY.format("tiingo"))
+    assert kept["plan"] == {"TIINGO_PLAN": "power"} and kept["alike"] == {"TIINGO_PLAN": ["commercial"]}
+    assert any("plan found: TIINGO_PLAN=power (or commercial: the same answers)" in l for l in lines)
+
+
+def test_a_paid_tiingo_key_is_power_unless_you_say_commercial(tmp_path):
+    from massive_collate.gui import plugins
+    from massive_collate.sources.plugins import tiingo
+
+    scans = {"tiingo": {"at": "x", "results": [], "plan": {"TIINGO_PLAN": "power"},
+                        "alike": {"TIINGO_PLAN": ["commercial"]}}}
+    keys = {**KEYS, "TIINGO_API_KEY": "t"}
+    found = with_detected(load_settings(env=keys, env_file=None), sourcing.detected_plans(scans))
+    assert tiingo.plan_of(found) == "power" and found.for_source("tiingo").max_requests_per_day == 95_000
+    with Store(tmp_path / "m.db") as store:
+        for env, differs in (({"TIINGO_PLAN": "commercial"}, []), ({"TIINGO_PLAN": "starter"}, ["starter"])):
+            s = load_settings(env={**keys, **env}, env_file=None)
+            feeds = feed_profiles(s)
+            view = plugins.view(store, s, feeds, sourcing.standing(store, feeds), scans)
+            t = next(p for p in view["plugins"] if p["name"] == "tiingo")
+            assert [d["yours"] for d in t["plan"]["differs"]] == differs  # commercial: the same answers as power
+            assert t["plan"]["alike"] == {"TIINGO_PLAN": ["commercial"]}
+    assert "cannot tell Power from Commercial" in tiingo.PLAN_NOTE
 
 
 def test_a_scan_keeps_the_plan_it_found(store):
@@ -245,6 +316,7 @@ def test_the_plugins_view_shows_each_plugin_its_plan_keys_and_part(tmp_path):
                                         {"name": "ALPACA_API_SECRET_KEY", "label": "secret key", "set": True}]
         assert all(set(k) == {"name", "label", "set"} for p in by.values() for k in p["keys"])  # never a key's value
         assert by["tiingo"]["state"] == "no key" and by["tiingo"]["plan"]["vars"][0]["value"] == "starter"
+        assert by["tiingo"]["plan"]["vars"][0]["choices"] == ["starter", "power", "commercial"]
         assert by["tiingo"]["plan"]["note"].startswith("Tiingo's API does not say")
         assert by["alpaca"]["watched"] == 1 and by["alpaca"]["limits"]["rate"] == [190, 60.0]
         assert {e["job"] for e in by["alpaca"]["delivery"]} >= {"minute"} and by["alpaca"]["load"] >= 0

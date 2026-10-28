@@ -86,7 +86,8 @@
     return `<h4>Plan</h4>
       ${rows ? `<table class="act-table ex-mini pl-plan"><thead><tr><th>Variable</th><th>Value</th><th>From</th><th>Choices</th></tr></thead><tbody>${rows}</tbody></table>`
         : `<div class="p-muted small">One fixed plan: ${esc(p.plan.tier)}.</div>`}
-      ${found.length ? `<div class="p-muted small">Its last scan found ${found.map(([k, v]) => `<code>${esc(k)}=${esc(v)}</code>`).join(', ')}:
+      ${found.length ? `<div class="p-muted small">Its last scan found ${found.map(([k, v]) => `<code>${esc(k)}=${esc(v)}</code>${
+        p.plan.alike?.[k]?.length ? ` (or ${p.plan.alike[k].map(esc).join(', ')}: their answers are the same, so the lower limits are used)` : ''}`).join(', ')}:
         used wherever you have not set it yourself.</div>` : ''}
       ${differs}
       ${p.plan.note ? `<div class="pl-note">${esc(p.plan.note)}.</div>` : ''}

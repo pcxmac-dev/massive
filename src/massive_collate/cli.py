@@ -910,11 +910,14 @@ def _scan(name: str, source, store: Store, log, due_days: float | None = None) -
         return
     store.kv_set(sourcing.SCAN_KEY.format(name), json.dumps({"at": now.isoformat(timespec="seconds"),
                                                              "results": [list(r) for r in found.results],
-                                                             "plan": dict(found.plan)}))
+                                                             "plan": dict(found.plan),
+                                                             "alike": {k: list(v) for k, v in found.alike.items()}}))
     for what, ok, detail in found.results:
         log(f"{name}: {'yes' if ok else 'no '} {what}" + (f": {detail}" if detail else ""))
     for var, value in found.plan.items():
-        log(f"{name}: plan found: {var}={value} (used wherever you have not set {var})")
+        alike = found.alike.get(var)
+        log(f"{name}: plan found: {var}={value}" + (f" (or {', '.join(alike)}: the same answers)" if alike else "")
+            + f" (used wherever you have not set {var})")
 
 
 def _scan_table(result: collector.ScanResult) -> None:

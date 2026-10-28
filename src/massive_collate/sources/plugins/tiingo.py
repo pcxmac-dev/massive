@@ -4,9 +4,13 @@ Its scan (`capabilities`, one request each) asks what else the account's plan gi
 bars (one exchange), forex and crypto bars, and Blue Ocean's overnight bars (a paid add-on,
 2026-10-27: $9 a month; Alpaca's free plan has them: boats.py). Only the daily bars are collected.
 
-Its plan cannot be found that way: Tiingo's API has no account endpoint and sends no rate-limit
-headers (2026-10-27), and Starter and Power reach the same data, at other limits. TIINGO_PLAN
-names it (starter, the default, or power): the key script and the Plugins view offer it."""
+Its plan is found in part: Tiingo's API has no account endpoint and sends no rate-limit headers
+(2026-10-27), but its News API is the paid plans' (Power, Commercial) and not Starter's (the pricing
+table, 2026-10-27), so the scan's News request tells Starter from a paid plan. Power and Commercial
+reach the same data at other limits: a paid key is taken for Power, the lower limits, unless
+TIINGO_PLAN says commercial (starter, the default; power; commercial: the key script and the Plugins
+view offer them). It also asks for the fundamentals add-on, of a stock outside the Dow 30 (those
+are free to evaluate)."""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -15,23 +19,32 @@ from datetime import date, timedelta
 from ...config import PUBLIC_FEEDS
 from ...errors import SourceError
 from ..public import PublicClient, TiingoSource
-from ..registry import KeyVar, Provider, limiter, machine_caps
+from ..registry import KeyVar, Provider, Scanned, limiter, machine_caps
 
 TIER, PER_RUN, PER_DAY = PUBLIC_FEEDS["tiingo"]
 BARS = "open,high,low,close,volume"
 
-# Tiingo's plans (tiingo.com/about/pricing, 2026-10-27), each kept a little inside: (plan, requests an
-# hour (a run's cap too: the sync runs hourly), a day, different symbols a month). Starter (free): 50 an
-# hour, 1,000 a day, 500 symbols, 1 GB a month; Power ($30 a month): 10,000 an hour, 100,000 a day,
-# every symbol (110,388), 40 GB a month.
+# Tiingo's plans (tiingo.com/about/pricing, both tables: "I am an Individual" and "I am a Business or
+# Organization", 2026-10-27), each kept a little inside: (plan, requests an hour (a run's cap too: the
+# sync runs hourly), a day, different symbols a month).
+#   Starter (free): 50 an hour, 1,000 a day, 500 symbols, 1 GB a month.
+#   Power (individuals, $30 a month or $300 a year): 10,000 an hour, 100,000 a day, every symbol
+#     (110,397), 40 GB a month.
+#   Commercial (a business's internal use, up to two developers, $50 a month or $499 a year): 20,000 an
+#     hour, 150,000 a day, every symbol, 100 GB a month.
+# Enterprise and redistribution are priced by Tiingo's sales, with no published limits: not offered.
 PLANS = {
     "starter": (TIER, PER_RUN, PER_DAY, 450),
     "power": (replace(TIER, name="tiingo-power"), 9_500, 95_000, None),
+    "commercial": (replace(TIER, name="tiingo-commercial"), 19_000, 142_500, None),
 }
-ALIASES = {"free": "starter"}
-PLAN_NOTE = ("Tiingo's API does not say which plan a key is on (no account endpoint, no rate-limit headers), "
-             "and Starter and Power reach the same data: its scan finds what the key reaches, TIINGO_PLAN "
-             "(starter or power) sets the limits")
+ALIASES = {"free": "starter", "business": "commercial"}
+PLAN_NOTE = ("Tiingo's API does not say which plan a key is on (no account endpoint, no rate-limit headers). "
+             "Its scan tells Starter from a paid plan by the News API, which only Power and Commercial have; "
+             "it cannot tell Power from Commercial (the same data, other limits), so a paid key gets Power's "
+             "limits unless you set TIINGO_PLAN=commercial")
+NEWS = "news (the paid plans: Power and Commercial, not Starter)"
+FUNDAMENTALS = "fundamentals (an add-on; asked for ROKU: the Dow 30 are free to evaluate)"
 
 
 def plan_of(settings) -> str:
@@ -78,6 +91,8 @@ def probes(today: date) -> list[tuple[str, str, dict]]:
                                                       "resampleFreq": "1min"}),
         ("crypto bars", "/tiingo/crypto/prices", {"tickers": "btcusd", "startDate": d, "endDate": d,
                                                   "resampleFreq": "1min"}),
+        (NEWS, "/tiingo/news", {"tickers": "aapl", "limit": 1, "startDate": d}),
+        (FUNDAMENTALS, "/tiingo/fundamentals/ROKU/daily", {"startDate": d, "endDate": d, "columns": "marketCap"}),
     ]
 
 
@@ -88,15 +103,27 @@ def rows_of(answer) -> int:
     return len(answer) if isinstance(answer, list) else 0
 
 
-def scan(source, today: date | None = None) -> list[tuple[str, bool, str]]:
-    out = []
+def scan(source, today: date | None = None) -> Scanned:
+    """Each probe once; the plan from the News request: served, a paid plan (Power's limits, the
+    lower: Commercial's answers are the same); refused by the plan (401, 403), Starter; anything
+    else (a timeout, a server error), no plan."""
+    out, plan, alike = [], {}, {}
     for what, path, params in probes(today or date.today()):
         try:
             n = rows_of(source.client.get(path, params))
-            out.append((what, True, f"{n:,} bars for {params['startDate']}"))
         except SourceError as e:  # NotEntitled included: a refusal names the add-on it needs
             out.append((what, False, str(e)[:200]))
-    return out
+            if what == NEWS and e.status in (401, 403):
+                plan["TIINGO_PLAN"] = "starter"
+            continue
+        if what == NEWS:
+            plan["TIINGO_PLAN"], alike["TIINGO_PLAN"] = "power", ("commercial",)
+            out.append((what, True, "served: a paid plan, Power or Commercial (the same data)"))
+        elif what == FUNDAMENTALS:
+            out.append((what, True, f"served: the add-on ({n:,} rows)"))
+        else:
+            out.append((what, True, f"{n:,} bars for {params['startDate']}"))
+    return Scanned(tuple(out), plan, alike)
 
 
 PLUGIN = Provider(
@@ -105,7 +132,8 @@ PLUGIN = Provider(
     keys=(KeyVar("TIINGO_API_KEY"),), signup="tiingo.com: a free account's API token",
     archival=True, tier=TIER, per_run=PER_RUN, per_day=PER_DAY,
     limits="Starter (free): 50 requests an hour, 1,000 a day, 500 symbols and 1 GB a month; "
-           "Power ($30 a month): 10,000 an hour, 100,000 a day, 40 GB a month",
+           "Power ($30 a month): 10,000 an hour, 100,000 a day, 40 GB a month; "
+           "Commercial ($50 a month, a business): 20,000 an hour, 150,000 a day, 100 GB a month",
     symbols_per_month=450,  # Starter's 500 different symbols a month, a little inside (Power: PLANS)
     plan_vars=("TIINGO_PLAN",), plan_choices={"TIINGO_PLAN": tuple(PLANS)}, plan_note=PLAN_NOTE,
     view=view, reporter=reporter,
