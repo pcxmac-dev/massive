@@ -405,6 +405,8 @@ def test_profiles_have_a_login_page_and_keep_their_own_preferences():
     assert 'src="login.js"' in login and 'id="profileList"' in login and 'id="newProfile"' in login
     assert "icon('vitruvian', 140)" in _js("login.js")  # Leonardo's Vitruvian Man (the user)
     assert "vitruvian:" in _js("icons.js")
+    card = _js("style.css").split("\n.login {", 1)[1].split("}", 1)[0]
+    assert "display: block" in card  # the app's `main { display: flex }` laid the card out in one row
     app = _js("app.js")
     assert "const PREFS_PREFIX = PROFILE === 1 ? 'mc:' : `mc:p${PROFILE}:`;" in app  # each profile its own
     assert "localStorage.getItem(PREFS_PREFIX + key)" in app and "localStorage.setItem(PREFS_PREFIX + key" in app

@@ -309,8 +309,8 @@ dialog::backdrop { background: rgba(0, 0, 0, .5); }
 /* The login page (login.html): the Vitruvian Man, the profiles, a new one. */
 body.login-page { display: grid; place-items: center; min-height: 100%; background: var(--bg); color: var(--text);
   font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-.login { width: min(360px, calc(100vw - 32px)); padding: 28px 24px; text-align: center; background: var(--panel);
-  border: 1px solid var(--border); border-radius: 10px; }
+.login { display: block; width: min(360px, calc(100vw - 32px)); padding: 28px 24px; text-align: center;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }  /* block: not main's row */
 .login h1 { margin: 10px 0 2px; font-size: 20px; font-weight: 600; }
 .login-icon { color: #c8a46e; display: grid; place-items: center; }  /* Leonardo's ink */
 .login-icon svg * { vector-effect: non-scaling-stroke; }  /* fine lines, as drawn, at any size */
