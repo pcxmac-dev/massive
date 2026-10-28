@@ -667,9 +667,11 @@ def cmd_live(args, settings: Settings) -> int:
         print("a recorder is already running (one per database, and one per machine: the exchanges "
               "count every connection from this address)")
         return 0
+    # Blue Ocean's night under way from Tiingo, on its key's limits (the client: its window and day cap)
+    boats = live.BoatsPoller(build_source("tiingo", settings).client) if live.boats_live(settings) else None
     recorder = live.Recorder(settings.db_path, coins=settings.live_coins, stock_keys=live.stock_keys(settings),
                              locks=locks, log=Logger(settings.db_path.parent / "logs" / "massive-collate.log"),
-                             selected_only=settings.live_selected_only)
+                             selected_only=settings.live_selected_only, boats=boats)
     try:
         recorder.run()
     except KeyboardInterrupt:

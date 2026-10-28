@@ -30,7 +30,7 @@ import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import killswitch
@@ -52,10 +52,18 @@ def active_watchlists(store) -> list:
     """The signed-in profile's watchlists (the one signed in last): they set the fetcher's order."""
     return store.kv_json(watchlists_key(store.active_profile()), [])
 BOATS_FEED = "boats"  # Blue Ocean's overnight session (sources/plugins/boats.py)
+TIINGO_BOATS = "tiingoboats"  # Blue Ocean's night under way, live from Tiingo (BoatsPoller): a feed of its own
 # One venue's bars, ranked last in a chart of all feeds: they show where no feed of the whole market
 # has bars (IEX: the session under way until a sync downloads it; Blue Ocean: the overnight session,
-# which the consolidated tape does not carry)
-PARTIAL_FEEDS = frozenset({IEX_FEED, BOATS_FEED})
+# which the consolidated tape does not carry; live from Tiingo, the night under way)
+PARTIAL_FEEDS = frozenset({IEX_FEED, BOATS_FEED, TIINGO_BOATS})
+BOATS_QUOTE_SECONDS = 5.0  # the open stocks' last sale and quote at night: one request for them all
+# each open stock's minutes of the night: asked again after this many seconds, or 2 s a stock with
+# more open (at most 30 requests a minute, whatever is open)
+BOATS_BARS_SECONDS = 15.0
+BOATS_IDLE_SECONDS = 30.0  # by day, killed, or nothing open: looked at again this often
+BOATS_REFUSED_SECONDS = 3600.0  # Tiingo refused Blue Ocean (the plan, no add-on): asked again after this
+BOATS_SETTLE_MS = 30_000  # a minute over this long is final (Tiingo's newest came half a minute behind)
 MAX_STOCKS = 30  # Alpaca Basic: symbols on its one real-time connection
 OPEN_FRESH_MS = 180_000  # a symbol is streamed this long after a page last said it has it open
 WANT_SECONDS = 5.0  # how often the stock symbols to stream are looked up
@@ -328,6 +336,91 @@ def wanted_coins(store, now_ms: int, coins) -> tuple[str, ...]:
     return tuple(t for t in dict.fromkeys(open_symbols(store, now_ms)) if t in pairs)
 
 
+# -- Blue Ocean's night, live from Tiingo --------------------------------------------------------
+
+def boats_live(settings) -> bool:
+    """Whether Blue Ocean's nights are polled live from Tiingo (BoatsPoller): online, live stocks
+    on, Tiingo's key set and a paid plan (Power or Commercial: Starter's 50 requests an hour would
+    all go on this)."""
+    if settings.offline or not settings.live_stocks or not settings.tiingo_api_key:
+        return False
+    from .sources.plugins.tiingo import plan_of
+
+    return plan_of(settings) != "starter"
+
+
+def _iso_ms(text: str) -> int:
+    """Tiingo's time (2026-10-28T07:43:00.000Z, or with an offset and nanoseconds) in ms."""
+    text = str(text).replace("Z", "+00:00")
+    head, _, rest = text.partition(".")
+    if not rest:
+        return int(datetime.fromisoformat(head).timestamp() * 1000)
+    cut = next((i for i, ch in enumerate(rest) if ch in "+-"), len(rest))  # nanoseconds: microseconds kept
+    return int(datetime.fromisoformat(f"{head}.{rest[:cut][:6]}{rest[cut:]}").timestamp() * 1000)
+
+
+class BoatsPoller:
+    """Blue Ocean's overnight session (20:00-04:00 ET, Sunday to Thursday nights), live, from Tiingo's
+    REST API: it has no stream for it, but its answers are real time (the newest minute half a minute
+    old, asked 2026-10-28 at 03:43 ET); Alpaca's real-time nights are a paid plan, its free one 16
+    minutes behind. While a night is open, for the stocks open on a chart (the recorder's wanted
+    stocks): their last sale and quote every BOATS_QUOTE_SECONDS, one request for them all (the
+    price the pages show); and each one's minutes of the night every BOATS_BARS_SECONDS or so, the
+    minutes over stored as the feed's own bars, the forming one as a built bar its final bar
+    replaces (TIINGO_BOATS, one of PARTIAL_FEEDS: a chart of all feeds shows them where no other
+    feed has the night yet). On the Tiingo key's limits: its window and day cap (the client), its
+    kills (a 429 or a refused key kills Tiingo's fetching, and this stops with it)."""
+
+    source = TIINGO_BOATS
+    account = "tiingo"  # the feed whose key, limits and kills these requests are
+
+    def __init__(self, client, now=None):
+        self.client = client
+        self.now = now or (lambda: datetime.now(timezone.utc))
+        self.quotes_at = float("-inf")  # monotonic: the last quote request
+        self.bars_at: dict[str, float] = {}  # ticker -> monotonic: its minutes last asked for
+        self.final_to: dict[str, int] = {}  # ticker -> ms: its minutes stored final up to here
+        self.refused_until = float("-inf")  # monotonic: Blue Ocean refused (no add-on) until then
+
+    @staticmethod
+    def symbol(ticker: str) -> str:
+        return ticker.upper().replace(".", "-").lower()  # Tiingo's: brk-b
+
+    def night(self, t: datetime):
+        """The Blue Ocean session open at `t` (sessions.Session), or None."""
+        from .freshness import CALENDAR
+        from .sessions import ET
+
+        d = t.astimezone(ET).date()
+        return next((s for s in CALENDAR.sessions("overnight", d, d + timedelta(days=1)) if s.open <= t < s.close), None)
+
+    def quotes(self, tickers) -> dict[str, dict]:
+        """{ticker: {price, last (ms), bid, ask}}: the last sale and quote of each, one request."""
+        names = {self.symbol(t): t.upper() for t in tickers}
+        rows = self.client.get("/boats/", {"tickers": ",".join(names)})
+        out = {}
+        for r in rows if isinstance(rows, list) else []:
+            ticker = names.get(str(r.get("ticker") or "").lower())
+            if ticker and r.get("last") is not None and r.get("lastSaleTimestamp"):
+                out[ticker] = {"price": float(r["last"]), "last": _iso_ms(r["lastSaleTimestamp"]),
+                               "bid": r.get("bidPrice"), "ask": r.get("askPrice")}
+        return out
+
+    def minutes(self, ticker: str, night) -> list[dict]:
+        """The night's minutes so far, the forming one too (oldest first)."""
+        rows = self.client.get(f"/boats/{self.symbol(ticker)}/prices",
+                               {"startDate": night.open.astimezone(timezone.utc).date().isoformat(),
+                                "resampleFreq": "1min", "columns": "open,high,low,close,volume"})
+        lo = int(night.open.timestamp() * 1000)
+        bars = []
+        for r in rows if isinstance(rows, list) else []:
+            t = _iso_ms(r["date"])
+            if t >= lo:
+                bars.append({"t": t, "o": float(r["open"]), "h": float(r["high"]), "l": float(r["low"]),
+                             "c": float(r["close"]), "v": float(r.get("volume") or 0), "vw": None, "n": None})
+        return sorted(bars, key=lambda b: b["t"])
+
+
 @dataclass
 class Recorder:
     db_path: Path
@@ -342,6 +435,7 @@ class Recorder:
     # and with none open nothing is connected. False (always): the coins of `coins` all the time,
     # and stocks open on a chart or on the rail's watchlists.
     selected_only: bool = False
+    boats: object = None  # BoatsPoller: Blue Ocean's night under way from Tiingo (boats_live)
 
     def __post_init__(self):
         self.streams = [STREAMS[s](dynamic=self.selected_only) for s in self.sources] if self.coins else []
@@ -352,6 +446,8 @@ class Recorder:
         self._since: dict[str, int] = {}  # source -> connected since (ms)
         self._heard: dict[str, int] = {}  # source -> last heard from (ms): a message or a keepalive answer
         self._status: dict[str, dict] = {s.source: {"connected": False, "pairs": {}} for s in self.streams}
+        if self.boats is not None:
+            self._status[TIINGO_BOATS] = {"connected": False, "pairs": {}, "polled": True}
         self._wanted: tuple[str, ...] = ()  # stock symbols to stream (wanted_stocks)
         self._wanted_coins: tuple[str, ...] = ()  # pairs to stream when following the charts (wanted_coins)
         self._subs: dict[str, dict[str, int]] = {s.source: {} for s in self.streams}  # symbol -> asked for since (ms)
@@ -716,7 +812,9 @@ class Recorder:
 
         threads = {s.source: self._start_stream(s) for s in self.streams}
         restarts = {s.source: {"wait": RESTART_SECONDS, "at": None, "started": time.monotonic()} for s in self.streams}
-        follows = any(getattr(s, "dynamic", False) for s in self.streams)  # streams whose symbols change
+        # streams whose symbols change, or the poller of Blue Ocean's nights (it follows the charts)
+        follows = any(getattr(s, "dynamic", False) for s in self.streams) or self.boats is not None
+        boats, boats_at = self._start_boats(), time.monotonic()
         # the one process that opens tick files in bars-only mode: it records the streams' trades
         with Store(self.db_path, ticks=True) as store:
             total, last_log, last_derive, last_want, last_lock = 0, time.time(), time.time(), 0.0, time.time()
@@ -733,6 +831,8 @@ class Recorder:
                         self.stop.set()
                 try:
                     self._supervise(threads, restarts, time.monotonic())  # a stream thread that ended: again
+                    if boats is not None and not boats.is_alive() and time.monotonic() - boats_at > MAX_BACKOFF:
+                        boats, boats_at = self._start_boats(), time.monotonic()  # the poller's thread ended: again
                     if follows and time.time() - last_want > WANT_SECONDS:
                         now_ms = int(time.time() * 1000)
                         self.set_wanted(wanted_stocks(store, now_ms, watchlists=not self.selected_only),
@@ -760,16 +860,121 @@ class Recorder:
         last did: nothing streamed, nothing read. (It rebuilt every coin's each minute, and so read
         what the sync's backfill changed, 0.5 to 1 GB a minute with no stream connected; the sync
         builds what it downloads itself.) Returns bars built."""
-        touched, self._touched = self._touched, set()
+        with self._lock:  # the poller's thread adds to it too
+            touched, self._touched = self._touched, set()
         if not touched:
             return 0
         from . import derive
 
+        sources = {s.source for s in self.streams} | ({TIINGO_BOATS} if self.boats is not None else set())
         try:
-            return derive.run(store, sources={s.source for s in self.streams}, tickers=touched, log=lambda *_: None)
+            return derive.run(store, sources=sources, tickers=touched, log=lambda *_: None)
         except Exception:
             self._touched |= touched  # tried again with the next
             raise
+
+    # -- Blue Ocean's night, live from Tiingo (BoatsPoller) ------------------------------------------
+    def _start_boats(self) -> threading.Thread | None:
+        if self.boats is None:
+            return None
+        t = threading.Thread(target=self._boats_loop, name="boats-live", daemon=True)
+        t.start()
+        return t
+
+    def _boats_loop(self) -> None:
+        """The poller's own thread and connection to the database: its requests wait on Tiingo's
+        window, never the streams' flushes. A step, then the wait it asks for, until the recorder stops."""
+        from .errors import NotEntitled, RateLimited, Unauthorized
+        from .storage import Store
+
+        p = self.boats
+        with Store(self.db_path) as store:
+            p.client.on_request = lambda n: store.count_request(p.account)  # the Tiingo key's day (the Fetcher's month)
+            while not self.stop.is_set():
+                wait = BOATS_IDLE_SECONDS
+                try:
+                    wait = self.boats_step(store)
+                except (RateLimited, Unauthorized) as e:  # the server said stop: Tiingo's fetching is killed, this with it
+                    killswitch.strike(store, p.account, "fetch", f"live Blue Ocean: {e}", log=self.log,
+                                      at_least_s=killswitch.retry_after_s(e))
+                    self._boats_off(f"stopped: {e}")
+                except NotEntitled as e:  # the plan has no Blue Ocean (the add-on): not asked again for an hour
+                    p.refused_until = time.monotonic() + BOATS_REFUSED_SECONDS
+                    self.log(f"live: Tiingo refused Blue Ocean ({e}); asked again in an hour")
+                    self._boats_off("refused by the plan")
+                except Exception as e:  # noqa: BLE001 - the network, a locked database: logged, tried again
+                    self.log(f"live: Blue Ocean from Tiingo: {type(e).__name__}: {e}")
+                self.stop.wait(wait)
+
+    def boats_step(self, store) -> float:
+        """One step of the poller: while a night is open and stocks are open on a chart, their last
+        sales and quotes (every BOATS_QUOTE_SECONDS, one request), and the minutes of the stock asked
+        longest ago (each every BOATS_BARS_SECONDS, or 2 s a stock with more open). Returns the
+        seconds to wait before the next."""
+        p = self.boats
+        now = p.now()
+        night = p.night(now)
+        with self._lock:
+            wanted = tuple(self._wanted)
+        if night is None or not wanted or killswitch.killed(store, p.account, "fetch", now) \
+                or time.monotonic() < p.refused_until:
+            self._boats_off(None if night else "by day: Blue Ocean trades 20:00-04:00 ET, Sunday to Thursday nights")
+            return BOATS_IDLE_SECONDS
+        if time.monotonic() - p.quotes_at >= BOATS_QUOTE_SECONDS:
+            p.quotes_at = time.monotonic()
+            quotes = p.quotes(wanted)
+            with self._lock:
+                st = self._status[TIINGO_BOATS]
+                st.update(connected=True, symbols=sorted(wanted), note=None)
+                st["pairs"] = {t: v for t, v in st["pairs"].items() if t in wanted}  # only those open: no list growing
+                for t, q in quotes.items():
+                    st["pairs"].setdefault(t, {"trades": 0}).update(q)
+        every = max(BOATS_BARS_SECONDS, 2.0 * len(wanted))
+        due = [t for t in wanted if time.monotonic() - p.bars_at.get(t, float("-inf")) >= every]
+        if due:
+            ticker = min(due, key=lambda t: p.bars_at.get(t, float("-inf")))  # one a step: the quotes keep their pace
+            p.bars_at[ticker] = time.monotonic()
+            self._boats_store(store, ticker, p.minutes(ticker, night), night, now)
+        return 1.0
+
+    def _boats_store(self, store, ticker: str, bars: list[dict], night, now: datetime) -> None:
+        """A stock's minutes of the night: those over (and settled) as the feed's own bars, entered
+        in the ledger from the night's open; the forming one as a built bar, which its final bar
+        replaces (bars_replace_built)."""
+        p = self.boats
+        now_ms = int(now.timestamp() * 1000)
+        over = [b for b in bars if b["t"] + 60_000 + BOATS_SETTLE_MS <= now_ms]
+        forming = [b for b in bars if b["t"] + 60_000 + BOATS_SETTLE_MS > now_ms]
+        since = p.final_to.get(ticker, 0) - 2 * 60_000  # the last two again: a late print corrects one
+        new = [b for b in over if b["t"] >= since]
+        if new:
+            store.upsert_bars(TIINGO_BOATS, ticker, "minute", 1, new)
+        if over:
+            p.final_to[ticker] = over[-1]["t"] + 60_000
+            store.add_coverage(TIINGO_BOATS, ticker, "minute", int(night.open.timestamp() * 1000), p.final_to[ticker])
+        if forming:
+            store.upsert_built_bars(TIINGO_BOATS, ticker, "minute", 1, forming, self._boats_derivation(store, ticker, night))
+        if new or forming:
+            with self._lock:
+                self._touched.add(ticker)
+
+    def _boats_derivation(self, store, ticker: str, night) -> int:
+        """The record of a stock's forming minutes of one night (built bars point to it)."""
+        from . import provenance
+
+        key = (TIINGO_BOATS, ticker, night.day.toordinal(), "forming")
+        if key not in self._derivations:
+            span = (int(night.open.timestamp() * 1000), int(night.close.timestamp() * 1000))
+            self._derivations[key] = provenance.record(
+                store, "forming-minute", f"{TIINGO_BOATS}:{ticker}",
+                {"method": "Tiingo's Blue Ocean minute still forming, as its REST answer gives it; replaced by "
+                           "the minute's final bar once it is over", "poll_seconds": BOATS_BARS_SECONDS},
+                {"url": f"https://api.tiingo.com/boats/{BoatsPoller.symbol(ticker)}/prices"}, span)
+        return self._derivations[key]
+
+    def _boats_off(self, note: str | None) -> None:
+        with self._lock:
+            self._status[TIINGO_BOATS].update(connected=False, note=note, pairs={}, symbols=[])
 
     def holds_locks(self) -> bool:
         """Whether every lock this recorder took still names it."""
