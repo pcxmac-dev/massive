@@ -117,9 +117,22 @@
     const b = e.target.closest('button[data-pane]');
     if (b) showPane(b.dataset.pane);
   });
-  // The status line ends where the views do (style.css #status): the rail's width, which a scrollbar
-  // widens on a short window.
-  new ResizeObserver(() => document.body.style.setProperty('--rail-w', `${$('rail').offsetWidth}px`)).observe($('rail'));
+  // The status line spans the open view's own area, in every view and at every size: not under the
+  // rail on its right (a scrollbar widens the rail on a short window), nor under the chart's drawing
+  // tools on its left (a strip at the view's left edge: it starts where the chart does).
+  function placeStatus() {
+    const view = document.querySelector('main > .view:not([hidden])');
+    if (!view) return;
+    const v = view.getBoundingClientRect();
+    const strip = [...view.children].find((c) => c.tagName === 'NAV' && c.offsetWidth && c.getBoundingClientRect().left - v.left < 2);
+    const first = strip && [...view.children].find((c) => c !== strip && c.offsetWidth);
+    const left = first ? first.getBoundingClientRect().left : v.left;
+    $('status').style.marginLeft = `${Math.round(left)}px`;
+    $('status').style.marginRight = `${Math.round(document.documentElement.clientWidth - v.right)}px`;
+  }
+  const statusPlace = new ResizeObserver(placeStatus);  // a view shown or hidden, the window or rail resized
+  for (const el of [$('rail'), $('tools'), ...document.querySelectorAll('main > .view')]) if (el) statusPlace.observe(el);
+  window.addEventListener('massive:view', placeStatus);
   window.addEventListener('massive:activity', (e) => renderRailIcons(e.detail));
   window.addEventListener('massive:symbol', () => renderRailIcons(window.Activity?.data));
   window.addEventListener('massive:run-finished', () => {

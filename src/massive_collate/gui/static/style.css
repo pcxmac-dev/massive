@@ -204,9 +204,12 @@ body.panel-hidden #sidePanel, body.panel-hidden #panelResizer { display: none; }
 .up { color: var(--up); }
 .down { color: var(--down); }
 .mid { color: #f0b90b; }
-.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-variant-numeric: tabular-nums; }
+/* Its values take what the labels leave and wrap there: a long one (the feed menu, "All merged
+   (alpaca > massive > iex > boats)") widened the side panel into a sideways scrollbar. */
+.kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 12px; font-variant-numeric: tabular-nums; }
 .kv dt { color: var(--muted); white-space: nowrap; }
-.kv dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+.kv dd { margin: 0; text-align: right; overflow-wrap: anywhere; min-width: 0; }
+.kv dd select { max-width: 100%; }
 .kv dd small { color: var(--muted); }
 .auto-level { font-size: 12px; color: var(--text); padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px;
   white-space: nowrap; cursor: default; }
@@ -231,16 +234,16 @@ body.panel-hidden #sidePanel, body.panel-hidden #panelResizer { display: none; }
 .inv-derived, .inv-star { color: var(--muted); }
 .inv-missing { color: #f0b90b; }
 .pr-table { border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; }
-.pr-table td { padding: 1px 6px 1px 0; vertical-align: top; white-space: nowrap; }
+.pr-table td { padding: 1px 6px 1px 0; vertical-align: top; overflow-wrap: break-word; }  /* wraps: no sideways scroll */
 .pr-table td:last-child { white-space: normal; color: var(--muted); }
 .pr-released td { opacity: 0.5; }
 #sidePanel a { color: var(--accent); }
 
-/* The status line ends where the views do, beside the rail and not under it: --rail-w is the rail's
-   width (its buttons, and a scrollbar on a short window), kept by panels.js. */
+/* The status line spans the open view's own area, not under the rail or the chart's drawing tools:
+   panels.js (placeStatus) sets its margins from the view; these are the rail's until it has. */
 #status {
   display: flex; gap: 12px; justify-content: space-between; align-items: center; flex: none;
-  height: 22px; margin: 0 calc(var(--gap) * 2 + var(--rail-w, 54px)) var(--gap) var(--gap); padding: 0 var(--pad);
+  height: 22px; margin: 0 calc(var(--gap) * 2 + 54px) var(--gap) var(--gap); padding: 0 var(--pad);
   background: var(--card); border-radius: var(--radius);
   color: var(--muted); font-size: 11px; line-height: 22px; white-space: nowrap; overflow: hidden;
 }
@@ -858,7 +861,7 @@ main > .view.ex-view:not([hidden]) { display: grid; }
 .ex-tools input { flex: 1; min-width: 120px; }
 .ex-table tr[data-product] { cursor: pointer; }
 .ex-table tr.active td { background: var(--panel); }
-.ex-pname { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ex-pname { overflow-wrap: break-word; }  /* wraps whole: one line each widened the table past its panel */
 .ex-more { margin: 8px 0; }
 .ex-side h3 { margin: 0 0 4px; font-size: 16px; display: flex; align-items: center; gap: 8px; }
 .ex-side h4 { margin: 14px 0 6px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }

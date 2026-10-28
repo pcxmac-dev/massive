@@ -119,33 +119,71 @@ function change(from, to, precision) {
 // York; UTC for crypto and forex, whose days are stamped 00:00 UTC, the previous evening in New
 // York), whatever zone is picked, or a day would read as the evening before. Within a day: the zone
 // picked with the switch under the price axis (state.timezone), the exchange's (New York) by default.
-// The exchange's zone (New York, with its daylight saving), then every whole-hour UTC offset, as
-// '-05:00' (both Intl and the chart take an offset for a zone), with cities on it in standard time.
+// The exchange's zone (New York), then places around the world, each in its own zone so its clock
+// keeps its daylight saving (Los Angeles: GMT−8 in winter, GMT−7 in summer). The list was fixed
+// offsets ('-08:00'), each a place's standard time all year: an hour off for half of it.
 const ZONE_CITIES = {
-  '-12': 'Baker Island', '-11': 'Pago Pago', '-10': 'Honolulu', '-9': 'Anchorage', '-8': 'Los Angeles, Vancouver',
-  '-7': 'Denver, Phoenix', '-6': 'Chicago, Mexico City', '-5': 'New York, Toronto', '-4': 'Halifax, Caracas',
-  '-3': 'São Paulo, Buenos Aires', '-2': 'South Georgia', '-1': 'Azores, Cape Verde', 0: 'London, Lisbon',
-  1: 'Paris, Frankfurt', 2: 'Athens, Johannesburg', 3: 'Moscow, Istanbul', 4: 'Dubai', 5: 'Karachi, Tashkent',
-  6: 'Dhaka, Almaty', 7: 'Bangkok, Jakarta', 8: 'Singapore, Hong Kong', 9: 'Tokyo, Seoul', 10: 'Sydney, Brisbane',
-  11: 'Nouméa, Solomon Islands', 12: 'Auckland, Fiji', 13: 'Tonga, Samoa', 14: 'Kiritimati' };
-const TIMEZONES = ['exchange', ...Array.from({ length: 27 }, (_, i) => i - 12).map(
-  (h) => `${h < 0 ? '-' : '+'}${String(Math.abs(h)).padStart(2, '0')}:00`)];
-state.timezone = TIMEZONES.includes(prefs.get('timezone')) ? prefs.get('timezone') : 'exchange';
+  'Etc/GMT+12': 'Baker Island', 'Pacific/Pago_Pago': 'Pago Pago', 'Pacific/Honolulu': 'Honolulu',
+  'America/Anchorage': 'Anchorage', 'America/Los_Angeles': 'Los Angeles, Vancouver', 'America/Phoenix': 'Phoenix',
+  'America/Denver': 'Denver, Calgary', 'America/Chicago': 'Chicago, Winnipeg', 'America/Mexico_City': 'Mexico City',
+  'America/New_York': 'New York, Toronto', 'America/Caracas': 'Caracas', 'America/Halifax': 'Halifax',
+  'America/Sao_Paulo': 'São Paulo', 'America/Argentina/Buenos_Aires': 'Buenos Aires',
+  'Atlantic/South_Georgia': 'South Georgia', 'Atlantic/Azores': 'Azores', 'Atlantic/Cape_Verde': 'Cape Verde',
+  UTC: 'UTC', 'Europe/London': 'London, Lisbon', 'Europe/Paris': 'Paris, Frankfurt',
+  'Africa/Johannesburg': 'Johannesburg', 'Europe/Athens': 'Athens, Helsinki', 'Europe/Istanbul': 'Istanbul',
+  'Europe/Moscow': 'Moscow', 'Asia/Dubai': 'Dubai', 'Asia/Karachi': 'Karachi, Tashkent', 'Asia/Kolkata': 'Mumbai, New Delhi',
+  'Asia/Dhaka': 'Dhaka', 'Asia/Bangkok': 'Bangkok, Jakarta', 'Asia/Singapore': 'Singapore, Hong Kong',
+  'Asia/Tokyo': 'Tokyo, Seoul', 'Australia/Brisbane': 'Brisbane', 'Australia/Sydney': 'Sydney, Melbourne',
+  'Pacific/Noumea': 'Nouméa, Solomon Islands', 'Pacific/Auckland': 'Auckland', 'Pacific/Fiji': 'Fiji',
+  'Pacific/Tongatapu': 'Tonga', 'Pacific/Kiritimati': 'Kiritimati' };
+// A fixed offset picked before: the place it stood for, now with its daylight saving ('-08:00' was
+// the user's Pacific time, an hour off from March to November).
+const OFFSET_ZONES = {
+  '-12:00': 'Etc/GMT+12', '-11:00': 'Pacific/Pago_Pago', '-10:00': 'Pacific/Honolulu', '-09:00': 'America/Anchorage',
+  '-08:00': 'America/Los_Angeles', '-07:00': 'America/Denver', '-06:00': 'America/Chicago', '-05:00': 'America/New_York',
+  '-04:00': 'America/Halifax', '-03:00': 'America/Sao_Paulo', '-02:00': 'Atlantic/South_Georgia', '-01:00': 'Atlantic/Azores',
+  '+00:00': 'Europe/London', '+01:00': 'Europe/Paris', '+02:00': 'Europe/Athens', '+03:00': 'Europe/Moscow',
+  '+04:00': 'Asia/Dubai', '+05:00': 'Asia/Karachi', '+06:00': 'Asia/Dhaka', '+07:00': 'Asia/Bangkok',
+  '+08:00': 'Asia/Singapore', '+09:00': 'Asia/Tokyo', '+10:00': 'Australia/Sydney', '+11:00': 'Pacific/Noumea',
+  '+12:00': 'Pacific/Auckland', '+13:00': 'Pacific/Tongatapu', '+14:00': 'Pacific/Kiritimati' };
+
+// Minutes east of UTC in a zone at `when` (its daylight saving counted).
+function zoneOffset(zone, when = new Date()) {
+  try {
+    const v = new Intl.DateTimeFormat('en-US', { timeZone: zone, timeZoneName: 'longOffset' }).formatToParts(when)
+      .find((p) => p.type === 'timeZoneName')?.value || '';
+    const [, sign, hh, mm] = v.match(/GMT([+-])(\d\d):(\d\d)/) || [];
+    return sign ? (sign === '-' ? -1 : 1) * (Number(hh) * 60 + Number(mm)) : 0;
+  } catch { return 0; }
+}
+
+// Round the world by their offset now (west to east), so the wheel stays in order as clocks change.
+const TIMEZONES = ['exchange', ...Object.keys(ZONE_CITIES).sort((a, b) => zoneOffset(a) - zoneOffset(b))];
+const savedZone = prefs.get('timezone');
+state.timezone = TIMEZONES.includes(savedZone) ? savedZone : OFFSET_ZONES[savedZone] || 'exchange';
+if (savedZone && state.timezone !== savedZone) prefs.set('timezone', state.timezone);  // kept as the place
 
 function pickedZone() {
   return state.timezone === 'exchange' ? TZ : state.timezone;
 }
 
-// "GMT+9", "GMT−5", "GMT" for an offset zone.
+// "GMT−7", "GMT+5:30", "GMT": a zone's offset from UTC now, its daylight saving in it.
 function gmtLabel(zone) {
-  const [, sign, hh] = zone.match(/^([+-])(\d\d):00$/) || [];
-  if (!sign) return zone;
-  return Number(hh) ? `GMT${sign === '-' ? '−' : '+'}${Number(hh)}` : 'GMT';
+  try {
+    const v = new Intl.DateTimeFormat('en-US', { timeZone: zone, timeZoneName: 'shortOffset' }).formatToParts(new Date())
+      .find((p) => p.type === 'timeZoneName')?.value;
+    return v ? v.replace('-', '−') : zone;
+  } catch { return zone; }
+}
+
+// Whether a zone's clock changes during the year (its offset in January and July differ).
+function keepsDaylightSaving(zone) {
+  const y = new Date().getUTCFullYear();
+  return zoneOffset(zone, new Date(Date.UTC(y, 0, 1))) !== zoneOffset(zone, new Date(Date.UTC(y, 6, 1)));
 }
 
 function zoneCities(zone) {
-  const [, sign, hh] = zone.match(/^([+-])(\d\d):00$/) || [];
-  return sign ? ZONE_CITIES[(sign === '-' ? -1 : 1) * Number(hh)] || '' : '';
+  return ZONE_CITIES[zone] || '';
 }
 
 function labelZone(period) {
@@ -1225,7 +1263,7 @@ $('chart').append(tzBtn, tzMenu);
 let tzTop = 0;  // the zone at the top of the wheel's window (an index into TIMEZONES)
 
 function zoneName(z) {
-  return z === 'exchange' ? 'Exchange' : gmtLabel(z);
+  return z === 'exchange' ? 'Exchange' : `${zoneCities(z) || z} (${gmtLabel(z)})`;
 }
 
 // The switch sits on the time axis's date row, as tall as it and centred on the dates' line (the
@@ -1249,7 +1287,7 @@ function placeTimezone() {
 }
 
 function renderTimezone() {
-  tzBtn.textContent = state.timezone === 'exchange' ? zoneShort(TZ) : gmtLabel(state.timezone);
+  tzBtn.textContent = zoneShort(pickedZone());  // "PDT" in summer, "PST" in winter: its daylight saving
   tzBtn.title = `Time zone of the time axis and crosshair: ${zoneName(state.timezone)}. Days, weeks and months keep `
     + 'the market\'s own dates. Click to change; the mouse wheel turns the list.';
   placeTimezone();
@@ -1259,8 +1297,10 @@ function renderTimezone() {
                                                             minute: '2-digit', hourCycle: 'h23' }).format(new Date());
   tzMenu.innerHTML = Array.from({ length: TZ_ROWS }, (_, i) => TIMEZONES[(((tzTop + i) % n) + n) % n]).map((z) =>
     `<button type="button" data-tz="${esc(z)}" class="${z === state.timezone ? 'on' : ''}"`
-    + ` title="${z === 'exchange' ? 'New York, with its daylight saving' : 'A fixed offset: cities in standard time'}">`
-    + `<span class="tz-name">${esc(zoneName(z))}</span><span class="tz-city p-muted">${esc(z === 'exchange' ? 'New York' : zoneCities(z))}</span>`
+    + ` title="${esc(z === 'exchange' ? 'New York, with its daylight saving'
+      : `${z}: ${keepsDaylightSaving(z) ? 'with its daylight saving' : 'no daylight saving'}`)}">`
+    + `<span class="tz-name">${esc(z === 'exchange' ? 'Exchange' : gmtLabel(z))}</span>`
+    + `<span class="tz-city p-muted">${esc(z === 'exchange' ? 'New York' : zoneCities(z))}</span>`
     + `<span class="tz-clock p-muted">${esc(clock(z))}</span></button>`).join('');
 }
 

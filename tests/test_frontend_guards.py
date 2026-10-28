@@ -115,9 +115,17 @@ def test_every_chart_request_says_which_view_it_reads():
 def test_the_time_zone_wheel_shows_six_and_turns_round_and_round():
     app = _js("app.js")
     assert "const TZ_ROWS = 6;" in app
-    assert "Array.from({ length: 27 }, (_, i) => i - 12)" in app  # whole hours, GMT-12 to GMT+14
+    # places in their own zones, so each keeps its daylight saving (a fixed '-08:00' was Los Angeles in
+    # standard time all year, an hour off from March to November), round the world by their offset now
     cities = re.search(r"const ZONE_CITIES = \{(.+?)\};", app, re.S).group(1)
-    assert all(f"'{h}':" in cities or f" {h}:" in cities for h in range(-12, 15))  # every offset has its cities
+    for zone in ("America/Los_Angeles", "America/Phoenix", "America/New_York", "Europe/London", "Asia/Tokyo",
+                 "Australia/Sydney", "Pacific/Auckland", "Etc/GMT+12", "Pacific/Kiritimati"):
+        assert f"'{zone}':" in cities, zone
+    assert "Object.keys(ZONE_CITIES).sort((a, b) => zoneOffset(a) - zoneOffset(b))" in app
+    offsets = re.search(r"const OFFSET_ZONES = \{(.+?)\};", app, re.S).group(1)
+    assert "'-08:00': 'America/Los_Angeles'" in offsets  # a fixed offset picked before: the place it stood for
+    assert all(f"'{'-' if h < 0 else '+'}{abs(h):02d}:00':" in offsets for h in range(-12, 15))
+    assert "timeZoneName: 'shortOffset'" in _function(app, "gmtLabel")  # "GMT−7" now, "GMT−8" in winter
     turn = app.split("tzMenu.addEventListener('wheel'", 1)[1].split("});", 1)[0]
     assert "% TIMEZONES.length + TIMEZONES.length) % TIMEZONES.length" in turn  # wraps both ways
     assert "e.preventDefault()" in turn
@@ -362,11 +370,25 @@ def test_the_page_follows_every_feed_fetching_side_by_side():
     assert "Running ${going.length} feeds" in page.split("function statusLine()", 1)[1].split("\n  }\n", 1)[0]
 
 
-def test_the_status_line_ends_where_the_views_do_not_under_the_rail():
+def test_the_status_line_spans_the_open_views_own_area_in_every_view():
+    place = _js("panels.js").split("function placeStatus()", 1)[1].split("\n  }\n", 1)[0]
+    # not under the rail (right) nor under the chart's drawing tools (left: a strip at the view's edge)
+    assert "c.tagName === 'NAV'" in place and "marginLeft" in place and "marginRight" in place
+    panels = _js("panels.js")
+    assert "const statusPlace = new ResizeObserver(placeStatus);" in panels  # no frame wait: a hidden tab has none
+    assert "[$('rail'), $('tools'), ...document.querySelectorAll('main > .view')]" in panels
+    assert "window.addEventListener('massive:view', placeStatus);" in panels
     status = _js("style.css").split("#status {", 1)[1].split("}", 1)[0]
-    assert "calc(var(--gap) * 2 + var(--rail-w, 54px))" in status  # the rail and the gaps either side of it
-    # the rail's width as it is: a scrollbar widens it on a short window
-    assert "setProperty('--rail-w', `${$('rail').offsetWidth}px`)" in _js("panels.js")
+    assert "calc(var(--gap) * 2 + 54px)" in status  # the rail's until placed
+
+
+def test_the_side_panel_and_the_exchanges_wrap_rather_than_scroll_sideways():
+    css = _js("style.css")
+    kv = css.split("\n.kv {", 1)[1].split("}", 1)[0]
+    assert "grid-template-columns: auto minmax(0, 1fr)" in kv  # the feed menu's long name no longer widens it
+    assert ".kv dd select { max-width: 100%; }" in css
+    assert "nowrap" not in css.split(".pr-table td {", 1)[1].split("}", 1)[0]
+    assert "nowrap" not in css.split(".ex-pname {", 1)[1].split("}", 1)[0]
 
 
 def test_tables_wrap_their_text_rather_than_scroll_sideways():
