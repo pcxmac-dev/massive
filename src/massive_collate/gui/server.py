@@ -991,6 +991,9 @@ class ChartApp:
                     rows_cache=self._activity_rows, rows_ttl_s=SYMBOL_ROWS_TTL_S))
             out = dict(hit[2])
         out["feeds"] = self.feeds()
+        # The opened symbol's own run: its end is not every feed's (Massive's pass goes on beside it)
+        run = getattr(self, "_symbol_run", None)
+        out["symbolRun"] = {"ticker": run[0], "going": run[1].poll() is None} if run else None
         return out
 
     def datasets(self) -> dict:
@@ -1182,14 +1185,15 @@ class ChartApp:
         """Pause background fetching ({"paused": true, "minutes": n}: at most two hours; the open
         symbol's own fetches go on, so the chart gets the feeds to itself), halt all fetching until
         resumed ({"paused": true, "halt": true}: the open symbol's too), or resume ({"paused":
-        false}): then a sync starts at once unless one is running, as the hourly one would."""
+        false}): then a sync starts at once, as the hourly one would (it starts the feeds not
+        fetching; one paused mid-run stopped at its next request)."""
         from .. import collector
 
         paused = bool(body.get("paused"))
         with self._lock:
             p = collector.set_pause(self.store, paused, minutes=body.get("minutes"), halt=bool(body.get("halt")))
         started = None
-        if not paused and not self.settings.offline and not activity.lock_owner(self.store.path):
+        if not paused and not self.settings.offline and None not in activity.fetching_feeds(self.store.path):
             exe = Path(sys.executable)
             quiet = exe.with_name("pythonw.exe") if exe.with_name("pythonw.exe").exists() else exe
             proc = subprocess.Popen([str(quiet), "-m", "massive_collate", "sync"], stdout=subprocess.DEVNULL,
@@ -1219,11 +1223,11 @@ class ChartApp:
 
     def priority(self, ticker: str) -> dict:
         """The chart opened `ticker`: every feed holding it updates it before anything else.
-        With no run going, a run for that symbol alone starts now (`sync --tickers`: gaps and
-        new data on every feed, only what each plan has published); with one going, the request
-        waits in the database and the running sync takes the symbol next on each feed it still
-        has to visit. Within every feed's limits either way: one fetching process at a time (the
-        run lock), and limiters that share their window across runs."""
+        While a feed it needs (`need`) is not fetching, a run for that symbol alone starts now
+        (`sync --tickers`: gaps and new data on each such feed, only what each plan has published);
+        on a feed that is fetching, the request waits in the database and that feed's run takes the
+        symbol next. Within every feed's limits either way: one fetching process per feed at a time
+        (its run lock), and limiters that share their window across processes."""
         from .. import collector
 
         from ..freshness import expected
@@ -1260,14 +1264,16 @@ class ChartApp:
             return {**out, "state": "offline"}  # a test copy of the app: nothing is fetched
         if self._halted():
             return {**out, "state": "halted"}  # nothing is fetched until the user resumes
-        if activity.lock_owner(self.store.path):
-            return {**out, "state": "queued"}  # the running sync takes it next
+        fetching = activity.fetching_feeds(self.store.path)
+        if None in fetching or all(name in fetching for name in need or feeds):
+            return {**out, "state": "queued"}  # each feed it needs is fetching: their runs take it next
         if asked["runs"]:
             return {**out, "state": "recent"}  # a run for it already went
         args = [sys.executable, "-m", "massive_collate", "sync", "--tickers", ticker]
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         self._scan = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                       stdin=subprocess.DEVNULL, creationflags=flags)
+        self._symbol_run = (ticker, self._scan)  # the page sees it end (activity: symbolRun)
         with self._lock:
             collector.priority_started(self.store, ticker)
         return {**out, "state": "started", "pid": self._scan.pid}

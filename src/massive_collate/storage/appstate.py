@@ -124,13 +124,16 @@ class AppStateStore:
         with self.conn:
             self.conn.execute("UPDATE runs SET current=? WHERE id=?", (ticker, run_id))
 
-    def close_abandoned_runs(self) -> int:
-        """Runs still marked 'running' (crashed or killed). Their recorded requests are kept;
+    def close_abandoned_runs(self, source: str | None = None) -> int:
+        """Runs still marked 'running' (crashed or killed): `source`'s only (the feeds run side
+        by side, each closing its own when it holds its lock). Their recorded requests are kept;
         nothing is lowered, so the daily cap stays conservative."""
+        where, args = ("status='running'", (_now(),)) if source is None else \
+            ("status='running' AND source=?", (_now(), source))
         with self.conn:
             return self.conn.execute(
                 "UPDATE runs SET status='abandoned', finished_at=COALESCE(finished_at, ?), "
-                "message=COALESCE(message, '') || ' (run did not finish)' WHERE status='running'", (_now(),)
+                f"message=COALESCE(message, '') || ' (run did not finish)' WHERE {where}", args
             ).rowcount
 
     EVENT_DAYS = 30  # feed_events older than this are dropped as new ones come
@@ -197,6 +200,14 @@ class AppStateStore:
         cur = self.conn.execute(
             "SELECT id, source, command, started_at, finished_at, requests, rows, status, message, current "
             "FROM runs ORDER BY id DESC LIMIT ?", (limit,))
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, row)) for row in cur]
+
+    def runs_going(self) -> list[dict]:
+        """The runs still marked 'running' (one a feed at most while their processes live), newest first."""
+        cur = self.conn.execute(
+            "SELECT id, source, command, started_at, finished_at, requests, rows, status, message, current "
+            "FROM runs WHERE status='running' ORDER BY id DESC LIMIT 50")
         cols = [c[0] for c in cur.description]
         return [dict(zip(cols, row)) for row in cur]
 

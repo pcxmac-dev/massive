@@ -194,11 +194,20 @@ def test_the_sync_lets_go_of_the_run_lock_before_building_derived_frames(tmp_pat
 
     db = tmp_path / "m.db"
     settings = SimpleNamespace(db_path=db)
-    seen = {}
-    monkeypatch.setattr(cli, "_sync", lambda args, s: (seen.setdefault("during", proc.holder(db.with_suffix(".lock"))), (0, 1))[1])
-    monkeypatch.setattr(cli, "after_sync", lambda args, s: seen.setdefault("after", proc.holder(db.with_suffix(".lock"))))
+    seen = []
+
+    def one_feed(args, s):  # a feed's run holds its own lock while it downloads (api_run)
+        with cli.run_lock(db, "massive"):
+            seen.append(("during", proc.run_holders(db)))
+        return 0, 1
+
+    monkeypatch.setattr(cli, "_sync", one_feed)
+    monkeypatch.setattr(cli, "after_sync", lambda args, s: seen.append(("after", proc.run_holders(db))))
     assert cli.cmd_sync(SimpleNamespace(), settings) == 0
-    assert seen["during"] == proc.os.getpid() and seen["after"] is None  # building frames fetches nothing
+    assert seen == [("during", {"massive": proc.os.getpid()}), ("after", {})]  # building frames fetches nothing
+    seen.clear()
+    assert cli.cmd_sync(SimpleNamespace(fetch_only=True), settings) == 0  # a feed's run the hourly sync started
+    assert [k for k, _ in seen] == ["during"]  # the hourly sync builds them, once an hour
 
 
 def test_one_pass_of_derived_frames_at_a_time(tmp_path, monkeypatch):

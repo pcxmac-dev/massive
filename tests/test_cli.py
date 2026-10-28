@@ -44,7 +44,7 @@ def test_watch_accepts_exchange_and_shows_listing(env, capsys):
 def test_daily_cap_reached_sends_nothing(env, monkeypatch, capsys):
     monkeypatch.setenv("MASSIVE_MAX_REQUESTS_PER_DAY", "0")
     cli.main(["watch", "add", "SPCX"])
-    assert cli.main(["sync"]) == 0
+    assert cli.main(["--source", "massive", "sync", "--only"]) == 0  # the feed's own run, as the hourly sync starts it
     assert "daily request cap" in capsys.readouterr().out
 
 
@@ -100,9 +100,11 @@ def test_pid_alive():
 def test_missing_key_skips_that_feed_and_says_so(env, monkeypatch, capsys):
     monkeypatch.delenv("MASSIVE_API_KEY")
     cli.main(["watch", "add", "SPCX"])
-    assert cli.main(["sync"]) == 0  # Alpaca still runs (crypto needs no key) and sends nothing for stocks
-    err = capsys.readouterr().err
-    assert "skipped massive: MASSIVE_API_KEY" in err
+    started = []
+    monkeypatch.setattr(cli, "start_feed", started.append)
+    assert cli.main(["sync"]) == 0  # the feeds set up here start (Alpaca: crypto needs no key), Massive not
+    assert "massive" not in started and {"alpaca", "bitstamp"} <= set(started)
+    assert "not set up here: massive" in capsys.readouterr().out
     assert cli.main(["--source", "massive", "sync", "--only"]) == 2  # only an unconfigured feed: an error
 
 
@@ -133,3 +135,72 @@ def test_offline_copies_of_the_app_fetch_nothing(env, monkeypatch, capsys):
     assert "offline (MASSIVE_OFFLINE)" in capsys.readouterr().out
     assert cli.main(["live", "start"]) == 0
     assert "live recording is off" in capsys.readouterr().out
+
+
+def test_each_feed_has_its_own_run_lock_and_a_move_of_the_data_waits_for_them_all(env):
+    import os
+
+    from massive_collate import proc
+
+    db = env / "data" / "m.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    with cli.run_lock(db, "massive"):
+        with cli.run_lock(db, "alpaca"):  # another feed fetches beside it
+            assert proc.run_holders(db) == {"massive": os.getpid(), "alpaca": os.getpid()}
+    assert proc.run_holders(db) == {}  # given back
+    other = proc.run_lock_path(db, "massive")
+    other.write_text(str(os.getppid()))  # Massive's run, in another live process
+    with pytest.raises(cli.Busy):
+        with cli.run_lock(db, "massive"):  # one run a feed
+            pass
+    with pytest.raises(cli.Busy):
+        with cli.run_lock(db):  # no move of the data while a feed fetches
+            pass
+    other.unlink()
+    proc.run_lock_path(db).write_text(str(os.getppid()))  # a move of the data, or a run from before the feeds ran apart
+    with pytest.raises(cli.Busy):
+        with cli.run_lock(db, "alpaca"):
+            pass
+    assert not proc.run_lock_path(db, "alpaca").exists()  # taken, then given back at once
+
+
+def test_the_hourly_sync_starts_each_idle_feed_in_a_process_of_its_own_without_waiting(env, monkeypatch, capsys):
+    # one run at a time, every feed waited for Massive's pass (hours); and the hourly task starts no
+    # second sync while one goes on, so the sync no longer waits for its feeds
+    import os
+
+    from massive_collate import proc
+
+    db = env / "data" / "m.db"
+    cli.main(["watch", "add", "SPCX"])
+    proc.run_lock_path(db, "massive").write_text(str(os.getppid()))  # Massive's pass goes on from an hour ago
+    started, built = [], []
+    monkeypatch.setattr(cli, "start_feed", started.append)
+    monkeypatch.setattr(cli, "after_sync", lambda args, s: built.append(1))
+    assert cli.main(["sync"]) == 0
+    assert "massive" not in started and {"alpaca", "bitstamp", "coinbase"} <= set(started)
+    assert built == [1]  # the derived frames from what arrived: once an hour, by the hourly sync
+    assert "fetching already: massive" in capsys.readouterr().out
+
+
+def test_a_run_for_an_opened_symbol_leaves_the_feeds_fetching_to_their_own_runs(env, monkeypatch, capsys):
+    import os
+    from contextlib import contextmanager
+
+    from massive_collate import proc
+
+    db = env / "data" / "m.db"
+    cli.main(["watch", "add", "SPCX"])
+    proc.run_lock_path(db, "massive").write_text(str(os.getppid()))  # Massive's pass, in another process
+    took = []
+
+    @contextmanager
+    def feed_run(args, settings, command, lock=True):  # api_run's lock, no requests
+        with cli.run_lock(db, args.source):
+            took.append(args.source)
+            yield None, None, None
+
+    monkeypatch.setattr(cli, "api_run", feed_run)
+    assert cli.main(["sync", "--tickers", "SPCX"]) == 0
+    assert "massive" not in took and "alpaca" in took  # the idle feeds take it now
+    assert "sync massive: fetching already; its run takes SPCX next" in capsys.readouterr().out

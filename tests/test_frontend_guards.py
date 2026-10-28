@@ -348,5 +348,15 @@ def test_the_status_bar_names_the_feeds_an_opened_symbol_waits_for():
     page = _js("activity.js")
     assert "phase: 'waiting', feeds, need: body.need || []" in page
     bar = page.split("function renderStatusBar()", 1)[1].split("\n  }\n", 1)[0]
-    assert "next on ${esc(now)}" in bar and "waiting for ${" in bar
+    assert "next on ${esc(need.join(', '))}" in bar and "waiting for ${" in bar  # each fetching now, or not
     assert "`${t}: next in line" not in bar  # it read as if the feed fetching now, with nothing for it, were about to
+
+
+def test_the_page_follows_every_feed_fetching_side_by_side():
+    page = _js("activity.js")
+    poll = page.split("async function pollOnce()", 1)[1].split("\n  }\n", 1)[0]
+    assert "!going.has(f)" in poll  # any feed's run ending may have brought new data
+    # the opened symbol's own run ends on its own: Massive's pass goes on beside it for hours
+    assert "data.symbolRun?.ticker === job.ticker && !data.symbolRun.going" in poll
+    assert "wasRunning" not in page and "(data.fetching || []).some((f) => f.source === l.source)" in page
+    assert "Running ${going.length} feeds" in page.split("function statusLine()", 1)[1].split("\n  }\n", 1)[0]

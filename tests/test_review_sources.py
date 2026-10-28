@@ -58,7 +58,7 @@ def test_a_revoked_key_stops_the_sync_after_one_request_and_kills_the_feed(tmp_p
     monkeypatch.setattr(requests.Session, "get", get)
     for ticker in ("AAPL", "MSFT", "NVDA", "AMZN"):
         assert cli.main(["watch", "add", ticker]) == 0
-    cli.main(["sync"])
+    cli.main(["--source", "massive", "sync", "--only"])  # its run, as the hourly sync starts it
     assert len([u for u in sent if "api.massive.com" in u]) == 1  # not one 401 per symbol until the cap
     with Store(tmp_path / "data" / "m.db") as s:
         k = killswitch.killed(s, "massive", "fetch")

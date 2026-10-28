@@ -1,5 +1,5 @@
-"""Processes, and the lock files that keep one of a kind running (one fetching run, one live
-recorder per database and per machine).
+"""Processes, and the lock files that keep one of a kind running (one fetching run per feed, one
+live recorder per database and per machine).
 
 A lock file names its owner by process id and the time that process started: the system reuses
 process ids quickly (on Windows especially), so an id alone would make a lock left by a crashed
@@ -92,6 +92,28 @@ def holder(path: Path) -> int | None:
         if now is not None and now != start:
             return None  # the id belongs to another process now
     return pid
+
+
+def run_lock_path(db_path: Path, feed: str | None = None) -> Path:
+    """A fetching run's lock beside the database: one feed's (`massive-fetch-alpaca.lock`: feeds
+    fetch side by side, one run each), or the whole database's (`massive.lock`: a move of the data,
+    which no run may write through, or a run from before the feeds ran apart)."""
+    return db_path.with_suffix(".lock") if feed is None else db_path.with_name(f"{db_path.stem}-fetch-{feed}.lock")
+
+
+def run_holders(db_path: Path) -> dict[str | None, int]:
+    """The runs going now: {feed: the id of the process fetching it}, None for the whole database's
+    lock (every feed is busy while it is held)."""
+    out: dict[str | None, int] = {}
+    whole = holder(run_lock_path(db_path))
+    if whole is not None:
+        out[None] = whole
+    prefix = f"{db_path.stem}-fetch-"
+    for path in db_path.parent.glob(f"{prefix}*.lock"):
+        pid = holder(path)
+        if pid is not None:
+            out[path.name[len(prefix):-len(".lock")]] = pid
+    return out
 
 
 def acquire(path: Path) -> bool:
