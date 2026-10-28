@@ -15,7 +15,7 @@ from typing import Iterator
 from . import analysis, charts, collector, config
 from .config import ConfigError, Settings, load_settings
 from .storage.feeds import TicksBlocked
-from .errors import NotEntitled, SourceError
+from .errors import NotEntitled, RateLimited, SourceError, Unauthorized
 from .sessions import ET
 from .symbols import resolve
 from .sources import DataSource, build_source, feed_profiles, is_archive, providers, supports
@@ -183,12 +183,12 @@ def api_run(args, settings: Settings, command: str, lock: bool = True) -> Iterat
             status, message = "stopped", str(e)
             log(f"stopped: {e}")
             if e.strike:
-                killswitch.strike(store, args.source, "fetch", str(e), log=log)
+                killswitch.strike(store, args.source, "fetch", str(e), log=log, at_least_s=killswitch.retry_after_s(e))
         except SourceError as e:  # the run as a whole failed on the server's side, or was refused
             status, message = "error", str(e)
             log(f"error: {e}")
             if not isinstance(e, NotEntitled) and (killswitch.is_refusal(e, e.status) or e.status == 0 or e.status >= 500):
-                killswitch.strike(store, args.source, "fetch", str(e), log=log)
+                killswitch.strike(store, args.source, "fetch", str(e), log=log, at_least_s=killswitch.retry_after_s(e))
         except Exception as e:
             status, message = "error", repr(e)
             raise
@@ -974,6 +974,8 @@ def _scan(name: str, source, store: Store, log, due_days: float | None = None) -
         return  # a feed with nothing to do spends no request on its scan
     try:
         found = p.run_scan(source)
+    except (RateLimited, Unauthorized):
+        raise  # the server said stop: the run ends and the feed is killed (api_run), not asked on at once
     except Exception as e:  # noqa: BLE001 - a scan must not stop the feed's run
         log(f"{name}: capability scan failed ({type(e).__name__}: {e})")
         return

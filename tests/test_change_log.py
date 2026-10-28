@@ -84,7 +84,7 @@ def test_the_fingerprint_changes_with_every_write_and_reads_no_series(clock):
         seen = {before}
         for write in (lambda: s.upsert_bars("massive", "SPCX", "minute", 1, [_bar(10 * MIN, 3.0)]),  # corrected
                       lambda: s.upsert_bars("massive", "SPCX", "minute", 1, [_bar(11 * MIN)]),  # added
-                      lambda: s.delete_before("massive", "SPCX", 11 * MIN * 1_000_000)):  # removed
+                      lambda: s.archive_before("massive", "SPCX", 11 * MIN * 1_000_000)):  # moved out
             write()
             fp = s.series_fingerprint("massive", "SPCX")
             assert fp not in seen

@@ -122,6 +122,12 @@ class MassiveClient:
                 self.on_request(self.requests_made)
             try:
                 resp = self._session.get(url, params=params, headers=self._headers, timeout=self._timeout)
+            except (requests.exceptions.InvalidHeader, requests.exceptions.InvalidURL):
+                # A key with a space or a line break in it: nothing can be sent, ever, and the error
+                # repeats the header (the key) word for word, which went to the log and the kill's
+                # reason. Not tried again; the message names the trouble, never the value.
+                raise Unauthorized(0, "a key or address this feed sends holds a space, a line break or another "
+                                      "character a request cannot carry: check its variable's value") from None
             except requests.RequestException as e:  # no answer (network down, a timeout): tried again like a 5xx
                 if attempt == self._max_retries:
                     raise SourceError(0, f"no answer: {type(e).__name__}: {e}") from e
@@ -150,8 +156,9 @@ class MassiveClient:
                 raise self._refused[host]
             if resp.status_code == 403:
                 raise NotEntitled(resp.status_code, message)
-            if resp.status_code == 429:
-                raise RateLimited(resp.status_code, message)
+            if resp.status_code == 429:  # the wait the server asked for: the kill that follows lasts at least that
+                raise RateLimited(resp.status_code, message,
+                                  _retry_delay(resp, 0) if resp.headers.get("Retry-After") else None)
             raise SourceError(resp.status_code, message)
         return resp
 
@@ -499,4 +506,8 @@ def _error_message(resp: requests.Response) -> str:
         body = resp.json()
     except ValueError:
         return resp.text[:200]
-    return body.get("message") or body.get("error") or str(body)[:200]
+    if isinstance(body, dict):
+        return body.get("message") or body.get("error") or str(body)[:200]
+    if isinstance(body, list):  # Bitfinex: ["error", 11010, "ratelimit: error"] (a 429 read as a crash)
+        return " ".join(map(str, body))[:200]
+    return str(body)[:200]

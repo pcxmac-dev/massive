@@ -158,6 +158,9 @@ class Provider:
     plan_note: str = ""  # what its scan cannot tell about its plan (the user's choice is then the plan)
     options: tuple[str, ...] = ()  # its other variables (Settings.env)
     archival: bool = False  # a closed feed: each symbol filled once, then never asked again
+    # the feed whose account (key and limits) its requests count against, when another's: a 429 or a
+    # refused key kills both (killswitch.sharing)
+    account: str = ""
     tier: "Tier | None" = None  # its plan, when it has one fixed plan
     per_run: int | None = None  # its request caps with that plan
     per_day: int | None = None

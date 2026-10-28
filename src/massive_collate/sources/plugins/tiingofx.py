@@ -32,7 +32,7 @@ def build(settings, request_budget):
 
 
 PLUGIN = Provider(
-    name="tiingofx", title="Tiingo forex", build=build, assets=frozenset({"fx"}), order=61,
+    name="tiingofx", title="Tiingo forex", build=build, assets=frozenset({"fx"}), order=61, account="tiingo",
     about="currency pairs' 1-minute bars from 2020 (your Tiingo key and limits)",
     keys=TIINGO.keys, signup=TIINGO.signup, kind="vendor",
     provides={"fx": ("minute",)}, per_request={"minute": TiingoFxSource.WINDOW_DAYS * 1440},

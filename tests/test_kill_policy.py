@@ -247,3 +247,76 @@ def test_tests_cannot_start_processes_from_the_chart_app():
 
     with pytest.raises(AssertionError, match="tried to start a process"):
         server.subprocess.Popen(["python", "-m", "massive_collate", "sync"])  # conftest: a test once started a real sync
+
+
+def test_a_feed_on_another_feeds_account_is_killed_with_it_for_as_long_as_the_server_asked(store):
+    # Blue Ocean's requests are Alpaca's account's: Alpaca's 429 is Blue Ocean's too
+    k = killswitch.strike(store, "boats", "fetch", "HTTP 429: too many", now=NOW, at_least_s=3600)
+    assert k["until"] == (NOW + timedelta(hours=1)).isoformat(timespec="seconds")  # not the ladder's 30 min
+    assert killswitch.killed(store, "alpaca", "fetch", NOW + timedelta(minutes=59))
+    assert killswitch.killed(store, "tiingo", "fetch", NOW) is None  # another account
+    killswitch.strike(store, "tiingo", "fetch", "refused", now=NOW)
+    assert killswitch.killed(store, "tiingofx", "fetch", NOW)  # Tiingo forex: Tiingo's key
+    killswitch.strike(store, "coinbase", "fetch", "by hand", now=NOW, minutes=60)
+    assert killswitch.killed(store, "bitstamp", "fetch", NOW) is None
+    killswitch.strike(store, "massive", "fetch", "by hand", now=NOW, minutes=60)  # by hand: the feed named only
+    assert killswitch.sharing("massive") == [] and sorted(killswitch.sharing("alpaca")) == ["boats"]
+
+
+def test_a_429_carries_its_wait_and_a_key_with_a_line_break_is_never_sent_or_repeated():
+    from massive_collate.errors import Unauthorized
+    from massive_collate.sources.massive import MassiveClient
+
+    from .conftest import FakeResponse, FakeSession
+
+    session = FakeSession([FakeResponse(429, {"message": "slow down"}, {"Retry-After": "3600"})])
+    client = MassiveClient("k", base_url="https://x.test", session=session, sleep=lambda s: None)
+    with pytest.raises(RateLimited) as caught:
+        client.get("/v2/aggs")
+    assert caught.value.retry_after == 3600 and len(session.calls) == 1  # longer than a run waits: not tried again
+    assert killswitch.retry_after_s(cli.collector.StopRun("rate limited")) is None
+
+    class Refusing:
+        calls = 0
+
+        def get(self, *a, **k):
+            Refusing.calls += 1
+            raise requests.exceptions.InvalidHeader("Invalid leading whitespace in header value: 'Bearer SECRETKEY\n'")
+
+    client = MassiveClient("SECRETKEY\n", base_url="https://x.test", session=Refusing(), sleep=lambda s: None)
+    with pytest.raises(Unauthorized) as caught:
+        client.get("/v2/aggs")
+    assert "SECRETKEY" not in str(caught.value) and Refusing.calls == 1  # not repeated, not tried again
+    # Bitfinex answers a list: read as the error it is, not a crash
+    session = FakeSession([FakeResponse(429, ["error", 11010, "ratelimit: error"])])
+    client = MassiveClient("k", base_url="https://x.test", session=session, sleep=lambda s: None, max_retries=0)
+    with pytest.raises(RateLimited, match="ratelimit: error"):
+        client.get("/v2/candles")
+
+
+def test_keys_are_read_without_the_spaces_and_line_breaks_around_them():
+    from massive_collate.config import load_settings
+
+    s = load_settings(env={"MASSIVE_API_KEY": " mk\r\n", "TIINGO_API_KEY": "tk\n", "ALPACA_API_KEY_ID": " id ",
+                           "ALPACA_API_SECRET_KEY": "sk\n"}, env_file=None)
+    assert (s.api_key, s.tiingo_api_key, s.alpaca.key_id, s.alpaca.secret_key) == ("mk", "tk", "id", "sk")
+
+
+def test_a_rate_limit_in_the_weekly_scan_stops_the_run_and_other_failures_do_not(store, monkeypatch):
+    class Limited:
+        scan = True
+
+        def run_scan(self, source):
+            raise RateLimited(429, "slow down", 600)
+
+    class Odd(Limited):
+        def run_scan(self, source):
+            raise ValueError("an answer it could not read")
+
+    monkeypatch.setattr(cli, "providers", lambda: {"x": Limited()})
+    with pytest.raises(RateLimited):  # swallowed, the sync sent its requests into the 429 straight after
+        cli._scan("x", object(), store, lambda *_: None)
+    logged = []
+    monkeypatch.setattr(cli, "providers", lambda: {"x": Odd()})
+    cli._scan("x", object(), store, logged.append)
+    assert logged and "capability scan failed" in logged[0]

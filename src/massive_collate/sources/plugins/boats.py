@@ -29,7 +29,7 @@ def scan(source) -> list[tuple[str, bool, str]]:
 
 
 PLUGIN = Provider(
-    name="boats", title="Blue Ocean", build=build, assets=frozenset({"stock"}), order=15,
+    name="boats", title="Blue Ocean", build=build, assets=frozenset({"stock"}), order=15, account="alpaca",
     about="US stocks overnight, 20:00-04:00 ET, Blue Ocean ATS through Alpaca (your Alpaca keys and limits)",
     keys=ALPACA.keys, signup=ALPACA.signup, kind="exchange",
     provides={"stock": ("minute",)}, per_request={"minute": PAGE_LIMIT},

@@ -20,7 +20,12 @@ class Unauthorized(SourceError):
 
 
 class RateLimited(SourceError):
-    """Still rate limited after all retries."""
+    """Still rate limited after all retries. `retry_after`: the seconds the server asked for, if it
+    said (the kill that follows lasts at least that long: killswitch.retry_after_s)."""
+
+    def __init__(self, status: int, message: str, retry_after: float | None = None):
+        super().__init__(status, message)
+        self.retry_after = retry_after
 
 
 class BudgetExhausted(Exception):

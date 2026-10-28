@@ -144,20 +144,25 @@ def test_history_written_newest_first_does_not_leave_pages_half_empty():
 
 
 
-def test_deleting_before_a_listing_seeks_first_and_deletes_each_frame(tmp_path):
+def test_another_instruments_rows_are_moved_to_the_archive_never_deleted(tmp_path):
     from massive_collate.storage import Store
 
-    with Store(tmp_path / "m.db") as s:
+    with Store(tmp_path / "m.db", ticks=True) as s:
         old, new = 1_600_000_000_000, 1_700_000_000_000
         bar = lambda t: {"t": t, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}
         s.upsert_bars("massive", "AAPL", "minute", 1, [bar(old), bar(new)])
         s.upsert_bars("massive", "AAPL", "day", 1, [bar(old), bar(new)])
         s.upsert_bars("massive", "MSFT", "minute", 1, [bar(old)])
+        s.upsert_trades("massive", "AAPL", [{"sip_timestamp": old * 10**6, "sequence_number": 1, "price": 1.0,
+                                             "size": 1.0, "conditions": [], "id": "1", "tape": 3}])
         conn = s._bars("massive")
         before = conn.total_changes
-        assert s.delete_before("massive", "AAPL", (old - 1) * 10**6) == 0
+        assert s.archive_before("massive", "AAPL", (old - 1) * 10**6) == 0
         assert conn.total_changes == before  # nothing older: no write at all
-        assert s.delete_before("massive", "AAPL", (old + 1) * 10**6) == 2  # the old minute and the old day
+        # the old minute, the old day and the old trade: out of the series, kept in the archive
+        assert s.archive_before("massive", "AAPL", (old + 1) * 10**6, reason="before its listing") == 3
+        assert s.archived_rows("massive", "AAPL") == 3 and s.archived_rows("massive", "MSFT") == 0
+        assert conn.execute("SELECT reason FROM archived_bars").fetchall() == [("before its listing",)] * 2
         assert s.bar_edges("massive", "AAPL") == (new, new) and s.bar_edges("massive", "MSFT") == (old, old)
 
 

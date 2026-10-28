@@ -878,8 +878,12 @@ class FeedStore:
                 "DELETE FROM grouped_days WHERE source=? AND status='denied'", (source,)
             ).rowcount
 
-    def delete_before(self, source: str, ticker: str, cutoff_ns: int | None = None) -> int:
-        """Delete a ticker's ticks and bars older than cutoff_ns (all of them if None)."""
+    def archive_before(self, source: str, ticker: str, cutoff_ns: int | None = None, reason: str = "") -> int:
+        """Move a ticker's ticks and bars older than cutoff_ns (all of them if None) out of its series
+        into the feed's archive tables (archived_bars, archived_built_bars, ticks.archived_trades, each
+        row with when and why): another instrument's data under the same symbol, no longer shown or
+        built from, and never deleted (they were: a new FIGI or listing date wiped every feed's history
+        and the recorded trades, which can never be downloaded again). Returns the rows moved."""
         ticker = ticker.upper()
         cutoff_ns = cutoff_ns if cutoff_ns is not None else 2**62
         feed = self._feed(source)
@@ -894,14 +898,38 @@ class FeedStore:
             "SELECT 1 FROM ticks.trades WHERE ticker=? AND ts_ns < ? LIMIT 1", (ticker, cutoff_ns)).fetchone() is not None
         if not frames and not ticks:
             return 0
+        at = _stored_ms()
         with feed.conn:
-            n = feed.conn.execute(
-                "DELETE FROM ticks.trades WHERE ticker=? AND ts_ns < ?", (ticker, cutoff_ns)
-            ).rowcount if ticks else 0
+            n = 0
+            if ticks:
+                feed.conn.execute("CREATE TABLE IF NOT EXISTS ticks.archived_trades AS "
+                                  "SELECT *, 0 AS archived_at, '' AS reason FROM ticks.trades WHERE 0")
+                feed.conn.execute("INSERT INTO ticks.archived_trades SELECT *, ?, ? FROM ticks.trades "
+                                  "WHERE ticker=? AND ts_ns < ?", (at, reason, ticker, cutoff_ns))
+                n += feed.conn.execute("DELETE FROM ticks.trades WHERE ticker=? AND ts_ns < ?",
+                                       (ticker, cutoff_ns)).rowcount
             for table, timespan, multiplier in frames:  # a range of the key: ticker, frame, then time
-                n += feed.conn.execute(f"DELETE FROM {table} WHERE ticker=? AND timespan=? AND multiplier=? AND ts < ?",
-                                       (ticker, timespan, multiplier, cutoff_ms)).rowcount
+                key = (ticker, timespan, multiplier, cutoff_ms)
+                where = "WHERE ticker=? AND timespan=? AND multiplier=? AND ts < ?"
+                feed.conn.execute(f"CREATE TABLE IF NOT EXISTS archived_{table} AS "
+                                  f"SELECT *, 0 AS archived_at, '' AS reason FROM {table} WHERE 0")
+                feed.conn.execute(f"INSERT INTO archived_{table} SELECT *, ?, ? FROM {table} {where}", (at, reason, *key))
+                n += feed.conn.execute(f"DELETE FROM {table} {where}", key).rowcount
         self._wrote()
+        return n
+
+    def archived_rows(self, source: str, ticker: str) -> int:
+        """Rows of a ticker moved to the feed's archive tables (archive_before)."""
+        feed = self._feed(source)
+        if feed is None:
+            return 0
+        tables = {r[0] for r in feed.conn.execute("SELECT name FROM sqlite_master WHERE name LIKE 'archived_%'")}
+        n = sum(feed.conn.execute(f"SELECT COUNT(*) FROM {t} WHERE ticker=?", (ticker.upper(),)).fetchone()[0]
+                for t in sorted(tables))
+        if feed.has_ticks() and feed.conn.execute(
+                "SELECT 1 FROM ticks.sqlite_master WHERE name='archived_trades'").fetchone():
+            n += feed.conn.execute("SELECT COUNT(*) FROM ticks.archived_trades WHERE ticker=?",
+                                   (ticker.upper(),)).fetchone()[0]
         return n
 
     def series_fingerprint(self, source: str, ticker: str) -> tuple:

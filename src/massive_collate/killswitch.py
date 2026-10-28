@@ -81,11 +81,34 @@ def killed(store, feed: str, kind: str, now: datetime | None = None) -> dict | N
         return None
 
 
+def sharing(feed: str) -> list[str]:
+    """The other feeds on the account a feed's requests count against: one key, one set of limits
+    (Blue Ocean's are Alpaca's, Tiingo forex's Tiingo's: Provider.account)."""
+    from .sources import providers
+
+    known = providers()
+    account = lambda f: (known[f].account or f) if f in known else f  # noqa: E731
+    return [f for f in known if f != feed and account(f) == account(feed)]
+
+
+def retry_after_s(error: BaseException | None) -> float | None:
+    """The wait a server asked for (Retry-After) on the 429 behind an error, if it said one."""
+    while error is not None:
+        if getattr(error, "retry_after", None):
+            return float(error.retry_after)
+        error = error.__cause__
+    return None
+
+
 def strike(store, feed: str, kind: str, why: str, now: datetime | None = None, minutes: float | None = None,
-           log=None) -> dict:
+           log=None, at_least_s: float | None = None, shared: bool = True) -> dict:
     """Kill a feed's live stream or fetching: for the next step of KILL_MINUTES (or `minutes`, a
-    kill by hand, which replaces any kill in force). Returns the kill. A strike while already
-    killed is the same kill: it does not climb the ladder, and is neither logged nor recorded again."""
+    kill by hand, which replaces any kill in force), and never shorter than the wait the server
+    asked for (`at_least_s`, its Retry-After: an hour asked for was struck as half an hour, and
+    asked again before the hour was up). Returns the kill. A strike while already killed is the
+    same kill: it does not climb the ladder, and is neither logged nor recorded again. A policy kill
+    of fetching reaches the feeds on the same account too (`sharing`): Alpaca's 429 is Blue Ocean's,
+    which went on sending into it; a kill by hand stays on the feed named."""
     now = _now(now)
     fresh = [True]
 
@@ -99,6 +122,8 @@ def strike(store, feed: str, kind: str, why: str, now: datetime | None = None, m
             recent = False
         strikes = (k.get("strikes", 0) if recent else 0) + 1
         length = minutes if minutes is not None else KILL_MINUTES[min(strikes, len(KILL_MINUTES)) - 1]
+        if minutes is None and at_least_s:
+            length = max(length, at_least_s / 60)
         return {"at": now.isoformat(timespec="seconds"), "until": (now + timedelta(minutes=length)).isoformat(timespec="seconds"),
                 "why": why[:300], "strikes": strikes, "by": "user" if minutes is not None else "policy"}
 
@@ -107,6 +132,10 @@ def strike(store, feed: str, kind: str, why: str, now: datetime | None = None, m
         store.feed_event(feed, kind, "killed", detail=f"until {k['until']} (strike {k['strikes']}): {why}", now=now)
         if log:
             log(f"KILLED {feed} {kind} until {k['until'][:16].replace('T', ' ')} UTC (strike {k['strikes']}): {why}")
+    if shared and kind == "fetch" and minutes is None:
+        for other in sharing(feed):
+            strike(store, other, kind, f"the same account as {feed}: {why}", now, log=log, at_least_s=at_least_s,
+                   shared=False)
     return k
 
 

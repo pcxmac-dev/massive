@@ -244,6 +244,16 @@ class AlpacaSettings:
                 f"feed={self.feed}, crypto_loc={self.crypto_loc}, paper={self.paper})")
 
 
+def _key(merged: Mapping[str, str], *names: str) -> str | None:
+    """A key's value from the first of its variables set, spaces and line breaks around it taken off
+    (one pasted with a newline made every request fail, the key repeated in the error)."""
+    for name in names:
+        value = (merged.get(name) or "").strip()
+        if value:
+            return value
+    return None
+
+
 def _alpaca(merged: Mapping[str, str]) -> AlpacaSettings:
     plan = (merged.get("ALPACA_PLAN") or "basic").strip().lower()
     if plan not in ALPACA_TIERS:
@@ -261,8 +271,8 @@ def _alpaca(merged: Mapping[str, str]) -> AlpacaSettings:
     per_run = _int_setting(merged, "ALPACA_MAX_REQUESTS_PER_RUN")
     per_day = _int_setting(merged, "ALPACA_MAX_REQUESTS_PER_DAY")
     return AlpacaSettings(
-        key_id=merged.get("ALPACA_API_KEY_ID") or merged.get("APCA_API_KEY_ID") or None,
-        secret_key=merged.get("ALPACA_API_SECRET_KEY") or merged.get("APCA_API_SECRET_KEY") or None,
+        key_id=_key(merged, "ALPACA_API_KEY_ID", "APCA_API_KEY_ID"),
+        secret_key=_key(merged, "ALPACA_API_SECRET_KEY", "APCA_API_SECRET_KEY"),
         tier=tier, feed=feed, crypto_loc=loc,
         paper=(merged.get("ALPACA_PAPER") or "1").strip().lower() not in ("0", "false", "no"),
         max_requests_per_run=3000 if per_run is None else per_run,
@@ -362,7 +372,7 @@ def load_settings(
     from .sources.registry import variables
 
     return Settings(
-        api_key=merged.get("MASSIVE_API_KEY") or None,
+        api_key=_key(merged, "MASSIVE_API_KEY"),
         tier=tier,
         db_path=Path(merged["MASSIVE_DB"]).expanduser() if merged.get("MASSIVE_DB") else DEFAULT_DB_PATH,
         base_url=(merged.get("MASSIVE_BASE_URL") or DEFAULT_BASE_URL).rstrip("/"),
@@ -379,7 +389,7 @@ def load_settings(
         second_history_days=_default(_int_setting(merged, "SECOND_HISTORY_DAYS"), 365),
         backups_keep=_default(_int_setting(merged, "BACKUPS_KEEP"), 7),
         tick_min_free_gb=_default(_int_setting(merged, "TICK_MIN_FREE_GB"), 250),
-        tiingo_api_key=merged.get("TIINGO_API_KEY") or None,
+        tiingo_api_key=_key(merged, "TIINGO_API_KEY"),
         gov_contact=(merged.get("GOV_CONTACT") or "").strip() or None,
         crypto_venue_days=_default(_int_setting(merged, "CRYPTO_VENUE_DAYS"), 0),
         live_coins=_live_coins(merged.get("LIVE_CRYPTO")),

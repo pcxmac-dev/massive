@@ -669,18 +669,20 @@ def check_listing(source: DataSource, store: Store, item: dict, today: date, log
     if item["figi"] and inst.figi and inst.figi != item["figi"]:
         n = 0
         for feed in feeds:
-            n += store.delete_before(feed, ticker)
-            store.drop_coverage(feed, ticker)  # what was held is gone: asked for again
+            # moved to the feed's archive (kept: nothing is ever deleted), out of the new issuer's series
+            n += store.archive_before(feed, ticker, reason=f"another instrument: {item['figi']}, now {inst.figi}")
+            store.drop_coverage(feed, ticker)  # what was held is the old issuer's: asked for again
             store.reset_backfill(feed, ticker)
             if feed != source.name:  # the new listing is theirs too (an archive fills from its own listing date)
                 store.set_listing(feed, ticker, inst.list_date, inst.figi, None, inst.name, inst.kind)  # checked again
                 store.set_closed(feed, ticker, None)  # a closed archive has the new issuer's history to fill
-        log(f"{ticker}: symbol now belongs to a different instrument ({inst.name}); removed {n} old rows"
-            + (f" on {len(feeds)} feeds" if len(feeds) > 1 else ""))
+        log(f"{ticker}: symbol now belongs to a different instrument ({inst.name}); {n} old rows moved to the "
+            "archive" + (f" on {len(feeds)} feeds" if len(feeds) > 1 else ""))
     if inst.list_date:
-        n = sum(store.delete_before(feed, ticker, _date_ns(inst.list_date)) for feed in feeds)
+        n = sum(store.archive_before(feed, ticker, _date_ns(inst.list_date), reason=f"before its {inst.list_date} listing")
+                for feed in feeds)
         if n:
-            log(f"{ticker}: removed {n} rows from before its {inst.list_date} listing (another instrument)")
+            log(f"{ticker}: {n} rows from before its {inst.list_date} listing (another instrument) moved to the archive")
         for w in store.watchlist(ticker=ticker):
             if w["backfilled_to"] and w["backfilled_to"] < inst.list_date:
                 store.set_backfilled(w["source"], ticker, inst.list_date)
@@ -1506,7 +1508,7 @@ def sync(
         if e.strike:  # refused, or failing: the feed's fetching is killed (killswitch.py)
             from . import killswitch
 
-            killswitch.strike(store, source.name, "fetch", str(e), log=log)
+            killswitch.strike(store, source.name, "fetch", str(e), log=log, at_least_s=killswitch.retry_after_s(e))
         # rows of the symbol it stopped in were stored page by page: count them too
         result.rows = max(result.rows, store.rows_saved - saved_before)
     return result
