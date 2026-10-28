@@ -20,8 +20,12 @@ Working notes so work can resume in a fresh session. Newest first.
   `activity.month_allowance`). Found 2026-10-28: Alpaca's Blue Ocean history starts 2024-09-16 and
   Tiingo's has nothing earlier (probed: none 2021-01 to 2024-09-25 for AAPL), so Tiingo adds no
   overnight range; Massive's backfill is nearly done (~32k requests left, 9.4 TB free, massive.db
-  629 GB, ~6 MB a request). Once the backlogs finish, spare allowance needs new data (the user's
-  call): more years of 1-second bars (SECOND_HISTORY_DAYS, 365 now), Tiingo's IEX or forex minutes.
+  629 GB, ~6 MB a request). Once the backlogs finish, spare allowance needs new data; the user
+  chose Tiingo's forex minutes (not more 1-second years, not Tiingo's IEX).
+- **Tiingo forex** (`tiingofx`, sources/plugins/tiingofx.py): currency pairs' 1-minute bars from
+  2020-01-01 (Tiingo's first), three UTC days a request, history through the day before; its own
+  feed file and market, on Tiingo's key, rate window and daily cap. The app's 7 pairs: about 3,100
+  requests and ~2 GB of Tiingo's 40 GB a month. More pairs would need a guard on that transfer cap.
 - **Feeds in parallel** (docs/APPRAISAL.md #6): a run lock per feed (`massive-fetch-<feed>.lock`;
   `massive.lock` is now the whole database's, for moves of the data). The hourly sync starts each
   feed that is set up and not fetching in a process of its own, does not wait for them, and builds

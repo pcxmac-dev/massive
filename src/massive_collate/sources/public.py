@@ -401,5 +401,73 @@ class TiingoSource(_Archive):
         yield bars[:limit] if limit else bars
 
 
+def tiingo_fx_pair(ticker: str) -> str:
+    """Tiingo's name for a currency pair (eurusd): the watch row keeps Massive's (C:EURUSD)."""
+    return ticker.upper().removeprefix("C:").lower()
+
+
+class TiingoFxSource(_Archive):
+    """Tiingo's forex: currency pairs' 1-minute bars (open, high, low, close; no volume) from
+    2020-01-01, the earliest it serves ("End date must be >= 2020-01-01", asked 2026-10-28). One
+    request gives at most about four days of minutes (5,772 bars for a whole year asked, 2026-10-28),
+    so it is asked WINDOW_DAYS whole UTC days at a time, which always fit. A feed of its own
+    (plugins/tiingofx.py) on the Tiingo key's limits; still trading, so kept up to date."""
+
+    name = "tiingofx"
+    assets = ("fx",)
+    archival = False
+    WINDOW_DAYS = 3  # 4,320 minutes: inside the ~5,772 one request gives
+    START = date(2020, 1, 1)
+
+    def __init__(self, client: PublicClient, has_key: bool):
+        super().__init__(client)
+        self.has_key = has_key
+
+    def serves(self, asset: str) -> bool:
+        return asset == "fx" and self.has_key
+
+    def resolutions(self, asset: str) -> tuple[str, ...]:
+        return ("minute",) if self.serves(asset) else ()
+
+    def native_frames(self, asset: str) -> tuple[tuple[str, int], ...]:
+        return ()  # its hours and days are built here from its minutes
+
+    def bar_pages(self, ticker, start, end, timespan, multiplier=1, descending=False, asset="fx",
+                  limit: int | None = None) -> Iterator[list[dict]]:
+        if not self.has_key:
+            raise NotEntitled(401, "TIINGO_API_KEY not set; nothing sent")
+        if (timespan, multiplier) != ("minute", 1):
+            raise NotEntitled(0, "Tiingo's forex is collected as 1-minute bars here")
+        pair = tiingo_fx_pair(ticker)
+        a, b = _bounds(start, end)
+        a = max(a, _ms(datetime.combine(self.START, datetime.min.time(), timezone.utc)))
+        day, step = 86_400_000, self.WINDOW_DAYS * 86_400_000
+        windows, t = [], a // day * day  # whole UTC days: Tiingo is asked by date
+        while t < b:
+            windows.append((t, min(b, t + step)))
+            t += step
+        for lo, hi in (reversed(windows) if descending else windows):
+            first = datetime.fromtimestamp(lo / 1000, timezone.utc).date()
+            last = datetime.fromtimestamp((hi - 1) / 1000, timezone.utc).date()  # Tiingo's end date is inclusive
+            rows = self.client.get("/tiingo/fx/prices", {"tickers": pair, "startDate": first.isoformat(),
+                                                         "endDate": last.isoformat(), "resampleFreq": "1min"})
+            if not isinstance(rows, list):
+                raise SourceError(0, f"unexpected Tiingo answer for {pair}")
+            bars = []
+            for r in rows:
+                ms = _ms(datetime.fromisoformat(r["date"]))
+                if max(lo, a) <= ms < hi:
+                    bars.append({"t": ms, "o": float(r["open"]), "h": float(r["high"]), "l": float(r["low"]),
+                                 "c": float(r["close"]), "v": None, "vw": None, "n": None})
+            bars.sort(key=lambda x: -x["t"] if descending else x["t"])
+            yield Page(bars[:limit] if limit else bars, window=(max(lo, a), hi))
+            if limit:
+                return
+
+    def instrument(self, ticker: str, resolve_exchange: bool = True) -> Instrument:
+        pair = tiingo_fx_pair(ticker).upper()
+        return Instrument(ticker=pair, name=f"{pair[:3]}/{pair[3:]} on Tiingo", details={"venue": "Tiingo"})
+
+
 __all__ = ["PublicClient", "BitstampSource", "CoinbaseSource", "BitfinexSource", "CboeSource", "TiingoSource",
-           "split_adjust", "BITSTAMP_PAIRS", "CRYPTO_PAIRS", "CBOE_INDICES"]
+           "TiingoFxSource", "split_adjust", "BITSTAMP_PAIRS", "CRYPTO_PAIRS", "CBOE_INDICES"]

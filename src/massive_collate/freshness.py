@@ -68,6 +68,11 @@ PLAN_DELAYS["alpaca-basic"] = {"stock": Delay("delay", timedelta(minutes=16)), "
                                "overnight": Delay("delay", timedelta(minutes=16))}
 PLAN_DELAYS["alpaca-plus"] = {"stock": Delay("delay"), "crypto": Delay("delay"), "overnight": Delay("delay")}
 
+# Tiingo's forex (sources/plugins/tiingofx.py), taken for history: whole UTC days, through the day
+# before (how soon its newest minutes are final is not known; a minute asked too soon and found
+# empty would be counted as held and never asked again).
+PLAN_DELAYS["tiingofx"] = {"fx": Delay("utc_day")}
+
 # A feed whose market keeps hours of its own: Blue Ocean (sources/plugins/boats.py) trades US stocks
 # overnight only, 20:00-04:00 ET (MarketCalendar's "overnight"). Judged by the stock day, its nights
 # looked closed: it was asked only up to 20:00, so a night's bars came the next morning, and a stock

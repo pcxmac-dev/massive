@@ -17,7 +17,7 @@ from massive_collate.symbols import resolve
 
 from .conftest import FakeSource
 
-BUILT_IN = ["massive", "alpaca", "boats", "bitstamp", "coinbase", "bitfinex", "cboe", "tiingo"]
+BUILT_IN = ["massive", "alpaca", "boats", "bitstamp", "coinbase", "bitfinex", "cboe", "tiingo", "tiingofx"]
 
 
 class AcmeSource(FakeSource):
