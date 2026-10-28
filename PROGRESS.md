@@ -15,6 +15,13 @@ Working notes so work can resume in a fresh session. Newest first.
   shows none ("Default" keeps every symbol with data).
 - **Blue Ocean queued**: every watched stock (7,885) is on the `boats` feed; its history fills
   within Alpaca's limits, the signed-in profile's watchlists first.
+- **Month-end allowance** (the user: every feed's allowance spent each month): the Fetcher's
+  Sources table shows each feed's month (used, lapsed on past days, left, where the pace takes it:
+  `activity.month_allowance`). Found 2026-10-28: Alpaca's Blue Ocean history starts 2024-09-16 and
+  Tiingo's has nothing earlier (probed: none 2021-01 to 2024-09-25 for AAPL), so Tiingo adds no
+  overnight range; Massive's backfill is nearly done (~32k requests left, 9.4 TB free, massive.db
+  629 GB, ~6 MB a request). Once the backlogs finish, spare allowance needs new data (the user's
+  call): more years of 1-second bars (SECOND_HISTORY_DAYS, 365 now), Tiingo's IEX or forex minutes.
 - **Feeds in parallel** (docs/APPRAISAL.md #6): a run lock per feed (`massive-fetch-<feed>.lock`;
   `massive.lock` is now the whole database's, for moves of the data). The hourly sync starts each
   feed that is set up and not fetching in a process of its own, does not wait for them, and builds
