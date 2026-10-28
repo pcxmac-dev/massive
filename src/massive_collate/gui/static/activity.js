@@ -186,9 +186,12 @@
   async function askFirst(ticker, again = false) {
     if (asked.busy === ticker || again && asked.ticker === ticker && Date.now() - asked.at < ASK_EVERY_MS) return;
     Object.assign(asked, { ticker, at: Date.now(), busy: ticker });
+    // a symbol you opened goes in your register once: not the one the page opened by itself, nor a repeat ask
+    const visit = state.picked === ticker;
+    if (visit) state.picked = null;
     let next = null;
     try {
-      const res = await fetch(`/api/priority?ticker=${encodeURIComponent(ticker)}`, { method: 'POST', headers: { 'X-Massive-Charts': '1' } });
+      const res = await fetch(`/api/priority?ticker=${encodeURIComponent(ticker)}${visit ? '&visit=1' : ''}`, { method: 'POST', headers: { 'X-Massive-Charts': '1' } });
       const body = await res.json().catch(() => ({}));
       if (res.status !== 404) {  // 404: not on the watchlist, nothing to fetch
         if (!res.ok) throw new Error(body.error || res.statusText);

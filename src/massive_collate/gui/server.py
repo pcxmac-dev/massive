@@ -1258,8 +1258,8 @@ class ChartApp:
     PRIORITY_COOLDOWN = 300  # seconds: a symbol opened again sooner is not asked for again
 
     def priority(self, ticker: str, profile: int | None = None) -> dict:
-        """The chart opened `ticker`: every feed holding it updates it before anything else, and it
-        goes in `profile`'s register (visits). While a feed it needs (`need`) is not fetching, a run
+        """The chart opened `ticker`: every feed holding it updates it before anything else, and,
+        opened by you rather than by the page itself, it goes in `profile`'s register (visits). While a feed it needs (`need`) is not fetching, a run
         for that symbol alone starts now (`sync --tickers`: gaps and new data on each such feed, only
         what each plan has published); on a feed that is fetching, the request waits in the database
         and that feed's run takes the symbol next. Within every feed's limits either way: one fetching
@@ -1272,12 +1272,12 @@ class ChartApp:
         ticker = ticker.upper()
         now = datetime.now(timezone.utc)
         with self._lock:
+            if profile is not None:  # noted whether or not a feed fetches it
+                self.store.visit(profile, ticker, now)
             rows = self.store.watchlist(ticker=ticker)
             feeds = sorted({w["source"] for w in rows})
             if not feeds:
                 raise LookupError(f"{ticker} is not on the watchlist")
-            if profile is not None:
-                self.store.visit(profile, ticker, now)
             profiles = feed_profiles(self.settings)
             if self._watch_everywhere(rows[0], profiles):  # a feed added since (Blue Ocean) takes it from now
                 rows = self.store.watchlist(ticker=ticker)
@@ -1545,10 +1545,12 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                 if method == "PUT" and parts == ["", "api", "watchlists"]:
                     return self._json(app.save_watchlists(body, me))
                 if method == "POST" and parts == ["", "api", "priority"]:
-                    ticker = parse_qs(urlparse(self.path).query).get("ticker", [None])[-1]
+                    query = parse_qs(urlparse(self.path).query)
+                    ticker = query.get("ticker", [None])[-1]
                     if not ticker:
                         return self._json({"error": "ticker is required"}, HTTPStatus.BAD_REQUEST)
-                    return self._json(app.priority(ticker, me), HTTPStatus.ACCEPTED)
+                    visit = query.get("visit", [None])[-1] == "1"  # you opened it (not the page by itself)
+                    return self._json(app.priority(ticker, me if visit else None), HTTPStatus.ACCEPTED)
                 if method == "POST" and parts == ["", "api", "fetching"]:
                     return self._json(app.set_fetching(body))
                 if method == "POST" and parts == ["", "api", "plugins", "rescan"]:

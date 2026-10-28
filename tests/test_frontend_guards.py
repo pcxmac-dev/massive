@@ -374,9 +374,11 @@ def test_the_status_line_spans_the_open_views_own_area_in_every_view():
     place = _js("panels.js").split("function placeStatus()", 1)[1].split("\n  }\n", 1)[0]
     # not under the rail (right) nor under the chart's drawing tools (left: a strip at the view's edge)
     assert "c.tagName === 'NAV'" in place and "marginLeft" in place and "marginRight" in place
+    # nor under the chart's side panel (an aside at the view's right): it ends where the chart does
+    assert "c.tagName === 'ASIDE'" in place and "last.getAttribute('role') === 'separator'" in place
     panels = _js("panels.js")
     assert "const statusPlace = new ResizeObserver(placeStatus);" in panels  # no frame wait: a hidden tab has none
-    assert "[$('rail'), $('tools'), ...document.querySelectorAll('main > .view')]" in panels
+    assert "[$('rail'), $('tools'), $('sidePanel'), ...document.querySelectorAll('main > .view')]" in panels
     assert "window.addEventListener('massive:view', placeStatus);" in panels
     status = _js("style.css").split("#status {", 1)[1].split("}", 1)[0]
     assert "calc(var(--gap) * 2 + 54px)" in status  # the rail's until placed
@@ -404,6 +406,11 @@ def test_profiles_have_a_login_page_and_keep_their_own_preferences():
     login = _js("login.html")
     assert 'src="login.js"' in login and 'id="profileList"' in login and 'id="newProfile"' in login
     assert "icon('vitruvian', 140)" in _js("login.js")  # Leonardo's Vitruvian Man (the user)
+    # signing in opens the globe: the page loads again (a new #markets alone would leave the login page)
+    assert "history.replaceState(null, '', '/#markets');\n    location.reload();" in _js("login.js")
+    start = _js("panels.js").split("// -- start --", 1)[1]
+    assert "Object.hasOwn(VIEWS, linked) ? linked : prefs.get('pane', 'markets')" in start  # nothing saved: the globe
+    assert "history.replaceState(null, '', location.pathname + location.search);" in start  # a reload keeps your view
     assert "vitruvian:" in _js("icons.js")
     card = _js("style.css").split("\n.login {", 1)[1].split("}", 1)[0]
     assert "display: block" in card  # the app's `main { display: flex }` laid the card out in one row
@@ -414,3 +421,10 @@ def test_profiles_have_a_login_page_and_keep_their_own_preferences():
     assert 'id="railProfile"' in _js("index.html") and "/api/profiles/sign-out" in _js("panels.js")
     watch = _js("watchlist.js")
     assert "api('/api/register')" in watch and "Visited (${visits.length})" in watch  # the register
+    # a new profile's Collected starts empty: only its own symbols (the first profile keeps every one)
+    assert "const own = PROFILE === 1 ? null : new Set(" in watch and "Collected (${collected.length})" in watch
+    assert "collected.filter((s) => (key === 'live'" in watch
+    # the register notes the symbols you open, not the first one the page opens by itself
+    assert "state.picked = String(ticker).toUpperCase();" in _js("app.js").split("function openSymbol(", 1)[1].split("\n}\n", 1)[0]
+    ask = _js("activity.js").split("async function askFirst(", 1)[1].split("\n  }\n", 1)[0]
+    assert "const visit = state.picked === ticker;" in ask and "${visit ? '&visit=1' : ''}" in ask

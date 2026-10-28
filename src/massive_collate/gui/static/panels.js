@@ -132,7 +132,8 @@
   });
   // The status line spans the open view's own area, in every view and at every size: not under the
   // rail on its right (a scrollbar widens the rail on a short window), nor under the chart's drawing
-  // tools on its left (a strip at the view's left edge: it starts where the chart does).
+  // tools on its left (a strip at the view's left edge: it starts where the chart does), nor under
+  // the chart's side panel on its right (an aside at the view's right edge: it ends where the chart does).
   function placeStatus() {
     const view = document.querySelector('main > .view:not([hidden])');
     if (!view) return;
@@ -140,11 +141,16 @@
     const strip = [...view.children].find((c) => c.tagName === 'NAV' && c.offsetWidth && c.getBoundingClientRect().left - v.left < 2);
     const first = strip && [...view.children].find((c) => c !== strip && c.offsetWidth);
     const left = first ? first.getBoundingClientRect().left : v.left;
+    const side = [...view.children].find((c) => c.tagName === 'ASIDE' && c.offsetWidth && v.right - c.getBoundingClientRect().right < 2);
+    let last = side?.previousElementSibling;  // the chart, past the panel's resizer
+    while (last && (last.getAttribute('role') === 'separator' || !last.offsetWidth)) last = last.previousElementSibling;
+    const right = last ? last.getBoundingClientRect().right : v.right;
     $('status').style.marginLeft = `${Math.round(left)}px`;
-    $('status').style.marginRight = `${Math.round(document.documentElement.clientWidth - v.right)}px`;
+    $('status').style.marginRight = `${Math.round(document.documentElement.clientWidth - right)}px`;
   }
-  const statusPlace = new ResizeObserver(placeStatus);  // a view shown or hidden, the window or rail resized
-  for (const el of [$('rail'), $('tools'), ...document.querySelectorAll('main > .view')]) if (el) statusPlace.observe(el);
+  // a view shown or hidden, the window, rail or side panel resized, the panel shown or hidden
+  const statusPlace = new ResizeObserver(placeStatus);
+  for (const el of [$('rail'), $('tools'), $('sidePanel'), ...document.querySelectorAll('main > .view')]) if (el) statusPlace.observe(el);
   window.addEventListener('massive:view', placeStatus);
   window.addEventListener('massive:activity', (e) => renderRailIcons(e.detail));
   window.addEventListener('massive:symbol', () => renderRailIcons(window.Activity?.data));
@@ -263,5 +269,8 @@
 
   // -- start --------------------------------------------------------------------------
   renderRailIcons(null);
-  showPane(prefs.get('pane', 'stock'), { toggle: false });
+  // The view a link names (/#markets: signing in opens the globe, login.js), else the one you were on.
+  const linked = location.hash.slice(1);
+  if (linked) history.replaceState(null, '', location.pathname + location.search);
+  showPane(Object.hasOwn(VIEWS, linked) ? linked : prefs.get('pane', 'markets'), { toggle: false });
 })();

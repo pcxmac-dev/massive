@@ -109,3 +109,33 @@ def test_the_login_page_until_a_profile_is_chosen_then_the_app(tmp_path):
     finally:
         httpd.shutdown()
         store.close()
+
+
+def test_only_a_stock_you_open_goes_in_the_register_not_one_the_page_opened(tmp_path, monkeypatch):
+    from massive_collate.storage import Store
+
+    store = Store(tmp_path / "m.db", check_same_thread=False)  # the server's threads share it
+    for t in ("SPCX", "AAPL"):
+        store.watch("massive", [t], "minute", exchange="XNAS")
+    monkeypatch.setattr(server.activity, "fetching_feeds", lambda path: {"massive": 9})  # nothing starts
+    app = ChartApp(store)
+    two = app.create_profile({"name": "Two"})["id"]
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app, [0]))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    port = httpd.server_address[1]
+
+    def open_(query):
+        c = HTTPConnection("127.0.0.1", port)
+        c.request("POST", f"/api/priority?{query}", headers={
+            "Host": f"127.0.0.1:{port}", "X-Massive-Charts": "1", "Cookie": f"mc_profile={two}"})
+        return c.getresponse().status
+
+    try:
+        assert open_("ticker=AAPL") == 202  # the first symbol, opened by the page itself: fetched first, not noted
+        assert open_("ticker=SPCX&visit=1") == 202  # picked from the watchlist, the search, the news
+        assert [v["ticker"] for v in app.register(two)["visits"]] == ["SPCX"]
+        assert open_("ticker=ADAUSD&visit=1") == 404  # no feed fetches it, but you opened it: noted
+        assert {v["ticker"] for v in app.register(two)["visits"]} == {"SPCX", "ADAUSD"}
+    finally:
+        httpd.shutdown()
+        store.close()

@@ -30,7 +30,9 @@
 
   async function signIn(id) {
     await post('/api/profiles/sign-in', { id });
-    location.replace('/');  // the app, as this profile
+    // the app, as this profile, on the globe (a new #markets alone would not load the page again)
+    history.replaceState(null, '', '/#markets');
+    location.reload();
   }
 
   async function load() {

@@ -9,7 +9,10 @@ Working notes so work can resume in a fresh session. Newest first.
   (the page's, under `mc:p<id>:`) and register of the stocks it opened (`visits`; the watchlist
   panel's "Visited"). "Default" holds what came before; a new one starts empty. The fetcher follows
   the signed-in profile's watchlists (the one signed in last). The rail's foot shows the profile;
-  a click signs out.
+  a click signs out. Signing in opens the globe (`/#markets`; nothing saved: the globe too). The
+  register notes only the symbols you open (`openSymbol` → `visit=1`), not the first one the page
+  opens by itself; another profile's "Collected" is its own (its lists and register), so a new one
+  shows none ("Default" keeps every symbol with data).
 - **Blue Ocean queued**: every watched stock (7,885) is on the `boats` feed; its history fills
   within Alpaca's limits, the signed-in profile's watchlists first.
 - **Feeds in parallel** (docs/APPRAISAL.md #6): a run lock per feed (`massive-fetch-<feed>.lock`;

@@ -1,5 +1,6 @@
 // Watchlist (right rail, beside the chart): quick access to symbols, as TradingView's. "Collected"
-// lists every symbol with data here, grouped by class (what is streaming live first) with its
+// lists every symbol with data here (another profile than the first: only its own, from its lists and
+// its register), grouped by class (what is streaming live first) with its
 // exchange, last price and change; your own lists (saved in the database, /api/watchlists) keep
 // the symbols you add in your order; "Visited" is the profile's register, every symbol it opened,
 // the latest first (/api/register). A click opens the symbol on the chart.
@@ -103,11 +104,15 @@
     const box = $('pWatch');
     const symbols = state.symbols || [];
     const bySym = new Map(symbols.map((s) => [s.ticker, s]));
+    // Collected: every symbol with data here for the first profile (it kept what was here before
+    // profiles); another's are its own, in its lists or opened by it, so a new one starts with none.
+    const own = PROFILE === 1 ? null : new Set([...lists.flatMap((l) => l.tickers), ...visits.map((v) => v.ticker)]);
+    const collected = own ? symbols.filter((s) => own.has(s.ticker)) : symbols;
     const q = query.trim().toUpperCase();
     const match = (s) => !q || s.ticker.includes(q) || (s.name || '').toUpperCase().includes(q) || (s.exchange || '').includes(q);
     const mine = lists.find((l) => l.name === current);
     const th = (key, label, cls = '') => `<th class="${cls}" data-sort="${key}">${label}${sort.key === key ? (sort.dir > 0 ? ' ▲' : ' ▼') : ''}</th>`;
-    const options = [`<option value="${COLLECTED}">Collected (${symbols.length})</option>`,
+    const options = [`<option value="${COLLECTED}">Collected (${collected.length})</option>`,
       `<option value="${VISITED}">Visited (${visits.length})</option>`,
       ...lists.map((l) => `<option value="${esc(l.name)}">${esc(l.name)} (${l.tickers.length})</option>`),
       '<option value="__new__">New list…</option>'].join('');
@@ -119,8 +124,9 @@
         : `<tbody><tr><td colspan="4" class="p-muted w-empty">${visits.length ? 'Nothing matches.' : 'Nothing visited yet: every symbol you open is noted here.'}</td></tr></tbody>`;
     } else if (!mine) {
       const live = new Set(window.Activity?.data?.liveFeeds?.liveTickers || []);
-      body = GROUPS.map(([key, label]) => {
-        const entries = symbols.filter((s) => (key === 'live' ? live.has(s.ticker) : s.asset === key && !live.has(s.ticker)) && match(s))
+      body = !collected.length ? '<tbody><tr><td colspan="4" class="p-muted w-empty">Nothing collected yet: the symbols you open or add to a list show here.</td></tr></tbody>'
+        : GROUPS.map(([key, label]) => {
+        const entries = collected.filter((s) => (key === 'live' ? live.has(s.ticker) : s.asset === key && !live.has(s.ticker)) && match(s))
           .map((sym) => ({ sym, q: quote(sym) })).sort(compare);
         if (!entries.length) return '';
         const closed = collapsed.has(key) && !q;

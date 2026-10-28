@@ -1659,6 +1659,7 @@ $('typeSelect').addEventListener('change', (e) => {
 // a pick waiting for the whole list (half a minute with thousands of symbols).
 function openSymbol(ticker, source = null) {
   if (!['stock', 'analysis'].includes(document.body.dataset.pane)) window.showPane?.('stock', { toggle: false });
+  state.picked = String(ticker).toUpperCase();  // yours: it goes in your register (activity.js), not one opened by itself
   const known = state.symbols.some((s) => s.ticker === String(ticker).toUpperCase());
   return (known ? selectSymbol(ticker, source) : loadSymbols().then(() => selectSymbol(ticker, source))).catch(showError);
 }
