@@ -21,8 +21,14 @@ REGULAR = ("", "@", " ")  # no condition: a regular trade
 # last price, which would make every pre-market and after-hours bar flat. Bars of those hours are
 # built from them (as the feeds' own bars are): T counts as regular, and U (extended hours, sold out
 # of sequence) as out of sequence (high/low and volume, not open/close). Audits check the result.
+# Prior reference price (P) and derivatively priced (4) prints carry a price fixed earlier or worked
+# out from other prices: the tape lets them set the day's high and low, but in a minute's bar they
+# stood as spikes (SPCX 2026-10-22, '@,4,P' prints at 153.6 through FINRA's facility with the stock
+# at 147, a dozen times an afternoon), and Massive's own minutes leave them out. They count in volume.
 BAR_RULES = {("cta", "T"): (True, True, True), ("utp", "T"): (True, True, True),
-             ("cta", "U"): (True, False, True), ("utp", "U"): (True, False, True)}
+             ("cta", "U"): (True, False, True), ("utp", "U"): (True, False, True),
+             ("cta", "P"): (False, False, True), ("utp", "P"): (False, False, True),
+             ("cta", "4"): (False, False, True), ("utp", "4"): (False, False, True)}
 
 
 def eligibility(trades: pd.DataFrame, rules: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray, set]:

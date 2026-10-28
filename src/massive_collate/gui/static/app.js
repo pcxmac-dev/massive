@@ -725,9 +725,9 @@ const LEVEL_MS = { second: 1e3, minute: 6e4, hour: 36e5, day: 864e5, week: 6048e
 // 20:00-04:00 on Blue Ocean, from its own feed).
 const SESSIONS = ['regular', 'extended', 'all'];
 const SESSION_TEXT = {
-  regular: ['RTH', 'regular hours 09:30-16:00', 'ETH'],
-  extended: ['ETH', 'extended hours: pre-market 04:00, after-hours to 20:00', 'ETH'],
-  all: ['ETH+ON', 'all four sessions: overnight 20:00-04:00 (Blue Ocean), pre-market, regular, after-hours', 'ETH+ON'],
+  regular: ['RTH', 'regular hours 09:30-16:00'],
+  extended: ['ETH', 'extended hours: pre-market 04:00, after-hours to 20:00'],
+  all: ['ETH+ON', 'all four sessions: overnight 20:00-04:00 (Blue Ocean), pre-market, regular, after-hours'],
 };
 
 function perDayGuess(asset, p, session) {
@@ -1690,7 +1690,7 @@ async function selectSymbol(ticker, source = null) {
   const meta = await api('/api/meta', { source, ticker, adjust: state.adjust, auto: 1 });
   if (pick !== state.selectToken) return;  // another symbol was picked while this one was asked for
   resetLod();
-  $('ethBtn').hidden = meta.aroundTheClock;  // fx and futures trade around the clock
+  $('sessionSelect').hidden = meta.aroundTheClock;  // fx and futures trade around the clock
   $('adjustSelect').hidden = meta.asset !== 'future';
   saveDrawings();
   state.ticker = meta.ticker;
@@ -2152,11 +2152,10 @@ function renderPeriods() {
       + 'has none finer the candles grow. This is the level shown now.';
 }
 
+// The sessions shown, picked by name (a button cycling through them read "ETH" while it showed the
+// regular hours only, and the overnight choice was two clicks away, unseen).
 function renderSession() {
-  $('ethBtn').classList.toggle('on', state.session !== 'regular');
-  $('ethBtn').textContent = SESSION_TEXT[state.session]?.[2] || 'ETH';
-  $('ethBtn').title = `${SESSION_TEXT[state.session]?.[1] || ''}. Click: `
-    + `${SESSION_TEXT[SESSIONS[(SESSIONS.indexOf(state.session) + 1) % SESSIONS.length]][1]}`;
+  $('sessionSelect').value = state.session;
   $('unfilteredBtn').classList.toggle('on', state.unfiltered);
 }
 
@@ -2169,8 +2168,8 @@ $('unfilteredBtn').addEventListener('click', () => {
   chart.resetData();
 });
 
-$('ethBtn').addEventListener('click', () => {
-  state.session = SESSIONS[(SESSIONS.indexOf(state.session) + 1) % SESSIONS.length];
+$('sessionSelect').addEventListener('change', (e) => {
+  state.session = SESSIONS.includes(e.target.value) ? e.target.value : 'regular';
   prefs.set('session', state.session); markDirty();
   renderSession();
   chart.resetData();

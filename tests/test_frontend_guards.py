@@ -372,6 +372,17 @@ def test_the_page_follows_every_feed_fetching_side_by_side():
     assert "Running ${going.length} feeds" in page.split("function statusLine()", 1)[1].split("\n  }\n", 1)[0]
 
 
+def test_the_sessions_are_picked_by_name():
+    html = _js("index.html")
+    picker = html.split('<select id="sessionSelect"', 1)[1].split("</select>", 1)[0]
+    for value in ("regular", "extended", "all"):
+        assert f'<option value="{value}">' in picker  # every session named, overnight too
+    app = _js("app.js")
+    assert "ethBtn" not in app and "ethBtn" not in html  # the button that read "ETH" on regular hours only
+    assert "$('sessionSelect').value = state.session;" in _function(app, "renderSession")
+    assert "state.session = SESSIONS.includes(e.target.value) ? e.target.value : 'regular';" in app
+
+
 def test_the_fetchers_limits_show_each_feeds_month_against_its_allowance():
     head = _js("index.html").split('class="act-table limits"', 1)[1].split("</thead>", 1)[0]
     assert "<th>This month</th>" in head and '<th class="num">By month end</th>' in head

@@ -72,7 +72,11 @@
     </select>
     </div>
     <div class="strip">
-    <button id="ethBtn" class="toggle" title="Extended hours: pre-market, after-hours and overnight">ETH</button>
+    <select id="sessionSelect" aria-label="Sessions shown" title="Sessions shown: regular hours 09:30-16:00; extended adds pre-market from 04:00 and after-hours to 20:00; overnight adds 20:00-04:00 on Blue Ocean">
+      <option value="regular">RTH: regular hours</option>
+      <option value="extended">ETH: + pre and after hours</option>
+      <option value="all">All four: + overnight</option>
+    </select>
     <button id="unfilteredBtn" class="toggle" title="Unfiltered: all data, bad data included. Off: filtered, the target data (bad data is on each feed's pruned list, in the Data panel)">All data</button>
     <div class="menu">
       <button id="indBtn" aria-haspopup="true">Indicators</button>

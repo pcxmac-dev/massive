@@ -161,6 +161,17 @@ def test_extended_hours_prints_build_extended_hours_bars():
     assert bars == [{"t": 0, "o": 50.0, "h": 52.0, "l": 50.0, "c": 51.0, "v": 30.0, "vw": 51.0, "n": 3}]
 
 
+def test_prior_reference_and_derivatively_priced_prints_make_no_spikes():
+    # the tape's rules let them set the high and low (as Massive's reference says); a minute's bar does not
+    rules = {("utp", "P"): (True, False, True), ("utp", "4"): (True, False, True)}
+    df = pd.DataFrame({"ts_ns": [0, 10 * S, 20 * S, 30 * S], "price": [147.0, 153.64, 147.2, 146.9],
+                       "size": [100, 150, 100, 100], "conditions": ["@", "@,4,P", "@", "@,4"], "tape": [3, 3, 3, 1]})
+    bars, unknown = build_bars(df, 60 * S, rules)
+    assert unknown == set()
+    assert bars[0]["h"] == 147.2 and bars[0]["l"] == 147.0 and bars[0]["c"] == 147.2  # SPCX 2026-10-22, 13:34
+    assert bars[0]["v"] == 450.0 and bars[0]["n"] == 4  # they still count in volume
+
+
 def test_merged_daily_bars_combine_feeds_day_by_day(store):
     from massive_collate.gui.bars import MERGED, BarEngine
 
