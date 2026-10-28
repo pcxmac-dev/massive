@@ -215,14 +215,15 @@ def _fill(source: DataSource, store: Store, ticker: str, timespan: str, a: int, 
     The newest span (`frontier`) counts as held only once the feed has published its last
     session: a span the feed has not caught up on stays open for the next run.
     Returns (rows saved, newest bar ms)."""
-    if not has_open_time(asset, a, b):  # nights, weekends, holidays: nothing to ask for
+    hours = freshness.hours(source.name, asset)  # the feed's own hours (Blue Ocean: the nights)
+    if not has_open_time(hours, a, b):  # nights, weekends, holidays: nothing to ask for
         store.add_coverage(source.name, ticker, timespan, a, b)
         return 0, None
     step = STEP_MS.get(timespan, 60_000)
     if timespan == "day":
         last_open = b - step - 6 * 3_600_000  # the last day bar, wherever its day starts (ET or UTC)
     else:
-        sessions = [x for x in freshness.CALENDAR.sessions(asset, _ms_to_date(a) - timedelta(days=1), _ms_to_date(b))
+        sessions = [x for x in freshness.CALENDAR.sessions(hours, _ms_to_date(a) - timedelta(days=1), _ms_to_date(b))
                     if ms(x.open) < b]
         last_open = ms(sessions[-1].open) if sessions else a
     saved, oldest, newest = 0, None, None
@@ -304,7 +305,7 @@ def sync_bars(
     gaps = _plan(store, me, feeds, ticker, asset, timespan, floor, now, listed_from, stop)
     # Only a gap reaching the feed's publication edge is its frontier (held only as far as published);
     # an older gap ending where another feed's data begins is history like any other.
-    edge = frontier_ms(asset, me.tier, now, timespan)
+    edge = frontier_ms(freshness.hours(me.name, asset), me.tier, now, timespan)
     saved = 0
     for i, (a, b) in enumerate(reversed(gaps)):
         try:
@@ -988,7 +989,7 @@ def feed_needs(row: dict, tier: Tier, now: datetime) -> bool:
     if synced is None:
         return not is_archive(row["source"])
     return _backfilling(row, history_floor(tier, now.astimezone(ET).date(), row["asset"])) or (
-        _due(row["asset"], tier, synced, now, 0.0) and (end is None or synced < end))
+        _due(freshness.hours(row["source"], row["asset"]), tier, synced, now, 0.0) and (end is None or synced < end))
 
 
 def needs_fetch(store: Store, ticker: str, tiers: dict[str, Tier], now: datetime,
@@ -1339,10 +1340,11 @@ def sync(
                 # History takes completed sessions only; the session under way is the live feeds'.
                 # A symbol opened in the chart, or on a watchlist, is the exception: the best feed
                 # for its current session is this one (freshness.history_horizon).
+                hours = freshness.hours(source.name, asset)  # the feed's own (Blue Ocean: the nights)
                 horizon = at if urgent or only is not None or ticker in on_lists \
-                    else freshness.history_horizon(asset, tier, at)
+                    else freshness.history_horizon(hours, tier, at)
                 if (only is None or published_only) and synced and not backfilling(item) and not _due(
-                        asset, tier, synced, horizon, 0.0 if urgent or only is not None else refresh_hours):
+                        hours, tier, synced, horizon, 0.0 if urgent or only is not None else refresh_hours):
                     # nothing new published since its last sync (a symbol still backfilling is never skipped)
                     if urgent or only is not None:  # opened in the chart: checked, nothing new; its request is met
                         store.set_synced(source.name, ticker, at)
@@ -1829,7 +1831,7 @@ def scan(
         if only is not None and item["ticker"] not in only:
             continue
         last, ask = _newest_stored(store, name, item)
-        a = freshness.assess(item["asset"], tier, last, now)
+        a = freshness.assess(freshness.hours(name, item["asset"]), tier, last, now)
         row = {"ticker": item["ticker"], "asset": item["asset"], "stored": last, **a, "available": None, "new": None}
         result.items.append(row)
         if a["state"] != "behind" or source is None or not ask:

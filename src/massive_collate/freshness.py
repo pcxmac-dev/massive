@@ -64,8 +64,21 @@ for _venue in ("coinbase-public", "bitstamp-public", "bitfinex-public"):
 # Alpaca: Basic serves everything but the latest 15 minutes; crypto is never held back.
 # (16 minutes: the requests stop a minute inside the 15-minute block, sources/alpaca.RECENT_SIP_BLOCK,
 # so the ledger must not count the minute between as held.)
-PLAN_DELAYS["alpaca-basic"] = {"stock": Delay("delay", timedelta(minutes=16)), "crypto": Delay("delay")}
-PLAN_DELAYS["alpaca-plus"] = {"stock": Delay("delay"), "crypto": Delay("delay")}
+PLAN_DELAYS["alpaca-basic"] = {"stock": Delay("delay", timedelta(minutes=16)), "crypto": Delay("delay"),
+                               "overnight": Delay("delay", timedelta(minutes=16))}
+PLAN_DELAYS["alpaca-plus"] = {"stock": Delay("delay"), "crypto": Delay("delay"), "overnight": Delay("delay")}
+
+# A feed whose market keeps hours of its own: Blue Ocean (sources/plugins/boats.py) trades US stocks
+# overnight only, 20:00-04:00 ET (MarketCalendar's "overnight"). Judged by the stock day, its nights
+# looked closed: it was asked only up to 20:00, so a night's bars came the next morning, and a stock
+# opened in the chart at 23:00 read up to date with the night going on.
+FEED_HOURS = {"boats": {"stock": "overnight"}}
+
+
+def hours(feed: str | None, asset: str) -> str:
+    """The calendar a feed's asset class keeps (what `expected`, `history_horizon` and the coverage
+    planner take as the asset): its market's own hours (FEED_HOURS), else the asset class's."""
+    return FEED_HOURS.get(feed or "", {}).get(asset, asset)
 
 
 def plan_delay(tier: Tier, asset: str) -> Delay:
