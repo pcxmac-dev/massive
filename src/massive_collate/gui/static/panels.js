@@ -117,6 +117,9 @@
     const b = e.target.closest('button[data-pane]');
     if (b) showPane(b.dataset.pane);
   });
+  // The status line ends where the views do (style.css #status): the rail's width, which a scrollbar
+  // widens on a short window.
+  new ResizeObserver(() => document.body.style.setProperty('--rail-w', `${$('rail').offsetWidth}px`)).observe($('rail'));
   window.addEventListener('massive:activity', (e) => renderRailIcons(e.detail));
   window.addEventListener('massive:symbol', () => renderRailIcons(window.Activity?.data));
   window.addEventListener('massive:run-finished', () => {

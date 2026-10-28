@@ -360,3 +360,19 @@ def test_the_page_follows_every_feed_fetching_side_by_side():
     assert "data.symbolRun?.ticker === job.ticker && !data.symbolRun.going" in poll
     assert "wasRunning" not in page and "(data.fetching || []).some((f) => f.source === l.source)" in page
     assert "Running ${going.length} feeds" in page.split("function statusLine()", 1)[1].split("\n  }\n", 1)[0]
+
+
+def test_the_status_line_ends_where_the_views_do_not_under_the_rail():
+    status = _js("style.css").split("#status {", 1)[1].split("}", 1)[0]
+    assert "calc(var(--gap) * 2 + var(--rail-w, 54px))" in status  # the rail and the gaps either side of it
+    # the rail's width as it is: a scrollbar widens it on a short window
+    assert "setProperty('--rail-w', `${$('rail').offsetWidth}px`)" in _js("panels.js")
+
+
+def test_tables_wrap_their_text_rather_than_scroll_sideways():
+    css = _js("style.css")
+    cell = css.split("\n.act-table td {", 1)[1].split("}", 1)[0]  # its own rule, not the light theme's
+    assert "nowrap" not in cell and "overflow-wrap: break-word" in cell  # Tiingo's plans widened the Sources table
+    note = css.split(".act-table .sub {", 1)[1].split("}", 1)[0]
+    assert "ellipsis" not in note and "max-width" not in note  # notes shown whole, wrapped
+    assert "white-space: nowrap" in css.split(".act-table .num {", 1)[1].split("}", 1)[0]  # numbers on one line

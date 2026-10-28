@@ -236,9 +236,12 @@ body.panel-hidden #sidePanel, body.panel-hidden #panelResizer { display: none; }
 .pr-released td { opacity: 0.5; }
 #sidePanel a { color: var(--accent); }
 
+/* The status line ends where the views do, beside the rail and not under it: --rail-w is the rail's
+   width (its buttons, and a scrollbar on a short window), kept by panels.js. */
 #status {
   display: flex; gap: 12px; justify-content: space-between; align-items: center; flex: none;
-  height: 22px; margin: 0 var(--gap) var(--gap); padding: 0 var(--pad); background: var(--card); border-radius: var(--radius);
+  height: 22px; margin: 0 calc(var(--gap) * 2 + var(--rail-w, 54px)) var(--gap) var(--gap); padding: 0 var(--pad);
+  background: var(--card); border-radius: var(--radius);
   color: var(--muted); font-size: 11px; line-height: 22px; white-space: nowrap; overflow: hidden;
 }
 #error { color: var(--down); overflow: hidden; text-overflow: ellipsis; }
@@ -400,13 +403,15 @@ dialog.wide { width: min(1100px, 96vw); max-height: 90vh; }
 .act-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
 .act-table th { text-align: left; font-weight: 500; color: var(--muted); font-size: 11px; padding: 6px 8px;
   border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--panel); }
-.act-table td { padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: top; white-space: nowrap; }
+/* Tables fit their panel, with no sideways scrolling: text wraps onto more lines (a long word breaks
+   rather than widen its column) and notes are shown whole; numbers stay on one line. */
+.act-table td { padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: break-word; }
 .act-table tr:last-child td { border-bottom: 0; }
 .act-table tr.has-data { cursor: pointer; }
 .act-table tr.has-data:hover td { background: var(--hover); }
-.act-table .num { text-align: right; }
+.act-table .num { text-align: right; white-space: nowrap; }
 .act-table .prog { min-width: 180px; }
-.act-table .sub { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.act-table .sub { color: var(--muted); font-size: 11px; }
 /* Fetcher statuses, a colour each (symbols, sources, runs, audits, dependencies): blue at work, cyan
    new data, amber waiting on a limit or a backfill, violet queued, green done and current, red a
    problem, slate and brown finished archives and retired listings, grey off. */
