@@ -4,6 +4,12 @@ Working notes so work can resume in a fresh session. Newest first.
 
 ## State (2026-10-27)
 
+- **Feeds in parallel** (docs/APPRAISAL.md #6): a run lock per feed (`massive-fetch-<feed>.lock`;
+  `massive.lock` is now the whole database's, for moves of the data). The hourly sync starts each
+  feed that is set up and not fetching in a process of its own, does not wait for them, and builds
+  the derived frames once an hour; a symbol opened in the chart fetches at once on the feeds it
+  needs that are idle. A sync from before this change still holds `massive.lock`: the new hourly
+  syncs start no feed until it ends.
 - **Plugins find their own plan; the Plugins view** (rail: a plug; docs/ARCHITECTURE.md, "Each
   plugin refreshes its own plan info", "The Plugins view"): scans may name the plan (Massive's
   stocks plan, Alpaca's), applied where the user set none; scans on each chart app start, weekly,
