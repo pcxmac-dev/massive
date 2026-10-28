@@ -223,7 +223,11 @@ def _fill(source: DataSource, store: Store, ticker: str, timespan: str, a: int, 
     if timespan == "day":
         last_open = b - step - 6 * 3_600_000  # the last day bar, wherever its day starts (ET or UTC)
     else:
-        sessions = [x for x in freshness.CALENDAR.sessions(hours, _ms_to_date(a) - timedelta(days=1), _ms_to_date(b))
+        # to the day after `b`: a session dated the next day opens the evening before (Blue Ocean at
+        # 20:00, currencies at 17:00); left out, the night before counted as the last, and a frontier
+        # with nothing of the night under way was recorded held, never asked for again
+        sessions = [x for x in freshness.CALENDAR.sessions(hours, _ms_to_date(a) - timedelta(days=1),
+                                                           _ms_to_date(b) + timedelta(days=1))
                     if ms(x.open) < b]
         last_open = ms(sessions[-1].open) if sessions else a
     saved, oldest, newest = 0, None, None

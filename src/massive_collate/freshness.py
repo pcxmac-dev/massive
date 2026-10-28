@@ -175,9 +175,11 @@ def history_horizon(asset: str, tier: Tier, now: datetime) -> datetime:
     publishes as it trades (real time or delayed): the moment its last completed session was fully
     published and settled (that session's end, extended hours included, plus the plan's delay and
     `settle`). The session under way belongs to the live feeds; history takes completed sessions
-    only (an end-of-day plan has only those anyway). Other assets trade around the clock: `now`."""
+    only (an end-of-day plan has only those anyway). Blue Ocean's nights ("overnight") likewise: at
+    `now`, every stock on it was due again with each hourly run of the night, about 24,000 requests
+    a day of Alpaca's 30,000 spent on the night under way. Other assets trade around the clock: `now`."""
     delay = plan_delay(tier, asset)
-    if asset not in ("stock", "index") or delay.kind != "delay":
+    if asset not in ("stock", "index", "overnight") or delay.kind != "delay":
         return now
     t = now.astimezone(ET)
     lag = delay.lag + settle(tier, asset)

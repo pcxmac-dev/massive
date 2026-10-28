@@ -55,3 +55,31 @@ def test_an_opened_stock_needs_the_overnight_feed_at_night_and_its_window_reache
     morning = datetime.combine(TUE_2300.date() + timedelta(days=1), time(5, 0), ET)  # Wednesday 05:00: night over
     store.set_synced("boats", "SPCX", datetime(2026, 10, 28, 4, 20, tzinfo=ET))
     assert collector.needs_fetch(store, "SPCX", {"boats": tier}, morning) == []  # nothing until 20:16
+
+
+def test_history_takes_blue_oceans_completed_nights_only():
+    # at 23:00 the night under way is the live feeds' (and the opened symbol's): a background run asked
+    # for it with every hourly run of the night, every stock on the feed, most of Alpaca's day
+    tier = _tier()
+    assert freshness.history_horizon("overnight", tier, TUE_2300) == datetime(2026, 10, 27, 4, 16, tzinfo=ET)
+    wed_0200 = datetime(2026, 10, 28, 2, 0, tzinfo=ET)
+    assert freshness.history_horizon("overnight", tier, wed_0200) == datetime(2026, 10, 27, 4, 16, tzinfo=ET)
+    wed_0500 = datetime(2026, 10, 28, 5, 0, tzinfo=ET)
+    assert freshness.history_horizon("overnight", tier, wed_0500) == datetime(2026, 10, 28, 4, 16, tzinfo=ET)
+
+
+def test_a_frontier_with_nothing_of_the_night_under_way_stays_open(store):
+    # the session dated tomorrow opens tonight at 20:00: looked for only up to today's date, the night
+    # before counted as the last, and a gap through 23:14 tonight was recorded held, never asked again
+    from .conftest import FakeSource
+
+    class Nights(FakeSource):
+        name = "boats"
+
+    store.watch("boats", ["SPCX"], "minute", exchange="XNAS")
+    last_night = datetime(2026, 10, 27, 3, 0, tzinfo=ET)
+    src = Nights(entitled=("minute",), bars={"minute": [{"t": ms(last_night), "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}]})
+    a, b = ms(datetime(2026, 10, 27, 3, 15, tzinfo=ET)), ms(datetime(2026, 10, 27, 23, 14, tzinfo=ET))
+    collector._fill(src, store, "SPCX", "minute", a - 3_600_000, b, fetch="SPCX", asset="stock", invert=False, frontier=True)
+    held = store.coverage("SPCX", "minute").get("boats", [])
+    assert not any(lo <= ms(datetime(2026, 10, 27, 22, 0, tzinfo=ET)) < hi for lo, hi in held)  # tonight: still to ask
