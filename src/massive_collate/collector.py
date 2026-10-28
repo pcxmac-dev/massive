@@ -791,23 +791,37 @@ def monthly_cap(source: DataSource) -> int | None:
     return getattr(source, "symbols_per_month", SYMBOLS_PER_MONTH.get(source.name))
 
 
-def _monthly_symbol(store: Store, feed: str, ticker: str, now: datetime, cap: int | None = -1) -> bool:
+def _monthly_symbol(store: Store, feed: str, ticker: str, now: datetime, cap: int | None = -1, ledger=None) -> bool:
     """Whether `feed` may ask for `ticker` this month (recorded as asked when it may; one
     transaction, so two processes cannot both take the last place); `cap` the plan's (default:
-    the plugin's)."""
+    the plugin's). With `ledger` (the source's `symbol_ledger`, a ratelimit.MachineLedger), the
+    cap is the key's on the whole machine, every database and feed on it (Tiingo's 500 were
+    counted per database, and its forex not at all); the database still records its own."""
     cap = SYMBOLS_PER_MONTH.get(feed) if cap == -1 else cap
     if cap is None:
         return True
+    if ledger is not None and not ledger.take_symbol(ticker, cap, now):
+        return False
     key = f"symbols:{feed}:{now.astimezone(timezone.utc):%Y-%m}"
     allowed = False
 
     def take(asked: list) -> list:
         nonlocal allowed
-        allowed = ticker in asked or len(asked) < cap
+        allowed = ticker in asked or len(asked) < cap or ledger is not None  # the machine's count decided
         return asked if ticker in asked or not allowed else [*asked, ticker]
 
     store.kv_update(key, take, [])
     return allowed
+
+
+def _watch_row(store: Store, feed: str, ticker: str, log) -> dict | None:
+    """A symbol's watch row as it stands now (the listing check may have changed it), or None when
+    it was taken off the watchlist since the run began (that ended the whole run: an IndexError)."""
+    rows = store.watchlist(feed, ticker)
+    if not rows:
+        log(f"{ticker}: taken off {feed}'s watchlist during the run; skipped")
+        return None
+    return rows[0]
 
 
 def gives_days(source: DataSource, me: FeedProfile, asset: str = "stock") -> bool:
@@ -865,7 +879,10 @@ def daily_first(source: DataSource, store: Store, me: FeedProfile, feeds: dict[s
             continue  # another feed is better placed for it, or nothing is left: nothing asked here
         try:
             listing = check_listing(source, store, item, today, log)
-            item.update(store.watchlist(source.name, ticker)[0])  # the run's own row: not checked again below
+            row = _watch_row(store, source.name, ticker, log)
+            if row is None:
+                continue
+            item.update(row)  # the run's own row: not checked again below
             if not listing.ok:
                 continue
             start = max(floor, listing.listed_from) if listing.listed_from else floor
@@ -1336,7 +1353,8 @@ def sync(
                         store.set_closed(source.name, ticker, now)
                         log(f"{ticker}: {source.name} has nothing to add (other feeds hold its history); closed")
                         continue
-                if not _monthly_symbol(store, source.name, ticker, now, monthly_cap(source)):  # Tiingo's Starter: 500 a month
+                if not _monthly_symbol(store, source.name, ticker, now, monthly_cap(source),  # Tiingo's Starter: 500 a month
+                                       getattr(source, "symbol_ledger", None)):
                     capped += 1
                     continue
                 if not urgent and refusals.paused(ticker, now):  # refused run after run: left alone a while
@@ -1398,7 +1416,9 @@ def sync(
                     check_reference(source, store, item, today, log)
                     listing = Listing(True)
                 item_floor = max(floor, listing.listed_from) if listing.listed_from else floor
-                item = store.watchlist(source.name, ticker)[0]
+                item = _watch_row(store, source.name, ticker, log)
+                if item is None:
+                    continue
                 # a retired symbol has nothing after its last listed day: only its history is filled
                 stop = retired_end(item)
                 resolution, backfilled_to = item["resolution"], item["backfilled_to"]

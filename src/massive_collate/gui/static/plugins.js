@@ -12,7 +12,7 @@
    Asked again every minute while shown, every few seconds while a rescan or recheck runs. */
 (() => {
   const box = document.getElementById('viewPlugins');
-  const { esc } = window.MassiveIcons;
+  const { esc, safeUrl } = window.MassiveIcons;
   let data = null, sel = null, note = '', timer = null;
 
   const STATE = { ready: 'ready', partly: 'keys not set', 'no key': 'no key', killed: 'killed', paused: 'paused',
@@ -171,15 +171,16 @@
     const pol = p.policy;
     const robots = p.robots.map((r) => `<div class="small"><code>${esc(r.host)}</code> robots.txt: ${r.status == null ? 'not read yet'
       : r.status === 200 ? `read ${ago(r.at)}${r.delayMinutes ? `, asks ${num(r.delayMinutes)} min between requests` : ''}`
-      : r.status >= 400 && r.status < 500 ? `none published to this reader (HTTP ${r.status}), read as allowing all · ${ago(r.at)}`
-      : `did not answer ${ago(r.at)}: nothing read from the host until it does`}${r.allows === false ? ' · <span class="down">disallows a feed: not read</span>' : ''}</div>`).join('');
+      : r.answered ? `none published to this reader (HTTP ${r.status}), read as allowing all · ${ago(r.at)}`
+      : `did not answer (${r.status ? `HTTP ${r.status}` : 'no answer'}) ${ago(r.at)}: nothing read from the host until it does`}${r.allows === false ? ' · <span class="down">disallows a feed: not read</span>' : ''}</div>`).join('');
     const checks = [
       pol.hosts.length ? `Only ${pol.hosts.map((h) => `<code>${esc(h)}</code>`).join(', ')}, over HTTPS; a redirect elsewhere is not followed` : `Through ${esc(p.account)}'s client: its rate window, daily cap and kills`,
       `Never these sites, whose terms bar programs: ${pol.blocked.map(esc).join(', ')}`,
       'Feeds and APIs only: an answer that is not XML or JSON is refused, never read as a page',
       `A feed at most every ${esc(every(p.floorMinutes))}${p.floorMinutes > pol.minMinutes ? ` (its hosts ask for that; its own is ${esc(every(pol.minMinutes))})` : ''}, whatever its schedule asks`,
       `At most ${num(pol.perDay)} requests a day, robots.txt included: ${num(p.requestsToday)} today`,
-      'Conditional requests (an unchanged feed sends nothing back); a refusal (401, 403, 429) holds it off 6 h, or the Retry-After if longer',
+      'Conditional requests (an unchanged feed sends nothing back); a refusal (401, 403, 429) holds the whole publisher off 6 h, or the Retry-After if longer; a Retry-After on any answer is honoured',
+      'A crawl-delay its robots.txt asks for is kept between any two requests to that host; a feed that keeps failing is asked less and less often, never more than its schedule',
       pol.contact ? (pol.contactSet ? 'Your GOV_CONTACT goes in its User-Agent, as it asks (to it only)' : 'It asks automated readers to identify: waiting for GOV_CONTACT (your name and email)')
         : 'No contact sent: it does not ask for one',
     ].map((c) => `<li>${c}</li>`).join('');
@@ -187,14 +188,19 @@
     const seen = rc?.limitsSeen ? Object.entries(rc.limitsSeen) : [];
     const acct = rc?.account ? `<div class="small">${esc(rc.account.title)}'s limits: ${esc(rate(rc.account.rate))}, ${num(rc.account.perDay)} a day${rc.account.published ? ` (its server: ${esc(rc.account.published)})` : ''}</div>` : '';
     const busy = data.rechecking?.name === p.name;
-    const can = !data.offline && !data.rechecking && p.state !== 'off';
-    return `<h4>Feeds</h4><table class="act-table ex-mini pl-feeds"><thead><tr><th>Feed</th><th>Every</th><th>State</th><th>Last read</th><th>Next</th><th></th></tr></thead>
+    const waitingContact = p.policy.contact && !p.policy.contactSet;
+    const can = !data.offline && !data.rechecking && !['off', 'paused', 'refused'].includes(p.state) && !p.held && !waitingContact;
+    const why = data.offline ? 'This offline copy of the app sends no requests'
+      : waitingContact ? 'Nothing is sent to it until GOV_CONTACT is set'
+      : p.state === 'paused' || p.state === 'refused' || p.held ? 'Nothing is sent to it while it is paused, stopped or held'
+      : 'Read its robots.txt again (unless read within the hour) and ask each feed once (never within its floor, refused or held), keeping the rate-limit headers its servers send; pressed again within 15 min it sends nothing';
+    const err = p.error ? `<div class="pl-warn">Its plugin failed here: ${esc(p.error)}</div>` : '';
+    return `${err}<h4>Feeds</h4><table class="act-table ex-mini pl-feeds"><thead><tr><th>Feed</th><th>Every</th><th>State</th><th>Last read</th><th>Next</th><th></th></tr></thead>
         <tbody>${feeds}</tbody></table>
       ${moments || cal ? `<h4>Schedule</h4>${moments}${cal}` : ''}
       <h4>Scrape checks</h4><ul class="pl-checks small">${checks}</ul>${robots}
       <h4 class="pl-scan-head"><span>Limits, verified</span>
-        <button type="button" data-recheck="${esc(p.name)}"${can ? '' : ' disabled'} title="${esc(data.offline ? 'This offline copy of the app sends no requests'
-          : 'Read its robots.txt again and ask each feed once (never within its floor), keeping the rate-limit headers its servers send')}">${busy ? 'Rechecking…' : 'Recheck'}</button></h4>
+        <button type="button" data-recheck="${esc(p.name)}"${can ? '' : ' disabled'} title="${esc(why)}">${busy ? 'Rechecking…' : 'Recheck'}</button></h4>
       <div class="p-muted small">${rc ? `Last verified ${ago(rc.at)}` : 'Not verified yet'}: weekly, and here.</div>
       ${acct}${(rc?.notes || []).map((n) => `<div class="small">${esc(n)}</div>`).join('')}
       ${seen.length ? `<table class="act-table ex-mini"><tbody>${seen.map(([k, h]) => `<tr><td>${esc(k)}</td><td class="p-muted">${
@@ -202,11 +208,19 @@
   }
 
   function pubSideHtml(p) {
-    const paused = p.state === 'paused';
+    const whose = p.kill?.whose;
+    const paused = p.state === 'paused' && whose === 'own';  // its own pause: Resume undoes it here
+    const until = (iso) => esc(String(iso || '').slice(0, 16).replace('T', ' '));
+    const stop = !p.kill ? ''
+      : paused ? 'Paused by you'
+      : whose === 'fetching' ? `${esc(p.kill.why)}: resume fetching there`
+      : whose === 'account' ? `Stopped with ${esc(p.account)}'s account until ${until(p.kill.until)} UTC: ${esc(p.kill.why)}`
+      : `Stopped until ${until(p.kill.until)} UTC: ${esc(p.kill.why)}`;
     const used = p.policy.perDay ? Math.min(100, (p.requestsToday / p.policy.perDay) * 100) : 0;
     return `<h3>${esc(p.title)} ${chip(p.state)}</h3>
       <div class="p-muted small">${esc(p.about)}${p.origin !== 'built in' ? ` · ${esc(p.origin)}` : ''}</div>
-      ${p.kill ? `<div class="pl-warn">${paused ? 'Paused by you' : `Stopped until ${esc(p.kill.until?.slice(0, 16).replace('T', ' '))} UTC: ${esc(p.kill.why)}`}</div>` : ''}
+      ${stop ? `<div class="pl-warn">${stop}</div>` : ''}
+      ${p.held ? `<div class="pl-warn">Nothing sent until ${until(p.held.until)} UTC: ${esc(p.held.why)}</div>` : ''}
       <div class="tiles ex-tiles">
         ${tile('Requests today', num(p.requestsToday), `of ${num(p.policy.perDay)} a day`)}
         ${tile('Floor', every(p.floorMinutes), 'between reads of a feed')}
@@ -218,7 +232,7 @@
       <button type="button" data-pause="${esc(p.name)}" data-on="${paused ? '0' : '1'}"${data.offline || (p.kill && !paused) ? ' disabled' : ''}>${paused ? 'Resume' : 'Pause'}</button>
       <div class="p-muted small">${paused ? 'Nothing is read until you resume it.' : 'Pausing stops its reads until you resume it.'}</div>
       ${p.policy.terms ? `<h4>Terms</h4><div class="small">${esc(p.policy.terms)}</div>` : ''}
-      ${p.policy.termsUrl ? `<div class="p-muted small"><a href="${esc(p.policy.termsUrl)}" target="_blank" rel="noopener noreferrer">${esc(p.policy.termsUrl.replace(/^https:\/\//, ''))}</a></div>` : ''}`;
+      ${safeUrl(p.policy.termsUrl) ? `<div class="p-muted small"><a href="${esc(safeUrl(p.policy.termsUrl))}" target="_blank" rel="noopener noreferrer">${esc(p.policy.termsUrl.replace(/^https:\/\//, ''))}</a></div>` : ''}`;
   }
 
   function mainHtml() {

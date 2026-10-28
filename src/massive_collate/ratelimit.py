@@ -196,6 +196,8 @@ class MachineLedger:
                 conn.execute("CREATE TABLE IF NOT EXISTS windows (name TEXT PRIMARY KEY, times TEXT NOT NULL)")
                 conn.execute("CREATE TABLE IF NOT EXISTS days (name TEXT, day TEXT, n INTEGER NOT NULL, "
                              "PRIMARY KEY (name, day))")
+                conn.execute("CREATE TABLE IF NOT EXISTS symbols (name TEXT, month TEXT, symbol TEXT, "
+                             "PRIMARY KEY (name, month, symbol))")
                 out = fn(conn)
             except BaseException:
                 conn.execute("ROLLBACK")
@@ -231,6 +233,25 @@ class MachineLedger:
             conn.execute("INSERT INTO days VALUES (?, ?, 1) ON CONFLICT (name, day) DO UPDATE SET n = n + 1",
                          (self.name, day))
             conn.execute("DELETE FROM days WHERE day < ?", ((now - timedelta(days=DAYS_KEPT)).date().isoformat(),))
+            return True
+
+        return self._in_transaction(take)
+
+    def take_symbol(self, symbol: str, cap: int, now: datetime | None = None) -> bool:
+        """Whether `symbol` may be asked for this month (UTC) under a plan's cap of different symbols
+        a month, counted for the key on the whole machine, every database and every feed on it
+        (Tiingo's 500: its stocks and its forex alike): taken when it may, in one transaction."""
+        now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        month = f"{now:%Y-%m}"
+
+        def take(conn) -> bool:
+            if conn.execute("SELECT 1 FROM symbols WHERE name=? AND month=? AND symbol=?",
+                            (self.name, month, symbol)).fetchone():
+                return True
+            if conn.execute("SELECT COUNT(*) FROM symbols WHERE name=? AND month=?", (self.name, month)).fetchone()[0] >= cap:
+                return False
+            conn.execute("INSERT INTO symbols VALUES (?, ?, ?)", (self.name, month, symbol))
+            conn.execute("DELETE FROM symbols WHERE month < ?", (f"{now - timedelta(days=62):%Y-%m}",))
             return True
 
         return self._in_transaction(take)

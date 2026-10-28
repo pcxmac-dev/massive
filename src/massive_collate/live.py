@@ -63,6 +63,7 @@ BOATS_QUOTE_SECONDS = 5.0  # the open stocks' last sale and quote at night: one 
 BOATS_BARS_SECONDS = 15.0
 BOATS_IDLE_SECONDS = 30.0  # by day, killed, or nothing open: looked at again this often
 BOATS_REFUSED_SECONDS = 3600.0  # Tiingo refused Blue Ocean (the plan, no add-on): asked again after this
+BOATS_LIMITS_SECONDS = 3600.0  # the limits a sync's scan found looked at again this often (a lower one kept)
 BOATS_SETTLE_MS = 30_000  # a minute over this long is final (Tiingo's newest came half a minute behind)
 MAX_STOCKS = 30  # Alpaca Basic: symbols on its one real-time connection
 OPEN_FRESH_MS = 180_000  # a symbol is streamed this long after a page last said it has it open
@@ -133,21 +134,23 @@ def _trade(ts_ns: int, seq: int, price, size, trade_id) -> dict:
             "exchange": None, "conditions": [], "id": str(trade_id), "tape": None}
 
 
-def _settle(trades: list[dict]) -> tuple[list[dict], list[int]]:
+def _settle(trades: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
     """A batch of one symbol's trades, in the order they came, as it stands at its end: (the trades
-    standing, the sequence numbers withdrawn). A withdrawal takes out the trades before it with its
-    sequence number (in the batch here, in the store by the caller, before the standing ones are
-    stored), never one after it: a correction that keeps its trade's id keeps its sequence number."""
+    standing, the withdrawals, the trades of the batch they withdrew). A withdrawal takes out the
+    trades before it with its sequence number (in the batch here, in the store by the caller, before
+    the standing ones are stored), never one after it: a correction that keeps its trade's id keeps
+    its sequence number."""
     standing: dict[int, list[dict]] = {}
-    gone: list[int] = []
+    gone: list[dict] = []
+    taken: list[dict] = []
     for t in trades:
         seq = int(t.get("sequence_number") or 0)
         if t.get("withdrawn"):
-            standing.pop(seq, None)
-            gone.append(seq)
+            taken += standing.pop(seq, [])
+            gone.append(t)
         else:
             standing.setdefault(seq, []).append(t)
-    return [t for kept in standing.values() for t in kept], gone
+    return [t for kept in standing.values() for t in kept], gone, taken
 
 
 @dataclass
@@ -753,15 +756,16 @@ class Recorder:
         streams = {s.source: s for s in self.streams}
         withdrawn: dict[tuple[str, str], list[int]] = {}  # the times (ns) of the stored trades taken out
         for (source, ticker), trades in batch.items():
-            standing, gone = _settle(trades)
+            standing, gone, taken = _settle(trades)
             if gone:  # first: a correction that keeps its trade's id must not go with the original
                 since_ns = min(t["sip_timestamp"] for t in trades) - DAY_MS * 1_000_000
-                withdrawn[(source, ticker)] = store.withdraw_trades(source, ticker, gone, since_ns)
+                withdrawn[(source, ticker)] = store.withdraw_trades(source, ticker, gone, since_ns, taken)
             if standing:
                 stored += store.upsert_trades(source, ticker, standing)
+        streamed = {source: self._streamed(streams[source], start, subs.get(source, {})) for source, start in since.items()}
         for source, start in since.items():
             end = min(now_ms, heard.get(source, start) + HEARD_SLACK_MS)  # not past the last time it was heard
-            for ticker, t0 in self._streamed(streams[source], start, subs.get(source, {})).items():
+            for ticker, t0 in streamed[source].items():
                 if t0 < end:
                     store.add_coverage(source, ticker, "trades", t0, end)
         for (source, ticker), trades in batch.items():
@@ -777,6 +781,7 @@ class Recorder:
             ticks = store.trades_between(source, ticker, lo * 1_000_000, hi_ns)
             rules, digest = self._tape_rules(store, source) if getattr(stream, "tape_rules", False) else ({}, None)
             prior = store.close_before(source, ticker, "minute", lo)  # an odd-lot-only first minute keeps it
+            heard_from = streamed.get(source, {}).get(ticker)
             dids = set()
             for step, timespan in ((1_000_000_000, "second"), (60_000_000_000, "minute")):
                 bars, _ = build_bars(ticks, step, rules, prior_close=prior)
@@ -787,7 +792,14 @@ class Recorder:
                     did = self._derivation(store, stream, ticker, day, rules, digest)
                     self._built[did] += store.upsert_built_bars(source, ticker, timespan, 1, part, did)
                     dids.add(did)
-                store.add_coverage(source, ticker, timespan, lo, now_ms, origin="ticks")
+                # held from the first whole bar heard: a bar the stream joined partway through is built
+                # of the trades heard and shown, never claimed whole (it was, from the minute's start,
+                # and baddata.inconsistent judged the feed's own minute by those seconds and pruned it).
+                # Not streamed (gone since): the sync's to download.
+                if heard_from is not None:
+                    whole = -(-heard_from // (step // 1_000_000)) * (step // 1_000_000)
+                    if max(lo, whole) < now_ms:
+                        store.add_coverage(source, ticker, timespan, max(lo, whole), now_ms, origin="ticks")
             for did in dids:
                 store.set_derivation_rows(did, self._built[did])
             self._touched.add(ticker)
@@ -891,31 +903,44 @@ class Recorder:
         """The publishers' due feeds, each on its own schedule (the FOMC's 2:00 p.m. statement read
         at 2:00:20), in this thread with its own connections: a slow agency never holds up a flush.
         One reader on the machine at a time (its lock, taken for each pass); the settings read again
-        when the saved keys change (a contact set)."""
-        from . import config, gov, proc, publications
+        when the saved keys change (a contact set), with the plans the scans found; settings that do
+        not load keep the ones before. Nothing here ends the thread but the recorder stopping: a
+        file that will not open is logged and tried again."""
+        from . import config, gov, proc, publications, sourcing
         from .storage import Store
 
         settings, saved = self.publications, config.saved_user_keys()
         lock = publications.lock_path(self.db_path)
-        gdb = gov.GovDB(gov.db_path(self.db_path))
-        try:
-            with Store(self.db_path) as store:
-                while not self.stop.is_set():
-                    wait = publications.STEP_MAX_S
-                    try:
-                        if config.saved_user_keys() != saved:
-                            settings, saved = config.load_settings(), config.saved_user_keys()
-                        if proc.acquire(lock):
+        while not self.stop.is_set():
+            try:
+                gdb = gov.GovDB(gov.db_path(self.db_path))
+                try:
+                    with Store(self.db_path) as store:
+                        while not self.stop.is_set():
+                            wait = publications.STEP_MAX_S
                             try:
-                                wait = publications.Reader(gdb, settings, store, log=self.log).step(
-                                    datetime.now(timezone.utc))
-                            finally:
-                                proc.release(lock)
-                    except Exception as e:  # noqa: BLE001 - the network, a locked file: logged, tried again
-                        self.log(f"live: publications: {type(e).__name__}: {e}")
-                    self.stop.wait(wait)
-        finally:
-            gdb.close()
+                                now_saved = config.saved_user_keys()
+                                if now_saved != saved:
+                                    saved = now_saved  # taken first: a save landing during the load is seen next pass
+                                    try:
+                                        settings = sourcing.apply_detected(config.load_settings())
+                                    except Exception as e:  # noqa: BLE001 - a bad value saved: the settings before stand
+                                        self.log(f"live: publications: the saved settings did not load ({e}); "
+                                                 "the ones before are kept")
+                                if proc.acquire(lock):
+                                    try:
+                                        wait = publications.Reader(gdb, settings, store, log=self.log).step(
+                                            datetime.now(timezone.utc))
+                                    finally:
+                                        proc.release(lock)
+                            except Exception as e:  # noqa: BLE001 - the network, a locked file: logged, tried again
+                                self.log(f"live: publications: {type(e).__name__}: {e}")
+                            self.stop.wait(wait)
+                finally:
+                    gdb.close()
+            except Exception as e:  # noqa: BLE001 - gov.db or the database would not open: logged, tried again
+                self.log(f"live: publications: {type(e).__name__}: {e}; tried again in a minute")
+                self.stop.wait(publications.STEP_MAX_S)
 
     # -- Blue Ocean's night, live from Tiingo (BoatsPoller) ------------------------------------------
     def _start_boats(self) -> threading.Thread | None:
@@ -928,15 +953,22 @@ class Recorder:
     def _boats_loop(self) -> None:
         """The poller's own thread and connection to the database: its requests wait on Tiingo's
         window, never the streams' flushes. A step, then the wait it asks for, until the recorder stops."""
-        from .errors import NotEntitled, RateLimited, Unauthorized
+        from .errors import BudgetExhausted, NotEntitled, RateLimited, Unauthorized
         from .storage import Store
 
         p = self.boats
+        limits_at = time.monotonic()
         with Store(self.db_path) as store:
             p.client.on_request = lambda n: store.count_request(p.account)  # the Tiingo key's day (the Fetcher's month)
             while not self.stop.is_set():
                 wait = BOATS_IDLE_SECONDS
                 try:
+                    if self.publications is not None and time.monotonic() - limits_at >= BOATS_LIMITS_SECONDS:
+                        limits_at = time.monotonic()  # a lower limit a sync's scan found since: kept from now on
+                        from .sources.registry import rate_window
+
+                        if hasattr(p.client, "tighten") and p.client.tighten(*rate_window(p.account, self.publications)):
+                            self.log("live: Blue Ocean from Tiingo: a lower limit its server gave is kept from now on")
                     wait = self.boats_step(store)
                 except (RateLimited, Unauthorized) as e:  # the server said stop: Tiingo's fetching is killed, this with it
                     killswitch.strike(store, p.account, "fetch", f"live Blue Ocean: {e}", log=self.log,
@@ -946,8 +978,11 @@ class Recorder:
                     p.refused_until = time.monotonic() + BOATS_REFUSED_SECONDS
                     self.log(f"live: Tiingo refused Blue Ocean ({e}); asked again in an hour")
                     self._boats_off("refused by the plan", down=True)
+                except BudgetExhausted as e:  # the Tiingo key's day spent on this machine: idle on its limits
+                    self._boats_off(f"paused on Tiingo's limits: {e}")
                 except Exception as e:  # noqa: BLE001 - the network, a locked database: logged, tried again
                     self.log(f"live: Blue Ocean from Tiingo: {type(e).__name__}: {e}")
+                    self._boats_off(f"{type(e).__name__}: {e}"[:200], down=True)  # not left "connected" on stale quotes
                 self.stop.wait(wait)
 
     def boats_step(self, store) -> float:

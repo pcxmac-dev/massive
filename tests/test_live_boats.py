@@ -105,3 +105,52 @@ def test_a_429_kills_tiingos_fetching_and_its_forex_with_it(tmp_path):
         assert killswitch.killed(store, "tiingofx", "fetch")  # the same key: not asked by the other feed either
     status = rec._status[live.TIINGO_BOATS]
     assert not status["connected"] and not status["idle"] and "too many requests" in status["error"]  # down, with why
+
+
+def test_the_day_cap_shows_idle_on_tiingos_limits_and_any_other_error_down(tmp_path):
+    from massive_collate.errors import BudgetExhausted
+
+    for fail, idle, words in ((BudgetExhausted("the daily request cap is reached"), True, "Tiingo's limits"),
+                              (ConnectionError("network down"), False, "network down")):
+        rec, poller = _recorder(tmp_path)
+
+        class Failing(FakeTiingo):
+            def get(self, path, params, fail=fail):
+                rec.stop.set()
+                raise fail
+
+        poller.client = Failing()
+        rec._status[live.TIINGO_BOATS].update(connected=True)  # as after an earlier step
+        rec._boats_loop()
+        status = rec._status[live.TIINGO_BOATS]
+        assert not status["connected"] and status["idle"] is idle
+        assert words in (status["note"] if idle else status["error"])  # never left "connected" on old quotes
+
+
+def test_a_lower_limit_found_while_a_client_runs_is_kept_from_then_on():
+    from massive_collate.ratelimit import RateLimiter
+    from massive_collate.sources.massive import MassiveClient
+
+    client = MassiveClient("k", rate_limiter=RateLimiter(190, 60.0))
+    assert client.tighten(95, 60.0) and client._limiter.max_calls == 95
+    assert not client.tighten(190, 60.0) and client._limiter.max_calls == 95  # never looser
+    assert not client.tighten(None, 60.0)
+    assert client.tighten(1, 3.0) and (client._limiter.max_calls, client._limiter.period) == (1, 3.0)
+
+
+def test_the_publications_thread_lives_through_a_file_that_will_not_open(tmp_path, monkeypatch):
+    from massive_collate import gov
+
+    rec = live.Recorder(tmp_path / "m.db", coins=(), publications=object(), log=lambda *_: None)
+    opened = []
+
+    def locked(path):
+        opened.append(path)
+        if len(opened) == 2:
+            rec.stop.set()
+        raise OSError("database is locked")
+
+    monkeypatch.setattr(gov, "GovDB", locked)
+    monkeypatch.setattr(rec.stop, "wait", lambda s: rec.stop.is_set())
+    rec._publications_loop()  # returns once stopped: it did not die at the first
+    assert len(opened) == 2

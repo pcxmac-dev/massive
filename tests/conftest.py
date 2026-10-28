@@ -27,12 +27,12 @@ def no_saved_keys(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_found_limits(monkeypatch):
-    """A feed's limiter keeps inside the limit its server's headers gave on its last scan, read
-    from the database the settings name (registry.found_per_minute): tests never read the real
-    one's; test_plugins.py tests the reading on its own."""
+    """A feed's limiter keeps inside the limits its servers' headers gave on its account's last
+    scans, read from the database the settings name (registry.found_limits): tests never read the
+    real one's; test_plugins.py tests the reading on its own."""
     from massive_collate.sources import registry
 
-    monkeypatch.setattr(registry, "found_per_minute", lambda name, settings: None)
+    monkeypatch.setattr(registry, "found_limits", lambda name, settings: [])
 
 
 @pytest.fixture(autouse=True)

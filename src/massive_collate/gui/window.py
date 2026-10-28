@@ -270,6 +270,9 @@ class WindowReader:
             return {"frame": bars[epoch_ms(bars.index) >= since_ms], "more": False, "newer": False}
         width = limit * step * factor
         if after_ms is not None:  # newer: the bars after the newest the chart has
+            # from the data's first bar at the earliest: a replay from before it widened the window
+            # over the empty years, then read years of bars at once
+            after_ms = max(after_ms, first - 1)
             while True:
                 hi = min(end, after_ms + width)
                 bars = self._built(s, feeds, base, period, span, session, after_ms, hi)

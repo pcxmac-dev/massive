@@ -273,9 +273,11 @@ def fx_windows(e: Exchange, start: datetime, days: int = 14) -> list[tuple[datet
     to Friday 17:00 New York; holiday early stops included). Adjacent pieces are merged."""
     from ..sessions import ET, MarketCalendar
 
+    from zoneinfo import ZoneInfo
+
     cal = _calendar(e.calendar)
     tz = str(cal.tz)
-    zone = pd.Timestamp(start).tz_convert(tz).tz
+    zone = ZoneInfo(tz)  # not pandas's zone: under pandas 2 a pytz one, which datetime.combine puts on its LMT offset
     first = pd.Timestamp(start).tz_convert(tz).date() - timedelta(days=1)
     fx = MarketCalendar.fx_session
     week = [s for k in range(-2, days + 2) for s in fx(start.astimezone(ET).date() + timedelta(days=k))]

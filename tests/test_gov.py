@@ -237,13 +237,18 @@ def test_a_refusal_is_not_asked_again_for_hours():
             return super().get(url, headers, timeout)
 
     db = GovDB(None)
-    _, reader = read(db, NOW, Refusing())
+    site = Refusing()
+    _, reader = read(db, NOW, site)
     states = db.fetched()
-    assert states["bls-cpi"]["status"] == "refused" and states["fedreg"]["status"] == "refused"
+    bls = [k for k in states if k.startswith("bls-")]
+    assert [states[k]["status"] for k in bls] == ["refused"] and states["fedreg"]["status"] == "refused"
+    # the refusal holds the whole publisher: its other feeds were not asked in the same pass
+    assert sum("bls.gov" in u and not u.endswith("robots.txt") for u, _ in site.calls) == 1
+    assert db.hold_get("bls")["why"].endswith("HTTP 403")
 
     def due(at):
         return {f.key for p in OFFICIAL.values() for f in reader.due(p, at)}
     later = due(NOW + timedelta(hours=2))
-    assert "bls-cpi" not in later and "fed-press" in later  # the others on their own time, hours for a refusal
+    assert not any(k.startswith("bls-") for k in later) and "fed-press" in later  # hours for a refusal
     assert "bls-cpi" in due(NOW + timedelta(hours=7))
     assert "fedreg" not in due(NOW + timedelta(hours=7))  # its Retry-After: 12 h

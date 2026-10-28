@@ -27,13 +27,14 @@ PLAN_NOTE = ("only the stocks plan (MASSIVE_TIER) is probed: the other asset cla
              "A free class is held to 5 requests a minute, and a probe that took one for paid would lift that")
 
 
-def build(settings, request_budget):
+def build(settings, request_budget, max_retries: int = 4):
     key = settings.require_api_key()
     client = MassiveClient(
         key,
         base_url=settings.base_url,
         rate_limiter=limiter("massive", settings, key),
         request_budget=request_budget,
+        max_retries=max_retries,
     )
     # Asset classes on another plan keep that plan's rate (the free plan: 5 a minute per class),
     # with the same margin as the feed's own window.
@@ -78,10 +79,12 @@ NEWS_DAYS = 2  # the first read reaches this far back
 
 def read_headlines(ctx) -> int:
     """Massive's newest headlines (one request, on Massive's limits: its rate window, daily cap and
-    kills), into the main database's news for the News view and the globe's ticker. Returns how many."""
+    kills), into the main database's news for the News view and the globe's ticker. Returns how many.
+    Never retried here: a 429 is the account's to answer (RateLimited kills it), anything else the
+    reader's to ask again on its schedule (with a budget of one, a retry only failed again)."""
     from datetime import datetime, timedelta, timezone
 
-    source = build(ctx.settings.for_source("massive"), 1)
+    source = build(ctx.settings.for_source("massive"), 1, max_retries=0)
     source.client.on_request = lambda n: (ctx.store.count_request("massive", now=ctx.now), ctx.count(1))
     newest = ctx.store.latest_news_ms("massive")
     since = datetime.fromtimestamp(newest / 1000, timezone.utc) if newest else ctx.now - timedelta(days=NEWS_DAYS)

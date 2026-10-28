@@ -201,11 +201,27 @@ def test_plugin_tiers_keep_their_history_start():
 
 
 # -- each feed's limits, verified by its capability scan ----------------------------------------------
-def test_a_servers_rate_limit_headers_are_read_as_a_minutes_limit():
+def test_a_servers_rate_limit_headers_are_read_with_their_windows():
     assert registry.server_per_minute({"X-RateLimit-Limit": "200", "X-RateLimit-Remaining": "199"}) == 200
     assert registry.server_per_minute({"ratelimit-limit": "10", "RateLimit-Policy": "10;w=1"}) == 600
     assert registry.server_per_minute({"RateLimit-Limit": "100"}) == 100  # no window said: a minute
     assert registry.server_per_minute({}) is None and registry.server_per_minute({"X-RateLimit-Limit": "x"}) is None
+    # an hour's limit is not cut to nothing, and every policy counts (this one raised before)
+    assert registry.server_limits({"RateLimit-Limit": "50", "RateLimit-Policy": "50;w=3600"}) == [(50, 3600)]
+    assert registry.server_per_minute({"RateLimit-Policy": "50;w=3600"}) == pytest.approx(0.833, abs=1e-3)
+    assert registry.server_limits({"RateLimit-Policy": "10;w=1, 1000;w=3600"}) == [(10, 1), (1000, 3600)]
+    assert registry.server_limits({"RateLimit-Policy": '"default";q=100;w=60'}) == [(100, 60)]
+
+
+def test_the_window_kept_is_inside_every_server_limit_never_rounded_above_one():
+    within = registry.within
+    assert within(190, 60.0, [(200, 60)]) == (190, 60.0)  # Alpaca's: already inside
+    assert within(8, 1.0, [(30, 60)]) == (1, 3.0)  # 8 a second against 30 a minute: one per 3 s, 20 a minute
+    assert within(None, 60.0, [(100, 60)]) == (95, 60.0)  # a plan with no limit of its own takes the server's
+    assert within(45, 3600.0, [(50, 3600)]) == (45, 3600.0)
+    n, s = within(None, 60.0, [(10, 1), (1000, 3600)])
+    assert n == 1 and n / s * 3600 <= 1000 * registry.SERVER_SHARE  # the hour's quota binds, a burst of one
+    assert within(30, 60.0, []) == (30, 60.0)
 
 
 def test_the_client_keeps_the_rate_limit_headers_its_server_sends():
@@ -234,10 +250,16 @@ def test_the_scan_verifies_the_rate_kept_against_its_servers_and_the_lower_is_us
     assert row[0] == "its server's rate limit" and row[1] is False and "used from now on" in row[2]
     assert found.limits["perMinute"] == int(kept_pm // 2) and found.limits["kept"] == [n, s]
     # the limiter keeps a little inside the server's lower limit from then on
-    monkeypatch.setattr(registry, "found_per_minute", lambda name, st: int(kept_pm // 2) if name == "alpaca" else None)
+    monkeypatch.setattr(registry, "found_limits",
+                        lambda name, st: [(int(kept_pm // 2), 60.0)] if name in ("alpaca", "boats") else [])
     m, t = rate_window("alpaca", settings)
     assert m * 60 / t <= int(kept_pm // 2) * registry.SERVER_SHARE and t == s
     assert rate_window("tiingo", settings) == provider("tiingo").rate_window(settings)  # the others untouched
+    # a plan without a limit of its own takes the server's too
+    massive = load_settings(env={"MASSIVE_API_KEY": "k", "MASSIVE_TIER": "developer"}, env_file=None)
+    assert provider("massive").rate_window(massive)[0] is None
+    monkeypatch.setattr(registry, "found_limits", lambda name, st: [(100.0, 60.0)])
+    assert rate_window("massive", massive) == (95, 60.0)
     # none sent: its own published limits kept
     quiet = bare.run_scan(SimpleNamespace(client=SimpleNamespace(limits_seen={})), settings)
     assert quiet.results[-1][1] is True and "not sent" in quiet.results[-1][2] and quiet.limits["perMinute"] is None
@@ -250,5 +272,11 @@ def test_the_limit_found_is_read_from_the_scan_kept_in_the_database(tmp_path):
     with Store(tmp_path / "m.db") as store:
         store.kv_set(sourcing.SCAN_KEY.format("alpaca"), json.dumps({"at": "2026-10-28T12:00:00", "results": [],
                                                                      "limits": {"perMinute": 150}}))
-    assert registry.scan_limit(tmp_path / "m.db", "alpaca") == 150
-    assert registry.scan_limit(tmp_path / "m.db", "tiingo") is None and registry.scan_limit(tmp_path / "none.db", "x") is None
+        store.kv_set(sourcing.SCAN_KEY.format("boats"), json.dumps({"at": "2026-10-28T12:00:00", "results": [],
+                                                                    "limits": {"seen": {"X-RateLimit-Limit": "50"}}}))
+    assert registry.scan_limits(tmp_path / "m.db", "alpaca") == [(150.0, 60.0)]
+    assert registry.scan_limits(tmp_path / "m.db", "tiingo") == [] and registry.scan_limits(tmp_path / "none.db", "x") == []
+    # Blue Ocean's scan is on Alpaca's account: its limit reaches Alpaca's limiter, which it paces with
+    assert set(registry.sharing("alpaca")) >= {"alpaca", "boats"}
+    assert sorted(lim for n in registry.sharing("alpaca") for lim in registry.scan_limits(tmp_path / "m.db", n)) == [
+        (50.0, 60.0), (150.0, 60.0)]

@@ -27,10 +27,12 @@ class PrunedStore:
     def prune(self, source: str, ticker: str, timespan: str, multiplier: int, bars: pd.DataFrame, rule: str,
               excludes: bool, evidence: Sequence[dict] | None = None, code: str | None = None) -> int:
         """Put bars (columns ts and the bar values; stored_at, derivation if known) on a feed's
-        pruned list under `rule`, each with its evidence. A time already pruned by this rule (also
-        one released since: a release is a decision) is left as it is; under "rebuilt", a version
-        already listed (its stored_at and derivation): each rebuild keeps the version it replaced,
-        so a second repair keeps the one the first made (by time alone it was passed over, and lost).
+        pruned list under `rule`, each with its evidence. A version already pruned by this rule
+        (also one released since: a release is a decision about that version) is left as it is: the
+        feed's own by its stored_at, one built here by its derivation (a later version of the bar is
+        judged as itself: feeds._STILL_STORED); under "rebuilt", by both: each rebuild keeps the
+        version it replaced, so a second repair keeps the one the first made (by time alone it was
+        passed over, and lost).
         Looked for and written in one write transaction (two scans of a series at once listed a bar
         twice). A bar left out of the filtered view (`excludes`) is logged in the change log, as a
         write is (feeds._LOG_CHANGE). Returns entries added."""
@@ -42,21 +44,27 @@ class PrunedStore:
 
         feed = self._feed(source, create=True)
         ticker = ticker.upper()
+        if "stored_at" not in bars and multiplier == 1:  # the version pruned: the one stored now
+            stored = self.series_rows(source, ticker, timespan, int(bars["ts"].min()), int(bars["ts"].max()) + 1)
+            if len(stored):
+                bars = bars.astype({"ts": "int64"}).drop(columns=["derivation"], errors="ignore").merge(
+                    stored[["ts", "stored_at", "derivation"]].astype({"ts": "int64"}), on="ts", how="left")
         now, code = _ms_now(), code or code_version()
         evidence = list(evidence) if evidence is not None else [{}] * len(bars)
         cols = {k: (bars[k].to_numpy(dtype=float) if k in bars else np.full(len(bars), np.nan))
                 for k in (*_VALUES, "stored_at", "derivation")}
         num = lambda v, whole=False: None if np.isnan(v) else (int(v) if whole else float(v))
         ts = bars["ts"].to_numpy(dtype="int64")
-        version = rule == "rebuilt"  # a version is listed once; any other rule lists a time once
-        same = " AND stored_at IS ? AND derivation IS ?" if version else ""
+        version = rule == "rebuilt"
+        same = (" AND stored_at IS ? AND derivation IS ?" if version else
+                " AND derivation IS ? AND (derivation IS NOT NULL OR stored_at IS ?)")
         rows = []
         for i in range(len(ts)):
             key = (ticker, timespan, multiplier, int(ts[i]), rule)
             stored_at, derivation = num(cols["stored_at"][i], True), num(cols["derivation"][i], True)
             rows.append((*key[:4], *(num(cols[k][i], k == "transactions") for k in _VALUES), stored_at, derivation,
                          rule, int(bool(excludes)), json.dumps(evidence[i], default=float), now, code,
-                         *key, *((stored_at, derivation) if version else ())))
+                         *key, *((stored_at, derivation) if version else (derivation, stored_at))))
         with write_transaction(feed.conn):
             added = feed.conn.executemany(
                 "INSERT OR IGNORE INTO pruned (ticker, timespan, multiplier, ts, open, high, low, close, volume, vwap, "
@@ -174,11 +182,14 @@ class PrunedStore:
         cols = ["timespan", "multiplier", "ts", *BAR_COLUMNS, "derivation", "stored_at"]
         if conn is None:
             return pd.DataFrame(columns=cols)
-        df = pd.read_sql_query(f"SELECT {', '.join(cols)} FROM built_bars WHERE ticker=? AND ts >= ? AND ts < ?",
-                               conn, params=(ticker.upper(), int(lo_ms), int(hi_ms)))
-        if frames is not None:
-            wanted = set(frames)
-            df = df[[(t, m) in wanted for t, m in zip(df["timespan"], df["multiplier"])]]
+        sql, args = f"SELECT {', '.join(cols)} FROM built_bars WHERE ticker=?", [ticker.upper()]
+        if frames is not None:  # filtered here, not after reading every frame (a year of seconds is millions)
+            wanted = sorted(set(frames))
+            if not wanted:
+                return pd.DataFrame(columns=cols)
+            sql += " AND (" + " OR ".join(["(timespan=? AND multiplier=?)"] * len(wanted)) + ")"
+            args += [v for frame in wanted for v in frame]
+        df = pd.read_sql_query(sql + " AND ts >= ? AND ts < ?", conn, params=(*args, int(lo_ms), int(hi_ms)))
         return df.reset_index(drop=True)
 
     def prune_replaced(self, source: str, ticker: str, before: pd.DataFrame, after: pd.DataFrame, why: str) -> int:

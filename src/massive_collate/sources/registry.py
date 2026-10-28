@@ -31,6 +31,7 @@ build. A plugin that fails to load is left out and reported (`errors()`, `plugin
 from __future__ import annotations
 
 import importlib
+import math
 import pkgutil
 import threading
 from dataclasses import dataclass, field, replace
@@ -277,18 +278,19 @@ class Provider:
         """Its server's rate limit from the headers it sent (source.client.limits_seen), a minute's,
         beside the window kept: {seen, perMinute, kept, row} (row: the scan's line for it)."""
         seen = dict(getattr(getattr(source, "client", None), "limits_seen", None) or {})
+        found = server_limits(seen)
         per_minute = server_per_minute(seen)
         kept = list(self.rate_window(settings)) if settings is not None else None
-        kept_pm = kept[0] * 60 / kept[1] if kept and kept[0] else None
-        if per_minute is None:
+        said = "; ".join(_per(q, w) for q, w in found)
+        if not found:
             row = ("its server's rate limit", True, "not sent in its answers: its own published limits are kept"
                    + (f" ({self.limits})" if self.limits else ""))
-        elif kept_pm is None or kept_pm <= per_minute:
-            row = ("its server's rate limit", True, f"{per_minute:,} a minute"
-                   + (f"; {kept_pm:,.0f} a minute kept, inside it" if kept_pm else ""))
+        elif kept is None or within(kept[0], kept[1], found) == tuple(kept):
+            row = ("its server's rate limit", True, said + (f"; {_per(*kept)} kept, inside it" if kept and kept[0] else ""))
         else:
-            row = ("its server's rate limit", False, f"{per_minute:,} a minute: fewer than the {kept_pm:,.0f} kept; "
-                   "its server's is used from now on (a little inside it)")
+            row = ("its server's rate limit", False, f"{said}: " + (f"tighter than the {_per(*kept)} kept" if kept[0]
+                                                                     else "its plan keeps no limit")
+                   + "; its server's is used from now on (a little inside it)")
         return {"seen": seen, "perMinute": per_minute, "kept": kept, "row": row}
 
     def plan_state(self, settings: "Settings") -> list[dict]:
@@ -371,56 +373,111 @@ def public_client(name: str, base_url: str, settings: "Settings", request_budget
 
 def rate_window(name: str, settings: "Settings") -> tuple[int | None, float]:
     """The window each feed's limiter keeps: (requests, seconds). A little inside what each
-    server publishes (Provider.limits) so a limiter never meets a refusal; and inside the limit its
-    server's own headers gave on its last capability scan, when that is lower (verified weekly)."""
+    server publishes (Provider.limits) so a limiter never meets a refusal; and inside the limits its
+    server's own headers gave on the last capability scans of every feed on its account (verified
+    weekly), when they are tighter, a plan without a limit of its own included."""
     p = get(name)
     if p is None:
         rpm = settings.for_source(name).tier.requests_per_minute
         return rpm, minute_window(rpm)
     n, seconds = p.rate_window(settings)
-    found = found_per_minute(name, settings)
-    if found and n and n * 60 / seconds > found * SERVER_SHARE:
-        n = max(1, int(found * SERVER_SHARE * seconds / 60))
-    return n, seconds
+    return within(n, seconds, found_limits(name, settings))
 
 
 SERVER_SHARE = 0.95  # of a server's own limit, when it is below the window a plugin keeps
 
 
-def server_per_minute(seen: Mapping[str, str]) -> int | None:
-    """A minute's limit from a server's rate-limit headers: X-RateLimit-Limit (a minute's, as
-    Alpaca's), or the IETF draft's RateLimit-Limit with its RateLimit-Policy window ("100;w=60")."""
+def within(n: int | None, seconds: float, limits: list[tuple[float, float]]) -> tuple[int | None, float]:
+    """A window (n requests in `seconds`; n None: no limit) kept within SERVER_SHARE of each server
+    limit (requests, seconds): on average under the lowest rate of them, and n at once under each
+    shorter window's. Unchanged when it already is. A few a second becomes one in a longer window,
+    never rounded up to one a second (that was twice a server's 30 a minute)."""
+    if not limits:
+        return n, seconds
+    rate = min(q / w for q, w in limits) * SERVER_SHARE  # requests a second
+    if n is not None and n / seconds <= rate + 1e-9 and all(n <= q * SERVER_SHARE for q, w in limits if w <= seconds):
+        return n, seconds
+    seconds = min(seconds or 60.0, min(w for _, w in limits))
+    n = int(rate * seconds + 1e-9)
+    if n < 1:
+        n, seconds = 1, float(math.ceil(1 / rate))
+    return n, float(seconds)
+
+
+def server_limits(seen: Mapping[str, str]) -> list[tuple[float, float]]:
+    """Each limit a server's rate-limit headers give, as (requests, seconds): X-RateLimit-Limit, a
+    minute's (Alpaca's, the one feed known to send it); the IETF draft's RateLimit-Policy, each of
+    its policies ("10;w=1, 1000;w=3600", or '"default";q=100;w=60'), else its RateLimit-Limit, a
+    minute's when no window is said."""
     def number(text) -> float | None:
         try:
-            return float(str(text).split(",")[0].split(";")[0].strip())
+            return float(str(text).strip().strip('"'))
         except (TypeError, ValueError):
             return None
+
     low = {k.lower(): v for k, v in seen.items()}
-    if number(low.get("x-ratelimit-limit")):
-        return int(number(low["x-ratelimit-limit"]))
-    limit = number(low.get("ratelimit-limit"))
-    if limit:
-        window = next((float(p.split("=", 1)[1]) for p in str(low.get("ratelimit-policy", "")).split(";")
-                       if p.strip().startswith("w=")), 60.0)
-        return int(limit * 60 / window) if window > 0 else None
-    return None
+    out: list[tuple[float, float]] = []
+    x = number(str(low.get("x-ratelimit-limit", "")).split(",")[0].split(";")[0])
+    if x:
+        out.append((x, 60.0))
+    policies = []
+    for part in str(low.get("ratelimit-policy") or "").split(","):
+        bits = [b.strip() for b in part.split(";") if b.strip()]
+        if not bits:
+            continue
+        q = next((number(b[2:]) for b in bits if b.startswith("q=")), None) or number(bits[0])
+        w = next((number(b[2:]) for b in bits if b.startswith("w=")), None) or 60.0
+        if q:
+            policies.append((q, w))
+    if policies:
+        out += policies
+    else:
+        limit = number(str(low.get("ratelimit-limit", "")).split(",")[0].split(";")[0])
+        if limit:
+            out.append((limit, 60.0))
+    return [(q, w) for q, w in out if q > 0 and w > 0]
 
 
-def found_per_minute(name: str, settings: "Settings") -> int | None:
-    """The limit a minute its server's headers gave on its last capability scan (kept in the
-    database it serves), or None."""
+def server_per_minute(seen: Mapping[str, str]) -> float | None:
+    """The lowest rate a server's rate-limit headers give, a minute's (server_limits), or None."""
+    found = server_limits(seen)
+    if not found:
+        return None
+    pm = min(q * 60 / w for q, w in found)
+    return int(pm) if pm == int(pm) else round(pm, 3)
+
+
+def _per(q: float, w: float) -> str:
+    """A limit in words: "200 a minute", "50 an hour", "10 a second", "3 per 7 s"."""
+    words = {1.0: "a second", 60.0: "a minute", 3600.0: "an hour", 86400.0: "a day"}
+    return f"{q:,.0f} {words[float(w)]}" if float(w) in words else f"{q:,.0f} per {w:,.0f} s"
+
+
+def sharing(name: str) -> list[str]:
+    """The feeds whose requests count against the same account as `name`'s, its own included
+    (Provider.account: Blue Ocean's on Alpaca's key)."""
+    ps = providers()
+    account = (ps[name].account if name in ps else "") or name
+    return [n for n, p in ps.items() if (p.account or n) == account] or [name]
+
+
+def found_limits(name: str, settings: "Settings") -> list[tuple[float, float]]:
+    """The limits their servers' headers gave on the last capability scans of every feed on its
+    account (kept in the database it serves): Blue Ocean's scan tells Alpaca's limiter too."""
     path = getattr(settings, "db_path", None)
-    return scan_limit(path, name) if path else None
+    return [lim for n in sharing(name) for lim in scan_limits(path, n)] if path else []
 
 
-def scan_limit(db_path, name: str) -> int | None:
-    """The limit a minute kept with a feed's last capability scan in a database, or None."""
+def scan_limits(db_path, name: str) -> list[tuple[float, float]]:
+    """The limits kept with a feed's last capability scan in a database (from the headers kept)."""
     from ..sourcing import scans_at
 
     try:
-        return (scans_at(db_path).get(name, {}).get("limits") or {}).get("perMinute")
+        kept = scans_at(db_path).get(name, {}).get("limits") or {}
     except Exception:  # a database being moved: the plugin's own window
-        return None
+        return []
+    found = server_limits(kept.get("seen") or {})
+    return found or ([(float(kept["perMinute"]), 60.0)] if kept.get("perMinute") else [])
 
 
 # -- the registry ----------------------------------------------------------------------------------

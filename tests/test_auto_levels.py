@@ -132,6 +132,9 @@ def test_a_far_future_projection_stops_before_timestamps_end(store):
     app = ChartApp(store)
     fut = app.future({"source": "*", "ticker": "SPCX", "period": "month", "span": "1", "auto": "1", "count": "4000"})
     assert 0 < len(fut["timestamps"]) <= 600  # fifty years of months, not four thousand
+    for auto in ("1", "0"):  # an offset past them answers nothing (past 2262 the timestamps overflowed)
+        far = {"source": "*", "ticker": "SPCX", "period": "minute", "span": "1", "auto": auto, "offset": str(10**12)}
+        assert app.future(far)["timestamps"] == []
 
 
 @pytest.mark.parametrize("period, span", [("minute", 5), ("hour", 1), ("day", 1), ("week", 1)])

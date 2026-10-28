@@ -73,7 +73,16 @@ def build(settings, request_budget):
     client = PublicClient("https://api.tiingo.com", headers=headers, request_budget=request_budget,
                           rate_limiter=limiter("tiingo", settings, key))
     source = TiingoSource(machine_caps(client, "tiingo", settings, key), has_key=bool(key))
-    source.symbols_per_month = PLANS[plan_of(settings)][3]  # collector._monthly_symbol
+    return monthly_symbols(source, settings, key)
+
+
+def monthly_symbols(source, settings, key):
+    """The plan's different symbols a month on a Tiingo source (collector._monthly_symbol), counted
+    for the key on the whole machine: its stocks and its forex (tiingofx) take the same places."""
+    from ...ratelimit import MachineLedger
+
+    source.symbols_per_month = PLANS[plan_of(settings)][3]
+    source.symbol_ledger = MachineLedger("tiingo:symbols", key)
     return source
 
 
@@ -106,19 +115,26 @@ def rows_of(answer) -> int:
 
 
 def scan(source, today: date | None = None) -> Scanned:
-    """Each probe once; the plan from the News request: served, a paid plan (Power's limits, the
-    lower: Commercial's answers are the same); refused by the plan (401, 403), Starter; anything
-    else (a timeout, a server error), no plan."""
+    """Each probe once; the plan from the News request: news served (articles), a paid plan
+    (Power's limits, the lower: Commercial's answers are the same); refused by the plan (401, 403),
+    Starter; anything else (a timeout, a server error, an answer without articles: an error said
+    in a 200, an empty list), no plan: a paid plan's far higher limits are never taken on less."""
     out, plan, alike = [], {}, {}
     for what, path, params in probes(today or date.today()):
         try:
-            n = rows_of(source.client.get(path, params))
+            answer = source.client.get(path, params)
+            n = rows_of(answer)
         except SourceError as e:  # NotEntitled included: a refusal names the add-on it needs
             out.append((what, False, str(e)[:200]))
             if what == NEWS and e.status in (401, 403):
                 plan["TIINGO_PLAN"] = "starter"
             continue
         if what == NEWS:
+            articles = isinstance(answer, list) and any(isinstance(a, dict) and (a.get("title") or a.get("id"))
+                                                        for a in answer)
+            if not articles:
+                out.append((what, False, f"answered without articles ({str(answer)[:120]}): the plan is not told"))
+                continue
             plan["TIINGO_PLAN"], alike["TIINGO_PLAN"] = "power", ("commercial",)
             out.append((what, True, "served: a paid plan, Power or Commercial (the same data)"))
         elif what == FUNDAMENTALS:

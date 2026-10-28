@@ -133,6 +133,8 @@ def test_tiingo_scans_its_plan_and_reports_the_blue_ocean_add_on(store):
                 raise NotEntitled(403, "You do not have the BOATS entitlement ($9/month add-on)")
             if path == "/tiingo/crypto/prices":
                 return [{"ticker": "btcusd", "priceData": [{"close": 1}, {"close": 2}]}]
+            if path == "/tiingo/news":
+                return [{"id": 1, "title": "Headline"}]
             return [{"close": 1}] * 3
 
     source = type("Source", (), {"client": Client()})()

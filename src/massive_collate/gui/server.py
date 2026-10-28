@@ -144,6 +144,7 @@ class ChartApp:
         self._derive_proc: subprocess.Popen | None = None  # a build started by start_derive
         self._gov_db, self._gov_lock = None, threading.Lock()  # gov/gov.db, opened on first use
         self._recheck: tuple | None = None  # a publisher's limits recheck: (thread, {name, since})
+        self._recheck_lock = threading.Lock()
         self._paper, self._paper_lock = None, threading.RLock()  # the paper account (paper), opened on first use
         self._monitor, self._monitor_lock = None, threading.Lock()  # the Resources view's sampler, made on first use
 
@@ -597,8 +598,6 @@ class ChartApp:
             raise RuntimeError("offline (MASSIVE_OFFLINE): this copy of the app sends no requests")
         if name not in publishers():
             raise LookupError(f"no publisher named {name}")
-        if self._recheck and self._recheck[0].is_alive():
-            raise RuntimeError("a recheck is already running")
         log = _log_to(self.store.path)
 
         def run() -> None:
@@ -610,9 +609,12 @@ class ChartApp:
             finally:
                 self._plugins_cache = None
         t = threading.Thread(target=run, name=f"recheck-{name}", daemon=True)
-        self._recheck = (t, {"name": name, "since": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+        with self._recheck_lock:  # one at a time: two presses at once started two
+            if self._recheck and self._recheck[0].is_alive():
+                raise RuntimeError("a recheck is already running")
+            t.start()
+            self._recheck = (t, {"name": name, "since": datetime.now(timezone.utc).isoformat(timespec="seconds")})
         self._plugins_cache = None
-        t.start()
         return {"started": True, "name": name}
 
     def _recheck_running(self) -> dict | None:
@@ -693,7 +695,10 @@ class ChartApp:
         with self._lock:
             scheme = sourcing.standing(self.store, feeds)
             out = plugins.view(self.store, settings, feeds, scheme, scans, running)
-        out["publishers"] = self.publishers()
+        try:
+            out["publishers"] = self.publishers()
+        except Exception as e:  # noqa: BLE001 - gov.db or a publisher's fault: the providers still show
+            out["publishers"], out["publishersError"] = [], f"{type(e).__name__}: {e}"
         out["rechecking"] = rechecking
         self._plugins_cache = (time.monotonic(), out, (bool(running), bool(rechecking)))
         return out
@@ -766,8 +771,16 @@ class ChartApp:
 
     @_heavy
     def future(self, q: dict[str, str]) -> dict:
+        from .window import UNIT_MS
+
         style = Style(type=q.get("type", "candles"))
         period, span = _level(q)
+        # slots for at most 50 years ahead, offset included (an offset past 2262 overflowed the timestamps)
+        reach = max(1, int(50 * 365.25 * 86_400_000 // (UNIT_MS.get(period, 60_000) * max(1, span))))
+        offset = min(max(0, int(q.get("offset", 0))), reach)
+        count = max(0, min(int(q.get("count", 500)), 5000, reach - offset))
+        if not count:
+            return {"timestamps": [], "last": None, "total": 0}
         if self._auto(q, style.type):  # projected from the level's newest bar, not the whole history
             from .projection import project
 
@@ -784,18 +797,13 @@ class ChartApp:
             last = pd.Timestamp(newest[-1]["timestamp"], unit="ms", tz="UTC").tz_convert("America/New_York")
             if period in ("day", "week", "month", "year"):  # days from the exchange's sessions, not every minute
                 s.daily = pd.DataFrame({"close": [newest[-1]["close"]]}, index=pd.DatetimeIndex([last]))
-            from .window import UNIT_MS
-
-            # slots for at most 50 years ahead: 4,000 months is centuries of sessions to walk
-            cap = max(1, int(50 * 365.25 * 86_400_000 // (UNIT_MS[period] * span)))
             ts = project(self.engine.calendar(), s, None, period, span, s.session_for(session), style.type, 1, 1, last,
-                         max(0, int(q.get("offset", 0))), min(int(q.get("count", 500)), 5000, cap),
-                         cache=self.engine._future_cache)
+                         offset, count, cache=self.engine._future_cache)
             return {"timestamps": ts, "last": newest[-1]["timestamp"], "total": 1, "lastBar": newest[-1]["timestamp"]}
         return self.engine.future(
             q["source"], q["ticker"], period, span, q.get("session", "regular"),
             style=style, adjust=_adjust(q.get("adjust")), lod=int(q.get("lod", 1)), model=_model(q),
-            offset=max(0, int(q.get("offset", 0))), count=min(int(q.get("count", 500)), 5000),
+            offset=offset, count=count,
         )
 
     @_heavy

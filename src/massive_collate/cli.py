@@ -989,6 +989,14 @@ def _scan(name: str, source, store: Store, log, due_days: float | None = None, s
                                                              "limits": dict(found.limits)}))
     for what, ok, detail in found.results:
         log(f"{name}: {'yes' if ok else 'no '} {what}" + (f": {detail}" if detail else ""))
+    client = getattr(source, "client", None)
+    if settings is not None and found.limits.get("perMinute") is not None and hasattr(client, "tighten"):
+        from .ratelimit import describe
+        from .sources.registry import rate_window
+
+        n, s = rate_window(p.account or name, settings)  # its limiter's (its account's), with what was just kept
+        if client.tighten(n, s):
+            log(f"{name}: its limiter keeps {describe(n, s)} from now on, this run included (its server's limit)")
     for var, value in found.plan.items():
         alike = found.alike.get(var)
         log(f"{name}: plan found: {var}={value}" + (f" (or {', '.join(alike)}: the same answers)" if alike else "")

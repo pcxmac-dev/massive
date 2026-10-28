@@ -116,6 +116,11 @@ CREATE TABLE IF NOT EXISTS limits_seen ( -- the rate-limit headers each feed's s
     seen      TEXT NOT NULL,
     PRIMARY KEY (publisher, feed)
 );
+CREATE TABLE IF NOT EXISTS holds (      -- nothing sent until: a publisher refused or asked to wait, a host's crawl-delay
+    name      TEXT PRIMARY KEY,         -- a publisher's name, or host:<host>
+    until     TEXT NOT NULL,
+    why       TEXT
+);
 """
 
 
@@ -219,6 +224,17 @@ class GovDB:
     def limits_kept(self, publisher: str) -> dict[str, dict]:
         return {r[0]: json.loads(r[1]) for r in
                 self.conn.execute("SELECT feed, seen FROM limits_seen WHERE publisher=?", (publisher,))}
+
+    def hold_get(self, name: str) -> dict | None:
+        r = self.conn.execute("SELECT until, why FROM holds WHERE name=?", (name,)).fetchone()
+        return {"until": r[0], "why": r[1]} if r else None
+
+    def hold_set(self, name: str, until: datetime, why: str) -> None:
+        """Hold until then, or the longer hold already kept (a later, shorter wait never cuts one short)."""
+        with self.conn:
+            self.conn.execute("INSERT INTO holds VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET "
+                              "until=excluded.until, why=excluded.why WHERE excluded.until > holds.until",
+                              (name, until.astimezone(timezone.utc).isoformat(timespec="seconds"), why))
 
 
 # -- reading the feeds -------------------------------------------------------------------------
@@ -360,8 +376,15 @@ def parameters(db: GovDB, spx_close: tuple[str, float] | None = None) -> list[di
 def upcoming(publishers, today, now: datetime | None = None) -> list[dict]:
     """The publishers' next scheduled releases (their calendars: the FOMC's decisions and minutes),
     soonest first: [{when, what, publisher}]; with `now`, only those still to come."""
-    out = [{**c, "publisher": p.title} for p in publishers.values() if p.calendar for c in p.calendar(today)
-           if now is None or datetime.fromisoformat(c["when"]) > now]
+    out = []
+    for p in publishers.values():
+        if not p.calendar:
+            continue
+        try:  # one plugin's calendar that fails (a naive time, a malformed entry) shows none, the others still do
+            out += [{**c, "publisher": p.title} for c in p.calendar(today)
+                    if now is None or datetime.fromisoformat(c["when"]) > now]
+        except (TypeError, ValueError, KeyError):
+            continue
     return sorted(out, key=lambda c: datetime.fromisoformat(c["when"]))
 
 

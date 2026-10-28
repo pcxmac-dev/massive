@@ -10,7 +10,7 @@ from dataclasses import replace
 from ...config import Tier
 from ..public import PublicClient, TiingoFxSource
 from ..registry import Provider, limiter, machine_caps
-from .tiingo import PLUGIN as TIINGO, view as tiingo_view
+from .tiingo import PLUGIN as TIINGO, monthly_symbols, view as tiingo_view
 
 # Its currencies' history: from Tiingo's first forex minute (its plan's other limits are Tiingo's)
 FX_TIER = Tier("tiingofx", requests_per_minute=None, history_years=None, history_start=TiingoFxSource.START)
@@ -28,7 +28,8 @@ def build(settings, request_budget):
     # Tiingo's window and day cap, held for the machine under Tiingo's name: one account's limits
     client = PublicClient("https://api.tiingo.com", headers=headers, request_budget=request_budget,
                           rate_limiter=limiter("tiingo", settings, key))
-    return TiingoFxSource(machine_caps(client, "tiingo", settings, key), has_key=bool(key))
+    # its pairs take places among the plan's different symbols a month, with Tiingo's stocks
+    return monthly_symbols(TiingoFxSource(machine_caps(client, "tiingo", settings, key), has_key=bool(key)), settings, key)
 
 
 PLUGIN = Provider(

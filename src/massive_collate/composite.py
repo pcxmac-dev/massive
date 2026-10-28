@@ -173,9 +173,23 @@ def _venue_bars(store, feed_of: dict[str, str], ticker: str, timespan: str, lo: 
     return out
 
 
+def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """[lo, hi) spans, overlapping or touching ones joined, in order."""
+    out: list[list[int]] = []
+    for lo, hi in sorted(spans):
+        if out and lo <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], hi)
+        else:
+            out.append([lo, hi])
+    return [(lo, hi) for lo, hi in out]
+
+
 def refresh(store, feeds: dict, now: datetime, log=print, rebuild_days: int = 2) -> dict:
     """Bring every multi-exchange asset's composite up to date (and the exchanges' quality, daily).
-    Only the last `rebuild_days` are rebuilt once a composite exists (late bars, quality changes)."""
+    Once a composite exists, rebuilt are: the last `rebuild_days` (late bars, quality changes), what
+    an exchange now holds further back than at the last build, and the span of each exchange's
+    bars written or pruned since the last build (its change log, as derive.py reads it: a late fill
+    or a prune mid-history never reached the composite)."""
     watched: dict[str, set] = {}
     for w in store.watchlist():
         watched.setdefault((w["ticker"], w["asset"]), set()).add(w["source"])
@@ -194,33 +208,41 @@ def refresh(store, feeds: dict, now: datetime, log=print, rebuild_days: int = 2)
             if len(edges) < 2:
                 continue
             first, last = min(e[0] for e in edges.values()), max(e[1] for e in edges.values())
-            # Rebuild the last few days, and from wherever an exchange's data now reaches further
-            # back than at the last build (a new exchange, a backfill); everything the first time.
-            key = f"composite:edges:{ticker}:{timespan}"
-            before = store.kv_json(key, {})
+            key, mark = f"composite:edges:{ticker}:{timespan}", f"composite:built:{ticker}:{timespan}"
+            started = int(datetime.now(timezone.utc).timestamp() * 1000)
+            before, built_to = store.kv_json(key, {}), int(store.kv_get(mark) or -1)
             have = store.bar_edges("composite", ticker, timespan)
-            lo = have[1] - rebuild_days * DAY_MS if have else first
-            for f, (a, _) in edges.items():
-                if f not in before or a < before[f][0]:
-                    lo = min(lo, a)
-            lo = max(first, lo) // DAY_MS * DAY_MS
+            spans = [(first, last + 1)] if not have else [(have[1] - rebuild_days * DAY_MS, last + 1)]
+            if have:
+                for f, (a, b) in edges.items():
+                    if f not in before or a < before[f][0]:  # a new exchange, a backfill
+                        spans.append((a, (before[f][0] if f in before else b) + 1))
+                    # written since the last build (60 s back: a write's stored_at is stamped before its lock)
+                    changed = store.changed_span(f, ticker, timespan, built_to - 60_000) if built_to >= 0 else None
+                    if changed:
+                        spans.append((changed[0], changed[1] + 1))
+            chunk = (30 if timespan == "day" else 1) * DAY_MS
+            spans = _merged([(max(first, a) // DAY_MS * DAY_MS, min(b, last + 1)) for a, b in spans if b > first])
             derivation = provenance.record(store, "composite", f"composite:{ticker}:{timespan}", {
                 "method": "volume x quality weighted mean of the exchanges' bars", "min_venues": 2,
                 "outlier_bps": OUTLIER_BPS, "outlier_sd": 3, "rebuild_days": rebuild_days},
-                {"exchanges": feed_of, "weights": weights, "edges": edges}, (lo, last + 1))
+                {"exchanges": feed_of, "weights": weights, "edges": edges},
+                (spans[0][0], spans[-1][1]) if spans else (first, last + 1))
             made = 0
-            while lo <= last:
-                hi = lo + (30 if timespan == "day" else 1) * DAY_MS
-                comp = combine(_venue_bars(store, feed_of, ticker, timespan, lo, hi), weights)
-                if not comp.empty:
-                    comp = comp[comp["venues"] >= 2]  # one exchange alone is that exchange, not a composite
-                # the whole chunk is built again: a composite bar it no longer makes (an exchange's bar
-                # since removed or pruned, fewer than two left) goes, not only those it makes anew
-                made += store.save_composite(ticker, timespan, comp, derivation, span=(lo, hi))
-                lo = hi
+            for lo, end in spans:
+                while lo < end:
+                    hi = lo + chunk
+                    comp = combine(_venue_bars(store, feed_of, ticker, timespan, lo, hi), weights)
+                    if not comp.empty:
+                        comp = comp[comp["venues"] >= 2]  # one exchange alone is that exchange, not a composite
+                    # the whole chunk is built again: a composite bar it no longer makes (an exchange's bar
+                    # since removed or pruned, fewer than two left) goes, not only those it makes anew
+                    made += store.save_composite(ticker, timespan, comp, derivation, span=(lo, hi))
+                    lo = hi
             store.set_derivation_rows(derivation, made)
             built += made
             store.kv_set(key, json.dumps({f: list(e) for f, e in edges.items()}))
+            store.kv_set(mark, str(started))
         key = f"quality:{ticker}"
         last_q = store.kv_get(key)
         if built or not last_q or (now - datetime.fromisoformat(last_q)).total_seconds() > 86_400:

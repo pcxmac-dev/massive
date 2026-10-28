@@ -158,7 +158,7 @@ class _TiingoClient:
         if path == "/tiingo/news":
             if isinstance(self.news, Exception):
                 raise self.news
-            return [{"title": "x"}]
+            return [{"title": "x"}] if self.news is None else self.news
         if path.startswith(("/boats/", "/tiingo/fundamentals/")):
             raise NotEntitled(403, "not on your plan")
         return [{"close": 1}]
@@ -179,6 +179,9 @@ def test_tiingos_scan_tells_starter_from_a_paid_plan_by_the_news_api(store):
     assert refused.plan == {"TIINGO_PLAN": "starter"} and refused.alike == {}
     failed = tiingo_p.run_scan(type("S", (), {"client": _TiingoClient(SourceError(500, "server error"))})())
     assert failed.plan == {}  # neither served nor refused: nothing told
+    for quiet in ({"detail": "Error: news is for the paid plans"}, []):  # a 200 without articles: never a paid plan
+        said = tiingo_p.run_scan(type("S", (), {"client": _TiingoClient(quiet)})())
+        assert said.plan == {} and next(r for r in said.results if r[0] == tiingo.NEWS)[1] is False
     client = _TiingoClient(news=None)
     tiingo_p_source = type("S", (), {"client": client})()
     assert client.paths == [] and len(tiingo.probes(date(2026, 10, 27))) == 7

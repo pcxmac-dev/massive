@@ -206,10 +206,12 @@ def test_the_limits_are_verified_weekly_and_a_recheck_never_asks_within_the_floo
     assert any("longer than its own" in n for n in found["notes"])
     assert site.asked == ["https://news.example.gov/robots.txt", "https://news.example.gov/feed.xml"]
     site.asked.clear()
-    r.recheck(p, NOW + timedelta(minutes=1))  # pressed again at once: robots.txt again, the feed not
-    assert site.asked == ["https://news.example.gov/robots.txt"]
+    r.recheck(p, NOW + timedelta(minutes=1))  # pressed again at once: robots.txt read within the hour, the feed in its floor
+    assert site.asked == []
+    r.recheck(p, NOW + timedelta(minutes=61))
+    assert site.asked == ["https://news.example.gov/robots.txt", "https://news.example.gov/feed.xml"]
     site.asked.clear()
-    r.step(NOW + timedelta(days=publications.RECHECK_DAYS, minutes=1), publishers={"t": p})
+    r.step(NOW + timedelta(days=publications.RECHECK_DAYS, minutes=62), publishers={"t": p})
     assert site.asked[0].endswith("robots.txt")  # a week on: verified again
 
 
@@ -246,7 +248,7 @@ def massive_news(monkeypatch):
     from massive_collate.sources.plugins import massive
 
     fake = FakeNews()
-    monkeypatch.setattr(massive, "build", lambda settings, budget: fake)
+    monkeypatch.setattr(massive, "build", lambda settings, budget, max_retries=4: fake)
     settings = load_settings(env={"MASSIVE_API_KEY": "k"}, env_file=None)
     return fake, settings, publishers()["massive-news"]
 
@@ -284,6 +286,187 @@ def test_a_publisher_paused_by_hand_is_not_read_until_resumed(store):
     publications.pause(store, "t", False)
     r.step(datetime.now(timezone.utc), publishers={"t": p})
     assert site.asked
+
+
+# -- the review of 2026-10-28: each finding --------------------------------------------------------------------
+def _mark(r, p, now=NOW):
+    """Its limits verified already: a step reads due feeds, not a recheck."""
+    r.gdb.recheck_set(p.name, {"at": now.isoformat(), "notes": []})
+
+
+def test_an_unchanged_feed_is_asked_once_not_twice_as_a_redirect():
+    site = Site({"https://news.example.gov/feed.xml": Resp(304)})
+    r = reader(site)
+    p = pub()
+    _mark(r, p)
+    r.step(NOW, publishers={"t": p})
+    assert site.asked == ["https://news.example.gov/robots.txt", "https://news.example.gov/feed.xml"]
+    assert r.gdb.fetched()["t-press"]["status"] == "unchanged"
+
+
+def test_a_refusal_holds_every_feed_of_the_publisher_and_its_robots_txt():
+    two = (Feed("t-a", "T", "A", "https://news.example.gov/a.xml", every_minutes=60),
+           Feed("t-b", "T", "B", "https://news.example.gov/b.xml", every_minutes=60))
+    site = Site({"https://news.example.gov/a.xml": Resp(429, headers={"Retry-After": str(24 * 3600)})})
+    r = reader(site)
+    p = pub(two)
+    _mark(r, p)
+    r.step(NOW, publishers={"t": p})
+    assert site.asked == ["https://news.example.gov/robots.txt", "https://news.example.gov/a.xml"]  # b not asked
+    site.asked.clear()
+    for hours in (1, 7, 23):  # the Retry-After, a day, is longer than the 6 h of a refusal
+        r.step(NOW + timedelta(hours=hours), publishers={"t": p})
+    assert site.asked == [] and r.held(p, NOW + timedelta(hours=23))
+    assert r.next_read(p, two[1], NOW + timedelta(hours=1)) == NOW + timedelta(hours=24)
+    r.recheck(p, NOW + timedelta(hours=2))  # Recheck pressed: held, nothing sent
+    assert site.asked == []
+    site.answers = {}  # answering again
+    r.step(NOW + timedelta(hours=24, minutes=1), publishers={"t": p})
+    assert site.asked == ["https://news.example.gov/a.xml", "https://news.example.gov/b.xml"]
+
+
+def test_a_retry_after_on_any_answer_holds_the_publisher():
+    site = Site({"https://news.example.gov/feed.xml": Resp(503, headers={"Retry-After": "7200"})})
+    r = reader(site)
+    p = pub()
+    _mark(r, p)
+    r.step(NOW, publishers={"t": p})
+    site.asked.clear()
+    r.step(NOW + timedelta(minutes=30), publishers={"t": p})
+    assert site.asked == []
+    r.step(NOW + timedelta(hours=2, minutes=1), publishers={"t": p})
+    assert site.asked == ["https://news.example.gov/feed.xml"]
+    # robots.txt asking to slow down holds it too
+    r2 = reader(Site(robots=Resp(429)))
+    _mark(r2, p)
+    r2.step(NOW, publishers={"t": p})
+    assert r2.held(p, NOW + timedelta(hours=5))
+
+
+def test_a_feed_that_keeps_failing_is_asked_less_and_less_often_never_above_its_cadence():
+    site = Site({"https://news.example.gov/feed.xml": Resp(500)})
+    r = reader(site)
+    p = pub()  # every 60 min, floor 5
+    _mark(r, p)
+    at, waits = NOW, []
+    for _ in range(5):
+        r.step(at, publishers={"t": p})
+        nxt = r.next_read(p, p.feeds[0], at)
+        waits.append(round((nxt - at).total_seconds() / 60))
+        at = nxt
+    assert waits == [10, 20, 40, 60, 60]
+    gone = Site({"https://news.example.gov/feed.xml": Resp(404)})
+    r = reader(gone)
+    _mark(r, p)
+    r.step(NOW, publishers={"t": p})
+    assert r.next_read(p, p.feeds[0], NOW) == NOW + timedelta(minutes=60)  # gone for good: its cadence
+
+
+def test_a_parsers_surprise_is_noted_and_never_stops_the_publishers_after_it():
+    class Odd(Resp):
+        def json(self):
+            return {"refRates": ["x"]}  # JSON of another shape: AttributeError deep in the parser
+
+    nyfed = Publisher("ny", "NY", "", (Feed("ny-r", "NY", "R", "https://markets.example.gov/r.json", "nyfed"),),
+                      Policy(hosts=("markets.example.gov",), min_minutes=5, per_day=40), order=1)
+    site = Site({"https://markets.example.gov/r.json": Odd(headers={"Content-Type": "application/json"})})
+    r = reader(site)
+    p = pub()
+    for x in (nyfed, p):
+        _mark(r, x)
+    r.step(NOW, publishers={"ny": nyfed, "t": p})
+    assert r.gdb.fetched()["ny-r"]["status"] == "failed" and "https://news.example.gov/feed.xml" in site.asked
+    assert r.next_read(nyfed, nyfed.feeds[0], NOW) >= NOW + timedelta(minutes=60)  # not every minute
+
+
+def test_a_crawl_delay_spaces_every_request_to_the_host():
+    feeds = tuple(Feed(f"t-{i}", "T", str(i), f"https://news.example.gov/{i}.xml", every_minutes=60) for i in range(3))
+    site = Site(robots=Resp(text="User-agent: *\nCrawl-delay: 600\n"))
+    r = reader(site)
+    p = pub(feeds)
+    _mark(r, p)
+    wait = r.step(NOW, publishers={"t": p})
+    assert site.asked == ["https://news.example.gov/robots.txt", "https://news.example.gov/0.xml"] and wait == 60
+    r.step(NOW + timedelta(minutes=5), publishers={"t": p})
+    assert len(site.asked) == 2
+    r.step(NOW + timedelta(minutes=10), publishers={"t": p})
+    assert site.asked[-1] == "https://news.example.gov/1.xml" and len(site.asked) == 3
+
+
+def test_a_redirect_is_followed_only_where_its_robots_txt_allows():
+    site = Site({"https://news.example.gov/feed.xml": Resp(301, headers={"Location": "/private/feed.xml"})},
+                robots=Resp(text="User-agent: *\nDisallow: /private/\n"))
+    r = reader(site)
+    p = pub()
+    _mark(r, p)
+    r.step(NOW, publishers={"t": p})
+    assert "https://news.example.gov/private/feed.xml" not in site.asked
+    assert "disallows" in r.gdb.fetched()["t-press"]["message"]
+
+
+def test_robots_txt_is_followed_through_its_own_redirects_and_a_move_elsewhere_reads_nothing():
+    class Moved(Site):
+        def get(self, url, headers=None, timeout=None, allow_redirects=True):
+            self.asked.append(url)
+            if url == "https://news.example.gov/robots.txt":
+                return Resp(301, headers={"Location": "/r/robots.txt"})
+            if url == "https://news.example.gov/r/robots.txt":
+                return Resp(text="User-agent: *\nDisallow: /\n")
+            return super().get(url, headers, timeout)
+
+    site = Moved()
+    r = reader(site)
+    p = pub()
+    _mark(r, p)
+    r.step(NOW, publishers={"t": p})
+    assert site.asked == ["https://news.example.gov/robots.txt", "https://news.example.gov/r/robots.txt"]  # disallowed
+    away = Site(robots=Resp(301, headers={"Location": "https://elsewhere.example.com/robots.txt"}))
+    r = reader(away)
+    _mark(r, p)
+    r.step(NOW, publishers={"t": p})
+    assert away.asked == ["https://news.example.gov/robots.txt"] and r.held(p, NOW)
+
+
+def test_a_recheck_sends_nothing_while_paused_killed_or_fetching_is_paused(store):
+    from massive_collate import collector
+
+    site = Site()
+    r = reader(site, store=store)
+    p = pub()
+    publications.pause(store, "t", True)
+    assert r.recheck(p, NOW).get("stopped") and site.asked == []
+    publications.pause(store, "t", False)
+    store.kv_set(collector.PAUSE_KEY, '{"at": "2026-10-26T00:00:00+00:00", "until": "9999-12-31T00:00:00+00:00"}')
+    assert r.kill(p, NOW)["whose"] == "fetching"
+    r.recheck(p, NOW)
+    r.step(NOW, publishers={"t": p})
+    assert site.asked == []
+
+
+def test_an_account_kill_shows_as_stopped_with_it_not_as_paused_by_you(store):
+    from massive_collate.gui.server import ChartApp
+
+    killswitch.strike(store, "massive", "fetch", "by hand", minutes=240, shared=False)
+    app = ChartApp(store)
+    news = {p["name"]: p for p in app.plugins()["publishers"]}["massive-news"]
+    assert news["kill"]["whose"] == "account" and news["state"] != "paused"
+
+
+def test_one_publishers_failing_calendar_never_takes_the_plugins_view_down(store, monkeypatch):
+    from dataclasses import replace
+
+    from massive_collate.gui.server import ChartApp
+
+    bad = replace(publishers()["fed"], calendar=lambda today: [{"when": "2026-11-05T08:30:00", "what": "naive"}])
+    monkeypatch.setattr(publications, "_today_moments", lambda pub, now: [])
+    out = publications.view(GovDB(None), None, store, publishers={"fed": bad})
+    assert out[0]["calendar"] == []  # a naive time: none shown, no error
+    assert gov.upcoming({"fed": bad}, NOW.date(), NOW) == []
+    broken = replace(publishers()["fed"], calendar=lambda today: 1 / 0)
+    out = publications.view(GovDB(None), None, store, publishers={"fed": broken, "bls": publishers()["bls"]})
+    assert "ZeroDivisionError" in out[0]["error"] and out[1]["name"] == "bls"
+    app = ChartApp(store)
+    assert app.plugins()["plugins"]  # the providers still there
 
 
 # -- the views, the recorder ------------------------------------------------------------------------------------

@@ -86,6 +86,16 @@ class MassiveClient:
         # the rate kept against them (Provider.run_scan).
         self.limits_seen: dict[str, str] = {}
 
+    def tighten(self, n: int | None, seconds: float) -> bool:
+        """Keep a tighter window from now on (a capability scan found its server's lower limit while
+        this client runs: it went on at the old one until the next run); never a looser one. Returns
+        whether it changed."""
+        lim = self._limiter
+        if n is None or (lim.max_calls and lim.max_calls / lim.period <= n / seconds + 1e-9 and lim.max_calls <= n):
+            return False
+        lim.max_calls, lim.period = n, float(seconds)
+        return True
+
     def get(self, path_or_url: str, params: dict[str, Any] | None = None) -> dict:
         resp = self._request(path_or_url, params)
         try:

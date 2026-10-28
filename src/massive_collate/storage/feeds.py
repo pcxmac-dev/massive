@@ -88,13 +88,26 @@ CREATE INDEX IF NOT EXISTS pruned_by_rule ON pruned (ticker, rule, released_at);
 """
 
 
+# A pruned entry (alias p) leaves out the bar it was made of only while that version is the one
+# stored: the feed's own by when it was stored (a corrected bar the feed sends later is stored anew,
+# and only a changed bar is), one built here by its derivation (a repair builds it anew). By time
+# alone, a correction or a repair stayed hidden for good. A new version is judged again when written
+# (the change log).
+_STILL_STORED = (
+    "(CASE WHEN p.derivation IS NULL THEN EXISTS (SELECT 1 FROM bars v WHERE v.ticker=p.ticker AND "
+    "v.timespan=p.timespan AND v.multiplier=p.multiplier AND v.ts=p.ts AND v.stored_at IS p.stored_at) "
+    "ELSE EXISTS (SELECT 1 FROM built_bars v WHERE v.ticker=p.ticker AND v.timespan=p.timespan AND "
+    "v.multiplier=p.multiplier AND v.ts=p.ts AND v.derivation IS p.derivation) END)")
+
+
 def _excluded(conn: sqlite3.Connection, ticker: str, timespan: str, multiplier: int, lo_ms: int | None = None,
               hi_ms: int | None = None) -> dict[str, set]:
-    """Times of a series' bars left out of the filtered view (bad data, pruned and not released),
-    per table: {"bars": the feed's own, "built_bars": those built here} (an entry of a bar built
-    here carries its derivation). A built bar beside a feed's own that was left out is not."""
-    sql = ("SELECT DISTINCT ts, derivation IS NOT NULL FROM pruned WHERE ticker=? AND timespan=? AND multiplier=? "
-           "AND excludes=1 AND released_at IS NULL")
+    """Times of a series' bars left out of the filtered view (bad data, pruned and not released,
+    the version pruned still stored), per table: {"bars": the feed's own, "built_bars": those built
+    here} (an entry of a bar built here carries its derivation). A built bar beside a feed's own that
+    was left out is not."""
+    sql = ("SELECT DISTINCT ts, derivation IS NOT NULL FROM pruned p WHERE ticker=? AND timespan=? AND multiplier=? "
+           "AND excludes=1 AND released_at IS NULL AND " + _STILL_STORED)
     args: list = [ticker.upper(), timespan, multiplier]
     if lo_ms is not None:
         sql += " AND ts >= ?"
@@ -296,6 +309,17 @@ def tick_access() -> bool:
 
 def _stored_ms() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
+def _trade_row(ticker: str, t: dict) -> tuple:
+    """A trade in the common shape as a row of ticks.trades."""
+    return (ticker, int(t["sip_timestamp"]), int(t.get("sequence_number") or 0), t["price"], t["size"],
+            t.get("exchange"), ",".join(str(c) for c in t.get("conditions") or []) or None, t.get("id"), t.get("tape"))
+
+
+def _archive_table(conn: sqlite3.Connection, archive: str, table: str) -> None:
+    """The archive of a table (archive_before, withdraw_trades): its columns, then when and why."""
+    conn.execute(f"CREATE TABLE IF NOT EXISTS {archive} AS SELECT *, 0 AS archived_at, '' AS reason FROM {table} WHERE 0")
 
 
 def _day_bounds(start: date | None, end: date | None, zone: tzinfo | None) -> tuple[int | None, int | None]:
@@ -518,15 +542,7 @@ class FeedStore:
 
     def upsert_trades(self, source: str, ticker: str, trades: Iterable[dict]) -> int:
         ticker = ticker.upper()
-        rows = sorted((  # oldest first: see _ascending
-            (
-                ticker, int(t["sip_timestamp"]), int(t.get("sequence_number") or 0),
-                t["price"], t["size"], t.get("exchange"),
-                ",".join(str(c) for c in t.get("conditions") or []) or None,
-                t.get("id"), t.get("tape"),
-            )
-            for t in trades
-        ), key=lambda r: (r[1], r[2]))
+        rows = sorted((_trade_row(ticker, t) for t in trades), key=lambda r: (r[1], r[2]))  # oldest first: see _ascending
         feed = self._feed(source, create=True)
         feed.attach_ticks()
         with feed.conn:
@@ -535,18 +551,34 @@ class FeedStore:
         self.rows_saved += len(rows)
         return len(rows)
 
-    def withdraw_trades(self, source: str, ticker: str, seqs: Iterable[int], since_ns: int) -> list[int]:
-        """Remove trades the exchange withdrew (canceled, or replaced by a correction), by sequence
-        number, from `since_ns` on. Returns the times (ns) of those removed."""
-        conn = self._ticks(source)
-        if conn is None:
+    def withdraw_trades(self, source: str, ticker: str, withdrawals: Iterable[dict], since_ns: int,
+                        unstored: Iterable[dict] = ()) -> list[int]:
+        """Take trades the exchange withdrew (canceled, or replaced by a correction) out of the series,
+        into ticks.archived_trades with why (kept: source data is never deleted; they were). Each
+        withdrawal names its trade by sequence number, price and size and takes the newest stored
+        match from `since_ns` on: the exchange's trade ids are unique within a day only, and an id
+        alone took yesterday's trade with it. `unstored`: trades withdrawn in the batch that brought
+        them, archived as they came. Returns the times (ns) of the trades taken out of the series."""
+        unstored = list(unstored)
+        feed = self._feed(source, create=bool(unstored))
+        if feed is None or not (unstored or feed.has_ticks()):
             return []
-        ticker, gone = ticker.upper(), []
+        feed.attach_ticks()
+        conn, ticker, gone, at = feed.conn, ticker.upper(), [], _stored_ms()
         with conn:
-            for seq in set(seqs):
-                where = ("WHERE ticker=? AND ts_ns>=? AND seq=?", (ticker, since_ns, int(seq)))
-                gone += [ts for (ts,) in conn.execute("SELECT ts_ns FROM ticks.trades " + where[0], where[1])]
-                conn.execute("DELETE FROM ticks.trades " + where[0], where[1])
+            _archive_table(conn, "ticks.archived_trades", "ticks.trades")
+            for w in withdrawals:
+                key = (ticker, since_ns, int(w.get("sequence_number") or 0), w["price"], w["size"])
+                row = conn.execute("SELECT ts_ns, seq FROM ticks.trades WHERE ticker=? AND ts_ns>=? AND seq=? "
+                                   "AND price=? AND size=? ORDER BY ts_ns DESC LIMIT 1", key).fetchone()
+                if row is None:
+                    continue
+                conn.execute("INSERT INTO ticks.archived_trades SELECT *, ?, 'withdrawn' FROM ticks.trades "
+                             "WHERE ticker=? AND ts_ns=? AND seq=?", (at, ticker, *row))
+                conn.execute("DELETE FROM ticks.trades WHERE ticker=? AND ts_ns=? AND seq=?", (ticker, *row))
+                gone.append(row[0])
+            conn.executemany("INSERT INTO ticks.archived_trades VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'withdrawn')",
+                             [(*_trade_row(ticker, t), at) for t in unstored])
         self._wrote()
         return gone
 
@@ -635,7 +667,8 @@ class FeedStore:
                 "INSERT OR REPLACE INTO built_bars SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS "
                 "(SELECT 1 FROM bars b WHERE ticker=? AND timespan=? AND multiplier=? AND ts=? AND NOT EXISTS "
                 "(SELECT 1 FROM pruned p WHERE p.ticker=b.ticker AND p.timespan=b.timespan AND p.multiplier=b.multiplier "
-                "AND p.ts=b.ts AND p.excludes=1 AND p.released_at IS NULL AND p.derivation IS NULL))",
+                "AND p.ts=b.ts AND p.excludes=1 AND p.released_at IS NULL AND p.derivation IS NULL "
+                "AND p.stored_at IS b.stored_at))",
                 [(*r, *r[:4]) for r in rows]).rowcount
         self._wrote()
         return max(0, n)
@@ -688,7 +721,8 @@ class FeedStore:
             return 0
         same = ("b.ticker=d.ticker AND b.timespan=d.timespan AND b.multiplier=d.multiplier AND b.ts=d.ts AND NOT EXISTS "
                 "(SELECT 1 FROM pruned p WHERE p.ticker=b.ticker AND p.timespan=b.timespan AND p.multiplier=b.multiplier "
-                "AND p.ts=b.ts AND p.excludes=1 AND p.released_at IS NULL AND p.derivation IS NULL)")
+                "AND p.ts=b.ts AND p.excludes=1 AND p.released_at IS NULL AND p.derivation IS NULL "
+                "AND p.stored_at IS b.stored_at)")
         with conn:
             conn.execute(
                 "INSERT OR IGNORE INTO bar_revisions (ticker, timespan, multiplier, ts, open, high, low, close, volume, "
@@ -818,8 +852,8 @@ class FeedStore:
         frames = []
         for feed in [self._feed(source)] if source else self._open_feeds():
             if feed is not None:
-                gone = pd.read_sql_query("SELECT DISTINCT ticker, ts, derivation IS NOT NULL AS built FROM pruned" + where
-                                         + " AND excludes=1 AND released_at IS NULL", feed.conn,
+                gone = pd.read_sql_query("SELECT DISTINCT ticker, ts, derivation IS NOT NULL AS built FROM pruned p" + where
+                                         + " AND excludes=1 AND released_at IS NULL AND " + _STILL_STORED, feed.conn,
                                          params=params) if filtered else None
                 for table in _BAR_TABLES:
                     f = pd.read_sql_query(sql.format(table=table) + " ORDER BY ticker, ts", feed.conn, params=params)
@@ -902,8 +936,7 @@ class FeedStore:
         with feed.conn:
             n = 0
             if ticks:
-                feed.conn.execute("CREATE TABLE IF NOT EXISTS ticks.archived_trades AS "
-                                  "SELECT *, 0 AS archived_at, '' AS reason FROM ticks.trades WHERE 0")
+                _archive_table(feed.conn, "ticks.archived_trades", "ticks.trades")
                 feed.conn.execute("INSERT INTO ticks.archived_trades SELECT *, ?, ? FROM ticks.trades "
                                   "WHERE ticker=? AND ts_ns < ?", (at, reason, ticker, cutoff_ns))
                 n += feed.conn.execute("DELETE FROM ticks.trades WHERE ticker=? AND ts_ns < ?",
@@ -911,8 +944,7 @@ class FeedStore:
             for table, timespan, multiplier in frames:  # a range of the key: ticker, frame, then time
                 key = (ticker, timespan, multiplier, cutoff_ms)
                 where = "WHERE ticker=? AND timespan=? AND multiplier=? AND ts < ?"
-                feed.conn.execute(f"CREATE TABLE IF NOT EXISTS archived_{table} AS "
-                                  f"SELECT *, 0 AS archived_at, '' AS reason FROM {table} WHERE 0")
+                _archive_table(feed.conn, f"archived_{table}", table)
                 feed.conn.execute(f"INSERT INTO archived_{table} SELECT *, ?, ? FROM {table} {where}", (at, reason, *key))
                 n += feed.conn.execute(f"DELETE FROM {table} {where}", key).rowcount
         self._wrote()
