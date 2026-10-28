@@ -372,6 +372,15 @@ def test_the_page_follows_every_feed_fetching_side_by_side():
     assert "Running ${going.length} feeds" in page.split("function statusLine()", 1)[1].split("\n  }\n", 1)[0]
 
 
+def test_the_fetchers_limits_show_each_feeds_month_against_its_allowance():
+    head = _js("index.html").split('class="act-table limits"', 1)[1].split("</thead>", 1)[0]
+    assert "<th>This month</th>" in head and '<th class="num">By month end</th>' in head
+    page = _js("activity.js")
+    assert "${monthHtml(l.month)}</tr>" in page.split("function limitsHtml(rows)", 1)[1]
+    month = page.split("function monthHtml(m)", 1)[1].split("\n  }\n", 1)[0]
+    assert "lapsed on past days" in month and "a day; ${num(m.left)} left" in month
+
+
 def test_the_status_line_spans_the_open_views_own_area_in_every_view():
     place = _js("panels.js").split("function placeStatus()", 1)[1].split("\n  }\n", 1)[0]
     # not under the rail (right) nor under the chart's drawing tools (left: a strip at the view's edge)

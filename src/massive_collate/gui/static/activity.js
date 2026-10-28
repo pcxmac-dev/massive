@@ -349,8 +349,20 @@
     } catch (err) { showError(err); }
   });
 
+  // A feed's month against its allowance (its daily cap, every day: gui/activity.py month_allowance):
+  // used so far, and what the pace of the last days spends by the month's end. A day's cap does not
+  // carry over, so what past days left unspent is lapsed.
+  function monthHtml(m) {
+    if (!m || !m.allowance) return '<td><span class="sub">no daily cap</span></td><td></td>';
+    const share = m.share ?? 0;
+    return `<td>${meter(m.used / m.allowance, '')}<div class="sub">${num(m.used)} of ${num(m.allowance)} used`
+      + `${m.lapsed ? `, ${num(m.lapsed)} lapsed on past days` : ''}</div></td>
+      <td class="num"><span class="${share < 0.9 ? 'warn' : ''}">${Math.round(share * 100)}%</span>`
+      + `<div class="sub">at ${num(m.pace)} a day; ${num(m.left)} left</div></td>`;
+  }
+
   // Every server's state and limits beside what this machine keeps to and has used.
-  const HEALTH_CLASS = { ok: 'run-ok', fetching: 'fetching', idle: 'idle', done: 'run-ok', limited: 'backfilling',
+  const HEALTH_CLASS ={ ok: 'run-ok', fetching: 'fetching', idle: 'idle', done: 'run-ok', limited: 'backfilling',
                          down: 'run-error', off: '', killed: 'killed' };
   function limitsHtml(rows) {
     const t = Date.now() / 1000;
@@ -368,7 +380,8 @@
         <td>${status}</td><td>${esc(l.published)}</td><td>${esc(l.keptTo)}</td>
         <td>${w.allowed ? `${meter(w.used / w.allowed, full ? 'warn' : '')}<div class="sub">${num(w.used)} of ${num(w.allowed)} in the last ${w.periodSeconds >= 3600 ? 'hour' : 'minute'}</div>` : '<span class="sub">no limit</span>'}</td>
         <td>${next}</td>
-        <td class="num">${num(l.today)} <span class="sub">/ ${num(l.perDay)}</span></td><td class="num">${num(l.perRun)}</td></tr>`;
+        <td class="num">${num(l.today)} <span class="sub">/ ${num(l.perDay)}</span></td><td class="num">${num(l.perRun)}</td>
+        ${monthHtml(l.month)}</tr>`;
     }).join('');
   }
 

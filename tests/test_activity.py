@@ -1,4 +1,5 @@
 """The fetcher activity view: live run, plan usage, per-symbol backfill state and the log tail."""
+import calendar
 from datetime import date, datetime, timedelta, timezone
 
 from massive_collate.collector import ET, sync
@@ -205,3 +206,35 @@ def test_the_fetcher_shows_every_feed_fetching_side_by_side(tmp_path):
     states = {h["source"]: h["state"] for h in out["health"]}
     assert states["massive"] == states["alpaca"] == "fetching"
     assert next(r for r in out["runs"] if r["id"] == dead)["status"] == "abandoned"
+
+
+def test_a_feeds_month_against_its_allowance_with_what_lapsed_and_where_the_pace_takes_it():
+    now = datetime(2026, 10, 28, 12, tzinfo=timezone.utc)
+    by_day = {"2026-09-30": 999, "2026-10-25": 100, "2026-10-26": 50, "2026-10-27": 80, "2026-10-28": 40}
+    m = act.month_allowance(by_day, 100, now)
+    assert m["used"] == 270 and m["allowance"] == 3100  # October: 31 days at 100 (September's not counted)
+    assert m["lapsed"] == 24 * 100 + 50 + 20  # a day's cap does not carry over
+    assert m["left"] == 60 + 3 * 100  # the rest of today and three days
+    # the pace of the last three whole days and half of today (270 in 3.5 days): the rest of today, then
+    # three days, none past its cap
+    assert m["pace"] == 77 and m["projected"] == round(270 + 270 / 3.5 * 0.5 + 270 / 3.5 * 3) == 540
+    assert m["share"] == round(540 / 3100, 4)
+    # a feed that began yesterday: its pace from yesterday and today, not the empty days before
+    started = act.month_allowance({"2026-10-27": 600, "2026-10-28": 1000}, 3000, now)
+    assert started["pace"] == round(1600 / 1.5) and started["lapsed"] == 26 * 3000 + 2400
+
+
+def test_a_months_first_day_paces_on_today_and_no_cap_has_no_allowance():
+    now = datetime(2026, 11, 1, 6, tzinfo=timezone.utc)  # a quarter of the day gone
+    m = act.month_allowance({"2026-11-01": 25}, 100, now)
+    assert m["lapsed"] == 0 and m["pace"] == 100 and m["projected"] == 3000 and m["share"] == 1.0
+    assert act.month_allowance({}, 0, now)["share"] is None
+
+
+def test_the_limits_carry_each_feeds_month(tmp_path):
+    now = datetime.now(timezone.utc)
+    settings = load_settings(env={"MASSIVE_API_KEY": "k", "MASSIVE_MAX_REQUESTS_PER_DAY": "100"}, env_file=None)
+    with Store(tmp_path / "m.db") as store:
+        store.count_request("massive", 30, now)
+        row = next(r for r in act.limits(store, settings, now) if r["source"] == "massive")
+    assert row["month"]["used"] == 30 and row["month"]["allowance"] == 100 * calendar.monthrange(now.year, now.month)[1]

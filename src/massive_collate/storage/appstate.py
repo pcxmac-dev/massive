@@ -271,6 +271,11 @@ class AppStateStore:
             self.conn.execute("INSERT INTO request_days (source, day, n) VALUES (?, ?, ?) "
                               "ON CONFLICT (source, day) DO UPDATE SET n = n + excluded.n", (source, day, n))
 
+    def requests_by_day(self, source: str, since: str) -> dict[str, int]:
+        """Requests made per UTC day (`request_days`) for a source, from the day `since` (ISO) on."""
+        return {day: int(n) for day, n in self.conn.execute(
+            "SELECT day, n FROM request_days WHERE source=? AND day>=? ORDER BY day", (source, since))}
+
     def requests_today(self, source: str, now: datetime | None = None) -> int:
         """API requests made today (UTC) for a source: counted as each is made (a run that began
         before midnight books what it asks after midnight to the new day), and never less than

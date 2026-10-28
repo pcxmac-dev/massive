@@ -4,6 +4,7 @@ Everything here is read from the local database and log file; nothing calls the 
 """
 from __future__ import annotations
 
+import calendar
 import math
 import time as _time
 from datetime import date, datetime, timedelta, timezone
@@ -323,10 +324,41 @@ def exchange_checks(store: Store, source: str, now: datetime) -> list[dict]:
     return checks
 
 
+PACE_DAYS = 3  # the month's pace: the requests of the last whole days and today so far, on average
+
+
+def month_allowance(by_day: dict[str, int], per_day: int, now: datetime) -> dict:
+    """A feed's month (UTC days) against its daily cap, so every allowance can be seen being spent:
+    the requests used, the month's allowance (the cap, every day), what past days left unspent (a
+    day's cap does not carry over: lapsed), what is left, and what the pace of the last whole days
+    (PACE_DAYS) and today so far spends by the month's end, no day past its cap (a feed that began
+    yesterday paces on yesterday and today, not on the empty days before it). `by_day`: requests
+    per UTC day (ISO dates) this month."""
+    now = now.astimezone(timezone.utc)
+    today = now.date()
+    first = today.replace(day=1)
+    days = calendar.monthrange(today.year, today.month)[1]
+    used = sum(n for d, n in by_day.items() if first.isoformat() <= d <= today.isoformat())
+    past = [by_day.get((first + timedelta(days=i)).isoformat(), 0) for i in range((today - first).days)]
+    lapsed = sum(max(0, per_day - n) for n in past)
+    allowance = per_day * days
+    so_far = by_day.get(today.isoformat(), 0)
+    day_gone = (now - datetime(today.year, today.month, today.day, tzinfo=timezone.utc)).total_seconds() / 86_400
+    started = next((i for i, n in enumerate(past) if n), len(past))  # the days before a feed began: not its pace
+    recent = past[max(started, len(past) - PACE_DAYS):]  # a month's first day has none: today's rate alone
+    pace = (sum(recent) + so_far) / max(len(recent) + day_gone, 1 / 24)
+    projected = round(used + min(max(0, per_day - so_far), pace * (1 - day_gone))
+                      + min(pace, per_day) * (days - today.day))
+    return {"used": used, "allowance": allowance, "lapsed": lapsed, "left": max(0, allowance - used - lapsed),
+            "pace": round(pace), "projected": projected,
+            "share": round(projected / allowance, 4) if allowance else None}
+
+
 def limits(store: Store, settings: Settings, now: datetime) -> list[dict]:
     """Every server's limits beside what this machine keeps to and has used: the request window
     (and how full it is now, from the window runs share), the caps per run and per day, today's
-    requests, and a wait in progress (a full window or a server's Retry-After) with its reason."""
+    requests and the month's (month_allowance), and a wait in progress (a full window or a
+    server's Retry-After) with its reason."""
     from ..ratelimit import describe, load_times, wait_key, window_state
     from ..sources import providers
 
@@ -339,11 +371,15 @@ def limits(store: Store, settings: Settings, now: datetime) -> list[dict]:
             f"{feed.tier.name} plan: {describe(feed.tier.requests_per_minute, 60.0)}")
         wait = store.kv_json(wait_key(name))
         used = store.requests_today(name)
+        today = now.astimezone(timezone.utc).date()
+        month = store.requests_by_day(name, today.replace(day=1).isoformat())
+        month[today.isoformat()] = max(used, month.get(today.isoformat(), 0))  # as the daily cap counts it
         rows.append({
             "source": name, "plan": feed.tier.name, "published": published, "keptTo": describe(calls, period),
             "window": window_state(load_times(store, name), calls, period, t),
             "perRun": feed.max_requests_per_run, "perDay": feed.max_requests_per_day,
             "today": used, "leftToday": max(0, feed.max_requests_per_day - used),
+            "month": month_allowance(month, feed.max_requests_per_day, now),
             "wait": wait if wait and wait.get("until", 0) > t else None,
         })
     return rows
