@@ -4,6 +4,16 @@ Working notes so work can resume in a fresh session. Newest first.
 
 ## State (2026-10-27)
 
+- **Code audit (2026-10-28):** six reviews of the whole package; the critical and high findings fixed
+  (no more deletes on a listing change, kills per account with Retry-After, keys trimmed and never
+  logged, Blue Ocean's night horizon, profiles across tabs, paper orders). The open ones, by area:
+  docs/AUDIT.md.
+- **Live Blue Ocean** (`live.BoatsPoller`, the user's main concern): Tiingo's REST answers for Blue
+  Ocean are real time, so the recorder polls them at night (20:00-04:00 ET, Sunday to Thursday) for
+  the stocks open on a chart: quotes every 5 s in one request, each stock's minutes every 15 s or so,
+  into the feed `tiingoboats` (one of PARTIAL_FEEDS). Paid Tiingo plan only; on Tiingo's limits and
+  kills. The chart shows the night with the session picker on "All four: + overnight".
+
 - **Profiles** (no passwords, the user's choice): a login page (`login.html`, a Vitruvian Man) picks
   or makes one; each keeps its own watchlists (`live.watchlists_key`), layouts (markups), preferences
   (the page's, under `mc:p<id>:`) and register of the stocks it opened (`visits`; the watchlist
