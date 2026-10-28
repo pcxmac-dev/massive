@@ -137,6 +137,8 @@ def test_the_gaps_between_panes_are_the_windows_grey_and_hold_no_crosshair_line(
     app = _js("app.js")
     spacing = _function(app, "applyPaneSpacing")
     assert "separator: { size: PANE_GAP, color: gapColor() }" in spacing and "placeAxisGap();" in spacing
+    # as wide as the page's gap between panels (under the toolbar), not a band of its own
+    assert "const PANE_GAP = parseFloat(getComputedStyle(document.body).getPropertyValue('--gap')) || 6;" in app
     assert "crosshair" not in spacing  # the library's dashed line, drawn in the panes only
     assert "getPropertyValue('--frame')" in app.split("const gapColor", 1)[1].splitlines()[0]  # the page's grey, between panels
     assert "applyPaneSpacing();" in _function(app, "applyChartType")  # after every theme
@@ -424,6 +426,10 @@ def test_profiles_have_a_login_page_and_keep_their_own_preferences():
     # a new profile's Collected starts empty: only its own symbols (the first profile keeps every one)
     assert "const own = PROFILE === 1 ? null : new Set(" in watch and "Collected (${collected.length})" in watch
     assert "collected.filter((s) => (key === 'live'" in watch
+    # nothing saved (a new profile): the first symbol with data opens, not the list's first (a queued future)
+    app = _js("app.js")
+    assert "state.symbols[0]" not in app and "s.feeds?.some((f) => f.data?.length)" in app
+    assert "await selectSymbol(firstStored().ticker);" in app
     # the register notes the symbols you open, not the first one the page opens by itself
     assert "state.picked = String(ticker).toUpperCase();" in _js("app.js").split("function openSymbol(", 1)[1].split("\n}\n", 1)[0]
     ask = _js("activity.js").split("async function askFirst(", 1)[1].split("\n  }\n", 1)[0]

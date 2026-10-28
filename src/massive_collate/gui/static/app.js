@@ -1237,8 +1237,9 @@ const LIGHT_CHART = {
 // the time axis (axisGap, behind the chart: the axis's labels and the crosshair's time stay on top),
 // in the window's grey (the theme's --panel, as the toolbar and side panel), not the plot's colour:
 // the same colour as the panes showed no gap at all. The crosshair's dashed line stays in the panes
-// (the library draws it pane by pane): nothing is drawn in the gaps.
-const PANE_GAP = 14;
+// (the library draws it pane by pane): nothing is drawn in the gaps. As wide as the page's gap between
+// panels (style.css --gap: under the toolbar too); 14 px stood out at the chart's foot.
+const PANE_GAP = parseFloat(getComputedStyle(document.body).getPropertyValue('--gap')) || 6;
 const axisGap = Object.assign(document.createElement('div'), { className: 'axis-gap' });
 $('chart').append(axisGap);
 
@@ -1673,6 +1674,12 @@ async function loadSymbols() {
 
 function symbolInfo(ticker) {
   return state.symbols.find((s) => s.ticker === ticker) || { ticker, feeds: [] };
+}
+
+// The symbol opened when nothing is saved (a new profile): the first with data stored. The first of
+// the list ("0A1!", a future only queued) opened nothing but "no data stored".
+function firstStored() {
+  return state.symbols.find((s) => s.feeds?.some((f) => f.data?.length)) || null;
 }
 
 // A symbol opens on every feed merged (each bar from the best feed that has it: the reference
@@ -2679,7 +2686,7 @@ async function applyLayout(l) {
     const known = (t) => !state.symbolsLoaded || state.symbols.some((s) => s.ticker === t);
     const sym = d.symbol && known(d.symbol.ticker) ? d.symbol
       : state.ticker ? { ticker: state.ticker, source: state.source }
-      : state.symbols.length ? { ticker: state.symbols[0].ticker, source: MERGED } : null;
+      : firstStored() ? { ticker: firstStored().ticker, source: MERGED } : null;
     // A layout saved on a reference exchange only because that was once the default opens merged.
     if (sym && sym.source === symbolInfo(sym.ticker).models?.reference) sym.source = MERGED;
     if (sym) await selectSymbol(sym.ticker, sym.source);
@@ -3362,7 +3369,7 @@ $('pHighlight').addEventListener('click', (e) => {
       }
     });
     await Promise.all([ensureLayout(), symbols]);  // the layout opens its symbol; nothing saved: the first below
-    if (!state.ticker && !state.selectToken && state.symbols.length) await selectSymbol(state.symbols[0].ticker);
+    if (!state.ticker && !state.selectToken && firstStored()) await selectSymbol(firstStored().ticker);
   } catch (err) {
     showError(err);
   }
