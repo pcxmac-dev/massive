@@ -19,6 +19,12 @@
   let query = '';
   let sort = prefs.get('watchSort', { key: 'symbol', dir: 1 });
   let collapsed = new Set(prefs.get('watchCollapsed', []));
+  // The list as a table or as a heat map (the user, 2026-10-28: "heat maps for all the exchanges ... as
+  // well as watchlist(s) so when i open the symbol picker or watchlist picker, its easier to figure").
+  let view = prefs.get('watchView', 'list');
+  const MAP_EQUAL = 400;  // a list up to this many: equal tiles; longer (everything collected): by dollar volume
+  const MAP_REDRAW_MS = 15000;  // the map drawn again with the activity polls at most this often
+  let mapDrawn = 0;
   // A group shows its first GROUP_ROWS rows until "Show all": thousands of stocks took half a second
   // to draw, again with every activity poll. A filter still searches every symbol.
   const GROUP_ROWS = 200;
@@ -98,6 +104,34 @@
     </tr>`;
   }
 
+  // The map of a list: stocks by sector and industry, the other classes in groups of their own (futures
+  // by family and type), each tile coloured by its move (live where it streams, as the table's).
+  function mapGroup(sym) {
+    const M = window.MarketMap;
+    if (sym.asset === 'stock') return [sym.sector || 'Not classified yet', sym.industry || ''];
+    if (sym.asset === 'future') return [`Futures · ${M.futuresFamily(sym.futuresType)}`, M.futuresTypeName(sym.futuresType)];
+    return [{ index: 'Indices', fx: 'Currencies', crypto: 'Crypto' }[sym.asset] || 'Other', ''];
+  }
+
+  function renderMap(box, head, syms) {
+    const M = window.MarketMap;
+    const items = syms.map((sym) => {
+      const q = quote(sym), [group, kind] = mapGroup(sym);
+      return { ticker: sym.ticker, name: sym.name, icon: sym.icon, asset: sym.asset, sector: group, industry: kind,
+        marketCap: sym.marketCap, dollarVolume: sym.market?.dollarVolume ?? null, changePct: q.pct, close: q.last };
+    });
+    const volumes = items.map((s) => s.dollarVolume).filter((v) => v > 0).sort((a, b) => a - b);
+    const median = volumes.length ? volumes[Math.floor(volumes.length / 2)] : 1;
+    const size = items.length <= MAP_EQUAL ? () => 1 : (s) => (s.asset === 'stock' ? s.dollarVolume || 0 : median);
+    box.innerHTML = `${head}<div id="watchMap" class="market-map watch-map" role="listbox" aria-label="Watchlist map"></div>
+      <div class="map-foot"><span class="map-legend">${[-3, -1, 0, 1, 3].map((p) => `<span style="background:${M.changeColor(p)}">${p > 0 ? '+' : ''}${p}%</span>`).join('')}</span>
+        <span class="p-muted small">${items.length.toLocaleString()} · ${items.length <= MAP_EQUAL ? 'equal tiles' : 'stocks by dollar volume'} · by sector</span></div>`;
+    $('watchList').value = lists.some((l) => l.name === current) ? current : current === VISITED ? VISITED : COLLECTED;
+    const el = $('watchMap');
+    if (el.clientWidth) M.render(el, items, { current: state.ticker, levels: [(s) => s.sector, (s) => s.industry], size });
+    mapDrawn = Date.now();
+  }
+
   let shownHead = null;  // the panel's head (list, sort, filter) as last drawn
   function render() {
     if (!shown()) return;
@@ -116,6 +150,18 @@
       `<option value="${VISITED}">Visited (${visits.length})</option>`,
       ...lists.map((l) => `<option value="${esc(l.name)}">${esc(l.name)} (${l.tickers.length})</option>`),
       '<option value="__new__">New list…</option>'].join('');
+    const toggle = `<button type="button" id="watchView" title="${view === 'map' ? 'Show the list as a table' : 'Show the list as a heat map, by sector'}"
+      aria-pressed="${view === 'map'}">${view === 'map' ? 'List' : 'Map'}</button>`;
+    if (view === 'map') {
+      const syms = current === VISITED ? visits.map((v) => bySym.get(v.ticker)).filter(Boolean)
+        : mine ? mine.tickers.map((t) => bySym.get(t)).filter(Boolean) : collected;
+      const head = `<h3 class="w-head">Watchlist <select id="watchList" aria-label="Watchlist">${options}</select>${toggle}
+          ${mine ? `<button type="button" id="watchAdd" title="Add ${esc(state.ticker || 'the open symbol')} to this list"${state.ticker && !mine.tickers.includes(state.ticker) ? '' : ' disabled'}>+</button>` : ''}</h3>
+        <input id="watchFilter" type="search" placeholder="Filter symbols" value="${esc(query)}" autocomplete="off">`;
+      shownHead = null;  // the table is drawn whole when it comes back
+      renderMap(box, head, syms.filter(match));
+      return;
+    }
     let body;
     if (current === VISITED) {
       const entries = visits.map((v) => bySym.get(v.ticker)).filter((s) => s && match(s)).map((sym) => ({ sym, q: quote(sym) }));
@@ -143,7 +189,7 @@
         : `<tbody><tr><td colspan="4" class="p-muted w-empty">${mine.tickers.length ? 'Nothing matches.' : 'Empty: open a symbol and press + to add it.'}</td></tr></tbody>`;
     }
     const head = `<h3 class="w-head">Watchlist
-        <select id="watchList" aria-label="Watchlist">${options}</select>
+        <select id="watchList" aria-label="Watchlist">${options}</select>${toggle}
         ${mine ? `<button type="button" id="watchAdd" title="Add ${esc(state.ticker || 'the open symbol')} to this list"${state.ticker && !mine.tickers.includes(state.ticker) ? '' : ' disabled'}>+</button>
           <button type="button" id="watchDelete" title="Delete this list">🗑</button>` : ''}</h3>
       <input id="watchFilter" type="search" placeholder="Filter symbols" value="${esc(query)}" autocomplete="off">
@@ -163,6 +209,7 @@
   // A light refresh of prices without losing the filter's focus.
   function refresh() {
     if (!shown()) return;
+    if (view === 'map' && Date.now() - mapDrawn < MAP_REDRAW_MS && document.activeElement?.id !== 'watchFilter') return;
     const focused = document.activeElement?.id === 'watchFilter';
     const at = focused ? $('watchFilter').selectionStart : null;
     const scroll = document.querySelector('#pWatch .w-wrap')?.scrollTop;
@@ -195,6 +242,13 @@
     render();
   });
   $('pWatch').addEventListener('click', async (e) => {
+    if (e.target.closest('#watchView')) {
+      view = view === 'map' ? 'list' : 'map';
+      prefs.set('watchView', view);
+      return render();
+    }
+    const tile = e.target.closest('.map-tile[data-ticker]');
+    if (tile) { window.dispatchEvent(new CustomEvent('massive:open-symbol', { detail: tile.dataset.ticker })); return; }
     const sortBy = e.target.closest('th[data-sort]');
     if (sortBy) {
       sort = { key: sortBy.dataset.sort, dir: sort.key === sortBy.dataset.sort ? -sort.dir : 1 };
@@ -237,6 +291,6 @@
     setTimeout(() => loadVisits().then(() => { if (current === VISITED) { shownHead = ''; refresh(); } }), 1500);
   });
   window.addEventListener('massive:activity', refresh);  // live prices with every activity poll
-  window.Watchlist = { render, load };
+  window.Watchlist = { render, load, lists: () => lists };  // the lists: the symbol picker maps them too
   load();
 })();

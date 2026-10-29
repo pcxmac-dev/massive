@@ -2198,6 +2198,53 @@ function renderDirectoryList(query) {
 state.switcherView = prefs.get('switcherView', 'map');
 let mapPick = null;  // a directory company picked on the map (not watched yet)
 
+// The maps' choices (the user, 2026-10-28: "heat maps for all the exchanges (and relevent sectors
+// divided in) as well as watchlist(s) so when i open the symbol picker or watchlist picker, its easier
+// to figure"): the exchange shown (all of them, each divided into its sectors, or one), what sizes a
+// tile (market cap: the companies with reference data; dollar volume: every stock that traded, those
+// not classified yet in a group of their own), the list the Watchlist tab maps, and for futures
+// whether only those with prices here are drawn.
+state.mapExchange = prefs.get('mapExchange', 'all');
+state.futuresExchange = prefs.get('futuresExchange', 'all');
+state.mapSize = prefs.get('mapSize', 'cap');
+state.mapList = prefs.get('mapList', '');
+state.futuresPriced = prefs.get('futuresPriced', true);
+const UNCLASSIFIED = 'Not classified yet';
+
+// The bar over a map: its exchanges (with how many each holds), the size measure, the list shown.
+function mapBar(items, { key, sizes = false, lists = false, priced = null }) {
+  const { esc: e } = window.MassiveIcons;
+  const counts = new Map();
+  for (const s of items) counts.set(s.exchange || '', (counts.get(s.exchange || '') || 0) + 1);
+  const chosen = counts.has(state[key]) ? state[key] : 'all';
+  const chip = (value, text, n, title = '') => `<button type="button" class="map-chip${chosen === value ? ' active' : ''}"
+      data-map-exchange="${e(value)}" data-key="${key}"${title ? ` title="${e(title)}"` : ''}>${e(text)} <span class="p-muted">${n.toLocaleString()}</span></button>`;
+  const exchanges = [...counts].sort((a, b) => b[1] - a[1]);
+  const names = lists ? window.Watchlist?.lists?.() || [] : [];
+  return `<div class="map-bar" role="toolbar" aria-label="Map choices">
+    <span class="map-group">${chip('all', 'All exchanges', items.length, 'Every exchange, each divided into its sectors')}${exchanges.length > 1
+      ? exchanges.map(([mic, n]) => chip(mic, window.MarketMap.exchangeName(mic), n, `${window.MarketMap.exchangeName(mic)} alone, by sector`)).join('') : ''}</span>
+    ${sizes ? `<span class="map-group"><span class="p-muted small">Size</span>${[['cap', 'Market cap', 'Companies with reference data, by market cap'],
+      ['volume', 'Dollar volume', 'Every stock that traded, by its average daily dollar volume']].map(([k, t, title]) =>
+      `<button type="button" class="map-chip${state.mapSize === k ? ' active' : ''}" data-map-size="${k}" title="${title}">${t}</button>`).join('')}</span>` : ''}
+    ${lists ? `<label class="map-group"><span class="p-muted small">List</span><select id="mapList" aria-label="Watchlist mapped">
+      <option value="">Every collected symbol</option>${names.map((l) => `<option value="${e(l.name)}"${state.mapList === l.name ? ' selected' : ''}>${e(l.name)} (${l.tickers.length})</option>`).join('')}</select></label>` : ''}
+    ${priced != null ? `<span class="map-group"><button type="button" class="map-chip${state.futuresPriced ? ' active' : ''}" data-map-priced="1"
+      title="Only the futures whose contracts have prices here (off: every watched product, grey where none yet)">With prices only <span class="p-muted">${priced.toLocaleString()}</span></button></span>` : ''}
+  </div>`;
+}
+
+// The exchange a map shows (one held by its items, else all of them) and its levels: every exchange
+// divided into its sectors, or one exchange's sectors.
+function mapLevels(items, key, inner) {
+  const held = new Set(items.map((s) => s.exchange || ''));
+  const chosen = held.has(state[key]) ? state[key] : 'all';
+  const shown = chosen === 'all' ? items : items.filter((s) => (s.exchange || '') === chosen);
+  const levels = chosen === 'all' && held.size > 1 ? [(s) => s.exchange || '', ...inner] : inner;
+  const label = (depth, name) => (levels.length > inner.length && depth === 0 ? window.MarketMap.exchangeName(name) : name);
+  return { shown, levels, label };
+}
+
 function mapMatch(q) {
   return (s) => !q || [s.ticker, s.name, s.sector, s.industry].some((v) => v && String(v).toLowerCase().includes(q));
 }
@@ -2229,14 +2276,24 @@ function renderMapList(query) {
   const list = $('symbolList');
   const q = query.trim().toLowerCase();
   const dir = state.switcherScope === 'stocks';
-  const toItem = (s) => ({ ticker: s.ticker, name: s.name, sector: s.sector, industry: s.industry, marketCap: s.marketCap,
+  const byVolume = state.mapSize === 'volume';
+  const toItem = (s) => ({ ticker: s.ticker, name: s.name, sector: s.sector || (byVolume ? UNCLASSIFIED : null),
+    industry: s.industry, marketCap: s.marketCap,
     changePct: s.changePct ?? s.market?.changePct ?? null, close: s.close ?? s.market?.close ?? null, icon: s.icon,
     asset: s.asset || (s.kind === 'future' ? 'future' : 'stock'), dollarVolume: s.dollarVolume ?? s.market?.dollarVolume ?? null,
     exchange: s.exchange, watched: dir ? s.watched : true });
-  const source = dir ? directory.items.filter((r) => r.kind === 'stock') : state.symbols.filter((s) => s.asset === 'stock');
-  const everyMapped = source.filter((s) => s.marketCap > 0 && s.sector).map(toItem);
-  const everyOther = dir ? [] : state.symbols.filter((s) => s.asset !== 'stock').map(toItem);
-  const unclassified = source.length - everyMapped.length;
+  // the Watchlist tab maps every collected symbol, or one of the watchlists
+  const named = !dir && state.mapList ? (window.Watchlist?.lists?.() || []).find((l) => l.name === state.mapList) : null;
+  const inList = named ? new Set(named.tickers) : null;
+  const listed = (s) => !inList || inList.has(s.ticker);
+  const source = (dir ? directory.items.filter((r) => r.kind === 'stock') : state.symbols.filter((s) => s.asset === 'stock')).filter(listed);
+  const sized = byVolume ? (s) => s.dollarVolume > 0 : (s) => s.marketCap > 0 && s.sector;
+  const candidates = source.map(toItem).filter(sized);
+  const { shown: everyMapped, levels, label } = mapLevels(candidates, 'mapExchange', [(s) => s.sector, (s) => s.industry]);
+  // beside the map: indices, currencies and crypto (futures have the Futures tab's map; a list's own, here)
+  const everyOther = dir ? [] : state.symbols.filter((s) => s.asset !== 'stock' && (s.asset !== 'future' || inList))
+    .filter(listed).map(toItem);
+  const unclassified = source.length - candidates.length;
   // A search: the matches as tiles of their own (those off the map too: no reference data yet), and
   // the map drawn again with only the companies that match, large enough to read (it dimmed the rest).
   const hits = q ? rankedMatches(source.map(toItem).concat(everyOther), q) : [];
@@ -2256,19 +2313,21 @@ function renderMapList(query) {
     ? `<h4>Matches <span class="p-muted">${hits.length.toLocaleString()}${hits.length > MAP_HITS ? ` · the first ${MAP_HITS}` : ''} · Enter opens the first</span></h4>
        <div class="tiles-grid map-hits">${hits.slice(0, MAP_HITS).map(hitHtml).join('')}</div>`
     : `<div class="empty">Nothing matches “${e(query.trim())}”${dir ? '' : ': try Nasdaq & NYSE for every listing'}.</div>`;
-  list.innerHTML = `${hitsHtml}${q && !mapped.length ? '' : `${q ? '<h4>On the market map</h4>' : ''}<div id="marketMap" class="market-map${q ? ' searched' : ''}" role="listbox" aria-label="Market map"></div>`}
-    ${others.length ? `<h4>Indices, futures, forex and crypto</h4><div id="marketStrip" class="market-map strip"></div>` : ''}
+  list.innerHTML = `${mapBar(candidates, { key: 'mapExchange', sizes: true, lists: !dir })}${hitsHtml}${q && !mapped.length ? '' : `${q ? '<h4>On the market map</h4>' : ''}<div id="marketMap" class="market-map${q ? ' searched' : ''}" role="listbox" aria-label="Market map"></div>`}
+    ${others.length ? `<h4>${inList ? 'Indices, futures, forex and crypto' : 'Indices, forex and crypto <span class="p-muted">· futures: the Futures tab</span>'}</h4><div id="marketStrip" class="market-map strip"></div>` : ''}
     <div class="map-foot">
       <span class="map-legend">${[-3, -2, -1, 0, 1, 2, 3].map((p) => `<span style="background:${window.MarketMap.changeColor(p)}">${p > 0 ? '+' : ''}${p}%</span>`).join('')}</span>
-      <span class="p-muted small">${mapped.length.toLocaleString()} ${q ? `of ${everyMapped.length.toLocaleString()} ` : ''}companies by market cap · colour: last session's change${unclassified > 0
-        ? ` · ${unclassified.toLocaleString()} ${dir ? 'listings' : 'symbols'} without reference data yet (${q ? 'among the matches, not on the map' : 'not shown'})` : ''}</span>
+      <span class="p-muted small">${mapped.length.toLocaleString()} ${q ? `of ${everyMapped.length.toLocaleString()} ` : ''}${byVolume ? 'stocks by dollar volume' : 'companies by market cap'} · colour: last session's change${unclassified > 0
+        ? ` · ${unclassified.toLocaleString()} ${dir ? 'listings' : 'symbols'} ${byVolume ? 'with no trading here yet' : 'without reference data yet (Dollar volume shows them)'}` : ''}</span>
       <span id="mapPick" class="map-pick" ${mapPick ? '' : 'hidden'}></span>
     </div>`;
   if (!dir && !source.length && !everyOther.length) {
-    list.innerHTML = '<div class="empty">No symbols yet. Add one with: python -m massive_collate watch add TICKER::EXCHANGE</div>';
+    list.innerHTML = named ? `${mapBar([], { key: 'mapExchange', sizes: true, lists: true })}<div class="empty">“${e(named.name)}” is empty: open a symbol and press + in the Watchlist panel to add it.</div>`
+      : '<div class="empty">No symbols yet. Add one with: python -m massive_collate watch add TICKER::EXCHANGE</div>';
     return;
   }
-  const opts = { current: state.ticker, isWatched: dir ? (s) => s.watched : null };
+  const opts = { current: state.ticker, isWatched: dir ? (s) => s.watched : null, levels, label,
+    size: byVolume ? (s) => s.dollarVolume : (s) => s.marketCap };
   const map = $('marketMap');
   if (map && !map.clientWidth) {  // not laid out yet (a closed dialog): drawn once it has a size
     if ($('symbolDialog').open) requestAnimationFrame(() => renderMapList(query));
@@ -2290,9 +2349,46 @@ function renderMapPick() {
     <button type="button" class="primary" data-watch="${e(p.ticker)}" title="Add to the watchlist: the fetcher will collect it">+ Watch</button>`;
 }
 
+// Futures map: the watched futures by exchange (CME, CBOT, NYMEX, COMEX), family (equity, energy,
+// metals ...) and type, equal tiles coloured by the front contract's last session (gui/server.py
+// _futures_moves): the user, 2026-10-28: "i want heat maps for futures all the different exchanges".
+function renderFuturesMap(query) {
+  const { esc: e } = window.MassiveIcons;
+  const list = $('symbolList');
+  const q = query.trim().toLowerCase();
+  const M = window.MarketMap;
+  const all = state.symbols.filter((s) => s.asset === 'future').map((s) => ({
+    ticker: s.ticker, name: s.name, asset: 'future', icon: false, exchange: s.exchange,
+    sector: M.futuresFamily(s.futuresType), industry: M.futuresTypeName(s.futuresType),
+    changePct: s.changePct ?? null, close: s.close ?? null }));
+  const priced = all.filter((s) => s.changePct != null);
+  const base = state.futuresPriced && priced.length ? priced : all;
+  const match = (s) => !q || [s.ticker, s.name, s.sector, s.industry, M.exchangeName(s.exchange)].some((v) => v && String(v).toLowerCase().includes(q));
+  const { shown, levels, label } = mapLevels(base, 'futuresExchange', [(s) => s.sector, (s) => s.industry]);
+  const mapped = shown.filter(match);
+  if (!all.length) {
+    list.innerHTML = '<div class="empty">No futures watched yet: add one with python -m massive_collate watch add ES1!</div>';
+    return;
+  }
+  list.innerHTML = `${mapBar(base, { key: 'futuresExchange', priced: priced.length })}
+    ${mapped.length ? '<div id="marketMap" class="market-map" role="listbox" aria-label="Futures map"></div>'
+      : `<div class="empty">Nothing matches “${e(query.trim())}”.</div>`}
+    <div class="map-foot">
+      <span class="map-legend">${[-3, -2, -1, 0, 1, 2, 3].map((p) => `<span style="background:${M.changeColor(p)}">${p > 0 ? '+' : ''}${p}%</span>`).join('')}</span>
+      <span class="p-muted small">${mapped.length.toLocaleString()} futures · colour: the front contract's last session · ${priced.length.toLocaleString()} of
+        ${all.length.toLocaleString()} watched have prices here so far (the fetcher fills the rest)</span>
+    </div>`;
+  const map = $('marketMap');
+  if (map && !map.clientWidth) {  // not laid out yet (a closed dialog): drawn once it has a size
+    if ($('symbolDialog').open) requestAnimationFrame(() => renderFuturesMap(query));
+    return;
+  }
+  if (map) M.render(map, mapped, { current: state.ticker, levels, label, size: () => 1 });
+}
+
 function renderSymbolList(query) {
   for (const b of $('scopeTabs').querySelectorAll('button')) b.classList.toggle('active', b.dataset.scope === state.switcherScope);
-  const mapOk = state.switcherScope !== 'futures';
+  const mapOk = true;  // every tab has its map (futures: by exchange and family)
   const useMap = mapOk && state.switcherView === 'map';
   $('switcherView').hidden = !mapOk;
   $('switcherView').textContent = state.switcherView === 'map' ? 'Tiles' : 'Map';
@@ -2300,6 +2396,10 @@ function renderSymbolList(query) {
   $('sortBtn').hidden = useMap;
   $('symbolDialog').classList.toggle('map-view', useMap);
   if (useMap) {
+    if (state.switcherScope === 'futures') {
+      renderFuturesMap(query);
+      return;
+    }
     if (state.switcherScope === 'stocks' && !directory.at) {
       $('symbolList').innerHTML = '<div class="empty">Loading the directory…</div>';
       loadDirectory().then(() => renderSymbolList($('symbolSearch').value)).catch(showError);
@@ -2376,7 +2476,23 @@ $('switcherView').addEventListener('click', () => {
   renderSymbolList($('symbolSearch').value);
 });
 window.addEventListener('resize', () => { if ($('symbolDialog').open && state.switcherView === 'map') renderSymbolList($('symbolSearch').value); });
+$('symbolList').addEventListener('change', (e) => {  // the Watchlist tab's list: every collected symbol, or one list
+  if (e.target.id !== 'mapList') return;
+  state.mapList = e.target.value;
+  prefs.set('mapList', state.mapList);
+  renderSymbolList($('symbolSearch').value);
+});
+
 $('symbolList').addEventListener('click', async (e) => {
+  const choice = e.target.closest('[data-map-exchange], [data-map-size], [data-map-priced]');
+  if (choice) {  // the map bar: an exchange, the size measure, priced futures only
+    const d = choice.dataset;
+    if (d.mapExchange != null) { state[d.key] = d.mapExchange; prefs.set(d.key, d.mapExchange); }
+    if (d.mapSize) { state.mapSize = d.mapSize; prefs.set('mapSize', d.mapSize); }
+    if (d.mapPriced) { state.futuresPriced = !state.futuresPriced; prefs.set('futuresPriced', state.futuresPriced); }
+    renderSymbolList($('symbolSearch').value);
+    return;
+  }
   const tile = e.target.closest('.map-tile, .map-hit');
   if (tile) {
     const t = tile.dataset.ticker;

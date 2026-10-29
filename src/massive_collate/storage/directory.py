@@ -140,10 +140,11 @@ class DirectoryStore:
         sql = """SELECT d.ticker, d.kind, d.name, d.exchange, d.type, s.close, s.volume, s.vwap,
                         i.data IS NOT NULL AS has_icon
                  FROM directory d
-                 LEFT JOIN market_snapshot s ON s.source=d.source AND s.ticker=d.ticker
+                 LEFT JOIN market_snapshot s ON s.source=d.source AND s.ticker=d.ticker AND d.kind='stock'
                       AND s.day=(SELECT MAX(day) FROM market_snapshot WHERE source=d.source)
                  LEFT JOIN icons i ON i.source=d.source AND i.ticker=d.ticker
                  WHERE d.source=? AND d.retired_on IS NULL""" + (" AND d.kind=?" if kind else "") + " ORDER BY d.ticker"
+        # (the snapshot is the stocks' whole-market file: a futures root sharing a stock's ticker, BZ, is not that stock)
         cols = ["ticker", "kind", "name", "exchange", "type", "close", "volume", "vwap", "icon"]
         return [dict(zip(cols, r)) for r in self.conn.execute(sql, [source] + ([kind] if kind else []))]
 

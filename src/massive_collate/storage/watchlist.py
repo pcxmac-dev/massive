@@ -77,6 +77,15 @@ class WatchlistStore:
             (source, product, rank))
         return [(date.fromisoformat(d), t) for d, t in cur]
 
+    def front_contracts(self) -> dict[tuple[str, str, int], str]:
+        """{(source, product, rank): contract} the contract each continuous future holds at its newest
+        session (its roll schedule's last entry): what its day's move is read from."""
+        cur = self.conn.execute(
+            "SELECT f.source, f.product, f.rank, f.ticker FROM futures_rolls f JOIN "
+            "(SELECT source, product, rank, MAX(session) AS last FROM futures_rolls GROUP BY source, product, rank) m "
+            "ON m.source=f.source AND m.product=f.product AND m.rank=f.rank AND m.last=f.session")
+        return {(s, p, r): t for s, p, r, t in cur}
+
     def set_listing(
         self, source: str, ticker: str, listed_from: date | None, figi: str | None, checked: date,
         name: str | None = None, kind: str | None = None, exchange: str | None = None,

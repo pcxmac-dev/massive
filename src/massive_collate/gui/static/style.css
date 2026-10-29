@@ -83,7 +83,20 @@ dialog.switcher.map-view #symbolList { max-height: calc(92vh - 60px); }
 .market-map { position: relative; height: calc(92vh - 170px); min-height: 320px; background: #1b1e27; border-radius: 4px; overflow: hidden;
   user-select: none; }
 .market-map.strip { height: auto; min-height: 0; }
+.market-map.watch-map { height: calc(100vh - 210px); min-height: 240px; }
+/* the bar over a map: its exchanges, the size measure, the list mapped, priced futures only */
+.map-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin: 0 0 6px; }
+.map-group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.map-chip { border: 1px solid var(--border); border-radius: 12px; background: none; color: var(--text); padding: 2px 9px;
+  font-size: 12px; cursor: pointer; }
+.map-chip:hover { border-color: var(--accent); }
+.map-chip.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.map-chip.active .p-muted { color: rgba(255,255,255,.8); }
+.map-group select { font-size: 12px; max-width: 220px; }
 .map-sector { position: absolute; border: 1px solid #0d0f14; }
+.map-sector.map-top { border: 2px solid #000; }  /* an exchange round its sectors */
+.map-sector.map-top > .map-sector-name { font-size: 13px; color: #fff; }
+.map-move { font-weight: 400; opacity: .85; text-transform: none; letter-spacing: 0; }
 .map-sector-name { position: absolute; left: 4px; top: 1px; font-size: 11px; font-weight: 600; letter-spacing: .03em;
   text-transform: uppercase; color: #d1d4dc; white-space: nowrap; overflow: hidden; max-width: calc(100% - 8px); }
 .map-industry { position: absolute; height: 13px; padding: 0 3px; font-size: 9px; line-height: 13px; text-transform: uppercase;

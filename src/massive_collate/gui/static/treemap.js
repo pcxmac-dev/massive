@@ -1,5 +1,6 @@
-/* Market map for the symbol switcher: stocks grouped by sector, then industry, each tile sized by
-   market cap and coloured by the day's change (−3 % red, 0 grey, +3 % green, as market maps do).
+/* Market maps for the symbol switcher and the watchlist: stocks grouped by exchange, sector and
+   industry (futures by exchange, family and type), each tile sized by market cap (or dollar volume)
+   and coloured by the day's change (−3 % red, 0 grey, +3 % green, as market maps do).
    Squarified layout (Bruls, Huizing & van Wijk): rows of tiles kept as close to square as
    possible. Tiles large enough show the company's logo. */
 (function () {
@@ -80,35 +81,86 @@
     </div>`;
   }
 
-  /* items: [{ticker, name, sector, industry, marketCap, changePct, close, icon}]
-     opts: {current, isMatch(s), isWatched(s)} */
+  // The exchanges' names on the maps (MICs as the directory and the watchlist give them).
+  const EXCHANGES = { XNAS: 'Nasdaq', XNYS: 'NYSE', XASE: 'NYSE American', ARCX: 'NYSE Arca', BATS: 'Cboe BZX',
+    IEXG: 'IEX', XCME: 'CME', XCBT: 'CBOT', XNYM: 'NYMEX', XCEC: 'COMEX' };
+  const exchangeName = (mic) => (mic ? EXCHANGES[mic] || mic : 'Other');
+
+  // Futures: each product's type (Massive's: crude_oil, us_index ...) in its family, as futures maps
+  // divide them (the user, 2026-10-28: "heat maps for futures all the different exchanges").
+  const FAMILIES = {
+    Equity: ['us_index', 'sel_sector_index', 'intl_index', 'ssf'],
+    Energy: ['crude_oil', 'refined_products', 'nat_gas', 'nat_gas_liq_petro', 'electricity', 'biofuels', 'coal', 'emissions'],
+    Metals: ['precious', 'base'],
+    Rates: ['long_term_gov', 'short_term_gov', 'short_term_non_gov', 'long_term_non_gov'],
+    Currencies: ['majors', 'minors', 'cross_rates'],
+    Agriculture: ['grains_and_oilseeds', 'livestock', 'dairy', 'softs', 'fertilizer', 'forestry'],
+    Freight: ['wet_bulk', 'dry_bulk'],
+    'Commodity indices': ['bbg_ci', 'dj_ubs_ci', 'sandp_gsci', 'custom_index'],
+    Weather: ['us', 'europe', 'asia', 'wind'],
+    Events: ['sports_index'],
+  };
+  const FAMILY = Object.fromEntries(Object.entries(FAMILIES).flatMap(([f, types]) => types.map((t) => [t, f])));
+  const TYPE_NAMES = { us_index: 'US indices', sel_sector_index: 'Sector indices', intl_index: 'International indices',
+    ssf: 'Single stocks', nat_gas_liq_petro: 'NGLs and petrochemicals', long_term_gov: 'Government bonds',
+    short_term_gov: 'Government bills', short_term_non_gov: 'Short-term rates', long_term_non_gov: 'Swaps and credit',
+    bbg_ci: 'Bloomberg', dj_ubs_ci: 'DJ-UBS', sandp_gsci: 'S&P GSCI', custom_index: 'Custom', us: 'US weather',
+    europe: 'European weather', asia: 'Asian weather', sports_index: 'Sports' };
+  const futuresFamily = (type) => FAMILY[type] || 'Other';
+  const futuresTypeName = (type) => TYPE_NAMES[type] || (type ? type[0].toUpperCase() + type.slice(1).replace(/_/g, ' ') : 'Other');
+
+  /* A map divided into groups, each into the groups of the next level, the last into tiles: the
+     user, 2026-10-28: "heat maps for all the exchanges (and relevent sectors divided in) as well as
+     watchlist(s)". items: [{ticker, name, sector, industry, exchange, marketCap, changePct, close, icon}]
+     opts: {current, isMatch(s), isWatched(s), levels: [s => group name, ...] (default sector, then
+     industry), size: s => tile area (default market cap; 0 leaves it out), label: (depth, name) =>
+     the group's heading}. Each group's heading carries its move, its tiles' size-weighted mean. */
   function render(el, items, opts = {}) {
     const W = el.clientWidth, H = el.clientHeight;
-    const SECTOR_HEAD = 16, INDUSTRY_HEAD = 13;
-    const bySector = new Map();
+    const TOP_HEAD = 18, GROUP_HEAD = 16, INDUSTRY_HEAD = 13;
+    const levels = opts.levels || [(s) => s.sector, (s) => s.industry];
+    const size = opts.size || ((s) => s.marketCap);
+    const label = opts.label || ((depth, name) => name);
+    const root = new Map();
     for (const s of items) {
-      if (!(s.marketCap > 0)) continue;
-      const sec = bySector.get(s.sector) || bySector.set(s.sector, new Map()).get(s.sector);
-      (sec.get(s.industry) || sec.set(s.industry, []).get(s.industry)).push(s);
+      const value = size(s);
+      if (!(value > 0)) continue;
+      let node = root;
+      levels.forEach((key, i) => {
+        const name = key(s) ?? '–';
+        if (i < levels.length - 1) node = node.get(name) || node.set(name, new Map()).get(name);
+        else (node.get(name) || node.set(name, []).get(name)).push({ ...s, value });
+      });
     }
-    const sectors = [...bySector].map(([name, inds]) => ({
-      name, inds, value: [...inds.values()].flat().reduce((a, s) => a + s.marketCap, 0),
-    }));
+    const sum = (n) => (Array.isArray(n) ? n : [...n.values()].flatMap(flat)).reduce((a, s) => a + s.value, 0);
+    const flat = (n) => (Array.isArray(n) ? n : [...n.values()].flatMap(flat));
+    const move = (n) => {  // the group's move: its tiles' changes, weighted by their size
+      let w = 0, m = 0;
+      for (const s of flat(n)) if (s.changePct != null && Number.isFinite(s.changePct)) { w += s.value; m += s.value * s.changePct; }
+      return w ? m / w : null;
+    };
     let html = '';
-    for (const sr of squarify(sectors, 0, 0, W, H)) {
-      const sec = sr.item;
-      const head = sr.h > 40 && sr.w > 50 ? SECTOR_HEAD : 0;
-      html += `<div class="map-sector" style="left:${sr.x}px;top:${sr.y}px;width:${sr.w - 2}px;height:${sr.h - 2}px">
-        ${head ? `<span class="map-sector-name">${esc(sec.name)}</span>` : ''}</div>`;
-      const inds = [...sec.inds].map(([name, list]) => ({ name, list, value: list.reduce((a, s) => a + s.marketCap, 0) }));
-      for (const ir of squarify(inds, sr.x + 1, sr.y + head, sr.w - 3, sr.h - head - 3)) {
-        const ind = ir.item;
-        const ih = ir.h > 46 && ir.w > 70 && sec.inds.size > 1 ? INDUSTRY_HEAD : 0;
-        if (ih) html += `<div class="map-industry" style="left:${ir.x}px;top:${ir.y}px;width:${ir.w - 1}px">${esc(ind.name)}</div>`;
-        const stocks = ind.list.map((s) => ({ ...s, value: s.marketCap }));
-        for (const r of squarify(stocks, ir.x, ir.y + ih, ir.w, ir.h - ih)) html += tileHtml(r.item, r, opts);
+    const draw = (node, depth, x, y, w, h) => {
+      const groups = [...node].map(([name, child]) => ({ name, child, value: sum(child) }));
+      const tiles = depth === levels.length - 1;  // the last level's groups hold tiles
+      for (const r of squarify(groups, x, y, w, h)) {
+        const g = r.item, chg = move(g.child), name = label(depth, g.name);
+        const heading = `${esc(name)}${chg == null ? '' : ` <span class="map-move">${pctText(chg)}</span>`}`;
+        const tip = `${name}: ${flat(g.child).length.toLocaleString()} · ${pctText(chg)}`;
+        if (tiles) {
+          const ih = r.h > 46 && r.w > 70 && node.size > 1 ? INDUSTRY_HEAD : 0;
+          if (ih) html += `<div class="map-industry" title="${esc(tip)}" style="left:${r.x}px;top:${r.y}px;width:${r.w - 1}px">${heading}</div>`;
+          for (const t of squarify(g.child, r.x, r.y + ih, r.w, r.h - ih)) html += tileHtml(t.item, t, opts);
+        } else {
+          const top = depth === 0 && levels.length > 2;  // the exchanges round their sectors
+          const head = r.h > 40 && r.w > 50 ? (top ? TOP_HEAD : GROUP_HEAD) : 0;
+          html += `<div class="map-sector${top ? ' map-top' : ''}" title="${esc(tip)}" style="left:${r.x}px;top:${r.y}px;width:${r.w - 2}px;height:${r.h - 2}px">
+            ${head ? `<span class="map-sector-name">${heading}</span>` : ''}</div>`;
+          draw(g.child, depth + 1, r.x + 1, r.y + head, r.w - 3, r.h - head - 3);
+        }
       }
-    }
+    };
+    draw(root, 0, 0, 0, W, H);
     el.innerHTML = html;
   }
 
@@ -121,5 +173,5 @@
     el.innerHTML = items.map((s, i) => tileHtml(s, { x: (i % perRow) * w, y: Math.floor(i / perRow) * h, w, h }, opts)).join('');
   }
 
-  window.MarketMap = { render, renderStrip, squarify, changeColor };
+  window.MarketMap = { render, renderStrip, squarify, changeColor, exchangeName, futuresFamily, futuresTypeName };
 })();

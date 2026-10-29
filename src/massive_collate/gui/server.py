@@ -230,6 +230,7 @@ class ChartApp:
             icons = store.icon_tickers()
             profiles = store.company_profiles()
             members = store.constituents("sp500", "S&P 500")
+            futures = _futures_moves(store)  # each continuous future's exchange, type and front contract's move
             now = datetime.now(timezone.utc).astimezone(activity.ET)
             by_feed: dict[str, dict[str, dict]] = {}  # ticker -> feed -> its Fetcher row
             for src in sorted({w["source"] for w in watch}):
@@ -261,6 +262,8 @@ class ChartApp:
             ws = by_ticker.get(ticker, [])
             w = next((x for x in ws if x.get("name")), ws[0] if ws else {})
             mic = next((x["exchange"] for x in ws if x.get("exchange")), None)
+            fut = next((futures(x) for x in ws if x["asset"] == "future"), None)
+            mic = mic or (fut or {}).get("exchange")
             held = kinds.get(ticker, {})
             have = set(held) | {x["source"] for x in ws if x["asset"] == "future"}
             fine = {s for s, ks in held.items() if any(k in ("trades", "second") for k in ks)}
@@ -279,7 +282,8 @@ class ChartApp:
                 "market": _market(snapshot, ticker, w),
                 **_sector(ticker, profiles.get(ticker), w.get("asset") or "stock", (snapshot.get(ticker) or {}).get("close"),
                           members.get(ticker)),
-                "changePct": _change(snapshot, ticker),
+                "changePct": fut["changePct"] if fut else _change(snapshot, ticker),
+                **({"futuresType": fut["type"], "front": fut["front"], "close": fut["close"]} if fut else {}),
                 "data": {k: state[k] for k in ("state", "progress", "last", "expectedThrough", "nextDue")}
                 if state else None,
             })
@@ -529,12 +533,16 @@ class ChartApp:
             profiles = self.store.company_profiles()
             members = self.store.constituents("sp500", "S&P 500")
             changes = self.store.snapshot_changes()
+            futures = _futures_moves(self.store)
         out = []
         for r in rows:
             dv = (r["close"] or 0) * (r["volume"] or 0) if r["close"] and r["volume"] else None
+            # a future's move is its front contract's; a stock's, the whole-market file's
+            fut = futures({"source": "massive", "source_ticker": r["ticker"], "rank": 1}) if r["kind"] == "future" else None
             out.append({"ticker": r["ticker"], "kind": r["kind"], "name": r["name"], "exchange": r["exchange"],
-                        "type": r["type"], "close": r["close"], "dollarVolume": dv, "icon": bool(r["icon"]),
-                        "watched": r["ticker"] in watched, "changePct": changes.get(r["ticker"]),
+                        "type": r["type"], "close": fut["close"] if fut else r["close"], "dollarVolume": dv,
+                        "icon": bool(r["icon"]), "watched": r["ticker"] in watched,
+                        "changePct": fut["changePct"] if fut else changes.get(r["ticker"]),
                         **_sector(r["ticker"], profiles.get(r["ticker"]), "future" if r["kind"] == "future" else "stock",
                                   r["close"], members.get(r["ticker"]))})
         return {"items": out}
@@ -1468,6 +1476,27 @@ def _change(snapshot: dict, ticker: str) -> float | None:
     """Last session's change in percent from local daily bars (any asset class)."""
     d = snapshot.get(ticker)
     return (d["close"] / d["prevClose"] - 1) * 100 if d and d.get("prevClose") else None
+
+
+def _futures_moves(store) -> Callable[[dict], dict]:
+    """For the market maps: a continuous future's (a watch row: source, source_ticker, rank) exchange
+    and type from the directory, and its last session's close and change from the contract it holds
+    now (its daily bars: the continuous series is built from contracts, not stored as one). Read once
+    (one query for the fronts, two day bars a front): call it inside the store's lock."""
+    fronts = store.front_contracts()
+    listed = {r["ticker"]: r for r in store.directory(kind="future")}
+    moves: dict[str, dict] = {}
+    for src in {s for s, _, _ in fronts}:
+        moves[src] = store.series_moves(src, [c for (s, _, _), c in fronts.items() if s == src])
+
+    def of(w: dict) -> dict:
+        product = w.get("source_ticker") or ""
+        front = fronts.get((w.get("source"), product, w.get("rank") or 1))
+        move = moves.get(w.get("source"), {}).get(front) if front else None
+        row = listed.get(product) or {}
+        return {"exchange": row.get("exchange"), "type": row.get("type"), "front": front,
+                "close": move["close"] if move else None, "changePct": move["changePct"] if move else None}
+    return of
 
 
 def _market(snapshot: dict, ticker: str, watch: dict) -> dict | None:
