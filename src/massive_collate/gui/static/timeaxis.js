@@ -210,7 +210,7 @@
     calc: (list) => list.map(() => ({})),
     createTooltipDataSource: () => ({ name: '', calcParamsText: '', features: [], legends: [] }),
     draw: ({ ctx, chart: c, bounding, xAxis }) => {
-      if (['day', 'week', 'month'].includes(state.period.type) || !sess.list.length) return true;
+      if (['day', 'week', 'month', 'year'].includes(state.period.type) || !sess.list.length) return true;
       const { from, to } = c.getVisibleRange();
       const t0 = store.dataIndexToTimestamp(Math.max(0, from - 1));
       const t1 = store.dataIndexToTimestamp(to + 1);

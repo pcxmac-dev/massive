@@ -72,6 +72,15 @@ SCHEME_MAX_BARS = 250_000
 # and then zoomed to seconds read years of seconds into RAM under the engine's lock.
 STRETCH_READ = BRICK_READ
 REPLAY_PAGE = 3000  # finer bars a replay page holds (about 50 minutes of seconds, 8 sessions of minutes)
+# A symbol's history before its feeds, from a dataset of the same index (the user, 2026-10-28: "also the
+# S&P back to 1800s if possible"; "make sure the source and dataset work together"): its months fill the
+# month and year levels before the month of the feeds' first daily bar, the feeds' own bars from there.
+# Shiller's S&P composite is a monthly average of daily closes, from 1871 (datasets.py, ODC PDDL).
+HISTORY = {"SPX": ("shiller-us-market-monthly", "SP500", "Robert J. Shiller's S&P composite")}
+HISTORY_TTL_S = 300.0  # the dataset's values are read again after this (a new month shows within it)
+# Where the feeds cover a month whole, its mean daily close against the dataset's value: a month apart by
+# more than this (percent) is flagged on the chart (Shiller's values are rounded to the cent).
+HISTORY_TOLERANCE_PCT = 0.5
 
 
 def _now_ms() -> int:
@@ -207,9 +216,13 @@ class WindowReader:
                         a = edges.setdefault(base, [e[0], e[1]])
                         a[0], a[1] = min(a[0], e[0]), max(a[1], e[1])
         s = self.series(source, ticker)
+        hist = self._history_values(ticker)  # months before the feeds: the month and year levels reach back
         out = []
         for ts, m in LEVELS:
             base = edges.get(BASE.get(ts, "day"))
+            if hist is not None and ts in ("month", "year"):
+                first, last = int(hist[0][0]), int(hist[0][-1])
+                base = [min(base[0], first), max(base[1], last)] if base else [first, last]
             if base is None:
                 continue
             out.append({"type": ts, "span": m, "first": int(base[0]), "last": int(base[1]),
@@ -241,8 +254,9 @@ class WindowReader:
         {"bars", "more": older ones exist, "newer": newer ones exist, "level"}."""
         s = self.series(source, ticker)
         session = s.session_for(session)
-        out = self._frame_page(s, self.feeds(source, ticker), period, span, session, to_ms, after_ms, since_ms,
-                               max(1, limit))
+        feeds = self.feeds(source, ticker)
+        out = self._frame_page(s, feeds, period, span, session, to_ms, after_ms, since_ms, max(1, limit))
+        self._note_history(out, s, feeds, out["frame"])
         out["bars"] = to_records(out.pop("frame"))
         out["level"] = {"type": period, "span": span, "label": level_label(period, span)}
         return out
@@ -457,10 +471,111 @@ class WindowReader:
         return daily
 
     def _calendar_bars(self, s, feeds, period) -> pd.DataFrame:
-        """Every bar of a calendar level (days, weeks, months, years): few, read whole."""
+        """Every bar of a calendar level (days, weeks, months, years): few, read whole. Months and
+        years begin with the history before the feeds (HISTORY), where the symbol has one."""
         daily = self._days(s, feeds)
-        return daily if period == "day" else _aggregate(
-            daily.groupby(calendar_key(daily.index, period, utc=utc_days(s)))).assign(derived=True)
+        if period == "day":
+            return daily
+        if period in ("month", "year"):
+            hist = self._history(s, int(epoch_ms(daily.index)[0]) if len(daily) else None)
+            if len(hist):
+                daily = pd.concat([hist, daily.assign(hist=False)]) if len(daily) else hist
+        return _aggregate(daily.groupby(calendar_key(daily.index, period, utc=utc_days(s)))).assign(derived=True)
+
+    # -- the history before the feeds (HISTORY) ------------------------------------------------
+    def _history_values(self, ticker: str) -> tuple[np.ndarray, np.ndarray] | None:
+        """The dataset series behind a symbol's history: its month starts (ms, New York midnight, as
+        the dataset dates them) and values, the latest version; None for a symbol without one or a
+        dataset not held. Kept HISTORY_TTL_S."""
+        spec = HISTORY.get(ticker.upper())
+        if spec is None:
+            return None
+        key = ("history", ticker.upper())
+        hit = self._levels.get(key)
+        if hit and time.monotonic() - hit[0] < HISTORY_TTL_S:
+            return hit[1]
+        from .. import datasets
+
+        name, series, _ = spec
+        try:
+            with self.engine.lock:
+                got = datasets.values(self.store, name, [series])[series]
+        except KeyError:  # the dataset not fetched yet
+            got = None
+        out = None
+        if got and got["t"]:
+            out = (np.asarray(got["t"], dtype=np.int64), np.asarray(got["v"], dtype=float))
+        self._levels[key] = (time.monotonic(), out)
+        return out
+
+    def _history(self, s, first_ms: int | None) -> pd.DataFrame:
+        """The symbol's history months before the month of its feeds' first daily bar (`first_ms`;
+        all of them with none): each a bar flat at the month's value, no volume, marked derived and
+        `hist` (the chart draws them as a line). The feeds' own bars take the months from there."""
+        got = self._history_values(s.ticker)
+        if got is None:
+            return _empty()
+        t, v = got
+        months = calendar_key(pd.to_datetime(t, unit="ms", utc=True), "month")
+        keep = np.ones(len(t), dtype=bool)
+        if first_ms is not None:
+            seam = calendar_key(pd.to_datetime([first_ms], unit="ms", utc=True), "month")[0]
+            keep = months < seam
+        bars = pd.DataFrame({"open": v, "high": v, "low": v, "close": v, "volume": 0.0, "turnover": 0.0, "trades": 0,
+                             "derived": True, "hist": True}, index=months)[keep]
+        return bars[~bars.index.duplicated(keep="last")]
+
+    def history_info(self, s, feeds) -> dict | None:
+        """What the history before the feeds is and how it agrees with them: {dataset, series,
+        title, licence, seam (ms: the month the feeds' daily bars take over; None with none), check}.
+        The check takes every month the feeds' daily bars cover whole (a bar on each of its trading
+        days) and the dataset has, and sets the mean of those daily closes (the dataset's own
+        measure) against the dataset's value: {months, median, max (percent, absolute), worst (the
+        month, ms), flagged ([[month ms, percent], ...] beyond HISTORY_TOLERANCE_PCT), agrees}."""
+        from .. import datasets
+
+        got = self._history_values(s.ticker)
+        if got is None:
+            return None
+        name, series, title = HISTORY[s.ticker.upper()]
+        ds = datasets.DATASETS[name]
+        daily = self._days(s, feeds)
+        seam = None
+        if len(daily):
+            seam = int(epoch_ms(calendar_key(daily.index[:1], "month"))[0])
+        info = {"dataset": name, "series": series, "title": title, "licence": ds.licence, "seam": seam,
+                "check": {"months": 0, "tolerance": HISTORY_TOLERANCE_PCT, "agrees": None}}
+        if not len(daily):
+            return info
+        months = calendar_key(daily.index, "month")
+        closes = daily["close"].groupby(months)
+        mean, held = closes.mean(), closes.count()
+        t, v = got
+        value = dict(zip(epoch_ms(calendar_key(pd.to_datetime(t, unit="ms", utc=True), "month")).tolist(), v.tolist()))
+        rows = []
+        for month, avg in mean.items():
+            ms = int(epoch_ms(pd.DatetimeIndex([month]))[0])
+            if ms not in value or not avg:
+                continue
+            days = pd.date_range(month.tz_localize(None), month.tz_localize(None) + pd.offsets.MonthEnd(0), freq="D")
+            trading = sum(_regular_close(d.date()) is not None for d in days)
+            if held[month] < trading:  # the feeds start part-way through it, miss a day, or it is not over
+                continue
+            rows.append((ms, (value[ms] / avg - 1) * 100))
+        if not rows:
+            return info
+        pct = np.array([abs(p) for _, p in rows])
+        worst = int(np.argmax(pct))
+        flagged = [[ms, round(p, 3)] for ms, p in rows if abs(p) > HISTORY_TOLERANCE_PCT]
+        info["check"] = {"months": len(rows), "median": round(float(np.median(pct)), 3),
+                         "max": round(float(pct[worst]), 3), "worst": rows[worst][0], "flagged": flagged,
+                         "tolerance": HISTORY_TOLERANCE_PCT, "agrees": not flagged}
+        return info
+
+    def _note_history(self, out: dict, s, feeds, bars: pd.DataFrame) -> None:
+        """A page holding history months carries what they are and how they agree with the feeds."""
+        if "hist" in bars and bool(bars["hist"].fillna(False).astype(bool).any()):
+            out["history"] = self.history_info(s, feeds)
 
     def _calendar_page(self, s, feeds, period, span, session, to_ms, after_ms, since_ms, limit) -> dict:
         return _paged(self._calendar_bars(s, feeds, period), to_ms, after_ms, since_ms, limit)
@@ -502,6 +617,7 @@ class WindowReader:
         feeds = self.feeds(source, ticker)
         out = self._frame_page(s, feeds, period, span, session, to_ms, after_ms, since_ms, max(1, limit))
         bars = out.pop("frame")
+        self._note_history(out, s, feeds, bars)
         used = {"type": style.type}
         if style.type == "heikin_ashi":
             bars = self._heikin_ashi(s, feeds, period, span, session, bars)
@@ -951,6 +1067,7 @@ class WindowReader:
         s = self.series(source, ticker)
         fine = levels[0]
         recent = self.page(source, ticker, fine["type"], fine["span"], "extended", limit=500)["bars"]
+        recent = [r for r in recent if not r.get("hist")]  # a dataset's averages (2996.1136...) set no decimals
         prices = [r[k] for r in recent for k in ("open", "high", "low", "close")]
         coarse = next((lv for lv in levels if lv["type"] == "day"), levels[-1])
         return {

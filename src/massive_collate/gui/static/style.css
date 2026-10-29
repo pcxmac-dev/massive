@@ -875,6 +875,9 @@ table.l2 tr.cursor.beyond td { box-shadow: inset 0 1px 0 var(--muted), inset 0 -
 .w-table tr:hover .w-x button { visibility: visible; }
 .w-table td.w-empty { padding: 8px 4px; white-space: normal; }  /* outranks the cells' nowrap: no sideways scroll */
 .derived-tag.interp { color: #b07cff; border-color: #b07cff; }
+/* a dataset's monthly history before the feed (app.js HIST_COLOR); flagged where it and the feed disagree */
+.derived-tag.hist, .history-chip { color: #d4a72c; border-color: #d4a72c; }
+.history-chip.warn { color: var(--down, #f23645); border-color: var(--down, #f23645); border-style: solid; }
 /* Schemes (Analysis view): settings, statistics and trades of a backtest (schemes.js) */
 #pSchemes h3 { display: flex; align-items: center; gap: 6px; }
 #pSchemes h3 #schClear { margin-left: auto; }

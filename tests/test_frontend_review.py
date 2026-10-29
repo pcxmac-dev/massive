@@ -333,7 +333,7 @@ def test_wide_bars_are_drawn_once_across_their_slots_and_read_as_their_minute():
     marks = app.split("name: 'DERIVED_MARKS'", 1)[1].split("\n});\n", 1)[0]
     assert "if (wide && WIDE_TYPES.has(state.chartType)) drawWide(ctx, c, xAxis, yAxis, data, from, to);" in marks
     assert "noteWideInView(wide);" in marks
-    assert "if (!d?.derived || d.interp || d.wide) continue;" in marks  # no derived rings under wide slots
+    assert "if (!d?.derived || d.interp || d.wide || d.hist) continue;" in marks  # no derived rings under wide slots (or history months)
     draw = _function(app, "drawWide")
     assert "Math.floor(data[j + 1].timestamp / d.wide) * d.wide === start" in draw  # one minute's slots together
     assert "yAxis.convertToPixel(d.wh)" in draw and "fillStyle = plotBackground" not in draw  # nothing painted out

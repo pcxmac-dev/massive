@@ -198,6 +198,8 @@ def _aggregate(groups) -> pd.DataFrame:
             "volume": "sum", "turnover": "sum", "trades": "sum"}
     if "derived" in getattr(groups, "obj", pd.DataFrame()).columns:
         spec["derived"] = "max"
+    if "hist" in getattr(groups, "obj", pd.DataFrame()).columns:  # a symbol's history before its feeds (gui/window.py)
+        spec["hist"] = "max"
     if "env_high" in getattr(groups, "obj", pd.DataFrame()).columns:  # composite: the deviation across exchanges
         spec.update(env_high="max", env_low="min", venues_n="max", dev_sq="mean")
     out = groups.agg(spec)
@@ -328,7 +330,7 @@ def lod_aggregate(bars: pd.DataFrame, k: int) -> pd.DataFrame:
 
 
 EXTRA_COLUMNS = ("yang_start", "yang", "switch", "up", "env_high", "env_low", "dev_sd", "venues_n", "q1", "med", "q3",
-                 "derived", "interp", "wide", "wo", "wh", "wl", "wc")
+                 "derived", "interp", "hist", "wide", "wo", "wh", "wl", "wc")
 # Derived models stored as bars: not feeds of their own in the merged view.
 MODEL_SOURCES = ("composite",)
 # Symbols whose second intervals continue back past their one-second data with values interpolated
@@ -390,7 +392,7 @@ def to_records(bars: pd.DataFrame) -> list[dict]:
         for c, values in extra.items():
             v = values[i]
             r[c] = None if isinstance(v, float) and np.isnan(v) else (
-                bool(v) if c in ("yang", "yang_start", "up", "derived", "interp") else v)
+                bool(v) if c in ("yang", "yang_start", "up", "derived", "interp", "hist") else v)
         records.append(r)
     return records
 

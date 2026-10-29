@@ -406,6 +406,7 @@ chart.setDataLoader({
       }
       if (type === 'init' && !res.bars.length && res.model?.hidden && state.meta?.auto && skipEmptyLevel()) return;
       if (type === 'init' || type === 'backward') state.hasNewer = !!res.newer;  // a window in the past: no live tail
+      if (type === 'backward' && res.history) state.history = res.history;  // scrolled back into it
       if (type === 'init' && state.fitAll) {  // a symbol opens on its whole history
         state.fitAll = false;
         requestAnimationFrame(() => fitWhole(res.bars.length));
@@ -416,6 +417,7 @@ chart.setDataLoader({
         state.approximate = res.approximate || null;
         if (state.model.kind === 'fourier') renderModelControls();  // a fit cut short says so
         state.derivedFrom = res.derivedFrom || null;
+        state.history = res.history || null;  // the months before the feed from a dataset, and how they agree with it
         state.baseTotal = (res.total || 0) * lodFor();  // bars at full detail
         if (applyModelPrecision(res)) return;  // reloads once with the right precision
         // A new model or chart type can change the value range completely; KLineChart only
@@ -1087,7 +1089,7 @@ function drawingsKey() {
 
 function windowSpan() {
   const p = state.period || { type: 'minute', span: 1 };
-  const seconds = { second: 1, minute: 60, hour: 3600, day: 86400, week: 604800, month: 2592000 }[p.type] * p.span;
+  const seconds = { second: 1, minute: 60, hour: 3600, day: 86400, week: 604800, month: 2592000, year: 31536000 }[p.type] * p.span;
   return fmtDuration(windowForDetail(state.model.detail) * seconds * 1000);
 }
 
@@ -1588,17 +1590,20 @@ kc.registerIndicator({
   draw: ({ ctx, chart: c, xAxis, yAxis }) => {
     const data = c.getDataList();
     const { from, to } = c.getVisibleRange();
-    if (!data.length || to <= from || state.model.kind !== 'price') { renderDerivedChip(0, 0); noteWideInView(0); return true; }
-    let some = 0, interp = 0, wide = 0, slots = 0;  // wide slots: the level's own bars are the rest
+    if (!data.length || to <= from || state.model.kind !== 'price') { renderDerivedChip(0, 0); renderHistoryChip(0); noteWideInView(0); return true; }
+    let some = 0, interp = 0, wide = 0, slots = 0, hist = 0;  // wide slots and history months: the level's own bars are the rest
     for (let i = from; i < to; i++) {
       if (data[i]?.wide) { wide = data[i].wide; slots++; } else if (data[i]?.interp) interp++;
+      else if (data[i]?.hist) hist++;
       else if (data[i]?.derived) some++;
     }
-    const total = to - from - slots;
+    const total = to - from - slots - hist;
     renderDerivedChip(some + interp, total, interp);
+    renderHistoryChip(hist);
     noteWideInView(wide);
     ctx.save();
     if (wide && WIDE_TYPES.has(state.chartType)) drawWide(ctx, c, xAxis, yAxis, data, from, to);
+    if (hist) drawHistory(ctx, xAxis, yAxis, data, from, to);
     if (interp) {
       // Interpolated history (no data at this interval): a dashed violet line, a style used nowhere else.
       ctx.strokeStyle = INTERP_COLOR; ctx.lineWidth = 1.6; ctx.setLineDash([6, 4]); ctx.globalAlpha = 0.95;
@@ -1618,7 +1623,7 @@ kc.registerIndicator({
       ctx.strokeStyle = '#9aa0a6'; ctx.globalAlpha = 0.85; ctx.lineWidth = 1;
       for (let i = from; i < to; i++) {
         const d = data[i];
-        if (!d?.derived || d.interp || d.wide) continue;
+        if (!d?.derived || d.interp || d.wide || d.hist) continue;
         ctx.beginPath(); ctx.arc(px(xAxis, i), yAxis.convertToPixel(d.low) + 6, 2.5, 0, Math.PI * 2); ctx.stroke();
       }
     }
@@ -1628,6 +1633,76 @@ kc.registerIndicator({
 });
 
 const INTERP_COLOR = '#b07cff';  // interpolated history only
+const HIST_COLOR = '#d4a72c';    // a dataset's monthly history before the feed only (gold: neither candle colour)
+
+// The months before the feed from a dataset of the same index (gui/window.py HISTORY: Shiller's S&P
+// from 1871, a monthly average of daily closes): each month's bar lies flat at its value, so a gold
+// line is drawn through them, on to the open of the feed's first bar where it takes over.
+function drawHistory(ctx, xAxis, yAxis, data, from, to) {
+  ctx.strokeStyle = HIST_COLOR; ctx.lineWidth = 1.6; ctx.globalAlpha = 0.95;
+  ctx.setLineDash([]);  // solid: the canvas is shared, and a dash set before this one is still on it
+  ctx.beginPath();
+  let pen = false;
+  for (let i = Math.max(0, from - 1); i < Math.min(data.length, to + 1); i++) {
+    const d = data[i];
+    if (!d?.hist) {
+      if (pen && d) ctx.lineTo(px(xAxis, i), yAxis.convertToPixel(d.open));  // the seam: on to the feed's first bar
+      pen = false;
+      continue;
+    }
+    const x = px(xAxis, i), y = yAxis.convertToPixel(d.close);
+    if (pen) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+    pen = true;
+  }
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+// "Jan 1871": a history month (New York midnight, as the dataset dates them).
+function monthText(ms) {
+  return new Date(ms).toLocaleDateString('en-US', { month: 'short', year: 'numeric', timeZone: 'America/New_York' });
+}
+
+// What the history is and how it agrees with the feed where both have a whole month.
+function historyTitle(h) {
+  if (!h) return '* Monthly history from a dataset: each month\'s bar lies flat at its value (the gold line).';
+  const c = h.check || {};
+  const where = h.seam != null
+    ? `Before ${monthText(h.seam)} this is ${h.title}; from ${monthText(h.seam)} the feed's own daily bars.`
+    : `No daily bars from the feed yet: all of this is ${h.title}.`;
+  const what = `\nA monthly average of daily closes, drawn as the gold line: each month's bar lies flat at its value `
+    + `(no highs, lows or volume). Source: ${h.licence}.`;
+  let check;
+  if (!c.months) {
+    check = '\nNot checked yet: the feed covers no whole month the dataset also has.';
+  } else {
+    check = `\nChecked against the feed's daily closes over ${c.months} whole month${c.months === 1 ? '' : 's'}: `
+      + `median ${c.median}% apart, largest ${c.max}% (${monthText(c.worst)}). `;
+    check += c.agrees
+      ? `All within ${c.tolerance}%: they agree.`
+      : `Apart by more than ${c.tolerance}%: ${c.flagged.map(([m, p]) => `${monthText(m)} (${p > 0 ? '+' : ''}${p}%)`).join(', ')}.`;
+  }
+  return `* Monthly history. ${where}${what}${check}`;
+}
+
+function renderHistoryChip(hist) {
+  let chip = $('historyChip');
+  if (!chip) {
+    chip = document.createElement('span');
+    chip.id = 'historyChip';
+    chip.className = 'derived-chip history-chip';
+    $('periods').append(chip);
+  }
+  const h = state.history;
+  const off = !!hist && h?.check?.agrees === false;
+  const shown = `${hist ? 1 : 0}|${h ? `${h.seam}|${JSON.stringify(h.check)}` : ''}`;  // drawn every frame: write on change
+  if (chip.dataset.shown === shown) return;
+  chip.dataset.shown = shown;
+  chip.hidden = !hist;
+  chip.classList.toggle('warn', off);
+  chip.textContent = off ? 'monthly* ⚠' : 'monthly*';
+  chip.title = historyTitle(h);
+}
 
 function renderDerivedChip(some, total, interp = 0) {
   let chip = $('derivedChip');

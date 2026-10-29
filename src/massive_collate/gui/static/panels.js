@@ -253,6 +253,7 @@
           · <span class="p-muted">Min</span> ${priceText(s.lo?.low)} <span class="p-muted">${s.lo ? e(t(barTime(s.lo))) : ''}</span></div>
         <div><span class="p-muted">${s.live ? 'Last' : e(t(barTime(b)))}</span>${wideTag(b)}${b.interp
           ? ' <span class="derived-tag interp" title="Interpolated: no data at this interval here; a line between the 1-minute bars\' volume-weighted prices">interpolated*</span>'
+          : b.hist ? ' <span class="derived-tag hist" title="Monthly history from a dataset (the chip beside the interval says which, and how it agrees with the feed): a monthly average of daily closes, flat at its value">monthly avg*</span>'
           : b.derived ? ' <span class="derived-tag" title="Derived: built here from finer data; no feed sent this candle at this interval">derived*</span>' : ''}
           O ${priceText(b.open)} H ${priceText(b.high)} L ${priceText(b.low)} C ${priceText(b.close)} ${chg}
           ${b.q1 != null ? `· <span class="p-muted" title="${e(state.approximate || '')}">Q1*</span> ${priceText(b.q1)} <span class="p-muted">Med*</span> ${priceText(b.med)} <span class="p-muted">Q3*</span> ${priceText(b.q3)} ` : ''}· <span class="p-muted">Rng</span> ${priceText(s.range)} · <span class="p-muted">Vol</span> ${big(b.volume)}${s.vwap && isPrice() ? ` · <span class="p-muted">VWAP</span> ${priceText(s.vwap)}` : ''}${s.feeds.length ? ` · <span class="p-muted">Src</span> ${e(s.feeds.join('+'))}` : ''}</div>`;
