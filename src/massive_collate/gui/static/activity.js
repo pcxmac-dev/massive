@@ -681,6 +681,6 @@
     followLog = l.scrollHeight - l.scrollTop - l.clientHeight < 24;
   });
   window.addEventListener('massive:view', () => { render(); poll(); });
-  window.Activity = { poll, get data() { return data; } };
+  window.Activity = { poll, get data() { return data; }, get job() { return job; } };  // job: the open symbol's fetch
   poll();
 })();

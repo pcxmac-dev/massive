@@ -285,8 +285,22 @@ dialog::backdrop { background: rgba(0, 0, 0, .5); }
 .empty { padding: 20px; color: var(--muted); text-align: center; }
 
 /* symbol button, rail and panes */
-#topbar .symbol #symbolLabel { display: inline-flex; align-items: center; gap: 6px; }
+#topbar .symbol #symbolLabel, #topbar .symbol #symbolText { display: inline-flex; align-items: center; gap: 6px; }
 #topbar .symbol .p-muted { font-size: 12px; }
+.symbol-logo { display: inline-grid; }
+/* The open symbol's logo as a throbber (throbber.js): a card, the logo in front and the Markets globe on
+   the back, turned about its upright axis while the symbol updates; it rests on the logo when done. */
+.throb { display: inline-grid; place-items: center; width: var(--throb-size); height: var(--throb-size); perspective: 160px; }
+.throb-card { display: grid; place-items: center; width: 100%; height: 100%; transform-style: preserve-3d; }
+.throb-face { grid-area: 1 / 1; display: grid; place-items: center; backface-visibility: hidden; -webkit-backface-visibility: hidden; }
+.throb-back { transform: rotateY(180deg); }
+.throb-globe { display: block; width: var(--throb-size); height: var(--throb-size); border-radius: 50%; }
+.throb.updating .throb-card { animation: throb-turn 2.4s linear infinite; }
+@keyframes throb-turn { from { transform: rotateY(0deg); } to { transform: rotateY(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .throb.updating .throb-card { animation: none; }
+  .throb.updating { border-radius: 50%; box-shadow: 0 0 0 2px var(--accent); }
+}
 .sym-icon { display: inline-grid; place-items: center; border-radius: 50%; overflow: hidden; flex: none;
   background: var(--hover); color: #fff; font-weight: 700; line-height: 1; }
 .sym-icon img { width: 100%; height: 100%; object-fit: cover; }

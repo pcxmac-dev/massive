@@ -504,3 +504,26 @@ def test_every_open_symbol_listens_for_new_bars_while_the_page_is_in_view():
     assert "if (listen && !state.stream && !state.streamFailed) openStream();" in poll
     assert "if (!listen && state.stream) closeStream();" in poll
     assert "if (live && !state.stream" not in poll  # not the live symbols only
+
+
+def test_the_open_symbols_logo_turns_like_explorers_throbber_while_it_updates():
+    """The user (2026-10-28): "use the old school explorer icon + the current symbol icon scheme, ie, the
+    globe rotates and the icon is on the other side"; "keep the status on the bottom, but lets animate
+    the current symbol icon"."""
+    js = _js("throbber.js")
+    assert "const FETCHING = new Set(['waiting', 'downloading']);" in js  # its fetch queued or under way
+    assert "window.GlobeIcon?.frame(lon - 180, host.classList.contains('active'))" in js  # the back: the turning globe
+    assert "if (!busy()) card.classList.remove('updating');" in js  # done: the turn finished, resting on the logo
+    assert "if (front.dataset.html !== html) { front.innerHTML = html; front.dataset.html = html; }" in js
+    assert "window.Throbber = { face, pulse, busy };" in js
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert html.index('<script src="throbber.js"></script>') < html.index('<script src="app.js"></script>')
+    app = _js("app.js")
+    assert "window.Throbber.face($('symbolLogo'), symbolIcon(info, 20), 20);" in _function(app, "renderSymbolButton")
+    assert app.count("window.Throbber?.pulse();") == 2  # each stream message and poll that brought bars
+    assert "window.Throbber.face($('railStock'), stockIcon, RAIL_ICON + 4);" in _js("panels.js")
+    assert "frame: (lon, selected = false) => (outlines ? render(lon, declination(), selected) : null)" in _js("globeicon.js")
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+    assert ".throb.updating .throb-card { animation: throb-turn 2.4s linear infinite; }" in css
+    assert ".throb-back { transform: rotateY(180deg); }" in css and "backface-visibility: hidden;" in css
+    assert "@media (prefers-reduced-motion: reduce) {\n  .throb.updating .throb-card { animation: none; }" in css

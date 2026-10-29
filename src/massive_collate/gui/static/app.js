@@ -469,6 +469,7 @@ chart.setDataLoader({
         });
         if (sub !== state.subscription || kind !== state.model.kind) return;
         res.bars.forEach((bar) => callback(bar));
+        if (res.bars.length) window.Throbber?.pulse();  // new bars in: the logo turns (throbber.js)
         // A forming bar changes in place (no scroll): refresh the side panel's last bar and the time handle.
         if (res.bars.length) requestAnimationFrame(() => { window.renderCursor?.(); placeNowHandle(); });
       } catch { /* the next poll will retry */ } finally { state.polling = false; }
@@ -497,6 +498,7 @@ chart.setDataLoader({
         const last = chart.getDataList().at(-1)?.timestamp ?? 0;
         const bars = msg.bars.filter((b) => b.timestamp >= last);
         bars.forEach((bar) => callback(bar));
+        if (bars.length) window.Throbber?.pulse();  // new bars in: the logo turns (throbber.js)
         if (bars.length) requestAnimationFrame(() => { window.renderCursor?.(); placeNowHandle(); });
       };
       es.addEventListener('end', () => { closeStream(); if (sub === state.subscription) openStream(); });
@@ -2032,9 +2034,13 @@ function renderSymbolButton() {
   const { symbolIcon, dataIcon, esc: e } = window.MassiveIcons;
   const info = symbolInfo(state.ticker);
   const data = window.Activity?.data?.symbols?.find((x) => x.ticker === state.ticker) || info.data;
-  $('symbolLabel').innerHTML = state.ticker
-    ? `${symbolIcon(info, 20)}<b>${e(state.ticker)}</b>${info.exchange ? `<span class="p-muted">${e(info.exchangeName || info.exchange)}</span>` : ''}${dataIcon(data, 14)}`
-    : 'Select symbol';
+  if (!state.ticker) { $('symbolLabel').innerHTML = 'Select symbol'; return; }
+  // the logo in a place of its own, the throbber's card (throbber.js): written again on every poll, it
+  // would start its turn over each time
+  if (!$('symbolLogo')) $('symbolLabel').innerHTML = '<span id="symbolLogo" class="symbol-logo"></span><span id="symbolText"></span>';
+  window.Throbber.face($('symbolLogo'), symbolIcon(info, 20), 20);
+  const text = `<b>${e(state.ticker)}</b>${info.exchange ? `<span class="p-muted">${e(info.exchangeName || info.exchange)}</span>` : ''}${dataIcon(data, 14)}`;
+  if ($('symbolText').dataset.html !== text) { $('symbolText').innerHTML = text; $('symbolText').dataset.html = text; }
 }
 window.addEventListener('massive:activity', renderSymbolButton);
 

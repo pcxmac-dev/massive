@@ -146,6 +146,7 @@
 
   load();
   setInterval(() => { if (!document.hidden) update(); }, TICK_MS);
-  // frame(lon): one frame as a canvas (for a look), null before the outlines load
-  window.GlobeIcon = { update, frame: (lon) => (outlines ? render(lon, declination()) : null) };
+  // frame(lon, selected): one frame as a canvas (a look; the symbol logo's throbber, throbber.js), null
+  // before the outlines load
+  window.GlobeIcon = { update, frame: (lon, selected = false) => (outlines ? render(lon, declination(), selected) : null) };
 })();

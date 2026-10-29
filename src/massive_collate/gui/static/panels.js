@@ -77,7 +77,9 @@
   const RAIL_ICON = 32;  // px; the buttons (style.css #rail) leave room around it
 
   function renderRailIcons(activity) {
-    $('railStock').innerHTML = state.ticker ? symbolIcon(symbolInfo(state.ticker), RAIL_ICON + 4) : icon('analysis', RAIL_ICON);
+    // the symbol's logo, the front of the card the throbber turns while it updates (throbber.js)
+    const stockIcon = state.ticker ? symbolIcon(symbolInfo(state.ticker), RAIL_ICON + 4) : icon('analysis', RAIL_ICON);
+    window.Throbber.face($('railStock'), stockIcon, RAIL_ICON + 4);
     $('railAnalysis').innerHTML = icon('integral', RAIL_ICON);
     $('railWatch').innerHTML = icon('watchlist', RAIL_ICON);
     $('railTrading').innerHTML = icon('trading', RAIL_ICON);
