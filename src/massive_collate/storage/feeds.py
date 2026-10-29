@@ -890,6 +890,24 @@ class FeedStore:
         self._wrote()
         return len(rows)
 
+    def save_market_day(self, source: str, day: date, bars: list[dict], start_ms: int, end_ms: int) -> int:
+        """Chosen stocks' bars of `day` from a whole-market daily file (each `t` the day's start),
+        each recorded held for [start_ms, end_ms) in the coverage ledger (its own pass then asks
+        nothing for the day), and the day marked asked. Returns bars saved."""
+        stored = _stored_ms()
+        rows = [_bar_row(b["T"].upper(), "day", 1, b, stored) for b in bars if b.get("T")]
+        if rows:
+            conn = self._feed(source, create=True).conn
+            with conn:
+                conn.executemany(_UPSERT_BAR, rows)
+            self.rows_saved += len(rows)
+        with write_transaction(self.conn):  # marked after the bars are in: a failure between means asking again
+            for r in rows:
+                self._add_coverage(source, r[0], "day", start_ms, end_ms, "download")
+            self._mark_day(source, day, "ok", len(rows))
+        self._wrote()
+        return len(rows)
+
     def mark_grouped_day(self, source: str, day: date, status: str) -> None:
         with self.conn:
             self._mark_day(source, day, status, 0)

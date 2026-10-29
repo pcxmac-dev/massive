@@ -20,7 +20,8 @@ from .config import UNLIMITED_BACKFILL_YEARS, Tier, asset_tier
 from .errors import BudgetExhausted, NotEntitled, Paused, RateLimited, SourceError
 from . import freshness
 from .futures import candidate_contracts, roll_schedule
-from .coverage import STEP_MS, FeedProfile, frame_parts, frontier_ms, has_open_time, ms, plan, second_floor
+from .coverage import (STEP_MS, FeedProfile, day_start_ms, frame_parts, frontier_ms, has_open_time, ms, plan,
+                       same_market, second_floor)
 from .sources import is_archive, providers
 from .sources.base import DataSource
 from .symbols import ASSETS
@@ -1316,6 +1317,8 @@ def sync(
             if refresh_calendars(source, store, today, log):
                 freshness.use_official(store)  # this week's official schedules, from here on
             from .gui.world import PROXIES
+            if source.serves("stock") and gives_days(source, me):  # every watched stock's day: a request a day
+                market_days(source, store, me, feeds, store.watchlist(source.name), now, PROXIES, log)
             fetch_market_moves(source, store, now, PROXIES, log)
         # Keep complete symbols current first; backfills take what budget is left, in the fetch
         # order (fetch_order: watchlists, big movers, then most traded), then by ticker.
@@ -1634,6 +1637,91 @@ def fetch_market_moves(source: DataSource, store: Store, now: datetime, proxies:
         d -= timedelta(days=1)
     return used
 
+
+MARKET_DAYS_BACK = 10  # trading days the watched stocks' daily bars are taken from the whole-market file
+
+
+def market_days(source: DataSource, store: Store, me: FeedProfile, feeds: dict[str, FeedProfile], watched: list[dict],
+                now: datetime, proxies: list[str], log: Log = print) -> int:
+    """The watched stocks' daily bars from the whole-market daily file, one request a trading day
+    for every US stock (the user, 2026-10-28: "without blowing through a whole bunch of subscription
+    calls"; "every stock on the heat map needs to be updated daily"): each of the last
+    MARKET_DAYS_BACK trading days not asked yet, once its session is over (the day frontier a
+    stock's own pass keeps to: by then that pass would ask for it), newest first; a day the file
+    has nothing for yet is asked again next run. Kept: the watched stocks whose listing was
+    checked, from their listing date (a symbol's earlier days may be another company's) to their
+    last listed day, on days no feed of the same market holds for them (one download per span),
+    each stamped at its day's start as a stock's own daily bars are. Each is recorded in the
+    coverage ledger, so the stock's own pass asks nothing for that day. The same file gives the
+    market moves (the snapshot and the proxies' closes): fetch_market_moves sends nothing more for
+    the day. Returns requests made."""
+    now = now.astimezone(ET)
+    today = now.date()
+    stocks = {w["ticker"].upper(): w for w in watched
+              if w["asset"] == "stock" and w.get("checked_at") and not w.get("closed_at")}
+    if not stocks:
+        return 0
+    known = store.grouped_days(source.name)
+    edge = frontier_ms(freshness.hours(source.name, "stock"), me.tier, now, "day")
+    d = today
+    while day_start_ms(d + timedelta(days=1)) > edge:  # its session not over (or not published) yet
+        d -= timedelta(days=1)
+    days = []
+    while len(days) < MARKET_DAYS_BACK:
+        if freshness.is_trading_day(d):
+            days.append(d)
+        d -= timedelta(days=1)
+    todo = [d for d in days if d not in known]
+    if not todo:
+        return 0
+    held: dict[str, list[tuple[int, int]]] = {}
+
+    def holds(ticker: str, a: int, b: int) -> bool:
+        """Whether a feed of the same market holds [a, b) of the stock's daily bars already."""
+        if ticker not in held:
+            held[ticker] = [s for src, spans in store.coverage(ticker, "day", received_only=True).items()
+                            if same_market(feeds, src, me.name, "stock") for s in spans]
+        return any(x <= a and y >= b for x, y in held[ticker])
+
+    used = 0
+    for day in todo:
+        try:
+            bars = _guard_call(source.market_daily, day)
+        except NotEntitled as e:
+            used += 1
+            if "end of day" in str(e).lower():  # not out yet: asked again next run
+                log(f"market days: {day} not out yet")
+                continue
+            store.mark_grouped_day(source.name, day, "denied")
+            log(f"market days: {day} not covered by your plan ({e.message}); not going further back")
+            break
+        except NotImplementedError:
+            return used
+        except SourceError as e:
+            log(f"market days: {day} not available ({e}); left to each stock's own pass")
+            break
+        used += 1
+        if not bars:
+            if (today - day).days > SETTLE_DAYS:
+                store.mark_grouped_day(source.name, day, "empty")
+            continue
+        store.save_market_snapshot(source.name, day, bars)  # the market moves read the same file
+        closes = {b["T"]: b["c"] for b in bars if b.get("T") in proxies and b.get("c")}
+        if closes:
+            store.save_proxy_closes(source.name, day, closes)
+        a, b = day_start_ms(day), day_start_ms(day + timedelta(days=1))
+        keep = []
+        for bar in bars:
+            w = stocks.get(str(bar.get("T") or "").upper())
+            if w is None or bar.get("c") is None:
+                continue
+            listed, retired = w.get("listed_from"), w.get("retired_on")
+            if (listed and day < listed) or (retired and day > retired) or holds(w["ticker"].upper(), a, b):
+                continue
+            keep.append({**bar, "T": w["ticker"], "t": a})
+        n = store.save_market_day(source.name, day, keep, a, b)
+        log(f"market days: {day}: {n:,} watched stocks' daily bars from the whole-market file ({len(bars):,} in it)")
+    return used
 
 
 def futures_for_schedules(store: Store, source: str) -> list[str]:
