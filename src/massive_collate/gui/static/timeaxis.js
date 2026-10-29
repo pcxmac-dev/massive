@@ -200,10 +200,12 @@
       const xOf = (ts) => xAxis.convertToPixel(store.timestampToDataIndex(ts)) - c.getBarSpace().halfBar;
       const dark = !document.body.classList.contains('light');
       // pre-market a cool blue, after-hours grey: one shade for both made them hard to tell apart. The
-      // blue and the violet at half the strength they had (the user, 2026-10-28: "a little too bright")
-      const preShade = dark ? 'rgba(10,32,96,0.225)' : 'rgba(20,60,170,0.065)';  // a deep navy
-      const postShade = dark ? 'rgba(120,123,134,0.07)' : 'rgba(120,123,134,0.08)';
-      const nightShade = dark ? 'rgba(90,40,140,0.15)' : 'rgba(110,60,170,0.05)';  // overnight: a violet
+      // blue and the violet at half the strength they had (the user, 2026-10-28: "a little too bright"),
+      // each then scaled by its Preferences slider (prefs.js: 0-200 %, 100 standard)
+      const k = (name) => Math.min(2, Math.max(0, (state.shade?.[name] ?? 100) / 100));
+      const preShade = dark ? `rgba(10,32,96,${0.225 * k('pre')})` : `rgba(20,60,170,${0.065 * k('pre')})`;  // a deep navy
+      const postShade = dark ? `rgba(120,123,134,${0.07 * k('post')})` : `rgba(120,123,134,${0.08 * k('post')})`;
+      const nightShade = dark ? `rgba(90,40,140,${0.15 * k('night')})` : `rgba(110,60,170,${0.05 * k('night')})`;  // overnight: a violet
       const wide = state.session !== 'regular';  // extended hours or all four sessions
       const now = Date.now();
       const cur = currentSession(sess.list, now);
@@ -240,5 +242,5 @@
     },
   });
   chart.createIndicator({ name: 'SESSIONS', paneId: 'candle_pane' }, true);
-  window.TimeAxis = { future: fut, sessions: sess, ensure, currentSession };
+  window.TimeAxis = { future: fut, sessions: sess, ensure, currentSession, redraw };
 })();

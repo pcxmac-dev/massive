@@ -66,6 +66,8 @@
     // the Trading view: two hands shaking
     trading: '<g stroke-width="1.5"><path d="M2 7.5h2.6v9H2z"/><path d="M22 7.5h-2.6v9H22z"/><path d="M19.4 9.2c-1.6-.9-3.4-1.4-5.2-1-1.3.3-2.6 1-3.6 1.9"/><path d="M4.6 9.6c1.6-.4 3.2-.6 4.6-.2l3.3 1.1"/><path d="M10.6 10.1 8.4 12.2c-.5.5-.4 1.3.2 1.6.5.3 1.1.2 1.5-.2l2.3-2.1"/><path d="M12.4 11.5l3 2.9c.5.5.5 1.2 0 1.6-.5.4-1.1.3-1.5-.1"/><path d="M14.6 13.6c.5.5.5 1.2 0 1.6-.5.4-1.1.3-1.5-.1l-1.1-1"/><path d="M12.9 15.2c.4.5.4 1.1 0 1.5-.4.4-1 .3-1.4-.1l-1-.9"/><path d="M10.9 16.6c.3.4.2 1-.2 1.3-.4.3-.9.2-1.2-.1L4.6 15.4"/><path d="M19.4 15.2c-1.3.8-2.8 1.3-4.3 1.5"/></g>',
     watchlist: '<path d="M9 6h12M9 12h12M9 18h7"/><path d="M4 6h.01M4 12h.01M4 18h.01"/><path d="m19 15 .9 1.8 2 .3-1.45 1.4.35 2-1.8-.95-1.8.95.35-2-1.45-1.4 2-.3z"/>',
+    // Preferences: three sliders, their knobs right, left, right (the user's drawing, 2026-10-28)
+    sliders: '<path d="M3 6.5h9.6M17.4 6.5H21M3 12h3.6M11.4 12H21M3 17.5h9.6M17.4 17.5H21"/><circle cx="15" cy="6.5" r="2.4"/><circle cx="9" cy="12" r="2.4"/><circle cx="15" cy="17.5" r="2.4"/>',
     scan: '<path d="M4 8V5a1 1 0 0 1 1-1h3"/><path d="M16 4h3a1 1 0 0 1 1 1v3"/><path d="M20 16v3a1 1 0 0 1-1 1h-3"/><path d="M8 20H5a1 1 0 0 1-1-1v-3"/><path d="M7 12h10"/>',
     expand: '<path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/>',
     news: '<rect x="3" y="4" width="15" height="16" rx="2"/><path d="M18 8h3v10a2 2 0 0 1-2 2"/><path d="M7 8h7"/><path d="M7 12h7"/><path d="M7 16h4"/>',

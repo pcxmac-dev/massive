@@ -344,7 +344,30 @@ def test_wide_bars_are_drawn_once_across_their_slots_and_read_as_their_minute():
     assert "e(t(barTime(b)))" in panels and "e(t(barTime(s.hi)))" in panels
 
 
-def test_the_pre_market_and_overnight_shades_are_at_half_their_old_strength():
+def test_the_pre_market_and_overnight_shades_are_at_half_their_old_strength_scaled_by_their_sliders():
     axis = _js("timeaxis.js")
-    assert "const preShade = dark ? 'rgba(10,32,96,0.225)' : 'rgba(20,60,170,0.065)';" in axis
-    assert "const nightShade = dark ? 'rgba(90,40,140,0.15)' : 'rgba(110,60,170,0.05)';" in axis
+    assert "const preShade = dark ? `rgba(10,32,96,${0.225 * k('pre')})` : `rgba(20,60,170,${0.065 * k('pre')})`;" in axis
+    assert "const nightShade = dark ? `rgba(90,40,140,${0.15 * k('night')})` : `rgba(110,60,170,${0.05 * k('night')})`;" in axis
+    assert "Math.min(2, Math.max(0, (state.shade?.[name] ?? 100) / 100))" in axis  # 0-200 %, 100 without a setting
+    assert "window.TimeAxis = { future: fut, sessions: sess, ensure, currentSession, redraw };" in axis
+
+
+def test_the_preferences_pane_sits_above_the_profile_below_the_separator_and_sets_sessions_and_shading():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    rail = html.split('<nav id="rail"', 1)[1].split("</nav>", 1)[0]
+    last_hr = rail.rindex("<hr>")
+    assert last_hr < rail.index('id="railPrefs"') < rail.index('id="railProfile"')  # below the line, above the user
+    assert '<div class="pane" id="panePrefs" data-pane="prefs" hidden>' in html
+    assert html.index('<script src="app.js"></script>') < html.index('<script src="prefs.js"></script>')
+    icons = _js("icons.js")
+    assert """sliders: '<path d="M3 6.5h9.6M17.4 6.5H21M3 12h3.6M11.4 12H21M3 17.5h9.6M17.4 17.5H21"/>""" in icons
+    panels = _js("panels.js")
+    assert "prefs: 'chart'" in panels and "const BESIDE = new Set(['watchlist', 'prefs']);" in panels
+    assert "if (view === 'chart' && !BESIDE.has(name)) window.switchWorkspace?.(name);" in panels  # no chart of its own
+    assert "$('railPrefs').innerHTML = icon('sliders', RAIL_ICON);" in panels
+    prefs = _js("prefs.js")
+    assert "state.shade = Object.fromEntries(SHADES.map(([k]) => [k, clamp(Number(saved?.[k] ?? 100))]));" in prefs
+    assert "prefs.set('shade', state.shade);" in prefs and "window.TimeAxis?.redraw();" in prefs
+    # the session: the toolbar's picker, the same setting
+    assert "$('sessionSelect').value = e.target.value;" in prefs and "$('sessionSelect').dispatchEvent(new Event('change'));" in prefs
+    assert 'type="range" min="0" max="200" step="5" data-shade=' in prefs

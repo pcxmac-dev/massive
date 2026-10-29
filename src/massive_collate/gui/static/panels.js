@@ -27,10 +27,11 @@
    cursor). */
 (() => {
   const { symbolIcon, icon, esc } = window.MassiveIcons;
-  // The watchlist sits beside whichever chart was showing (it has no chart content of its own).
-  const VIEWS = { stock: 'chart', analysis: 'chart', trading: 'chart', watchlist: 'chart', markets: 'markets', news: 'news',
-                  gov: 'gov', datasets: 'datasets', fetcher: 'fetcher', live: 'live', resources: 'resources',
+  // The watchlist and the preferences sit beside whichever chart was showing (no chart content of their own).
+  const VIEWS = { stock: 'chart', analysis: 'chart', trading: 'chart', watchlist: 'chart', prefs: 'chart', markets: 'markets',
+                  news: 'news', gov: 'gov', datasets: 'datasets', fetcher: 'fetcher', live: 'live', resources: 'resources',
                   exchanges: 'exchanges', plugins: 'plugins' };
+  const BESIDE = new Set(['watchlist', 'prefs']);
 
   // -- rail --------------------------------------------------------------------------------
   function showPane(name, { toggle = true } = {}) {
@@ -46,7 +47,7 @@
     document.body.dataset.view = view;
     if (view !== 'chart') state.selectedOverlay = null;  // Delete on another view deleted the hidden chart's drawing
     prefs.set('pane', name);
-    if (view === 'chart' && name !== 'watchlist') window.switchWorkspace?.(name);  // each chart view keeps its own content
+    if (view === 'chart' && !BESIDE.has(name)) window.switchWorkspace?.(name);  // each chart view keeps its own content
     for (const v of document.querySelectorAll('main > .view')) v.hidden = v.dataset.view !== view;
     if (view === 'chart') {
       for (const p of document.querySelectorAll('#sidePanel .pane')) p.hidden = p.dataset.pane !== name;
@@ -87,6 +88,7 @@
     $('railResources').innerHTML = icon('chip', RAIL_ICON);
     $('railExchanges').innerHTML = icon('scales', RAIL_ICON);
     $('railPlugins').innerHTML = icon('plug', RAIL_ICON);
+    $('railPrefs').innerHTML = icon('sliders', RAIL_ICON);
     const running = !!activity?.running;
     const fresh = activity?.newData || 0;
     // its platter turns while a run fetches (.busy): redrawn only when it changes, or each poll would

@@ -806,6 +806,24 @@ table.l2 tr.cursor.beyond td { box-shadow: inset 0 1px 0 var(--muted), inset 0 -
 .derived-chip[hidden] { display: none; }
 .derived-tag { font-size: 10px; color: var(--muted); border: 1px dashed var(--border); border-radius: 3px; padding: 0 3px; }
 #railMarkets canvas.globe-icon { display: block; border-radius: 50%; }
+/* Preferences (side panel, prefs.js) */
+.pref-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; margin: 6px 0;
+  font-size: 12px; }
+.pref-row select { max-width: 100%; font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 2px 4px; }
+.pref-session { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.pref-session select { width: 100%; }
+.pref-shade { grid-template-columns: minmax(0, 1fr) 110px 44px; }
+.pref-shade input { width: 100%; margin: 0; }
+.pref-shade output { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+.pref-swatch { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 2px; vertical-align: -1px;
+  border: 1px solid var(--border); }
+.pref-swatch.pre { background: rgb(20, 60, 170); }
+.pref-swatch.post { background: rgb(120, 123, 134); }
+.pref-swatch.night { background: rgb(110, 60, 170); }
+.pref-reset { margin-top: 6px; border: 1px solid var(--border); border-radius: 4px; background: none; color: var(--text);
+  padding: 3px 8px; font: inherit; font-size: 12px; cursor: pointer; }
+.pref-reset:hover { border-color: var(--accent); }
 /* Watchlist (side panel) */
 #pWatch .w-head { display: flex; align-items: center; gap: 6px; }
 #pWatch .w-head select { margin-left: auto; max-width: 60%; }
