@@ -11,7 +11,7 @@ Frames are only ever built upward, from finer data (CHAINS); nothing finer is ma
 bars, so a gap in the finer data stays a gap.
 
 - 1 s and 1 min from ticks: ticks.py (with the trade-condition rules), as the ticks arrive.
-- 30 s from the 1-second bars.
+- 10 and 30 s from the 1-second bars.
 - 5 and 30 min, 1, 2 and 4 h and 1 day from the 1-minute bars (the feed's own first, built ones
   where it sent none). Minutes are clock bins; hours are wall-clock bins from midnight in the
   series' day zone (New York, UTC for crypto and forex; the same on days the clocks change). Days
@@ -48,7 +48,7 @@ from .sessions import is_nyse_holiday, nyse_early_close
 ET = ZoneInfo("America/New_York")
 # Each base frame and the frames built from it, finest first.
 CHAINS = (
-    ("second", (("second", 30),)),
+    ("second", (("second", 10), ("second", 30))),
     ("minute", (("minute", 5), ("minute", 30), ("hour", 1), ("hour", 2), ("hour", 4), ("day", 1))),
     ("day", (("week", 1), ("month", 1), ("year", 1))),
 )

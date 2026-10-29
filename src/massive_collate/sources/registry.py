@@ -176,7 +176,8 @@ class Provider:
     reference_for: frozenset = frozenset()  # asset classes whose gold standard exchange it is
     venue_notes: Mapping[str, str] = field(default_factory=dict)  # audits: what its data of an asset is
     symbols_per_month: int | None = None  # different symbols its plan allows a month
-    bulk_resolution: str = "auto"  # the initializer's bulk symbols start at this resolution
+    # the initializer's bulk symbols start at this resolution, or one per asset class ({"stock": ...})
+    bulk_resolution: "str | Mapping[str, str]" = "auto"
     missing_keys_note: str = ""  # the Fetcher's hover text when its keys are not set
     missing_keys_chip: str = "no key"
     # Capabilities, for the delivery scheme (sourcing.py): the resolutions it provides per asset class

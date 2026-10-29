@@ -25,7 +25,7 @@ CME_GROUP = ("XCME", "XNYM", "XCBT", "XCEC")  # CME, NYMEX, CBOT, COMEX: their f
 EXCHANGES = STOCK_EXCHANGES + CME_GROUP
 ORDER_KEY = "watchlist:order"  # {ticker: rank}: the order backfills go in, 0 first
 DONE_KEY = "init:listings"
-BULK_KEY = "init:bulk"  # [ticker]: the symbols it added (kept at minute resolution on plan changes)
+BULK_KEY = "init:bulk"  # [ticker]: the symbols it added (kept at their bulk resolution on plan changes)
 # Preferred shares' tickers lose their case in the directory (Massive writes them like BACpE; the
 # directory keeps BACPE), so they would be asked for under the wrong symbol: left out until the
 # directory keeps the case.
@@ -52,13 +52,15 @@ def futures_rank(f: dict) -> tuple:
     return (1, FUTURES_SECTORS.index(sector), code) if sector in FUTURES_SECTORS else (2, 0, code)
 
 
-def bulk_resolution(feed: str) -> str:
-    """Feeds with ticks take bulk symbols at minute resolution (their plugin's `bulk_resolution`);
-    the others collect what they have."""
+def bulk_resolution(feed: str, asset: str = "stock") -> str:
+    """The resolution a feed takes bulk symbols of an asset class at (its plugin's `bulk_resolution`,
+    one for all or one per class: Massive's stocks at seconds, its futures at minutes); the others
+    collect what they have."""
     from .sources import providers
 
     p = providers().get(feed)
-    return p.bulk_resolution if p else "auto"
+    r = p.bulk_resolution if p else "auto"
+    return r if isinstance(r, str) else r.get(asset, "auto")
 
 
 def load_order(store) -> dict[str, int]:
@@ -91,7 +93,7 @@ def initialize(store, feeds: list[str], exchanges=EXCHANGES, by: str = "value", 
         bulk |= {t for tickers in new.values() for t in tickers if t not in watched}
         if not dry_run:
             for mic, tickers in new.items():  # one transaction per exchange
-                store.watch(feed, tickers, bulk_resolution(feed), exchange=mic)
+                store.watch(feed, tickers, bulk_resolution(feed, "stock"), exchange=mic)
     futures = _futures(store, future_mics, futures_feeds, source, have, dry_run) if future_mics else None
     order = load_order(store)
     if ranked:  # the stocks ranked afresh; futures and symbols watched one by one keep their places
@@ -135,7 +137,7 @@ def _futures(store, mics: list[str], feeds: list[str], source: str, have: set, d
         added[feed] = len(new)
         if not dry_run:
             for spec in new:
-                store.watch_spec(feed, spec, bulk_resolution(feed))
+                store.watch_spec(feed, spec, bulk_resolution(feed, "future"))
     by_mic: dict[str, int] = {}
     for f in ranked:
         by_mic[f["exchange"]] = by_mic.get(f["exchange"], 0) + 1

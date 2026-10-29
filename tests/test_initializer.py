@@ -56,7 +56,8 @@ def test_the_initializer_watches_every_listing_once_and_keeps_the_order(store):
     rows = {(w["source"], w["ticker"]): w for w in store.watchlist()}
     assert len(rows) == 12 and ("massive", "SPY") not in rows and ("massive", "BACPE") not in rows
     assert rows[("massive", "KO")]["resolution"] == "trades"  # kept
-    assert rows[("massive", "AAPL")]["resolution"] == "minute" and rows[("alpaca", "AAPL")]["resolution"] == "minute"
+    # Massive's bulk stocks at 1-second bars (after their minute history), Alpaca's at minutes
+    assert rows[("massive", "AAPL")]["resolution"] == "second" and rows[("alpaca", "AAPL")]["resolution"] == "minute"
     assert rows[("tiingo", "AAPL")]["resolution"] == "auto" and rows[("massive", "PENNY")]["exchange"] == "XNAS"
     assert initializer.load_order(store) == {"AAPL": 0, "KO": 1, "PENNY": 2, "QUIET": 3}
     assert json.loads(store.kv_get(initializer.DONE_KEY))["added"]["massive"] == 3
@@ -143,7 +144,7 @@ def test_the_oldest_daily_bar_dates_the_start_of_a_sources_history():
     assert MassiveSource(Client()).oldest_day("AAPL", today=TODAY) == date(2003, 9, 10)
 
 
-def test_a_plan_change_finds_each_symbols_resolution_again_but_bulk_stays_at_minutes(store):
+def test_a_plan_change_finds_each_symbols_resolution_again_but_bulk_keeps_its_own(store):
     _listings(store)
     store.watch("massive", ["KO"], "minute", exchange="XNYS")  # chosen one by one (resolved on the old plan)
     store.watch("massive", ["ESZ6"], "minute", asset="future")
@@ -151,4 +152,31 @@ def test_a_plan_change_finds_each_symbols_resolution_again_but_bulk_stays_at_min
     assert initializer.load_bulk(store) == ["AAPL", "PENNY", "QUIET"]  # KO was watched before: not bulk
     assert cli.reresolve(store, "massive") == 1
     rows = {w["ticker"]: w["resolution"] for w in store.watchlist("massive")}
-    assert rows == {"KO": "auto", "ESZ6": "minute", "AAPL": "minute", "PENNY": "minute", "QUIET": "minute"}
+    assert rows == {"KO": "auto", "ESZ6": "minute", "AAPL": "second", "PENNY": "second", "QUIET": "second"}
+
+
+def test_the_bulk_stocks_taken_at_minutes_move_to_seconds_once_their_minute_history_kept(store):
+    """2026-10-28, the user: every stock's year of 1-second bars. The bulk stocks Massive took at
+    minutes before go to seconds once, their backfill kept (the minute history is still theirs);
+    those chosen one by one, other feeds' and futures stay as they are."""
+    store.watch("massive", ["AAPL", "PENNY"], "minute")
+    store.watch("massive", ["KO"], "minute")  # chosen one by one at minutes: the user's choice
+    store.watch("massive", ["ESZ6"], "minute", asset="future")
+    store.watch("alpaca", ["AAPL"], "minute")
+    store.set_backfilled("massive", "AAPL", date(2003, 9, 10))
+    store.kv_set(initializer.BULK_KEY, json.dumps(["AAPL", "ESZ6", "PENNY"]))
+    src = FakeSource()
+    src.name = "massive"
+    logged = []
+    now = datetime(2026, 10, 28, 22, 0, tzinfo=ET)
+    sync(src, store, TIERS["free"], now, log=logged.append, only={"NONE"})
+    rows = {(w["source"], w["ticker"]): w for w in store.watchlist()}
+    assert {k: w["resolution"] for k, w in rows.items()} == {
+        ("massive", "AAPL"): "second", ("massive", "PENNY"): "second", ("massive", "KO"): "minute",
+        ("massive", "ESZ6"): "minute", ("alpaca", "AAPL"): "minute"}
+    assert rows[("massive", "AAPL")]["backfilled_to"] == date(2003, 9, 10)  # not walked again
+    assert rows[("massive", "AAPL")]["seconds_from"] is None  # its window: the second pass's
+    assert "massive: 2 stocks moved from minute to 1-second bars (their minute history kept)" in logged
+    store.set_resolution("massive", "PENNY", "minute")  # set back by hand afterwards: left so
+    sync(src, store, TIERS["free"], now, log=logged.append, only={"NONE"})
+    assert store.watchlist("massive", "PENNY")[0]["resolution"] == "minute"  # once only

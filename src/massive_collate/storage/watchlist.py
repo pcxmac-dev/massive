@@ -163,6 +163,15 @@ class WatchlistStore:
             return self.conn.execute("UPDATE watchlist SET retired_on=? WHERE ticker=? AND asset IN ('stock', 'future')",
                                      (day.isoformat() if day else None, ticker.upper())).rowcount
 
+    def move_resolution(self, source: str, tickers: Iterable[str], old: str, new: str, asset: str = "stock") -> int:
+        """Move a feed's symbols of an asset class at `old` resolution to `new`, their backfill kept
+        (set_resolution starts it again: minute to second, the minute history is still theirs).
+        Returns the symbols moved."""
+        with self.conn:
+            return self.conn.executemany(
+                "UPDATE watchlist SET resolution=? WHERE source=? AND ticker=? AND resolution=? AND asset=?",
+                [(new, source, t.upper(), old, asset) for t in tickers]).rowcount
+
     def reset_backfill(self, source: str, ticker: str) -> None:
         self.set_backfilled(source, ticker, None)
 

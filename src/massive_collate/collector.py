@@ -1301,6 +1301,15 @@ def sync(
         store.kv_set("ledger:empty-heads:v1", now.isoformat())
         if n:
             log(f"ledger: {n} spans where a feed's history starts later marked as theirs to leave")
+    from .initializer import bulk_resolution, load_bulk
+
+    if bulk_resolution(source.name, "stock") == "second" and not store.kv_get(f"resolution:bulk-seconds:{source.name}:v1"):
+        # one-off (2026-10-28): the bulk stocks taken at minutes before go to 1-second bars (the
+        # second pass gives each its window once every minute history is in), their backfill kept
+        n = store.move_resolution(source.name, load_bulk(store), "minute", "second")
+        store.kv_set(f"resolution:bulk-seconds:{source.name}:v1", now.isoformat())
+        if n:
+            log(f"{source.name}: {n:,} stocks moved from minute to 1-second bars (their minute history kept)")
     try:
         if not archival and only is None:  # a run for chosen symbols spends nothing on the rest
             sync_exchanges(source, store, log)

@@ -64,7 +64,10 @@ PLUGIN = Provider(
                "MASSIVE_MAX_REQUESTS_PER_DAY"),
     plan_choices={v: tuple(TIERS) for v in ("MASSIVE_TIER", *MASSIVE_CLASS_TIERS.values())},
     plan_note=PLAN_NOTE, scan=scan,
-    kind="consolidated", venue_notes={"crypto": "consolidated across exchanges"}, bulk_resolution="minute",
+    kind="consolidated", venue_notes={"crypto": "consolidated across exchanges"},
+    # every stock's year of 1-second bars after its minute history (the user, 2026-10-28: "all 7,800");
+    # futures at minutes
+    bulk_resolution={"stock": "second", "future": "minute"},
     per_request={"day": PAGE_LIMIT, "minute": PAGE_LIMIT, "second": PAGE_LIMIT},
     # 1-second bars on a paid plan of the asset class (the free plan: day and minute bars, 2 years)
     plan_resolutions=lambda tier, asset: ("day", "minute") if asset_tier(tier, asset).name == "free"

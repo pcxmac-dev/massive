@@ -877,7 +877,7 @@ class BarEngine:
             stored_hw=started if kind in BAR_KINDS else 0, loaded_at=monotonic(), filtered=filtered,
         )
 
-    PERIOD_CHOICES = (("second", (1, 30)), ("minute", (1, 5, 30)), ("hour", (1, 2, 4)),
+    PERIOD_CHOICES = (("second", (1, 10, 30)), ("minute", (1, 5, 30)), ("hour", (1, 2, 4)),
                       ("day", (1,)), ("week", (1,)), ("month", (1,)), ("year", (1,)))
 
     def periods(self, series: Series) -> list[dict]:

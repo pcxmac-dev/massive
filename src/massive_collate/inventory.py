@@ -3,7 +3,7 @@
 For each feed with data for the symbol (or watching it): the frames it sent (prime data), the
 frames built here from its finer data (*derived, with the derivation record saying from what and
 how), its ticks, what it is set to collect, and which frames it should have built but has not yet
-(derive.py builds every standard frame above each base frame a feed holds: 30 s from seconds;
+(derive.py builds every standard frame above each base frame a feed holds: 10 and 30 s from seconds;
 5 and 30 min, 1, 2 and 4 h and 1 day from minutes; weeks, months and years from days). Feeds come
 in the order a merged chart takes them. Read by the chart's side panel (/api/inventory) and
 `python -m massive_collate inventory TICKER`.
@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from . import derive
 
 # Every standard frame, finest first: (timespan, multiplier).
-FRAMES = (("second", 1), ("second", 30), ("minute", 1), *derive.FROM_MINUTES[:-1], ("day", 1),
+FRAMES = (("second", 1), ("second", 10), ("second", 30), ("minute", 1), *derive.FROM_MINUTES[:-1], ("day", 1),
           ("week", 1), ("month", 1), ("year", 1))
 MODEL_FEEDS = ("composite",)  # derived through and through: a model of several exchanges
 

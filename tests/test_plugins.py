@@ -97,7 +97,9 @@ def test_composite_and_audits_read_the_plugins_facts():
     assert composite.feed_kind("alpaca", "crypto") == "exchange"
     assert composite.feed_kind("cboe", "index") == "official" and composite.feed_kind("composite", "crypto") == "consolidated"
     assert audit.venue_note("alpaca", "crypto") == "one exchange's book (Kraken)" and audit.venue_note("tiingo", "stock") is None
-    assert initializer.bulk_resolution("massive") == "minute" and initializer.bulk_resolution("tiingo") == "auto"
+    assert initializer.bulk_resolution("massive") == "second" and initializer.bulk_resolution("tiingo") == "auto"
+    assert initializer.bulk_resolution("massive", "future") == "minute"  # one per asset class
+    assert initializer.bulk_resolution("alpaca", "future") == "minute"  # one for all
 
 
 def test_a_provider_from_an_installed_package_is_found_built_and_keyed(installed):

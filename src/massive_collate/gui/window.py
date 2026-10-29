@@ -38,8 +38,8 @@ from .bars import (CALENDAR, COLUMNS, MERGED, MODEL_SOURCES, PERIOD_SECONDS, PRI
                    transformed, utc_days, ET)
 
 # Every level the chart moves through, finest first.
-LEVELS = (("second", 1), ("second", 30), ("minute", 1), ("minute", 5), ("minute", 30), ("hour", 1), ("hour", 2),
-          ("hour", 4), ("day", 1), ("week", 1), ("month", 1), ("year", 1))
+LEVELS = (("second", 1), ("second", 10), ("second", 30), ("minute", 1), ("minute", 5), ("minute", 30), ("hour", 1),
+          ("hour", 2), ("hour", 4), ("day", 1), ("week", 1), ("month", 1), ("year", 1))
 UNIT_MS = {"second": 1_000, "minute": 60_000, "hour": 3_600_000, "day": 86_400_000, "week": 604_800_000,
            "month": 2_629_746_000, "year": 31_556_952_000}
 BASE = {"second": "second", "minute": "minute", "hour": "minute"}  # the stored bars a level is built from

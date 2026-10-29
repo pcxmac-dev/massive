@@ -220,7 +220,7 @@ def test_seconds_can_go_on_past_the_second_layer_interpolated_from_minutes(store
     assert "interpolated" in page
 
 
-def test_frames_are_only_built_upward_seconds_to_30s_and_days_to_weeks_months_years(store):
+def test_frames_are_only_built_upward_seconds_to_10s_and_30s_and_days_to_weeks_months_years(store):
     secs = [{"t": _ms("2026-10-20 10:00") + i * 1000, "o": 100 + i, "h": 101 + i, "l": 99 + i, "c": 100.5 + i,
              "v": 1, "vw": 100 + i, "n": 1} for i in range(65)]
     store.upsert_built_bars("alpaca", "BTCUSD", "second", 1, secs, 1)
@@ -231,7 +231,7 @@ def test_frames_are_only_built_upward_seconds_to_30s_and_days_to_weeks_months_ye
     derive.run(store, log=lambda *_: None)
     conn = store._bars("alpaca")
     count = dict(conn.execute("SELECT timespan || multiplier, COUNT(*) FROM built_bars GROUP BY 1").fetchall())
-    assert count["second30"] == 3 and count["week1"] == 1 and count["month1"] == 2 and count["year1"] == 1
+    assert count["second10"] == 7 and count["second30"] == 3 and count["week1"] == 1 and count["month1"] == 2 and count["year1"] == 1
     months = conn.execute("SELECT ts FROM built_bars WHERE timespan='month' ORDER BY ts").fetchall()
     assert [m for (m,) in months] == [_ms("2026-09-01 00:00", "UTC"), _ms("2026-10-01 00:00", "UTC")]
     kinds = {k for (k,) in store._bars("tiingo").execute("SELECT DISTINCT timespan FROM built_bars")}
