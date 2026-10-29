@@ -1919,36 +1919,79 @@ function mapMatch(q) {
   return (s) => !q || [s.ticker, s.name, s.sector, s.industry].some((v) => v && String(v).toLowerCase().includes(q));
 }
 
+// What a search matches, best first: the ticker itself, a ticker starting with it, a name starting
+// with it, a ticker holding it, a word of the name starting with it, then a name, sector or industry
+// holding it; the biggest (market cap, else dollar volume) first within each.
+function rankedMatches(items, q) {
+  const Q = q.trim().toUpperCase();
+  if (!Q) return [];
+  const rank = (s) => {
+    const t = s.ticker.toUpperCase(), n = String(s.name || '').toUpperCase();
+    if (t === Q) return 0;
+    if (t.startsWith(Q)) return 1;
+    if (n.startsWith(Q)) return 2;
+    if (t.includes(Q)) return 3;
+    if (n.split(/[\s.,&/-]+/).some((w) => w.startsWith(Q))) return 4;
+    return [n, s.sector, s.industry].some((v) => v && String(v).toUpperCase().includes(Q)) ? 5 : -1;
+  };
+  const size = (s) => s.marketCap || s.dollarVolume || 0;
+  return items.map((s) => [rank(s), s]).filter(([r]) => r >= 0)
+    .sort((a, b) => a[0] - b[0] || size(b[1]) - size(a[1]) || a[1].ticker.localeCompare(b[1].ticker)).map(([, s]) => s);
+}
+
+const MAP_HITS = 24;  // the matches shown above the map: a search found them, the map shows where they sit
+
 function renderMapList(query) {
-  const { esc: e } = window.MassiveIcons;
+  const { esc: e, symbolIcon } = window.MassiveIcons;
   const list = $('symbolList');
   const q = query.trim().toLowerCase();
   const dir = state.switcherScope === 'stocks';
   const toItem = (s) => ({ ticker: s.ticker, name: s.name, sector: s.sector, industry: s.industry, marketCap: s.marketCap,
     changePct: s.changePct ?? s.market?.changePct ?? null, close: s.close ?? s.market?.close ?? null, icon: s.icon,
-    watched: dir ? s.watched : true });
+    asset: s.asset || (s.kind === 'future' ? 'future' : 'stock'), dollarVolume: s.dollarVolume ?? s.market?.dollarVolume ?? null,
+    exchange: s.exchange, watched: dir ? s.watched : true });
   const source = dir ? directory.items.filter((r) => r.kind === 'stock') : state.symbols.filter((s) => s.asset === 'stock');
-  const mapped = source.filter((s) => s.marketCap > 0 && s.sector).map(toItem);
-  const others = dir ? [] : state.symbols.filter((s) => s.asset !== 'stock').map(toItem);
-  const unclassified = source.length - mapped.length;
-  list.innerHTML = `<div id="marketMap" class="market-map" role="listbox" aria-label="Market map"></div>
+  const everyMapped = source.filter((s) => s.marketCap > 0 && s.sector).map(toItem);
+  const everyOther = dir ? [] : state.symbols.filter((s) => s.asset !== 'stock').map(toItem);
+  const unclassified = source.length - everyMapped.length;
+  // A search: the matches as tiles of their own (those off the map too: no reference data yet), and
+  // the map drawn again with only the companies that match, large enough to read (it dimmed the rest).
+  const hits = q ? rankedMatches(source.map(toItem).concat(everyOther), q) : [];
+  const match = mapMatch(q);
+  const mapped = q ? everyMapped.filter(match) : everyMapped;
+  const others = q ? everyOther.filter(match) : everyOther;
+  const pct = (p) => (p == null ? '' : `${p >= 0 ? '+' : ''}${p.toFixed(2)}%`);
+  const hitHtml = (s) => `<button type="button" class="tile-btn map-hit${s.ticker === state.ticker ? ' current' : ''}${s.watched ? '' : ' unwatched'}"
+      role="option" data-ticker="${e(s.ticker)}" style="--heat:${window.MarketMap.changeColor(s.changePct)}"
+      title="${e(s.name || s.ticker)}${s.sector ? ` · ${e(s.sector)}` : ''}${s.watched ? '' : ' · not collected yet: pick it, then + Watch'}">
+      <span class="hit-top">${symbolIcon({ ticker: s.ticker, icon: s.icon, asset: s.asset }, 20)}<b>${e(s.ticker)}</b>
+        <span class="hit-pct">${pct(s.changePct)}</span></span>
+      <span class="tile-nm">${e(s.name || s.exchange || s.asset || '')}</span>
+      <span class="hit-px">${s.close != null ? Number(s.close).toFixed(2) : ''}${s.watched ? '' : ' <span class="chip">not collected</span>'}</span>
+    </button>`;
+  const hitsHtml = !q ? '' : hits.length
+    ? `<h4>Matches <span class="p-muted">${hits.length.toLocaleString()}${hits.length > MAP_HITS ? ` · the first ${MAP_HITS}` : ''} · Enter opens the first</span></h4>
+       <div class="tiles-grid map-hits">${hits.slice(0, MAP_HITS).map(hitHtml).join('')}</div>`
+    : `<div class="empty">Nothing matches “${e(query.trim())}”${dir ? '' : ': try Nasdaq & NYSE for every listing'}.</div>`;
+  list.innerHTML = `${hitsHtml}${q && !mapped.length ? '' : `${q ? '<h4>On the market map</h4>' : ''}<div id="marketMap" class="market-map${q ? ' searched' : ''}" role="listbox" aria-label="Market map"></div>`}
     ${others.length ? `<h4>Indices, futures, forex and crypto</h4><div id="marketStrip" class="market-map strip"></div>` : ''}
     <div class="map-foot">
       <span class="map-legend">${[-3, -2, -1, 0, 1, 2, 3].map((p) => `<span style="background:${window.MarketMap.changeColor(p)}">${p > 0 ? '+' : ''}${p}%</span>`).join('')}</span>
-      <span class="p-muted small">${mapped.length} companies by market cap · colour: last session's change${unclassified > 0
-        ? ` · ${unclassified.toLocaleString()} ${dir ? 'listings' : 'symbols'} without reference data yet (not shown)` : ''}</span>
+      <span class="p-muted small">${mapped.length.toLocaleString()} ${q ? `of ${everyMapped.length.toLocaleString()} ` : ''}companies by market cap · colour: last session's change${unclassified > 0
+        ? ` · ${unclassified.toLocaleString()} ${dir ? 'listings' : 'symbols'} without reference data yet (${q ? 'among the matches, not on the map' : 'not shown'})` : ''}</span>
       <span id="mapPick" class="map-pick" ${mapPick ? '' : 'hidden'}></span>
     </div>`;
-  if (!dir && !source.length && !others.length) {
+  if (!dir && !source.length && !everyOther.length) {
     list.innerHTML = '<div class="empty">No symbols yet. Add one with: python -m massive_collate watch add TICKER::EXCHANGE</div>';
     return;
   }
-  const opts = { current: state.ticker, isMatch: q ? mapMatch(q) : null, isWatched: dir ? (s) => s.watched : null };
-  if (!$('marketMap').clientWidth) {  // not laid out yet (a closed dialog): drawn once it has a size
+  const opts = { current: state.ticker, isWatched: dir ? (s) => s.watched : null };
+  const map = $('marketMap');
+  if (map && !map.clientWidth) {  // not laid out yet (a closed dialog): drawn once it has a size
     if ($('symbolDialog').open) requestAnimationFrame(() => renderMapList(query));
     return;
   }
-  window.MarketMap.render($('marketMap'), mapped, opts);
+  if (map) window.MarketMap.render(map, mapped, opts);
   if (others.length) window.MarketMap.renderStrip($('marketStrip'), others, opts);
   renderMapPick();
 }
@@ -2051,7 +2094,7 @@ $('switcherView').addEventListener('click', () => {
 });
 window.addEventListener('resize', () => { if ($('symbolDialog').open && state.switcherView === 'map') renderSymbolList($('symbolSearch').value); });
 $('symbolList').addEventListener('click', async (e) => {
-  const tile = e.target.closest('.map-tile');
+  const tile = e.target.closest('.map-tile, .map-hit');
   if (tile) {
     const t = tile.dataset.ticker;
     const item = state.switcherScope === 'stocks' ? directory.items.find((r) => r.ticker === t) : null;
@@ -2096,8 +2139,9 @@ $('symbolDialog').addEventListener('keydown', (e) => {
     moveTileFocus(...moves[e.key]);
   } else if (e.key === 'Enter' && e.target === $('symbolSearch')) {
     e.preventDefault();
-    // map: the biggest match (tiles are laid out largest first); tiles: the first one
-    const first = $('symbolList').querySelector('.map-tile:not(.dim)') || $('symbolList').querySelector('.tile-btn');
+    // map: the best match (its matches' tiles come first); tiles: the first one
+    const first = $('symbolList').querySelector('.map-hit') || $('symbolList').querySelector('.map-tile')
+      || $('symbolList').querySelector('.tile-btn');
     if (first) first.click();
   }
 });

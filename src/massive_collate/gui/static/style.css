@@ -102,6 +102,18 @@ dialog.switcher.map-view #symbolList { max-height: calc(92vh - 60px); }
 .map-legend span { padding: 2px 8px; color: #fff; font-size: 11px; }
 .map-pick { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
 .map-pick .primary { margin: 0; }
+/* A search's matches above the map: tiles in the map's colours (the last session's change) */
+.market-map.searched { height: min(52vh, calc(92vh - 170px)); }
+.map-hits { margin-bottom: 4px; }
+.tile-btn.map-hit { background: var(--heat); border-color: transparent; color: #fff; text-shadow: 0 1px 1px rgba(0,0,0,.35); }
+.tile-btn.map-hit:hover, .tile-btn.map-hit:focus-visible { filter: brightness(1.15); border-color: #fff; background: var(--heat); }
+.tile-btn.map-hit.current { box-shadow: inset 0 0 0 2px #fff; }
+.map-hit .hit-top { display: flex; align-items: center; gap: 6px; width: 100%; }
+.map-hit .hit-pct { margin-left: auto; font-size: 11px; font-variant-numeric: tabular-nums; }
+.map-hit .tile-nm { color: rgba(255,255,255,.82); }
+.map-hit .hit-px { font-size: 11px; font-variant-numeric: tabular-nums; }
+.map-hit .chip { color: #fff; border-color: rgba(255,255,255,.6); }
+.map-hit.unwatched { opacity: .9; }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 /* Panels: everything the page holds (a strip of the top bar's tools, the drawing tools, the chart and

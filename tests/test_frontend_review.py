@@ -269,3 +269,19 @@ def test_an_indicator_turned_on_brings_back_the_drawings_waiting_for_its_pane():
     assert "drawAside(name)" in menu
     aside = app.split("function drawAside(name) {", 1)[1].split("\n}\n", 1)[0]
     assert "indicatorPane(name)" in aside and "drawSaved(d, paneId)" in aside
+
+
+def test_a_search_in_the_pickers_market_map_shows_its_matches_and_maps_only_them():
+    app = _js("app.js")
+    ranked = _function(app, "rankedMatches")
+    # the ticker itself first, then starts-with, then the name, then anywhere: the biggest first within each
+    assert ranked.index("if (t === Q) return 0;") < ranked.index("if (t.startsWith(Q)) return 1;") \
+        < ranked.index("if (n.startsWith(Q)) return 2;") < ranked.index("if (t.includes(Q)) return 3;")
+    assert "size(b[1]) - size(a[1])" in ranked
+    body = _function(app, "renderMapList")
+    assert "rankedMatches(source.map(toItem).concat(everyOther), q)" in body  # those off the map too
+    assert "everyMapped.filter(match)" in body and "isMatch" not in body  # the map holds the matches, not dimmed tiles
+    assert "hits.slice(0, MAP_HITS).map(hitHtml)" in body
+    assert "closest('.map-tile, .map-hit')" in app  # a match picks or opens like a map tile
+    enter = app.split("e.key === 'Enter' && e.target === $('symbolSearch')", 1)[1].split("});", 1)[0]
+    assert enter.index(".map-hit") < enter.index(".map-tile")  # Enter opens the best match
