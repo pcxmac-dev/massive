@@ -6,6 +6,8 @@
      Time zone         the zone intraday times are read in (the switch under the price axis: the same
                        setting); with none picked, this computer's own (app.js LOCAL_ZONE)
      Theme             the page's and the chart's colours (the toolbar's theme picker: the same setting)
+     Candles           the rising and falling candles' colours (app.js setCandleColors: TradingView's
+                       #089981 and #f23645 unless picked), from the same colour popup
      Session shading   each session's shade on the chart (timeaxis.js): pre-market (blue), after-hours
                        (grey) and overnight (violet). Its colour from a popup (the swatch: a palette, any
                        colour by the system's picker or its hex code, or back to the standard one), and
@@ -31,7 +33,17 @@
   const savedColors = prefs.get('shadeColor', {});
   // a colour picked, or null: the standard one (each theme its own)
   state.shadeColor = Object.fromEntries(SHADES.map(([k]) => [k, HEX.test(savedColors?.[k] || '') ? savedColors[k].toLowerCase() : null]));
-  const colorOf = (k) => state.shadeColor[k] || STANDARD[k];
+  // The candles' rising and falling colours (app.js setCandleColors: TradingView's unless picked), and their palette.
+  const CANDLES = [['up', 'Rising', 'a candle that closed above its open'], ['down', 'Falling', 'a candle that closed below its open']];
+  const CANDLE_PALETTE = ['#089981', '#22ab94', '#26a69a', '#2ebd85', '#2dc08e', '#4caf50', '#00c853', '#787b86',
+                          '#f23645', '#f7525f', '#ef5350', '#e53935', '#f92855', '#ff5252', '#ff9800', '#ffffff'];
+  const isCandle = (k) => k === 'up' || k === 'down';
+  const standardOf = (k) => (isCandle(k) ? window.candleColors()[k === 'up' ? 'standardUp' : 'standardDown'] : STANDARD[k]);
+  const colorOf = (k) => (isCandle(k) ? window.candleColors()[k] : state.shadeColor[k] || STANDARD[k]);
+  const nameOf = (k) => (isCandle(k) ? `${CANDLES.find(([x]) => x === k)[1]} candles` : SHADES.find(([x]) => x === k)[1]);
+  const swatchHtml = (k, what) => `<button type="button" class="pref-swatch" data-color="${k}" style="background:${colorOf(k)}"
+    aria-haspopup="dialog" aria-expanded="false" title="${esc(`${nameOf(k)} (${what}): ${colorOf(k)}${colorOf(k) === standardOf(k)
+      ? (isCandle(k) ? ", TradingView's" : ', standard') : ''}. Click to pick`)}"></button>`;
 
   const shown = () => document.body.dataset.pane === 'prefs';
 
@@ -58,11 +70,12 @@
         <select id="prefTheme">${Object.entries(THEMES).map(([t, th]) =>
           `<option value="${esc(t)}"${t === state.theme ? ' selected' : ''}>${esc(th.label)} (${th.base === 'light' ? 'light' : 'dark'})</option>`).join('')}
         </select></label>
+      <div class="pref-row pref-candles"><span class="pref-candles-head">Candles</span>
+        ${CANDLES.map(([k, name, what]) => `<span>${swatchHtml(k, what)}${esc(name)}</span>`).join('')}</div>
       <div class="p-sub">Session shading <span class="p-muted small">on intraday stock charts: its colour, and its strength (100 % standard)</span></div>
       ${SHADES.map(([k, name, what]) => `
         <div class="pref-row pref-shade" title="${esc(`${name}: ${what}`)}">
-          <span><button type="button" class="pref-swatch" data-color="${k}" style="background:${colorOf(k)}"
-            aria-haspopup="dialog" aria-expanded="false" title="${esc(name)}'s colour${state.shadeColor[k] ? ` (${colorOf(k)})` : ' (standard)'}: click to pick"></button>${esc(name)}</span>
+          <span>${swatchHtml(k, what)}${esc(name)}</span>
           <input type="range" min="0" max="200" step="5" data-shade="${k}" value="${state.shade[k]}" aria-label="${esc(name)} shading strength">
           <output>${state.shade[k]} %</output></div>`).join('')}
       <button type="button" id="prefShadeReset" class="pref-reset">Standard colours and strength</button>`;
@@ -76,9 +89,15 @@
   }
 
   function setColor(k, hex) {
-    state.shadeColor[k] = hex && HEX.test(hex) && hex.toLowerCase() !== STANDARD[k] ? hex.toLowerCase() : null;
-    prefs.set('shadeColor', state.shadeColor);
-    window.TimeAxis?.redraw();
+    const pick = hex && HEX.test(hex) && hex.toLowerCase() !== standardOf(k) ? hex.toLowerCase() : null;
+    if (isCandle(k)) {  // the pair, each candle drawn again (app.js)
+      const c = window.candleColors();
+      window.setCandleColors(k === 'up' ? pick : c.up, k === 'down' ? pick : c.down);
+    } else {
+      state.shadeColor[k] = pick;
+      prefs.set('shadeColor', state.shadeColor);
+      window.TimeAxis?.redraw();
+    }
     const sw = $('pPrefs').querySelector(`.pref-swatch[data-color="${k}"]`);
     if (sw) sw.style.background = colorOf(k);
     if (pop?.dataset.color === k) syncPop(k);
@@ -88,7 +107,7 @@
   let pop = null;
   function openPop(k, swatch) {
     closePop();
-    const name = SHADES.find(([x]) => x === k)[1];
+    const name = nameOf(k), palette = isCandle(k) ? CANDLE_PALETTE : PALETTE;
     pop = document.createElement('div');
     pop.className = 'pref-pop';
     pop.dataset.color = k;
@@ -96,17 +115,17 @@
     pop.setAttribute('aria-label', `${name}'s colour`);
     pop.innerHTML = `
       <div class="pref-pop-head">${esc(name)}</div>
-      <div class="pref-pop-grid">${PALETTE.map((c) =>
-        `<button type="button" data-pick="${c}" style="background:${c}" title="${c}${Object.values(STANDARD).includes(c) ? ' (a standard colour)' : ''}" aria-label="${c}"></button>`).join('')}</div>
+      <div class="pref-pop-grid">${palette.map((c) =>
+        `<button type="button" data-pick="${c}" style="background:${c}" title="${c}${c === standardOf(k) ? (isCandle(k) ? " (TradingView's)" : ' (standard)') : ''}" aria-label="${c}"></button>`).join('')}</div>
       <div class="pref-pop-row">
         <input type="color" class="pref-pop-any" aria-label="Any colour (the system's picker)" title="Any colour: the system's picker">
         <input type="text" class="pref-pop-hex" maxlength="7" spellcheck="false" aria-label="Colour as #rrggbb">
       </div>
       <div class="pref-pop-row">
-        <button type="button" data-pick="" class="pref-reset">Standard</button>
+        <button type="button" data-pick="" class="pref-reset">${isCandle(k) ? 'TradingView\'s' : 'Standard'}</button>
         <button type="button" data-done class="pref-reset">Done</button>
       </div>`;
-    swatch.closest('.pref-shade').append(pop);
+    swatch.closest('.pref-row').append(pop);
     swatch.setAttribute('aria-expanded', 'true');
     syncPop(k);
     (pop.querySelector(`.pref-pop-grid [data-pick="${colorOf(k)}"]`) || pop.querySelector('.pref-pop-grid [data-pick]')).focus();

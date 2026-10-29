@@ -105,10 +105,25 @@ function fmtDuration(ms) {
   return `${(h / 24).toFixed(1)}d`;
 }
 
+// Candle colours: TradingView's rising and falling (the user, 2026-10-28: "match the green and red from
+// trading view"), or the pair picked in Preferences (setCandleColors, prefs.js). Every path that draws a
+// candle reads them: the chart library's candles, wicks, borders and last-price mark (DEFAULT_CANDLE,
+// candleStyles), the volume pane, the GPU, the types drawn here (CHART_STYLE) and the wide minutes. The
+// page's green and red text keeps each theme's own (style.css --up, --down: set for contrast).
+const TV_UP = '#089981';
+const TV_DOWN = '#f23645';
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+const savedCandles = prefs.get('candleColors', {});
+let UP = HEX_COLOR.test(savedCandles?.up || '') ? savedCandles.up.toLowerCase() : TV_UP;
+let DOWN = HEX_COLOR.test(savedCandles?.down || '') ? savedCandles.down.toLowerCase() : TV_DOWN;
+
+// A colour at an opacity, for fills: tint('#089981', 0.15) is rgba(8,153,129,0.15).
+function tint(hex, a) {
+  return `rgba(${[1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(',')},${a})`;
+}
+
 // Highlight: box between two points with a center line, start/center/end labels,
 // and exact statistics for the bars inside it (computed by the server).
-const UP = '#26a69a';
-const DOWN = '#ef5350';
 const MID = '#f0b90b';
 const statsTimers = new Map();
 let highlightShown = '';  // what the Highlight panel was last scheduled for (the measure overlay)
@@ -290,7 +305,7 @@ kc.registerOverlay({
     const up = pb.value >= pa.value;
     return [
       { type: 'rect', attrs: { x: left, y: top, width: right - left, height: Math.max(1, bottom - top) },
-        styles: { style: 'fill', color: up ? 'rgba(38,166,154,0.15)' : 'rgba(239,83,80,0.15)' } },
+        styles: { style: 'fill', color: up ? tint(UP, 0.15) : tint(DOWN, 0.15) } },
       { type: 'line', ignoreEvent: true, attrs: { coordinates: [{ x: left, y: cy }, { x: right, y: cy }] },
         styles: { style: 'dashed', dashedValue: [5, 4], color: MID, size: 1 } },
       { type: 'line', ignoreEvent: true, attrs: { coordinates: [{ x: cx, y: top }, { x: cx, y: bottom }] },
@@ -1181,12 +1196,37 @@ $('modelDetail').addEventListener('input', (e) => {
 });
 $('modelDetail').addEventListener('change', (e) => applyDetail(Number(e.target.value)));
 
-// The theme's own candle colours, captured before any chart type hides them.
+// The theme's own candle colours, captured before any chart type hides them, in the candle colours
+// (UP, DOWN: the library's own green and red were not TradingView's).
 const DEFAULT_CANDLE = (() => {
   const c = chart.getStyles().candle;
-  return { bar: { ...c.bar }, priceMark: { high: { ...c.priceMark.high }, low: { ...c.priceMark.low } },
+  return { bar: { ...c.bar, ...candleBar() }, priceMark: { high: { ...c.priceMark.high }, low: { ...c.priceMark.low },
+                                                         last: { upColor: UP, downColor: DOWN } },
            area: JSON.parse(JSON.stringify(c.area)) };
 })();
+
+function candleBar() {
+  return { upColor: UP, downColor: DOWN, upBorderColor: UP, downBorderColor: DOWN, upWickColor: UP, downWickColor: DOWN };
+}
+
+// The volume pane's bars in the candle colours (the library's VOL), as they were drawn: a little see-through.
+function candleStyles() {
+  const bars = chart.getStyles().indicator?.bars || [];
+  chart.setStyles({ indicator: { bars: (bars.length ? bars : [{}]).map((b) => ({ ...b, upColor: tint(UP, 0.7), downColor: tint(DOWN, 0.7) })) } });
+}
+
+// A pair picked in Preferences (prefs.js), or none: TradingView's. Kept per profile; every candle drawn again.
+function setCandleColors(up, down) {
+  UP = HEX_COLOR.test(up || '') ? up.toLowerCase() : TV_UP;
+  DOWN = HEX_COLOR.test(down || '') ? down.toLowerCase() : TV_DOWN;
+  prefs.set('candleColors', { up: UP === TV_UP ? null : UP, down: DOWN === TV_DOWN ? null : DOWN });
+  Object.assign(DEFAULT_CANDLE.bar, candleBar());
+  Object.assign(DEFAULT_CANDLE.priceMark.last, { upColor: UP, downColor: DOWN });
+  applyChartType();
+  window.dispatchEvent(new CustomEvent('massive:candle-colors', { detail: { up: UP, down: DOWN } }));
+}
+window.setCandleColors = setCandleColors;
+window.candleColors = () => ({ up: UP, down: DOWN, standardUp: TV_UP, standardDown: TV_DOWN });
 
 // -- GPU rendering -------------------------------------------------------------------
 // Candle-shaped chart types are drawn by WebGL2 (gpu.js) underneath KLineChart's canvas,
@@ -1429,6 +1469,7 @@ function applyChartType() {
   if (themeBase() === 'light') chart.setStyles(LIGHT_CHART);
   if (THEMES[state.theme].chart) chart.setStyles(THEMES[state.theme].chart);
   chart.setStyles({ yAxis: { size: Y_AXIS_WIDTH } });
+  candleStyles();  // the theme's styles above put back the library's green and red
   applyPaneSpacing();
   chart.setStyles({ candle: { type: NATIVE[state.chartType] || 'candle_solid', ...DEFAULT_CANDLE } });
   chart.removeIndicator({ name: 'GPU_BARS' });
@@ -1629,14 +1670,14 @@ kc.registerIndicator({
       for (let i = lo; i < hi; i++) ctx[i === lo ? 'moveTo' : 'lineTo'](px(xAxis, i), y(data[i].high));
       for (let i = hi - 1; i >= lo; i--) ctx.lineTo(px(xAxis, i), y(data[i].low));
       ctx.closePath(); ctx.fillStyle = 'rgba(41,98,255,0.15)'; ctx.fill();
-      polyline((d) => d.high, 'rgba(38,166,154,0.8)', 1);
-      polyline((d) => d.low, 'rgba(239,83,80,0.8)', 1);
+      polyline((d) => d.high, tint(UP, 0.8), 1);
+      polyline((d) => d.low, tint(DOWN, 0.8), 1);
       polyline((d) => d.close, LINE, 1.5);
     } else if (type === 'baseline') {
       const range = yAxis.getRange();
       const base = (range.from + range.to) / 2;  // TradingView default: 50% of the visible scale
       const by = y(base);
-      for (const [clipTop, clipH, fill, stroke] of [[0, by, 'rgba(38,166,154,0.18)', UP], [by, bounding.height - by, 'rgba(239,83,80,0.18)', DOWN]]) {
+      for (const [clipTop, clipH, fill, stroke] of [[0, by, tint(UP, 0.18), UP], [by, bounding.height - by, tint(DOWN, 0.18), DOWN]]) {
         ctx.save();
         ctx.beginPath(); ctx.rect(0, clipTop, bounding.width, clipH); ctx.clip();
         ctx.beginPath();

@@ -814,7 +814,8 @@ table.l2 tr.cursor.beyond td { box-shadow: inset 0 1px 0 var(--muted), inset 0 -
 .pref-session { grid-template-columns: minmax(0, 1fr); gap: 4px; }
 .pref-session select { width: 100%; }
 .pref-shade { grid-template-columns: minmax(0, 1fr) 110px 44px; position: relative; }
-.pref-shade > span { display: inline-flex; align-items: center; }
+.pref-shade > span, .pref-candles > span { display: inline-flex; align-items: center; }
+.pref-candles { grid-template-columns: auto auto auto; justify-content: start; gap: 14px; position: relative; }
 .pref-shade > input { width: 100%; margin: 0; }
 .pref-shade output { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
 /* the session's colour: a button opening its colour popup (prefs.js) */

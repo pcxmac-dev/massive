@@ -360,11 +360,12 @@ def test_each_sessions_colour_is_picked_from_a_popup_in_preferences():
     assert 'class="pref-swatch" data-color="${k}"' in prefs and 'aria-haspopup="dialog"' in prefs
     opener = _inner(prefs, "openPop")
     assert "pop.setAttribute('role', 'dialog');" in opener
-    assert 'PALETTE.map((c) =>' in opener and 'type="color" class="pref-pop-any"' in opener and 'class="pref-pop-hex"' in opener
-    assert '<button type="button" data-pick="" class="pref-reset">Standard</button>' in opener  # back to the theme's own
+    assert "palette = isCandle(k) ? CANDLE_PALETTE : PALETTE;" in opener and "palette.map((c) =>" in opener
+    assert 'type="color" class="pref-pop-any"' in opener and 'class="pref-pop-hex"' in opener
+    assert '<button type="button" data-pick="" class="pref-reset">${isCandle(k)' in opener and ": 'Standard'}" in opener  # the theme's own
     color = _inner(prefs, "setColor")
     assert "prefs.set('shadeColor', state.shadeColor);" in color and "window.TimeAxis?.redraw();" in color  # live, kept
-    assert "hex.toLowerCase() !== STANDARD[k]" in color  # the standard colour picked: none kept (each theme its own)
+    assert "hex.toLowerCase() !== standardOf(k)" in color  # the standard colour picked: none kept (each theme its own)
     # the system's picker live, a typed hex once whole; Escape or a click elsewhere closes it
     assert "if (e.target.classList.contains('pref-pop-any')) { setColor(pop.dataset.color, e.target.value); return; }" in prefs
     assert "if (HEX.test(v)) setColor(pop.dataset.color, v);" in prefs
@@ -457,3 +458,23 @@ def test_the_preferences_pane_draws_when_the_page_opens_on_it_and_a_redraw_drops
     prefs = _js("prefs.js")
     assert "if (shown()) render();  // the page opened on this pane" in prefs  # it was empty after a reload
     assert "if (pop) { pop.remove(); pop = null; }" in _inner(prefs, "render")  # else the next swatch click "closed" it
+
+
+def test_candles_are_tradingviews_green_and_red_everywhere_unless_picked():
+    app = _js("app.js")
+    assert "const TV_UP = '#089981';" in app and "const TV_DOWN = '#f23645';" in app
+    assert "const UP = '#26a69a'" not in app and "rgba(38,166,154" not in app and "rgba(239,83,80" not in app
+    assert "let UP = HEX_COLOR.test(savedCandles?.up || '') ? savedCandles.up.toLowerCase() : TV_UP;" in app
+    # the chart library's candles, wicks, borders and last-price mark; the volume pane; after each theme reset
+    assert "bar: { ...c.bar, ...candleBar() }" in app and "last: { upColor: UP, downColor: DOWN }" in app
+    assert "upWickColor: UP, downWickColor: DOWN" in _function(app, "candleBar")
+    assert "upColor: tint(UP, 0.7), downColor: tint(DOWN, 0.7)" in _function(app, "candleStyles")
+    chart_type = _function(app, "applyChartType")
+    assert chart_type.index("chart.setStyles(themeBase());") < chart_type.index("candleStyles();")
+    pick = _function(app, "setCandleColors")
+    assert "prefs.set('candleColors'," in pick and "Object.assign(DEFAULT_CANDLE.bar, candleBar());" in pick
+    assert "applyChartType();" in pick  # every candle drawn again: the library's, the GPU's, those drawn here
+    prefs = _js("prefs.js")
+    assert "const CANDLES = [['up', 'Rising'" in prefs and "'#089981'" in prefs and "'#f23645'" in prefs
+    assert "window.setCandleColors(k === 'up' ? pick : c.up, k === 'down' ? pick : c.down);" in prefs
+    assert "${isCandle(k) ? 'TradingView" in prefs  # the popup's standard: TradingView's pair
