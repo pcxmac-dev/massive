@@ -5,6 +5,7 @@
                        same setting, either one changes both)
      Time zone         the zone intraday times are read in (the switch under the price axis: the same
                        setting); with none picked, this computer's own (app.js LOCAL_ZONE)
+     Theme             the page's and the chart's colours (the toolbar's theme picker: the same setting)
      Session shading   each session's shade on the chart (timeaxis.js): pre-market (blue), after-hours
                        (grey) and overnight (violet). Its colour from a popup (the swatch: a palette, any
                        colour by the system's picker or its hex code, or back to the standard one), and
@@ -37,6 +38,7 @@
   function render() {
     const box = $('pPrefs');
     if (!box) return;
+    if (pop) { pop.remove(); pop = null; }  // drawn again: an open popup goes with its row (a click on its swatch opens it)
     const fixed = !!state.meta?.aroundTheClock;  // fx and futures: no sessions to pick
     box.innerHTML = `
       <h3>Preferences</h3>
@@ -50,6 +52,11 @@
         <select id="prefZone">${TIMEZONES.map((z) =>
           `<option value="${esc(z)}"${z === state.timezone ? ' selected' : ''}>${esc(z === 'exchange'
             ? `Exchange: New York (${gmtLabel(TZ)})` : zoneName(z))}${z === LOCAL_ZONE ? ' · this computer' : ''}</option>`).join('')}
+        </select></label>
+      <div class="p-sub">Appearance</div>
+      <label class="pref-row pref-session" title="The page's and the chart's colours (the toolbar's theme picker: the same setting)"><span>Theme</span>
+        <select id="prefTheme">${Object.entries(THEMES).map(([t, th]) =>
+          `<option value="${esc(t)}"${t === state.theme ? ' selected' : ''}>${esc(th.label)} (${th.base === 'light' ? 'light' : 'dark'})</option>`).join('')}
         </select></label>
       <div class="p-sub">Session shading <span class="p-muted small">on intraday stock charts: its colour, and its strength (100 % standard)</span></div>
       ${SHADES.map(([k, name, what]) => `
@@ -138,6 +145,11 @@
   });
   $('pPrefs').addEventListener('change', (e) => {
     if (e.target.id === 'prefZone') window.setChartTimezone(e.target.value);  // as the switch under the price axis
+    if (e.target.id === 'prefTheme') {  // the toolbar's picker does the rest (app.js): page, chart, kept
+      $('themeSelect').value = e.target.value;
+      $('themeSelect').dispatchEvent(new Event('change'));
+      return;
+    }
     if (e.target.id !== 'prefSession') return;
     $('sessionSelect').value = e.target.value;  // the toolbar's picker does the rest (app.js)
     $('sessionSelect').dispatchEvent(new Event('change'));
@@ -167,6 +179,8 @@
   $('sessionSelect').addEventListener('change', again);
   window.addEventListener('massive:symbol', again);
   window.addEventListener('massive:timezone', again);  // picked under the price axis
+  window.addEventListener('massive:theme', () => { again(); window.TimeAxis?.redraw(); });  // picked in the toolbar; the shades' theme
   window.addEventListener('massive:view', (e) => { if (e.detail?.pane === 'prefs') render(); else closePop(); });
   window.Prefs = { render, get shade() { return { ...state.shade }; }, get colors() { return { ...state.shadeColor }; } };
+  if (shown()) render();  // the page opened on this pane (its pick kept): shown before this script listened
 })();

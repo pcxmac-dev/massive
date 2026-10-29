@@ -443,3 +443,17 @@ def test_the_stock_panels_data_times_are_in_the_picked_zone():
     assert "['From', esc(zoneTime(data.first))]" in app and "['To', esc(zoneTime(data.last))]" in app
     assert "timeZone: pickedZone()" in _function(app, "zoneTime")
     assert "window.addEventListener('massive:timezone', () => { if (state.info) renderPanel(); });" in app
+
+
+def test_the_theme_is_picked_in_preferences_too():
+    prefs = _js("prefs.js")
+    assert '<select id="prefTheme">${Object.entries(THEMES).map(([t, th]) =>' in prefs
+    assert "$('themeSelect').value = e.target.value;" in prefs  # the toolbar's picker: the same setting
+    assert "$('themeSelect').dispatchEvent(new Event('change'));" in prefs
+    assert "window.addEventListener('massive:theme', () => { again(); window.TimeAxis?.redraw(); });" in prefs
+
+
+def test_the_preferences_pane_draws_when_the_page_opens_on_it_and_a_redraw_drops_its_popup():
+    prefs = _js("prefs.js")
+    assert "if (shown()) render();  // the page opened on this pane" in prefs  # it was empty after a reload
+    assert "if (pop) { pop.remove(); pop = null; }" in _inner(prefs, "render")  # else the next swatch click "closed" it
