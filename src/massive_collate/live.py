@@ -409,16 +409,20 @@ class BoatsPoller:
                                "bid": r.get("bidPrice"), "ask": r.get("askPrice")}
         return out
 
-    def minutes(self, ticker: str, night) -> list[dict]:
-        """The night's minutes so far, the forming one too (oldest first). Tiingo reads startDate
-        as a New York date: the night's open's date there. (The open's UTC date, asked before, is
-        the next day in New York, so a night's first four hours came back empty, 2026-10-28.)"""
+    def minutes(self, ticker: str, night, since_ms: int = 0) -> list[dict]:
+        """The night's minutes from `since_ms` (its open at the latest), the forming one too (oldest
+        first). Tiingo reads its dates in New York and, without an endDate, answers only startDate's
+        hours before 04:00 ET: asked as the open's UTC date alone, a night came back empty all
+        evening (2026-10-28). So from the New York date of the first minute wanted (the open's until
+        the minutes after midnight are stored: the night before's last hours come with it, left out
+        here) to the close's."""
         from .sessions import ET
 
-        rows = self.client.get(f"/boats/{self.symbol(ticker)}/prices",
-                               {"startDate": night.open.astimezone(ET).date().isoformat(),
-                                "resampleFreq": "1min", "columns": "open,high,low,close,volume"})
         lo = int(night.open.timestamp() * 1000)
+        first = datetime.fromtimestamp(max(lo, since_ms) / 1000, ET).date()
+        rows = self.client.get(f"/boats/{self.symbol(ticker)}/prices",
+                               {"startDate": first.isoformat(), "endDate": night.close.astimezone(ET).date().isoformat(),
+                                "resampleFreq": "1min", "columns": "open,high,low,close,volume"})
         bars = []
         for r in rows if isinstance(rows, list) else []:
             t = _iso_ms(r["date"])
@@ -1025,7 +1029,8 @@ class Recorder:
         if due:
             ticker = min(due, key=lambda t: p.bars_at.get(t, float("-inf")))  # one a step: the quotes keep their pace
             p.bars_at[ticker] = time.monotonic()
-            self._boats_store(store, ticker, p.minutes(ticker, night), night, now)
+            since = p.final_to.get(ticker, 0) - 2 * 60_000  # the last two again (_boats_store)
+            self._boats_store(store, ticker, p.minutes(ticker, night, since), night, now)
         return 1.0
 
     def _boats_store(self, store, ticker: str, bars: list[dict], night, now: datetime) -> None:

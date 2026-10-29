@@ -16,10 +16,14 @@ def _ms(t: datetime) -> int:
 
 
 class FakeTiingo:
-    """Tiingo's /boats answers: the last sale and quote of each stock asked, and three minutes of SPCX
-    from startDate on, a New York date as Tiingo reads it."""
+    """Tiingo's /boats answers: the last sale and quote of each stock asked, and SPCX's minutes as
+    Tiingo dates them (asked 2026-10-28): New York dates from startDate to endDate, or without an
+    endDate only startDate's hours before 04:00 ET. The night before's last minute and three of the
+    night of the 27th."""
 
-    MINUTES = ("2026-10-28T03:03:00.000Z", "2026-10-28T03:04:00.000Z", "2026-10-28T03:05:00.000Z")  # 23:03-23:05 ET
+    MINUTES = {"2026-10-27T07:59:00.000Z": 151.0,  # 03:59 ET: the night of the 26th's last
+               "2026-10-28T03:03:00.000Z": 149.5, "2026-10-28T03:04:00.000Z": 149.7,  # 23:03-23:05 ET
+               "2026-10-28T03:05:00.000Z": 149.89}
 
     def __init__(self):
         self.asked = []
@@ -30,9 +34,11 @@ class FakeTiingo:
             return [{"ticker": t, "last": 149.89, "lastSaleTimestamp": "2026-10-27T23:05:30.168898757-04:00",
                      "bidPrice": 149.8, "askPrice": 149.95} for t in params["tickers"].split(",")]
         start = date.fromisoformat(params["startDate"])
-        rows = [{"date": d, "open": 149.0, "high": 150.0, "low": 148.5, "close": c, "volume": 100}
-                for d, c in zip(self.MINUTES, (149.5, 149.7, 149.89))]
-        return [r for r in rows if datetime.fromisoformat(r["date"].replace("Z", "+00:00")).astimezone(ET).date() >= start]
+        end = date.fromisoformat(params["endDate"]) if "endDate" in params else None
+        et = lambda d: datetime.fromisoformat(d.replace("Z", "+00:00")).astimezone(ET)  # noqa: E731
+        return [{"date": d, "open": 149.0, "high": 150.0, "low": 148.5, "close": c, "volume": 100}
+                for d, c in self.MINUTES.items()
+                if (start <= et(d).date() <= end if end else et(d).date() == start and et(d).hour < 4)]
 
 
 def _recorder(tmp_path, now=TUE_2305):
@@ -54,10 +60,12 @@ def test_a_night_open_stores_the_minutes_over_and_builds_the_forming_one(tmp_pat
     rec, poller = _recorder(tmp_path)
     assert rec.boats_step(store) == 1.0
     assert [p for p, _ in poller.client.asked] == ["/boats/", "/boats/spcx/prices"]  # one request for every quote
-    assert poller.client.asked[1][1]["startDate"] == "2026-10-27"  # the night's open, 20:00 ET: a New York date
+    asked = poller.client.asked[1][1]
+    assert (asked["startDate"], asked["endDate"]) == ("2026-10-27", "2026-10-28")  # its open's New York date to its close's
     t = lambda h, m: _ms(datetime(2026, 10, 27, h, m, tzinfo=ET))  # noqa: E731
-    own = store.bars_window([live.TIINGO_BOATS], "SPCX", "minute", t(20, 0), t(23, 10), filtered=False)
+    own = store.bars_window([live.TIINGO_BOATS], "SPCX", "minute", t(0, 0), t(23, 10), filtered=False)
     assert own["ts"].tolist() == [t(23, 3), t(23, 4), t(23, 5)] and own["close"].tolist() == [149.5, 149.7, 149.89]
+    # (the night before's 03:59, in the same answer, is not this night's)
     assert store.bar_edges(live.TIINGO_BOATS, "SPCX", received_only=True) == (t(23, 3), t(23, 4))  # 23:05: built
     assert store.coverage("SPCX", "minute")[live.TIINGO_BOATS] == [(t(20, 0), t(23, 5))]  # held from the night's open
     status = rec._status[live.TIINGO_BOATS]
@@ -72,12 +80,20 @@ def test_after_midnight_the_night_is_asked_from_its_open_and_shows_live_not_idle
     rec, poller = _recorder(tmp_path, now=datetime(2026, 10, 28, 0, 30, tzinfo=ET))
     rec._boats_off("by day: Blue Ocean trades 20:00-04:00 ET")  # as before the night opened
     rec.boats_step(store)
-    assert poller.client.asked[1][1]["startDate"] == "2026-10-27"  # the night of the 27th, still
+    asked = poller.client.asked[1][1]
+    assert (asked["startDate"], asked["endDate"]) == ("2026-10-27", "2026-10-28")  # the night of the 27th, still
     t = lambda h, m: _ms(datetime(2026, 10, 27, h, m, tzinfo=ET))  # noqa: E731
     own = store.bars_window([live.TIINGO_BOATS], "SPCX", "minute", t(20, 0), t(23, 59), filtered=False)
     assert own["ts"].tolist() == [t(23, 3), t(23, 4), t(23, 5)]  # every one over: stored final
     status = rec._status[live.TIINGO_BOATS]
     assert status["connected"] and not status["idle"] and status["note"] is None and status["error"] is None
+    # its minutes stored past midnight: asked from that day on, not the night before's last hours again
+    poller.final_to["SPCX"] = _ms(datetime(2026, 10, 28, 0, 25, tzinfo=ET))
+    poller.bars_at.clear()
+    poller.client.asked.clear()
+    rec.boats_step(store)
+    asked = next(p for path, p in poller.client.asked if path != "/boats/")
+    assert (asked["startDate"], asked["endDate"]) == ("2026-10-28", "2026-10-28")
 
 
 def test_nothing_is_asked_by_day_while_killed_or_with_nothing_open(tmp_path, store):
