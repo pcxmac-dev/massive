@@ -390,3 +390,36 @@ def test_the_time_zone_defaults_to_this_computers_and_is_picked_in_preferences_t
     assert '<select id="prefZone">${TIMEZONES.map((z) =>' in prefs and "z === LOCAL_ZONE ? ' · this computer' : ''" in prefs
     assert "if (e.target.id === 'prefZone') window.setChartTimezone(e.target.value);" in prefs
     assert "window.addEventListener('massive:timezone', () => { if (shown()) render(); });" in prefs
+
+
+def test_turning_the_override_off_holds_again_even_mid_switch_and_a_stuck_switch_expires():
+    app = _js("app.js")
+    toggle = _function(app, "toggleAutoOverride")
+    assert "if (state.lodSwitch) state.lodRecheck = true;" in toggle  # off while a switch loads: looked at once it is in
+    finish = _function(app, "finishLodSwitch")
+    assert "if (state.lodRecheck) {" in finish and "requestAnimationFrame(checkLod);" in finish
+    lod = _function(app, "checkLod")
+    # a switch whose page never came holds the level LOD_SWITCH_STALE_MS at most
+    assert "Date.now() - (state.lodSwitch.at ?? Date.now()) > LOD_SWITCH_STALE_MS) state.lodSwitch = null;" in lod
+    assert lod.index("LOD_SWITCH_STALE_MS) state.lodSwitch = null;") < lod.index("if (state.lodSwitch || !state.meta")
+    # held: a move to seconds is looked at again once its page is in (wide minutes there: back to minutes)
+    assert "if (lv.type === 'second' && !state.autoOverride) state.lodRecheck = true;" in lod
+    assert app.count("at: Date.now()") >= 3  # every switch says when it began
+
+
+def test_hollow_and_volume_candles_draw_wide_minutes_once():
+    app = _js("app.js")
+    assert "const WIDE_TYPES = new Set(['candles', 'bars', 'hollow', 'volume_candles']);" in app
+    custom = app.split("} else if (type === 'hollow' || type === 'volume_candles') {", 1)[1].split("} else if (type === 'kagi')", 1)[0]
+    assert "if (d.wide) continue;" in custom  # the custom renderer leaves the wide slots to drawWide
+    draw = _function(app, "drawWide")
+    assert "state.chartType === 'hollow' && d.wc > d.wo" in draw and "ctx.strokeRect(" in draw
+    assert "clearRect" not in draw  # the session shading under it kept
+
+
+def test_the_stock_panels_data_times_are_in_the_picked_zone():
+    app = _js("app.js")
+    assert "['Times', 'US/Eastern']" not in app
+    assert "['From', esc(zoneTime(data.first))]" in app and "['To', esc(zoneTime(data.last))]" in app
+    assert "timeZone: pickedZone()" in _function(app, "zoneTime")
+    assert "window.addEventListener('massive:timezone', () => { if (state.info) renderPanel(); });" in app

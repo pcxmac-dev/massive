@@ -566,7 +566,7 @@ function reloadMovedModel() {
   if (!atNewest() || !chartShown()) return;  // asked again when the newest bar is back in view
   due.stale = false;
   due.at = Date.now();
-  state.lodSwitch = { barSpace: chart.getBarSpace().bar, anchor: null, anchorX: null, atLatest: true };  // the same zoom
+  state.lodSwitch = { barSpace: chart.getBarSpace().bar, anchor: null, anchorX: null, atLatest: true, at: Date.now() };  // the same zoom
   chart.resetData();
 }
 
@@ -711,6 +711,7 @@ const chartShown = () => chart.getSize('candle_pane', 'main')?.width > 0;
 // the interval menu was ("auto: 1 hour"). A level change keeps the window: the same moment in the
 // centre, the same span across the chart (finishLodSwitch).
 const AUTO_SLACK = 0.15;  // hysteresis: a level is left only 15 % past its fit, so zooming does not flicker
+const LOD_SWITCH_STALE_MS = 15_000;  // a level switch whose page has not come by then no longer holds the level
 state.autoDetail = Math.min(100, Math.max(0, Number(prefs.get('autoDetail', 50)) || 0));
 
 // The narrowest candle (px) before the chart moves to a coarser level, from the Detail slider: 2 px in
@@ -851,6 +852,8 @@ function visibleWindow() {
 
 function checkLod() {
   if (state.replay) return;  // a replay keeps its level: zoom only widens or narrows the candles
+  // a switch whose page never came (failed, superseded) blocks the level no longer than this
+  if (state.lodSwitch && Date.now() - (state.lodSwitch.at ?? Date.now()) > LOD_SWITCH_STALE_MS) state.lodSwitch = null;
   if (state.lodSwitch || !state.meta || !chart.getDataList().length) return;
   if (!chartShown()) return;  // a hidden chart: decided when it is shown (showPane calls this)
   if (state.fitPending) {  // opened while hidden: its whole history now that it has a width
@@ -871,7 +874,11 @@ function checkLod() {
     barSpace: chartWidth() / newBars, anchor: w.centre ?? null, anchorX: chartWidth() / 2, atLatest: w.atLatest,
     // a window in the past: its page ends a window past its right edge (older and newer load on scroll)
     to: w.atLatest || w.centre == null ? null : Math.round(w.centre + w.days * 864e5 * 1.5),
+    at: Date.now(),
   };
+  // held to the data's sampling: seconds are looked at again once their page is in (noteWide), where
+  // the levels' ends (read when the symbol opened) did not tell that the window has none
+  if (lv.type === 'second' && !state.autoOverride) state.lodRecheck = true;
   state.period = { type: lv.type, span: lv.span };
   renderPeriods();
   chart.setPeriod(state.period);
@@ -955,6 +962,10 @@ function finishLodSwitch() {
     if (Number.isFinite(x)) chart.scrollByDistance(target - x, 0);
   }
   updateStatus(chart.getDataList().length);
+  if (state.lodRecheck) {  // the hold changed while this switch was under way (toggleAutoOverride)
+    state.lodRecheck = false;
+    requestAnimationFrame(checkLod);
+  }
 }
 
 chart.subscribeAction('onZoom', autoSoon);
@@ -1081,7 +1092,7 @@ function setModel(patch) {
   state.lodSwitch = {
     barSpace: chart.getBarSpace().bar, anchor: edge ? edge.timestamp : null,
     anchorX: edge ? chart.convertToPixel({ timestamp: edge.timestamp }, { paneId: 'candle_pane' }).x : null,
-    atLatest: !data.length || to >= data.length,
+    atLatest: !data.length || to >= data.length, at: Date.now(),
   };
   renderModelControls();
   applyChartType();
@@ -1453,8 +1464,9 @@ function px(xAxis, i) { return xAxis.convertToPixel(i); }
 // _with_wide): its middle slot is the minute, the others lie flat at its close, so the library's own
 // thin candles (or the GPU's) fall inside the minute drawn here once across its slots, as wide as its
 // time, a hair in from its edges so it reads as one bar. The other chart types draw the slots as
-// they are (a line steps along the minutes' closes).
-const WIDE_TYPES = new Set(['candles', 'bars']);
+// they are (a line steps along the minutes' closes). Hollow and volume candles (drawn by CHART_STYLE,
+// which leaves the wide slots out) are drawn here whole: hollow rising, filled falling.
+const WIDE_TYPES = new Set(['candles', 'bars', 'hollow', 'volume_candles']);
 
 function drawWide(ctx, c, xAxis, yAxis, data, from, to) {
   const half = c.getBarSpace().bar / 2;
@@ -1472,12 +1484,20 @@ function drawWide(ctx, c, xAxis, yAxis, data, from, to) {
     const color = d.wc > d.wo ? upColor : d.wc < d.wo ? downColor : noChangeColor;
     const inset = Math.min(Math.max(1, w * 0.08), w / 3);
     ctx.fillStyle = color;
-    ctx.fillRect(cx, Math.min(yH, yL), 1, Math.max(1, Math.abs(yL - yH)));  // high to low
+    const top = Math.min(yO, yC), height = Math.max(1, Math.abs(yC - yO));
+    if (state.chartType === 'hollow' && d.wc > d.wo) {  // rising: its outline, the wick above and below it only
+      ctx.fillRect(cx, Math.min(yH, top), 1, Math.max(0, top - yH));
+      ctx.fillRect(cx, top + height, 1, Math.max(0, yL - top - height));
+      ctx.strokeStyle = color; ctx.lineWidth = 1;
+      ctx.strokeRect(x0 + inset + 0.5, top + 0.5, Math.max(1, w - 2 * inset - 1), Math.max(1, height - 1));
+    } else {
+      ctx.fillRect(cx, Math.min(yH, yL), 1, Math.max(1, Math.abs(yL - yH)));  // high to low
+    }
     if (state.chartType === 'bars') {  // OHLC: the open's tick left, the close's right
       ctx.fillRect(x0 + inset, yO - 0.5, cx - x0 - inset, 1);
       ctx.fillRect(cx, yC - 0.5, x1 - inset - cx, 1);
-    } else {
-      ctx.fillRect(x0 + inset, Math.min(yO, yC), w - 2 * inset, Math.max(1, Math.abs(yC - yO)));
+    } else if (!(state.chartType === 'hollow' && d.wc > d.wo)) {
+      ctx.fillRect(x0 + inset, top, w - 2 * inset, height);
     }
     i = j + 1;
   }
@@ -1667,6 +1687,7 @@ kc.registerIndicator({
       if (type === 'volume_candles') for (let i = lo; i < hi; i++) maxVol = Math.max(maxVol, data[i].volume || 0);
       for (let i = lo; i < hi; i++) {
         const d = data[i], x = px(xAxis, i);
+        if (d.wide) continue;  // a minute across its slots: drawn once, wide (drawWide)
         const color = type === 'hollow' ? dirColor(i) : (d.close >= d.open ? UP : DOWN);
         const w = type === 'volume_candles' && maxVol ? Math.max(1, half * 2 * (d.volume || 0) / maxVol) : half * 2;
         const top = y(Math.max(d.open, d.close)), bottom = y(Math.min(d.open, d.close));
@@ -2328,6 +2349,7 @@ function wideLabel(ms) {
 function toggleAutoOverride() {
   state.autoOverride = !state.autoOverride;
   if (!state.autoOverride) state.wideInView = 0;
+  if (state.lodSwitch) state.lodRecheck = true;  // a switch under way: the level is looked at again once it is in
   renderPeriods();
   checkLod();
 }
@@ -3319,6 +3341,15 @@ $('pInventory').addEventListener('click', async (e) => {
   }
 });
 
+// "2026-10-22 06:30": an ISO time (the server's, New York's offset) in the zone picked.
+function zoneTime(iso) {
+  const t = new Date(iso);
+  if (Number.isNaN(t.getTime())) return String(iso ?? '').slice(0, 16).replace('T', ' ');
+  return new Intl.DateTimeFormat('en-CA', { timeZone: pickedZone(), year: 'numeric', month: '2-digit', day: '2-digit',
+                                            hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(t).replace(',', '');
+}
+window.addEventListener('massive:timezone', () => { if (state.info) renderPanel(); });  // its times relabelled
+
 function renderPanel() {
   const info = state.info;
   if (!info) { ['pSymbol', 'pStats', 'pBusiness', 'pData'].forEach((id) => { $(id).innerHTML = ''; }); return; }
@@ -3378,9 +3409,9 @@ function renderPanel() {
     <h3>Data</h3>
     ${kv([
       ['Feed', feedPicker(sy.ticker, data.feeds)], ['Resolution', esc(data.base) + (data.officialDaily ? ' + official daily' : '')],
-      ['Rows', data.rows != null ? data.rows.toLocaleString() : 'counting…'], ['From', esc(data.first.slice(0, 16).replace('T', ' '))],
-      ['To', esc(data.last.slice(0, 16).replace('T', ' '))], ['Price precision', `${data.pricePrecision} dp`],
-      ['Times', 'US/Eastern'],
+      ['Rows', data.rows != null ? data.rows.toLocaleString() : 'counting…'], ['From', esc(zoneTime(data.first))],
+      ['To', esc(zoneTime(data.last))], ['Price precision', `${data.pricePrecision} dp`],
+      ['Times', esc(`${zoneShort(pickedZone())} (${state.timezone === 'exchange' ? 'New York' : zoneCities(state.timezone) || pickedZone()})`)],
     ])}
     ${attributionHtml(info.attribution, data.base)}
     ${auditsHtml(info.audits, info.symbol.ticker)}`;
