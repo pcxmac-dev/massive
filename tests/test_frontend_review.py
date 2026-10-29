@@ -493,3 +493,14 @@ def test_a_current_feed_giving_minutes_holds_the_zoom_at_them_across_the_chart_u
     assert "if (minutesLive && lv.type === 'second') continue;" in choose  # nowhere under them, any window
     activity = app.split("window.addEventListener('massive:activity', () => requestAnimationFrame(() => {  // live or not, again", 1)[1]
     assert "if (res !== state.liveRes) { state.liveRes = res; renderPeriods(); autoSoon(); }" in activity.split("}));", 1)[0]
+
+
+def test_every_open_symbol_listens_for_new_bars_while_the_page_is_in_view():
+    """The user (2026-10-28): "when new bars are rendered for the current symbol i need to see them update
+    the screen and show them": a symbol not streaming live was polled once a minute."""
+    app = _js("app.js")
+    poll = app.split("state.poll = setInterval(() => {", 1)[1].split("}, LIVE_POLL_MS);", 1)[0]
+    assert "const listen = !document.hidden;" in poll
+    assert "if (listen && !state.stream && !state.streamFailed) openStream();" in poll
+    assert "if (!listen && state.stream) closeStream();" in poll
+    assert "if (live && !state.stream" not in poll  # not the live symbols only

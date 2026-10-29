@@ -508,8 +508,14 @@ chart.setDataLoader({
     state.poll = setInterval(() => {
       if (state.replay) { closeStream(); return; }  // the replay is the chart's only source of new bars
       const live = isLive();
-      if (live && !state.stream && !state.streamFailed) openStream();
-      if (!live && state.stream) closeStream();
+      // Every open symbol listens while the page is in view, live or not: bars the fetcher stores (the
+      // symbol's own fetch on opening, the hourly sync) show the moment they are in, as the recorder's
+      // do (the user, 2026-10-28: "when new bars are rendered for the current symbol i need to see them
+      // update the screen"); a symbol not live was polled once a minute. A hidden page lets go of it (a
+      // browser holds six connections to the app at most).
+      const listen = !document.hidden;
+      if (listen && !state.stream && !state.streamFailed) openStream();
+      if (!listen && state.stream) closeStream();
       if (state.stream) return;  // pushed
       if (live || Date.now() - state.lastPoll >= POLL_MS) { state.lastPoll = Date.now(); state.pollNow(); }
     }, LIVE_POLL_MS);
