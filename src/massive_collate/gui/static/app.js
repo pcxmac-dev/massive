@@ -164,8 +164,12 @@ function zoneOffset(zone, when = new Date()) {
 
 // Round the world by their offset now (west to east), so the wheel stays in order as clocks change.
 const TIMEZONES = ['exchange', ...Object.keys(ZONE_CITIES).sort((a, b) => zoneOffset(a) - zoneOffset(b))];
+// With none picked, this computer's own zone where the list has it (the user's Pacific time: it read
+// New York's, the user, 2026-10-28), else the exchange's.
+const LOCAL_ZONE = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { return null; } })();
 const savedZone = prefs.get('timezone');
-state.timezone = TIMEZONES.includes(savedZone) ? savedZone : OFFSET_ZONES[savedZone] || 'exchange';
+state.timezone = TIMEZONES.includes(savedZone) ? savedZone
+  : OFFSET_ZONES[savedZone] || (TIMEZONES.includes(LOCAL_ZONE) ? LOCAL_ZONE : 'exchange');
 if (savedZone && state.timezone !== savedZone) prefs.set('timezone', state.timezone);  // kept as the place
 
 function pickedZone() {
@@ -1383,16 +1387,25 @@ tzMenu.addEventListener('wheel', (e) => {
 tzMenu.addEventListener('click', (e) => {
   const b = e.target.closest('[data-tz]');
   if (!b) return;
-  state.timezone = b.dataset.tz;
-  prefs.set('timezone', state.timezone);
   tzMenu.hidden = true;
+  setChartTimezone(b.dataset.tz);
+});
+
+// A zone picked (the switch under the price axis, or Preferences: prefs.js): kept, and everything
+// that reads times in it relabelled at once.
+function setChartTimezone(z) {
+  if (!TIMEZONES.includes(z)) return;
+  state.timezone = z;
+  prefs.set('timezone', state.timezone);
   renderTimezone();
   const zone = labelZone(chart.getPeriod());
   if (chart.getTimezone() !== zone) chart.setTimezone(zone);  // the axis and crosshair relabel, no reload
   window.renderCursor?.();
   tickNowClock();  // the current time's clock at once, not at its next second
-  window.dispatchEvent(new CustomEvent('massive:timezone', { detail: { zone: pickedZone() } }));  // level 2's times
-});
+  updateStatus(chart.getDataList().length);  // its zone
+  window.dispatchEvent(new CustomEvent('massive:timezone', { detail: { zone: pickedZone() } }));  // level 2, Preferences
+}
+window.setChartTimezone = setChartTimezone;
 document.addEventListener('click', (e) => { if (!tzMenu.hidden && !tzMenu.contains(e.target)) tzMenu.hidden = true; });
 window.addEventListener('resize', () => requestAnimationFrame(renderTimezone));
 requestAnimationFrame(renderTimezone);
@@ -3080,7 +3093,7 @@ function updateStatus(loaded) {
     `${d(m.first)}→${d(m.last)}`,
     `${m.pricePrecision}dp`,
     SESSION_TEXT[state.session]?.[0] || 'RTH',
-    'ET',
+    zoneShort(labelZone(chart.getPeriod() || state.period)),  // the times' zone: the one picked within a day
     ...(lod ? [`×${state.lod}`] : []),
     ...(loaded !== undefined ? [`${k(loaded)} bars`] : []),
   ];
@@ -3092,7 +3105,8 @@ function updateStatus(loaded) {
     `${m.rows.toLocaleString()} rows, ${m.first.slice(0, 10)} to ${m.last.slice(0, 10)}`,
     `price precision ${m.pricePrecision} decimals`,
     SESSION_TEXT[state.session]?.[1] || 'regular hours 09:30-16:00',
-    'times US/Eastern',
+    `times ${state.timezone === 'exchange' ? 'New York (the exchange\'s)' : zoneName(state.timezone)}; `
+      + 'days, weeks and months the market\'s own',
     ...(lod ? [`zoomed out: each candle = ${state.lod} consecutive bars`] : []),
     ...(loaded !== undefined ? [`${loaded.toLocaleString()} bars loaded (scroll left for more)`] : []),
   ];

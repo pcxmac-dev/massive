@@ -291,7 +291,7 @@ def test_the_current_times_clock_and_level_2s_times_follow_the_picked_zone():
     app = _js("app.js")
     # the "now" handle's clock at the newest bar: the zone picked under the price axis, not New York's
     assert "nowClock(pickedZone()).format(new Date())" in app and "NOW_CLOCK" not in app
-    pick = app.split("tzMenu.addEventListener('click'", 1)[1].split("\n});\n", 1)[0]
+    pick = _function(app, "setChartTimezone")  # the switch under the price axis and Preferences both
     assert "tickNowClock();" in pick  # at once on a new pick
     assert "new CustomEvent('massive:timezone'" in pick
     l2 = _js("level2.js")
@@ -371,3 +371,22 @@ def test_the_preferences_pane_sits_above_the_profile_below_the_separator_and_set
     # the session: the toolbar's picker, the same setting
     assert "$('sessionSelect').value = e.target.value;" in prefs and "$('sessionSelect').dispatchEvent(new Event('change'));" in prefs
     assert 'type="range" min="0" max="200" step="5" data-shade=' in prefs
+
+
+def test_the_time_zone_defaults_to_this_computers_and_is_picked_in_preferences_too():
+    app = _js("app.js")
+    # none picked: this computer's own zone where the list has it (the user's Pacific time read New York's)
+    assert "const LOCAL_ZONE = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; }" in app
+    assert "|| (TIMEZONES.includes(LOCAL_ZONE) ? LOCAL_ZONE : 'exchange');" in app
+    pick = _function(app, "setChartTimezone")
+    assert "prefs.set('timezone', state.timezone);" in pick and "tickNowClock();" in pick
+    assert "updateStatus(chart.getDataList().length);" in pick  # the status line's zone
+    assert "new CustomEvent('massive:timezone'" in pick
+    assert "setChartTimezone(b.dataset.tz);" in app.split("tzMenu.addEventListener('click'", 1)[1].split("\n});\n", 1)[0]
+    status = _function(app, "updateStatus")
+    assert "zoneShort(labelZone(chart.getPeriod() || state.period))" in status and "'ET'," not in status
+    assert "times US/Eastern" not in status
+    prefs = _js("prefs.js")
+    assert '<select id="prefZone">${TIMEZONES.map((z) =>' in prefs and "z === LOCAL_ZONE ? ' · this computer' : ''" in prefs
+    assert "if (e.target.id === 'prefZone') window.setChartTimezone(e.target.value);" in prefs
+    assert "window.addEventListener('massive:timezone', () => { if (shown()) render(); });" in prefs
