@@ -478,3 +478,18 @@ def test_candles_are_tradingviews_green_and_red_everywhere_unless_picked():
     assert "const CANDLES = [['up', 'Rising'" in prefs and "'#089981'" in prefs and "'#f23645'" in prefs
     assert "window.setCandleColors(k === 'up' ? pick : c.up, k === 'down' ? pick : c.down);" in prefs
     assert "${isCandle(k) ? 'TradingView" in prefs  # the popup's standard: TradingView's pair
+
+
+def test_a_current_feed_giving_minutes_holds_the_zoom_at_them_across_the_chart_unless_overridden():
+    """The user (2026-10-28): "if there is a current feed, do not break under it, unless you override the
+    auto button" ... "because its possible for me to see the previous session and then no data for this one"."""
+    app = _js("app.js")
+    live = _function(app, "liveResolution")
+    assert "if (!isLive()) return null;" in live
+    assert "const r = s.resolution || (s.polled ? 'minute' : 'second');" in live  # Tiingo's Blue Ocean poller: minutes
+    assert "if (res == null || r === 'second') res = r;" in live  # the finest current feed counts
+    choose = _function(app, "chooseLevel")
+    assert "const minutesLive = !state.autoOverride && liveResolution() === 'minute';" in choose
+    assert "if (minutesLive && lv.type === 'second') continue;" in choose  # nowhere under them, any window
+    activity = app.split("window.addEventListener('massive:activity', () => requestAnimationFrame(() => {  // live or not, again", 1)[1]
+    assert "if (res !== state.liveRes) { state.liveRes = res; renderPeriods(); autoSoon(); }" in activity.split("}));", 1)[0]

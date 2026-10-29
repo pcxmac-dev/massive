@@ -594,6 +594,23 @@ function isLive() {
   return !!state.ticker && (window.Activity?.data?.liveFeeds?.liveTickers || []).includes(state.ticker);
 }
 
+// The finest the open symbol's current feed gives right now (the live recorder's streams): 'second'
+// where a stream sends its trades (IEX, the crypto exchanges), 'minute' where only a polled feed has it
+// (Blue Ocean's night from Tiingo: 1-minute bars), null with none live. The auto zoom holds at it
+// (chooseLevel), unless overridden.
+const LIVE_FRESH_MS = 300_000;  // a feed's last sale older than this is not current (activity.py LIVE_FRESH_SECONDS)
+function liveResolution() {
+  if (!isLive()) return null;
+  let res = null;
+  for (const s of Object.values(window.Activity?.data?.liveFeeds?.streams || {})) {
+    const p = s?.pairs?.[state.ticker];
+    if (!s.connected || !p?.last || Date.now() - p.last > LIVE_FRESH_MS) continue;
+    const r = s.resolution || (s.polled ? 'minute' : 'second');
+    if (res == null || r === 'second') res = r;  // the finest of them
+  }
+  return res;
+}
+
 // -- the current time's place on screen -----------------------------------------------------
 // The newest bar can be kept anywhere across the chart (half way, 80 % to the right ...): drag the
 // "now" handle on the time axis; double-click it to put the newest bar back at the right edge. While
@@ -686,6 +703,8 @@ chart.subscribeAction('onVisibleRangeChange', () => requestAnimationFrame(() => 
 window.addEventListener('massive:activity', () => requestAnimationFrame(() => {  // live or not, again
   if (state.nowAt != null && state.nowApplied !== isLive() && atNewest()) applyNowPosition();
   else placeNowHandle();
+  const res = liveResolution();  // the current feed began, ended, or changed what it gives: the level again
+  if (res !== state.liveRes) { state.liveRes = res; renderPeriods(); autoSoon(); }
 }));
 
 // -- level of detail -------------------------------------------------------------------
@@ -841,10 +860,14 @@ function chooseLevel(days, fromMs, current = null, toMs = NaN) {
   const from = Math.max(Number.isFinite(fromMs) ? fromMs : oldest, oldest);
   const empty = state.model.kind === 'price' ? null : emptyLevels();
   const minutesFrom = levels.find((lv) => lv.type === 'minute')?.first;
+  // a current feed giving minutes only (Blue Ocean's night): nowhere under them, the user's rule (2026-10-28:
+  // "if there is a current feed, do not break under it, unless you override the auto button")
+  const minutesLive = !state.autoOverride && liveResolution() === 'minute';
   for (const lv of levels) {
     const wide = state.autoOverride && lv.type === 'second';  // overridden: the minutes drawn wide at it
     const reach = wide && minutesFrom != null ? Math.min(lv.first, minutesFrom) : lv.first;
     if (reach > from + LEVEL_MS.day || empty?.has(`${lv.type}:${lv.span}`)) continue;
+    if (minutesLive && lv.type === 'second') continue;
     if (!wide && (stopsShort(lv, levels, toMs) || (lv.type === 'second' && seenWide(from, toMs)))) continue;
     const same = current && lv.type === current.type && lv.span === current.span;
     if (days * levelPerDay(lv) <= fit * (same ? 1 + AUTO_SLACK : 1 - AUTO_SLACK)) return lv;
@@ -2377,7 +2400,10 @@ function renderPeriods() {
         ? `\n\nOverridden: the zoom goes on to seconds where the data has none; the minutes there are drawn wide, as `
           + `long as their time, among the seconds${under ? ` (now: ${wideLabel(state.wideInView)} bars in view, blinking)` : ''}. `
           + 'Click to hold the zoom at the data\'s finest again.'
-        : '\n\nWhere the window has nothing finer than minutes (the night on Blue Ocean), the zoom holds at them. '
+        : (liveResolution() === 'minute'
+          ? '\n\nThe current feed gives 1-minute bars (Blue Ocean\'s night from Tiingo): the zoom holds at them across '
+            + 'the whole chart, the sessions before with seconds too. '
+          : '\n\nWhere the window has nothing finer than minutes (the night on Blue Ocean), the zoom holds at them. ')
           + 'Click to override: seconds anyway, the minutes drawn wide among them.');
 }
 
