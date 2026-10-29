@@ -285,3 +285,17 @@ def test_a_search_in_the_pickers_market_map_shows_its_matches_and_maps_only_them
     assert "closest('.map-tile, .map-hit')" in app  # a match picks or opens like a map tile
     enter = app.split("e.key === 'Enter' && e.target === $('symbolSearch')", 1)[1].split("});", 1)[0]
     assert enter.index(".map-hit") < enter.index(".map-tile")  # Enter opens the best match
+
+
+def test_the_current_times_clock_and_level_2s_times_follow_the_picked_zone():
+    app = _js("app.js")
+    # the "now" handle's clock at the newest bar: the zone picked under the price axis, not New York's
+    assert "nowClock(pickedZone()).format(new Date())" in app and "NOW_CLOCK" not in app
+    pick = app.split("tzMenu.addEventListener('click'", 1)[1].split("\n});\n", 1)[0]
+    assert "tickNowClock();" in pick  # at once on a new pick
+    assert "new CustomEvent('massive:timezone'" in pick
+    l2 = _js("level2.js")
+    for name in ("when", "spanText"):
+        body = _inner(l2, name)
+        assert "const zone = pickedZone();" in body and "zoneShort(zone)" in body and " ET`" not in body
+    assert "addEventListener('massive:timezone', () => { if (lastProfile) render(lastProfile); })" in l2

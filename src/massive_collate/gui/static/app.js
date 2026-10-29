@@ -601,10 +601,17 @@ const nowHandle = document.createElement('div');
 nowHandle.id = 'nowHandle';
 nowHandle.className = 'now-handle';
 nowHandle.title = 'The current time, at the newest bar: drag to place it on screen; double-click to put it back at the right edge';
-// The clock in the time axis's zone, with the zone's name (EDT, EST ...).
-const NOW_CLOCK = new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: '2-digit', minute: '2-digit', second: '2-digit',
-                                                       hourCycle: 'h23', timeZoneName: 'short' });
-const tickNowClock = () => { nowHandle.textContent = NOW_CLOCK.format(new Date()); };
+// The clock in the zone picked under the price axis, as the crosshair and the axis within a day read
+// it, with the zone's name (EDT, PST, GMT+9 ...). It was New York's whatever the pick.
+const nowClocks = new Map();  // zone -> its clock's format
+function nowClock(zone) {
+  if (!nowClocks.has(zone)) {
+    nowClocks.set(zone, new Intl.DateTimeFormat('en-US', { timeZone: zone, hour: '2-digit', minute: '2-digit', second: '2-digit',
+                                                           hourCycle: 'h23', timeZoneName: 'short' }));
+  }
+  return nowClocks.get(zone);
+}
+const tickNowClock = () => { nowHandle.textContent = nowClock(pickedZone()).format(new Date()); };
 tickNowClock();
 setInterval(tickNowClock, 1000);
 $('chart').append(nowHandle);
@@ -1331,6 +1338,8 @@ tzMenu.addEventListener('click', (e) => {
   const zone = labelZone(chart.getPeriod());
   if (chart.getTimezone() !== zone) chart.setTimezone(zone);  // the axis and crosshair relabel, no reload
   window.renderCursor?.();
+  tickNowClock();  // the current time's clock at once, not at its next second
+  window.dispatchEvent(new CustomEvent('massive:timezone', { detail: { zone: pickedZone() } }));  // level 2's times
 });
 document.addEventListener('click', (e) => { if (!tzMenu.hidden && !tzMenu.contains(e.target)) tzMenu.hidden = true; });
 window.addEventListener('resize', () => requestAnimationFrame(renderTimezone));

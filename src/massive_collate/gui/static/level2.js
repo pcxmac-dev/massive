@@ -80,23 +80,28 @@
     : v > 0 ? Number(v.toPrecision(3)).toString() : '0');
   const money = (s) => (s === 'auto' ? 'auto' : `$${Number(s) < 1 ? Number(s).toFixed(2) : s}`);
 
+  // Within a day, times in the zone picked under the price axis (app.js pickedZone), named as it is
+  // now (EDT, PST, GMT+9), as the crosshair reads them; days are the market's own (New York, or UTC
+  // for crypto and forex) whatever the pick.
   function when(p) {
     const intraday = ['second', 'minute', 'hour'].includes(p.period);
+    const zone = pickedZone();
     const f = new Intl.DateTimeFormat('en-US', intraday
-      ? { timeZone: TZ, hour: '2-digit', minute: '2-digit', ...(p.period === 'second' ? { second: '2-digit' } : {}), hourCycle: 'h23' }
+      ? { timeZone: zone, hour: '2-digit', minute: '2-digit', ...(p.period === 'second' ? { second: '2-digit' } : {}), hourCycle: 'h23' }
       : { timeZone: ['crypto', 'fx'].includes(state.meta?.asset) ? 'UTC' : TZ, month: 'short', day: 'numeric', year: 'numeric' });
-    return intraday ? `${f.format(new Date(p.bar.from))}–${f.format(new Date(p.bar.to))} ET` : f.format(new Date(p.bar.from));
+    return intraday ? `${f.format(new Date(p.bar.from))}–${f.format(new Date(p.bar.to))} ${zoneShort(zone)}` : f.format(new Date(p.bar.from));
   }
 
-  // A stretch's time: "Oct 14 09:30 → 16:00 ET", "Oct 14 09:30 → Oct 16 16:00 ET", "Oct 1, 2026 → Oct 16, 2026".
+  // A stretch's time: "Oct 14 09:30 → 16:00 EDT", "Oct 14 09:30 → Oct 16 16:00 EDT", "Oct 1, 2026 → Oct 16, 2026".
   function spanText(p) {
     const intraday = ['second', 'minute', 'hour'].includes(p.period);
-    const day = new Intl.DateTimeFormat('en-US', { timeZone: !intraday && ['crypto', 'fx'].includes(state.meta?.asset) ? 'UTC' : TZ,
+    const zone = pickedZone();
+    const day = new Intl.DateTimeFormat('en-US', { timeZone: intraday ? zone : ['crypto', 'fx'].includes(state.meta?.asset) ? 'UTC' : TZ,
       month: 'short', day: 'numeric', ...(intraday ? {} : { year: 'numeric' }) });
     const a = new Date(p.range.from), b = new Date(p.range.to);
     if (!intraday) return `${day.format(a)} → ${day.format(new Date(p.range.to - 1))}`;
-    const time = new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
-    return `${day.format(a)} ${time.format(a)} → ${day.format(a) === day.format(b) ? '' : `${day.format(b)} `}${time.format(b)} ET`;
+    const time = new Intl.DateTimeFormat('en-US', { timeZone: zone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+    return `${day.format(a)} ${time.format(a)} → ${day.format(a) === day.format(b) ? '' : `${day.format(b)} `}${time.format(b)} ${zoneShort(zone)}`;
   }
 
   // The major prices' marks on a row: its classes and tags (the point of control, the value area's
@@ -219,6 +224,7 @@
     }
   }
   window.addEventListener('massive:symbol', () => { at = null; schedule(300); });
+  window.addEventListener('massive:timezone', () => { if (lastProfile) render(lastProfile); });  // its times relabelled
   window.addEventListener('massive:view', (e) => { if (e.detail?.pane === 'analysis') schedule(50); });
   let lastKey = '';
   // A highlight drawn, moved or taken off (app.js scheduleHighlightPanel), or the chart scrolled or
