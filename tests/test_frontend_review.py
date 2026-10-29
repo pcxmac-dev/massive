@@ -506,24 +506,35 @@ def test_every_open_symbol_listens_for_new_bars_while_the_page_is_in_view():
     assert "if (live && !state.stream" not in poll  # not the live symbols only
 
 
-def test_the_open_symbols_logo_turns_like_explorers_throbber_while_it_updates():
-    """The user (2026-10-28): "use the old school explorer icon + the current symbol icon scheme, ie, the
-    globe rotates and the icon is on the other side"; "keep the status on the bottom, but lets animate
-    the current symbol icon"."""
+def test_the_open_symbols_logo_stays_while_a_globe_turns_behind_it_like_explorers_throbber():
+    """The user (2026-10-28): "use the old school explorer icon + the current symbol icon scheme"; "keep the
+    status on the bottom, but lets animate the current symbol icon"; "i need the appearance of a sphere
+    rotating"; "its gotta look just as smooth"; "blue and gold like, ... centers on the current time zone";
+    "use night and day"; "night globe with cities lights or day globe like the IE 3 one"; "the symbol icon
+    doesn't really move, its more or less the globe rotating in its place"."""
     js = _js("throbber.js")
     assert "const FETCHING = new Set(['waiting', 'downloading']);" in js  # its fetch queued or under way
-    assert "window.GlobeIcon?.frame(lon - 180, host.classList.contains('active'))" in js  # the back: the turning globe
-    assert "if (!busy()) card.classList.remove('updating');" in js  # done: the turn finished, resting on the logo
-    assert "if (front.dataset.html !== html) { front.innerHTML = html; front.dataset.html = html; }" in js
-    assert "window.Throbber = { face, pulse, busy };" in js
+    assert "const TURN_MS = 2300;" in js and "const LOGO_SCALE = 0.6;" in js
+    assert "const OCEAN = [16, 52, 150], LAND = [226, 176, 62]" in js  # blue and gold by day
+    sphere = _inner(js, "drawSphere")
+    assert "const lon = home + ((v + c.lon) * 180) / Math.PI;" in sphere  # centred on the picked zone's meridian
+    assert "const h = c.sinLat * sun.sinLat + c.cl * sun.cosLat * Math.cos((lon - sun.lon) * RAD);" in sphere  # the Sun now
+    assert "const glow = (1 - day) * gridAt(lights, lon, c.lat);" in sphere  # its cities lit at night
+    assert "g.drawImage(entry.logo.canvas, at, at, w, w);" in sphere  # the logo still, in front
+    assert "Math.min(zoneOffset(zone, new Date(Date.UTC(y, 0, 1))), zoneOffset(zone, new Date(Date.UTC(y, 6, 1))))" in js
+    draw = _inner(js, "draw")
+    assert "frame = requestAnimationFrame(draw);" in draw  # every screen frame: as smooth as the screen draws
+    assert "const turns = (now - began) / TURN_MS;" in draw  # the angle from the time
+    assert "else if (!ending && Math.floor(turns) > Math.floor(angle)) ending = now;" in draw  # done: home, then going
+    assert "if (front.dataset.html !== html) { front.innerHTML = html; front.dataset.html = html; entry.logo = null; }" in js
+    assert "window.Throbber = { face, pulse, busy, preview: setPreview };" in js
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     assert html.index('<script src="throbber.js"></script>') < html.index('<script src="app.js"></script>')
     app = _js("app.js")
     assert "window.Throbber.face($('symbolLogo'), symbolIcon(info, 20), 20);" in _function(app, "renderSymbolButton")
     assert app.count("window.Throbber?.pulse();") == 2  # each stream message and poll that brought bars
     assert "window.Throbber.face($('railStock'), stockIcon, RAIL_ICON + 4);" in _js("panels.js")
-    assert "frame: (lon, selected = false) => (outlines ? render(lon, declination(), selected) : null)" in _js("globeicon.js")
+    assert "sun: (t = new Date()) => ({ lon: noon(t), lat: declination(t) })" in _js("globeicon.js")
     css = (STATIC / "style.css").read_text(encoding="utf-8")
-    assert ".throb.updating .throb-card { animation: throb-turn 2.4s linear infinite; }" in css
-    assert ".throb-back { transform: rotateY(180deg); }" in css and "backface-visibility: hidden;" in css
-    assert "@media (prefers-reduced-motion: reduce) {\n  .throb.updating .throb-card { animation: none; }" in css
+    assert ".throb.updating .throb-sphere { display: block; }" in css and ".throb.updating .throb-front { visibility: hidden; }" in css
+    assert ".throb.ringed { border-radius: 50%; box-shadow: 0 0 0 2px var(--accent); }" in css  # reduced motion

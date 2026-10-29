@@ -146,7 +146,8 @@
 
   load();
   setInterval(() => { if (!document.hidden) update(); }, TICK_MS);
-  // frame(lon, selected): one frame as a canvas (a look; the symbol logo's throbber, throbber.js), null
-  // before the outlines load
-  window.GlobeIcon = { update, frame: (lon, selected = false) => (outlines ? render(lon, declination(), selected) : null) };
+  // frame(lon, selected): one frame as a canvas (a look), null before the outlines load; sun(): where the
+  // Sun is overhead now (degrees: noon's longitude, today's declination), for the throbber's day and night
+  window.GlobeIcon = { update, frame: (lon, selected = false) => (outlines ? render(lon, declination(), selected) : null),
+                       sun: (t = new Date()) => ({ lon: noon(t), lat: declination(t) }) };
 })();
