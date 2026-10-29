@@ -813,14 +813,27 @@ table.l2 tr.cursor.beyond td { box-shadow: inset 0 1px 0 var(--muted), inset 0 -
   border-radius: 4px; padding: 2px 4px; }
 .pref-session { grid-template-columns: minmax(0, 1fr); gap: 4px; }
 .pref-session select { width: 100%; }
-.pref-shade { grid-template-columns: minmax(0, 1fr) 110px 44px; }
-.pref-shade input { width: 100%; margin: 0; }
+.pref-shade { grid-template-columns: minmax(0, 1fr) 110px 44px; position: relative; }
+.pref-shade > span { display: inline-flex; align-items: center; }
+.pref-shade > input { width: 100%; margin: 0; }
 .pref-shade output { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
-.pref-swatch { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 2px; vertical-align: -1px;
-  border: 1px solid var(--border); }
-.pref-swatch.pre { background: rgb(20, 60, 170); }
-.pref-swatch.post { background: rgb(120, 123, 134); }
-.pref-swatch.night { background: rgb(110, 60, 170); }
+/* the session's colour: a button opening its colour popup (prefs.js) */
+.pref-swatch { width: 18px; height: 18px; margin: 0 8px 0 0; padding: 0; border-radius: 4px; border: 1px solid var(--border);
+  cursor: pointer; flex: none; }
+.pref-swatch:hover, .pref-swatch[aria-expanded="true"] { border-color: var(--text); box-shadow: 0 0 0 2px var(--accent); }
+.pref-pop { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; width: 196px; padding: 8px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 6px 18px rgba(0, 0, 0, .35); }
+.pref-pop-head { font-size: 11px; font-weight: 600; margin-bottom: 6px; }
+.pref-pop-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; }
+.pref-pop-grid button { aspect-ratio: 1; padding: 0; border: 1px solid var(--border); border-radius: 3px; cursor: pointer; }
+.pref-pop-grid button:hover, .pref-pop-grid button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pref-pop-grid button.on { outline: 2px solid var(--text); outline-offset: 1px; }
+.pref-pop-row { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+.pref-pop-row .pref-reset { margin-top: 0; flex: 1; }
+.pref-pop-any { width: 32px; height: 24px; padding: 0; border: 1px solid var(--border); border-radius: 4px; background: none;
+  cursor: pointer; }
+.pref-pop-hex { flex: 1; min-width: 0; font: inherit; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text);
+  background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; }
 .pref-reset { margin-top: 6px; border: 1px solid var(--border); border-radius: 4px; background: none; color: var(--text);
   padding: 3px 8px; font: inherit; font-size: 12px; cursor: pointer; }
 .pref-reset:hover { border-color: var(--accent); }

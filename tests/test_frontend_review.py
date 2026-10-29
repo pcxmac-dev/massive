@@ -346,10 +346,30 @@ def test_wide_bars_are_drawn_once_across_their_slots_and_read_as_their_minute():
 
 def test_the_pre_market_and_overnight_shades_are_at_half_their_old_strength_scaled_by_their_sliders():
     axis = _js("timeaxis.js")
-    assert "const preShade = dark ? `rgba(10,32,96,${0.225 * k('pre')})` : `rgba(20,60,170,${0.065 * k('pre')})`;" in axis
-    assert "const nightShade = dark ? `rgba(90,40,140,${0.15 * k('night')})` : `rgba(110,60,170,${0.05 * k('night')})`;" in axis
-    assert "Math.min(2, Math.max(0, (state.shade?.[name] ?? 100) / 100))" in axis  # 0-200 %, 100 without a setting
+    assert "pre: { dark: [10, 32, 96, 0.225], light: [20, 60, 170, 0.065] }," in axis  # half the 0.45 and 0.13 before
+    assert "night: { dark: [90, 40, 140, 0.15], light: [110, 60, 170, 0.05] }," in axis  # half the 0.30 and 0.10
+    shade = _inner(axis, "shadeOf")
+    assert "Math.min(2, Math.max(0, (state.shade?.[name] ?? 100) / 100))" in shade  # 0-200 %, 100 without a setting
+    assert "const hex = state.shadeColor?.[name];" in shade  # a colour picked in Preferences, else the theme's own
+    assert "const preShade = shadeOf('pre', dark), postShade = shadeOf('post', dark), nightShade = shadeOf('night', dark);" in axis
     assert "window.TimeAxis = { future: fut, sessions: sess, ensure, currentSession, redraw };" in axis
+
+
+def test_each_sessions_colour_is_picked_from_a_popup_in_preferences():
+    prefs = _js("prefs.js")
+    assert 'class="pref-swatch" data-color="${k}"' in prefs and 'aria-haspopup="dialog"' in prefs
+    opener = _inner(prefs, "openPop")
+    assert "pop.setAttribute('role', 'dialog');" in opener
+    assert 'PALETTE.map((c) =>' in opener and 'type="color" class="pref-pop-any"' in opener and 'class="pref-pop-hex"' in opener
+    assert '<button type="button" data-pick="" class="pref-reset">Standard</button>' in opener  # back to the theme's own
+    color = _inner(prefs, "setColor")
+    assert "prefs.set('shadeColor', state.shadeColor);" in color and "window.TimeAxis?.redraw();" in color  # live, kept
+    assert "hex.toLowerCase() !== STANDARD[k]" in color  # the standard colour picked: none kept (each theme its own)
+    # the system's picker live, a typed hex once whole; Escape or a click elsewhere closes it
+    assert "if (e.target.classList.contains('pref-pop-any')) { setColor(pop.dataset.color, e.target.value); return; }" in prefs
+    assert "if (HEX.test(v)) setColor(pop.dataset.color, v);" in prefs
+    assert "if (pop && e.key === 'Escape') { e.stopPropagation(); closePop(true); }" in prefs
+    assert "for (const [k] of SHADES) { setShade(k, 100); setColor(k, null); }" in prefs  # the reset: colours too
 
 
 def test_the_preferences_pane_sits_above_the_profile_below_the_separator_and_sets_sessions_and_shading():
@@ -389,7 +409,7 @@ def test_the_time_zone_defaults_to_this_computers_and_is_picked_in_preferences_t
     prefs = _js("prefs.js")
     assert '<select id="prefZone">${TIMEZONES.map((z) =>' in prefs and "z === LOCAL_ZONE ? ' · this computer' : ''" in prefs
     assert "if (e.target.id === 'prefZone') window.setChartTimezone(e.target.value);" in prefs
-    assert "window.addEventListener('massive:timezone', () => { if (shown()) render(); });" in prefs
+    assert "window.addEventListener('massive:timezone', again);" in prefs and "const again = () => { if (shown())" in prefs
 
 
 def test_turning_the_override_off_holds_again_even_mid_switch_and_a_stuck_switch_expires():

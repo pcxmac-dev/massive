@@ -185,6 +185,23 @@
     return list.find((s) => s.open <= now && now < s.close) || list.find((s) => s.open > now) || null;
   }
 
+  // Each session's shade: pre-market a cool blue, after-hours grey (one shade for both made them hard to
+  // tell apart), overnight a violet; each theme its own [r, g, b, alpha]. The blue and the violet at half
+  // the strength they had (the user, 2026-10-28: "a little too bright"). Preferences (prefs.js) can give
+  // a session a colour of its own (both themes, at the theme's alpha) and scale its alpha 0-200 %.
+  const SHADE_BASE = {
+    pre: { dark: [10, 32, 96, 0.225], light: [20, 60, 170, 0.065] },  // a deep navy
+    post: { dark: [120, 123, 134, 0.07], light: [120, 123, 134, 0.08] },
+    night: { dark: [90, 40, 140, 0.15], light: [110, 60, 170, 0.05] },  // a violet
+  };
+  function shadeOf(name, dark) {
+    const [r, g, b, alpha] = SHADE_BASE[name][dark ? 'dark' : 'light'];
+    const hex = state.shadeColor?.[name];
+    const rgb = /^#[0-9a-f]{6}$/i.test(hex || '') ? [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)) : [r, g, b];
+    const k = Math.min(2, Math.max(0, (state.shade?.[name] ?? 100) / 100));
+    return `rgba(${rgb.join(',')},${+(alpha * k).toFixed(4)})`;
+  }
+
   kc.registerIndicator({
     name: 'SESSIONS',
     shortName: '',
@@ -199,13 +216,7 @@
       const t1 = store.dataIndexToTimestamp(to + 1);
       const xOf = (ts) => xAxis.convertToPixel(store.timestampToDataIndex(ts)) - c.getBarSpace().halfBar;
       const dark = !document.body.classList.contains('light');
-      // pre-market a cool blue, after-hours grey: one shade for both made them hard to tell apart. The
-      // blue and the violet at half the strength they had (the user, 2026-10-28: "a little too bright"),
-      // each then scaled by its Preferences slider (prefs.js: 0-200 %, 100 standard)
-      const k = (name) => Math.min(2, Math.max(0, (state.shade?.[name] ?? 100) / 100));
-      const preShade = dark ? `rgba(10,32,96,${0.225 * k('pre')})` : `rgba(20,60,170,${0.065 * k('pre')})`;  // a deep navy
-      const postShade = dark ? `rgba(120,123,134,${0.07 * k('post')})` : `rgba(120,123,134,${0.08 * k('post')})`;
-      const nightShade = dark ? `rgba(90,40,140,${0.15 * k('night')})` : `rgba(110,60,170,${0.05 * k('night')})`;  // overnight: a violet
+      const preShade = shadeOf('pre', dark), postShade = shadeOf('post', dark), nightShade = shadeOf('night', dark);
       const wide = state.session !== 'regular';  // extended hours or all four sessions
       const now = Date.now();
       const cur = currentSession(sess.list, now);
