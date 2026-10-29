@@ -887,6 +887,10 @@ table.l2 tr.cursor.beyond td { box-shadow: inset 0 1px 0 var(--muted), inset 0 -
 .w-table .w-x button { border: 0; background: none; color: var(--muted); cursor: pointer; visibility: hidden; }
 .w-table tr:hover .w-x button { visibility: visible; }
 .w-table td.w-empty { padding: 8px 4px; white-space: normal; }  /* outranks the cells' nowrap: no sideways scroll */
+.w-map-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 10px 4px; }
+.w-map-empty button { border: 1px solid var(--border); border-radius: 4px; background: none; color: var(--text);
+  padding: 3px 10px; cursor: pointer; }
+.w-map-empty button:hover { border-color: var(--accent); }
 .derived-tag.interp { color: #b07cff; border-color: #b07cff; }
 /* a dataset's monthly history before the feed (app.js HIST_COLOR); flagged where it and the feed disagree */
 .derived-tag.hist, .history-chip { color: #d4a72c; border-color: #d4a72c; }

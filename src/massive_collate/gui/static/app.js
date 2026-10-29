@@ -2357,11 +2357,17 @@ function renderFuturesMap(query) {
   const list = $('symbolList');
   const q = query.trim().toLowerCase();
   const M = window.MarketMap;
+  // Every front's change is on one session (server.py _futures_moves); one whose newest bar is older is
+  // grey, dated: its older change is not this session's.
+  const dayText = (d) => (d ? new Date(`${d}T12:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' }) : '');
+  const session = state.symbols.find((s) => s.asset === 'future' && s.session)?.session || null;
+  const behind = (s) => s.changePct == null && s.day;
   const all = state.symbols.filter((s) => s.asset === 'future').map((s) => ({
     ticker: s.ticker, name: s.name, asset: 'future', icon: false, exchange: s.exchange,
     sector: M.futuresFamily(s.futuresType), industry: M.futuresTypeName(s.futuresType),
-    changePct: s.changePct ?? null, close: s.close ?? null }));
-  const priced = all.filter((s) => s.changePct != null);
+    changePct: s.changePct ?? null, close: s.close ?? null, asOf: behind(s) ? dayText(s.day) : null,
+    note: behind(s) ? `Newest bar here: ${dayText(s.day)}${session ? `, none for ${dayText(session)} yet` : ''}` : '' }));
+  const priced = all.filter((s) => s.close != null);
   const base = state.futuresPriced && priced.length ? priced : all;
   const match = (s) => !q || [s.ticker, s.name, s.sector, s.industry, M.exchangeName(s.exchange)].some((v) => v && String(v).toLowerCase().includes(q));
   const { shown, levels, label } = mapLevels(base, 'futuresExchange', [(s) => s.sector, (s) => s.industry]);
@@ -2375,7 +2381,8 @@ function renderFuturesMap(query) {
       : `<div class="empty">Nothing matches “${e(query.trim())}”.</div>`}
     <div class="map-foot">
       <span class="map-legend">${[-3, -2, -1, 0, 1, 2, 3].map((p) => `<span style="background:${M.changeColor(p)}">${p > 0 ? '+' : ''}${p}%</span>`).join('')}</span>
-      <span class="p-muted small">${mapped.length.toLocaleString()} futures · colour: the front contract's last session · ${priced.length.toLocaleString()} of
+      <span class="p-muted small">${mapped.length.toLocaleString()} futures · colour: ${session
+        ? `${dayText(session)}'s session, each front contract (grey with a date: its newest bar is older)` : "the front contract's last session"} · ${priced.length.toLocaleString()} of
         ${all.length.toLocaleString()} watched have prices here so far (the fetcher fills the rest)</span>
     </div>`;
   const map = $('marketMap');

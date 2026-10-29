@@ -72,12 +72,13 @@
     const cls = ['map-tile', opts.isMatch && !opts.isMatch(s) ? 'dim' : '', s.ticker === opts.current ? 'current' : '',
       opts.isWatched && !opts.isWatched(s) ? 'unwatched' : ''].filter(Boolean).join(' ');
     const title = `${s.ticker} · ${s.name || ''}\n${s.sector || ''}${s.industry ? ` / ${s.industry}` : ''}\n`
-      + `${s.close != null ? `${Number(s.close).toFixed(2)} ` : ''}${pctText(pct)}${s.marketCap ? ` · ${money(s.marketCap)}` : ''}`;
+      + `${s.close != null ? `${Number(s.close).toFixed(2)} ` : ''}${pctText(pct)}${s.marketCap ? ` · ${money(s.marketCap)}` : ''}${s.note ? `\n${s.note}` : ''}`;
+    const sub = pct == null && s.asOf ? s.asOf : pctText(pct);  // no change on the map's session: its newest bar's day
     return `<div class="${cls}" role="option" tabindex="-1" data-ticker="${esc(s.ticker)}" title="${esc(title)}"
         style="left:${r.x.toFixed(1)}px;top:${r.y.toFixed(1)}px;width:${Math.max(0, r.w - 1).toFixed(1)}px;height:${Math.max(0, r.h - 1).toFixed(1)}px;background:${changeColor(pct)}">
       ${logo ? `<img class="map-logo" src="/api/icon?ticker=${encodeURIComponent(s.ticker)}" alt="" width="${logoSize}" height="${logoSize}" loading="lazy">` : ''}
       ${r.w > 16 && r.h > 10 ? `<b style="font-size:${fs.toFixed(1)}px">${esc(s.ticker)}</b>` : ''}
-      ${showPct ? `<span style="font-size:${Math.max(8, fs * 0.55).toFixed(1)}px">${pctText(pct)}</span>` : ''}
+      ${showPct ? `<span style="font-size:${Math.max(8, fs * 0.55).toFixed(1)}px">${esc(sub)}</span>` : ''}
     </div>`;
   }
 

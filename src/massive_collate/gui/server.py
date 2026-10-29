@@ -6,7 +6,7 @@ import json
 import math
 import sqlite3
 import traceback
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from contextlib import contextmanager
 import mimetypes
 import subprocess
@@ -283,7 +283,8 @@ class ChartApp:
                 **_sector(ticker, profiles.get(ticker), w.get("asset") or "stock", (snapshot.get(ticker) or {}).get("close"),
                           members.get(ticker)),
                 "changePct": fut["changePct"] if fut else _change(snapshot, ticker),
-                **({"futuresType": fut["type"], "front": fut["front"], "close": fut["close"]} if fut else {}),
+                **({"futuresType": fut["type"], "front": fut["front"], "close": fut["close"],
+                    "session": fut["session"], "day": fut["day"]} if fut else {}),
                 "data": {k: state[k] for k in ("state", "progress", "last", "expectedThrough", "nextDue")}
                 if state else None,
             })
@@ -1478,24 +1479,42 @@ def _change(snapshot: dict, ticker: str) -> float | None:
     return (d["close"] / d["prevClose"] - 1) * 100 if d and d.get("prevClose") else None
 
 
+FUTURES_MOVE_BARS = 5  # day bars read a front: its session's bar and the one before, past newer ones
+
+
 def _futures_moves(store) -> Callable[[dict], dict]:
     """For the market maps: a continuous future's (a watch row: source, source_ticker, rank) exchange
-    and type from the directory, and its last session's close and change from the contract it holds
-    now (its daily bars: the continuous series is built from contracts, not stored as one). Read once
-    (one query for the fronts, two day bars a front): call it inside the store's lock."""
+    and type from the directory, and its close and change from the contract it holds now (its daily
+    bars: the continuous series is built from contracts, not stored as one), all on one session: the
+    newest one most fronts have a bar for, against the session most have before it. The fetcher
+    reaches products at different times, so their newest bars were days apart (2026-10-29: CL's from
+    Oct 23 beside ES's from Oct 27 and GC's from Oct 28, one map). A front without that session's bar
+    has no change (grey), its newest bar's day in `day`. Read once (one query for the fronts, a few
+    day bars a front): call it inside the store's lock."""
     fronts = store.front_contracts()
     listed = {r["ticker"]: r for r in store.directory(kind="future")}
-    moves: dict[str, dict] = {}
+    bars: dict[str, dict] = {}
     for src in {s for s, _, _ in fronts}:
-        moves[src] = store.series_moves(src, [c for (s, _, _), c in fronts.items() if s == src])
+        bars[src] = store.last_days(src, [c for (s, _, _), c in fronts.items() if s == src], FUTURES_MOVE_BARS)
+    day = lambda ts: datetime.fromtimestamp(ts / 1000, timezone.utc).date()  # noqa: E731 (bars start at ET midnight)
+    held = [[day(r[0]) for r in rows] for b in bars.values() for rows in b.values()]
+    newest = Counter(d[0] for d in held if len(d) > 1)
+    session = max(newest, key=lambda d: (newest[d], d)) if newest else None
+    before = Counter(d[d.index(session) + 1] for d in held if session in d[:-1])
+    prior = max(before, key=lambda d: (before[d], d)) if before else None
 
     def of(w: dict) -> dict:
         product = w.get("source_ticker") or ""
         front = fronts.get((w.get("source"), product, w.get("rank") or 1))
-        move = moves.get(w.get("source"), {}).get(front) if front else None
+        rows = bars.get(w.get("source"), {}).get(front.upper(), []) if front else []
+        days = [day(r[0]) for r in rows]
+        i = days.index(session) if session in days[:-1] else None
+        move = (rows[i][1] / rows[i + 1][1] - 1) * 100 if i is not None and days[i + 1] == prior and rows[i][1] and rows[i + 1][1] else None
         row = listed.get(product) or {}
         return {"exchange": row.get("exchange"), "type": row.get("type"), "front": front,
-                "close": move["close"] if move else None, "changePct": move["changePct"] if move else None}
+                "close": rows[i][1] if i is not None else rows[0][1] if rows else None, "changePct": move,
+                "session": session.isoformat() if move is not None else None,
+                "day": days[0].isoformat() if days else None}
     return of
 
 

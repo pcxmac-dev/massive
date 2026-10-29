@@ -113,8 +113,15 @@
     return [{ index: 'Indices', fx: 'Currencies', crypto: 'Crypto' }[sym.asset] || 'Other', ''];
   }
 
-  function renderMap(box, head, syms) {
+  function renderMap(box, head, syms, empty) {
     const M = window.MarketMap;
+    if (!syms.length) {  // no blank map: why it is empty, and the market's map to pick from
+      box.innerHTML = `${head}<div class="w-map-empty p-muted">${esc(empty)}
+        <button type="button" id="watchPick" title="The symbol picker's map: every Nasdaq and NYSE company by exchange and sector">Pick from the market map</button></div>`;
+      $('watchList').value = lists.some((l) => l.name === current) ? current : current === VISITED ? VISITED : COLLECTED;
+      mapDrawn = Date.now();
+      return;
+    }
     const items = syms.map((sym) => {
       const q = quote(sym), [group, kind] = mapGroup(sym);
       return { ticker: sym.ticker, name: sym.name, icon: sym.icon, asset: sym.asset, sector: group, industry: kind,
@@ -159,7 +166,10 @@
           ${mine ? `<button type="button" id="watchAdd" title="Add ${esc(state.ticker || 'the open symbol')} to this list"${state.ticker && !mine.tickers.includes(state.ticker) ? '' : ' disabled'}>+</button>` : ''}</h3>
         <input id="watchFilter" type="search" placeholder="Filter symbols" value="${esc(query)}" autocomplete="off">`;
       shownHead = null;  // the table is drawn whole when it comes back
-      renderMap(box, head, syms.filter(match));
+      // an empty list (the user, 2026-10-29: "even empty watch list"): said as the table says it
+      const empty = syms.length ? 'Nothing matches.' : current === VISITED ? 'Nothing visited yet: every symbol you open is noted here.'
+        : mine ? 'Empty: open a symbol and press + to add it.' : 'Nothing collected yet: the symbols you open or add to a list show here.';
+      renderMap(box, head, syms.filter(match), empty);
       return;
     }
     let body;
@@ -249,6 +259,13 @@
     }
     const tile = e.target.closest('.map-tile[data-ticker]');
     if (tile) { window.dispatchEvent(new CustomEvent('massive:open-symbol', { detail: tile.dataset.ticker })); return; }
+    if (e.target.closest('#watchPick')) {  // the picker on Nasdaq & NYSE's map (app.js)
+      state.switcherScope = 'stocks';
+      state.switcherView = 'map';
+      prefs.set('switcherScope', 'stocks');
+      prefs.set('switcherView', 'map');
+      return $('symbolBtn').click();
+    }
     const sortBy = e.target.closest('th[data-sort]');
     if (sortBy) {
       sort = { key: sortBy.dataset.sort, dir: sort.key === sortBy.dataset.sort ? -sort.dir : 1 };

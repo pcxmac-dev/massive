@@ -112,7 +112,7 @@ def test_the_symbol_picker_maps_every_exchange_by_sector_the_watchlists_and_the_
 def test_the_watchlist_panel_shows_its_list_as_a_heat_map():
     wl = _js("watchlist.js")
     assert "let view = prefs.get('watchView', 'list');" in wl
-    assert "if (view === 'map') {" in wl and "renderMap(box, head, syms.filter(match));" in wl
+    assert "if (view === 'map') {" in wl and "renderMap(box, head, syms.filter(match), empty);" in wl
     group = wl.split("function mapGroup(", 1)[1].split("\n  }\n", 1)[0]
     assert "if (sym.asset === 'stock') return [sym.sector || 'Not classified yet', sym.industry || ''];" in group
     assert "`Futures · ${M.futuresFamily(sym.futuresType)}`" in group
@@ -125,3 +125,43 @@ def test_the_watchlist_panel_shows_its_list_as_a_heat_map():
     assert "window.Watchlist = { render, load, lists: () => lists };" in wl
     css = (STATIC / "style.css").read_text(encoding="utf-8")
     assert ".market-map.watch-map {" in css and ".map-chip.active {" in css and ".map-sector.map-top {" in css
+
+
+def test_every_future_is_coloured_by_the_same_session_and_one_behind_is_grey_with_its_date(store):
+    # the user's map, 2026-10-29: CL's newest bar was from Oct 23, ES's from Oct 27, GC's from Oct 28
+    store.watch("massive", ["CL1!"], "minute", asset="future", source_ticker="CL", rank=1)
+    store.watch("massive", ["SR31!"], "minute", asset="future", source_ticker="SR3", rank=1)
+    store.set_rolls("massive", "CL", 1, [(date(2026, 10, 23), "CLZ6")])
+    store.set_rolls("massive", "SR3", 1, [(date(2026, 10, 28), "SR3Z6")])
+    for contract, days in (("CLZ6", ((22, 99.1), (23, 103.44))), ("SR3Z6", ((26, 95.0), (27, 95.95), (28, 99.0)))):
+        store.upsert_bars("massive", contract, "day", 1, [
+            {"t": ET_MIDNIGHT(date(2026, 10, d)), "o": c, "h": c, "l": c, "c": c, "v": 1, "vw": c, "n": 1} for d, c in days])
+    syms = {x["ticker"]: x for x in ChartApp(store).symbols()}
+    # Oct 27: the session most fronts' newest bar is from (ES and BZ), against Oct 26
+    assert (syms["ES1!"]["session"], syms["ES1!"]["changePct"]) == ("2026-10-27", pytest.approx(1.0))
+    # a front a session ahead is read on that session too (Oct 27 against Oct 26), not on its newest
+    sr3 = syms["SR31!"]
+    assert sr3["changePct"] == pytest.approx(1.0) and sr3["close"] == 95.95 and sr3["day"] == "2026-10-28"
+    # a front behind: no change (its +4.38 % was Oct 23's), its newest bar's day to show
+    cl = syms["CL1!"]
+    assert (cl["changePct"], cl["session"], cl["day"], cl["close"]) == (None, None, "2026-10-23", 103.44)
+
+
+def test_the_futures_map_dates_a_front_behind_and_an_empty_watchlist_says_so():
+    app = _js("app.js")
+    futures = _function(app, "renderFuturesMap")
+    assert "const session = state.symbols.find((s) => s.asset === 'future' && s.session)?.session || null;" in futures
+    assert "asOf: behind(s) ? dayText(s.day) : null" in futures
+    assert "const priced = all.filter((s) => s.close != null);" in futures  # a front behind stays on the priced map, grey
+    assert "'s session, each front contract (grey with a date: its newest bar is older)" in futures
+    tm = _js("treemap.js")
+    assert "const sub = pct == null && s.asOf ? s.asOf : pctText(pct);" in tm and "${s.note ? `\\n${s.note}` : ''}" in tm
+    wl = _js("watchlist.js")
+    # the user, 2026-10-29: "even empty watch list": the map says why it is empty, as the table does
+    assert "renderMap(box, head, syms.filter(match), empty);" in wl
+    assert "mine ? 'Empty: open a symbol and press + to add it.'" in wl and "'Nothing visited yet: every symbol you open is noted here.'" in wl
+    draw = wl.split("function renderMap(", 1)[1].split("\n  }\n", 1)[0]
+    assert "if (!syms.length) {" in draw and 'id="watchPick"' in draw and "Pick from the market map" in draw
+    assert "if (e.target.closest('#watchPick')) {" in wl and "return $('symbolBtn').click();" in wl
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+    assert ".w-map-empty {" in css and ".w-map-empty button {" in css
