@@ -766,17 +766,66 @@ function currentLevel() {
 
 const levelPerDay = (lv) => lv.perDay[state.session] || lv.perDay.extended;
 
+// The auto level holds at the finest sampling the window has: a level whose data stops short of the
+// window's end while a coarser level's goes on (the seconds end at 20:00, Blue Ocean's minutes go on
+// through the night), or a second level seen drawn wide in the window (no seconds there: the minutes
+// fill its slots, gui/window.py _with_wide), is not chosen. A click on the auto tag overrides it
+// (state.autoOverride): the second levels are then chosen as the zoom asks, the minutes drawn wide
+// among the seconds (a mixed presentation), and the tag blinks while they are in view.
+const REACH_SLACK_MS = 3 * 60_000;  // a level ending this little before the window still reaches it (a forming bar)
+
+function stopsShort(lv, levels, toMs) {
+  if (!Number.isFinite(toMs)) return false;
+  const unit = LEVEL_MS[lv.type] * lv.span;
+  return lv.last + REACH_SLACK_MS < toMs
+    && levels.some((o) => LEVEL_MS[o.type] * o.span > unit && o.last > lv.last + REACH_SLACK_MS);
+}
+
+// The stretches seen drawn wide at a second level, for this symbol and session ([from, to] ms).
+function wideSeen() {
+  const ctx = `${state.source}:${state.ticker}|${state.session}`;
+  if (state.wideSeen?.ctx !== ctx) state.wideSeen = { ctx, spans: [] };
+  return state.wideSeen.spans;
+}
+
+function seenWide(fromMs, toMs) {
+  return Number.isFinite(fromMs) && Number.isFinite(toMs) && wideSeen().some(([a, b]) => a < toMs && b > fromMs);
+}
+
+// The wide bars in data[lo, hi) noted as a stretch seen wide; the wide bars' length (ms), 0 for none.
+function noteWide(data, lo, hi) {
+  let a = null, b = null, wide = 0;
+  for (let i = Math.max(0, lo); i < Math.min(data.length, hi); i++) {
+    const d = data[i];
+    if (!d?.wide) continue;
+    a ??= d.timestamp;
+    b = d.timestamp + d.wide;
+    wide = d.wide;
+  }
+  if (wide) {
+    const spans = wideSeen();
+    spans.push([a, b]);
+    if (spans.length > 64) spans.shift();
+  }
+  return wide;
+}
+
 // The finest level whose candles for `days` of history fit the chart and whose data reaches back
-// to `fromMs` (a level with nothing that old is not shown for that window: candles grow instead).
-function chooseLevel(days, fromMs, current = null) {
+// to `fromMs` (a level with nothing that old is not shown for that window: candles grow instead) and
+// on to `toMs` (as above).
+function chooseLevel(days, fromMs, current = null, toMs = NaN) {
   const levels = autoLevels();
   if (!levels.length) return null;
   const fit = chartWidth() / autoMinPx();
   const oldest = Math.min(...levels.map((lv) => lv.first));
   const from = Math.max(Number.isFinite(fromMs) ? fromMs : oldest, oldest);
   const empty = state.model.kind === 'price' ? null : emptyLevels();
+  const minutesFrom = levels.find((lv) => lv.type === 'minute')?.first;
   for (const lv of levels) {
-    if (lv.first > from + LEVEL_MS.day || empty?.has(`${lv.type}:${lv.span}`)) continue;
+    const wide = state.autoOverride && lv.type === 'second';  // overridden: the minutes drawn wide at it
+    const reach = wide && minutesFrom != null ? Math.min(lv.first, minutesFrom) : lv.first;
+    if (reach > from + LEVEL_MS.day || empty?.has(`${lv.type}:${lv.span}`)) continue;
+    if (!wide && (stopsShort(lv, levels, toMs) || (lv.type === 'second' && seenWide(from, toMs)))) continue;
     const same = current && lv.type === current.type && lv.span === current.span;
     if (days * levelPerDay(lv) <= fit * (same ? 1 + AUTO_SLACK : 1 - AUTO_SLACK)) return lv;
   }
@@ -790,8 +839,10 @@ function visibleWindow() {
   const lo = r.realFrom ?? r.from, hi = r.realTo ?? r.to;
   const cur = currentLevel();
   const bars = Math.max(1, hi - lo);
+  const last = data[Math.max(0, Math.min(data.length - 1, hi - 1))];
   return { bars, days: cur ? bars / levelPerDay(cur) : 0, fromMs: data[Math.max(0, Math.min(data.length - 1, lo))]?.timestamp,
-           centre: data[Math.max(0, Math.min(data.length - 1, Math.floor((lo + hi) / 2)))]?.timestamp, atLatest: hi >= data.length };
+           centre: data[Math.max(0, Math.min(data.length - 1, Math.floor((lo + hi) / 2)))]?.timestamp, atLatest: hi >= data.length,
+           toMs: last ? last.timestamp + (last.wide || (cur ? LEVEL_MS[cur.type] * cur.span : 0)) : NaN, lo, hi };
 }
 
 function checkLod() {
@@ -808,7 +859,8 @@ function checkLod() {
   const cur = currentLevel();
   if (!cur) return;
   const w = visibleWindow();
-  const lv = chooseLevel(w.days, w.fromMs, cur);
+  if (!state.autoOverride && cur.type === 'second') noteWide(chart.getDataList(), w.lo, w.hi);  // held coarser there
+  const lv = chooseLevel(w.days, w.fromMs, cur, w.toMs);
   if (!lv || (lv.type === cur.type && lv.span === cur.span)) { prefetchFiner(w, cur); return; }
   const newBars = Math.max(1, w.days * levelPerDay(lv));
   state.lodSwitch = {
@@ -1384,6 +1436,40 @@ function applyChartType() {
 
 function px(xAxis, i) { return xAxis.convertToPixel(i); }
 
+// Wide candles: at a second level, a minute with no seconds fills its slots (gui/window.py
+// _with_wide): its middle slot is the minute, the others lie flat at its close, so the library's own
+// thin candles (or the GPU's) fall inside the minute drawn here once across its slots, as wide as its
+// time, a hair in from its edges so it reads as one bar. The other chart types draw the slots as
+// they are (a line steps along the minutes' closes).
+const WIDE_TYPES = new Set(['candles', 'bars']);
+
+function drawWide(ctx, c, xAxis, yAxis, data, from, to) {
+  const half = c.getBarSpace().bar / 2;
+  const { upColor, downColor, noChangeColor } = DEFAULT_CANDLE.bar;
+  const lo = Math.max(0, from - 120), hi = Math.min(data.length, to + 120);  // a minute's slots reach past the edges
+  for (let i = lo; i < hi;) {
+    const d = data[i];
+    if (!d?.wide) { i++; continue; }
+    const start = Math.floor(d.timestamp / d.wide) * d.wide;
+    let j = i;
+    while (j + 1 < data.length && data[j + 1]?.wide && Math.floor(data[j + 1].timestamp / d.wide) * d.wide === start) j++;
+    const x0 = px(xAxis, i) - half, x1 = px(xAxis, j) + half, w = x1 - x0, cx = Math.round((x0 + x1) / 2) - 0.5;
+    const yH = yAxis.convertToPixel(d.wh), yL = yAxis.convertToPixel(d.wl);
+    const yO = yAxis.convertToPixel(d.wo), yC = yAxis.convertToPixel(d.wc);
+    const color = d.wc > d.wo ? upColor : d.wc < d.wo ? downColor : noChangeColor;
+    const inset = Math.min(Math.max(1, w * 0.08), w / 3);
+    ctx.fillStyle = color;
+    ctx.fillRect(cx, Math.min(yH, yL), 1, Math.max(1, Math.abs(yL - yH)));  // high to low
+    if (state.chartType === 'bars') {  // OHLC: the open's tick left, the close's right
+      ctx.fillRect(x0 + inset, yO - 0.5, cx - x0 - inset, 1);
+      ctx.fillRect(cx, yC - 0.5, x1 - inset - cx, 1);
+    } else {
+      ctx.fillRect(x0 + inset, Math.min(yO, yC), w - 2 * inset, Math.max(1, Math.abs(yC - yO)));
+    }
+    i = j + 1;
+  }
+}
+
 // Derived candles: built here (from ticks, or finer bars) where the feed sent none at this interval.
 // When the candles on screen mix the feed's own with derived ones, each derived one gets a small
 // ring under it; when all are derived, the chip beside the interval menu says so instead.
@@ -1397,14 +1483,17 @@ kc.registerIndicator({
   draw: ({ ctx, chart: c, xAxis, yAxis }) => {
     const data = c.getDataList();
     const { from, to } = c.getVisibleRange();
-    if (!data.length || to <= from || state.model.kind !== 'price') { renderDerivedChip(0, 0); return true; }
-    let some = 0, interp = 0;
+    if (!data.length || to <= from || state.model.kind !== 'price') { renderDerivedChip(0, 0); noteWideInView(0); return true; }
+    let some = 0, interp = 0, wide = 0, slots = 0;  // wide slots: the level's own bars are the rest
     for (let i = from; i < to; i++) {
-      if (data[i]?.interp) interp++;
+      if (data[i]?.wide) { wide = data[i].wide; slots++; } else if (data[i]?.interp) interp++;
       else if (data[i]?.derived) some++;
     }
-    renderDerivedChip(some + interp, to - from, interp);
+    const total = to - from - slots;
+    renderDerivedChip(some + interp, total, interp);
+    noteWideInView(wide);
     ctx.save();
+    if (wide && WIDE_TYPES.has(state.chartType)) drawWide(ctx, c, xAxis, yAxis, data, from, to);
     if (interp) {
       // Interpolated history (no data at this interval): a dashed violet line, a style used nowhere else.
       ctx.strokeStyle = INTERP_COLOR; ctx.lineWidth = 1.6; ctx.setLineDash([6, 4]); ctx.globalAlpha = 0.95;
@@ -1420,11 +1509,11 @@ kc.registerIndicator({
       ctx.stroke();
       ctx.setLineDash([]);
     }
-    if (some && some + interp < to - from) {
+    if (some && some + interp < total) {
       ctx.strokeStyle = '#9aa0a6'; ctx.globalAlpha = 0.85; ctx.lineWidth = 1;
       for (let i = from; i < to; i++) {
         const d = data[i];
-        if (!d?.derived || d.interp) continue;
+        if (!d?.derived || d.interp || d.wide) continue;
         ctx.beginPath(); ctx.arc(px(xAxis, i), yAxis.convertToPixel(d.low) + 6, 2.5, 0, Math.PI * 2); ctx.stroke();
       }
     }
@@ -2195,14 +2284,51 @@ function renderPeriods() {
       + '(2 px in the middle). Right: finer levels sooner, more and thinner candles. Left: coarser levels, bigger candles.';
   const lv = currentLevel();
   const label = lv ? lv.label : periodLabel(state.period);
-  tag.textContent = `auto: ${label}`;
+  const under = state.autoOverride && state.wideInView > 0;  // overridden below the data's sampling in view
+  tag.textContent = `auto: ${label}${under ? ` · ${wideLabel(state.wideInView)} here` : ''}`;
+  tag.classList.toggle('override', !!state.autoOverride);
+  tag.classList.toggle('under', under);
+  tag.setAttribute('role', 'button');
+  tag.tabIndex = 0;
+  tag.setAttribute('aria-pressed', String(!!state.autoOverride));
   if (state.model.kind !== 'price') renderModelControls();  // the model window's span in time is the level's
   tag.title = PRICE_BASED.has(state.chartType)
     ? `Built from ${label} bars over the whole history: bricks follow price, not time, and each depends on every `
       + 'one before it, so they come from one level, the finest that builds in a moment; zooming does not change it.'
     : 'Auto-ranging: the candles follow the zoom. A symbol opens on its whole history; zooming in moves to '
       + 'finer levels (days, hours, minutes, seconds) while the data has them for the window on screen, and where it '
-      + 'has none finer the candles grow. This is the level shown now.';
+      + 'has none finer the candles grow. This is the level shown now.'
+      + (state.autoOverride
+        ? `\n\nOverridden: the zoom goes on to seconds where the data has none; the minutes there are drawn wide, as `
+          + `long as their time, among the seconds${under ? ` (now: ${wideLabel(state.wideInView)} bars in view, blinking)` : ''}. `
+          + 'Click to hold the zoom at the data\'s finest again.'
+        : '\n\nWhere the window has nothing finer than minutes (the night on Blue Ocean), the zoom holds at them. '
+          + 'Click to override: seconds anyway, the minutes drawn wide among them.');
+}
+
+// "1 min", "30 sec": a wide bar's length.
+function wideLabel(ms) {
+  return ms % 60_000 ? `${ms / 1000} sec` : `${ms / 60_000} min`;
+}
+
+// The auto tag holds or overrides the zoom's hold at the data's finest sampling (chooseLevel).
+function toggleAutoOverride() {
+  state.autoOverride = !state.autoOverride;
+  if (!state.autoOverride) state.wideInView = 0;
+  renderPeriods();
+  checkLod();
+}
+$('periods').addEventListener('click', (e) => { if (e.target.closest('#autoLevel')) toggleAutoOverride(); });
+$('periods').addEventListener('keydown', (e) => {
+  if (e.target.closest('#autoLevel') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); toggleAutoOverride(); }
+});
+window.addEventListener('massive:symbol', () => { state.autoOverride = false; state.wideInView = 0; renderPeriods(); });
+
+// From the drawing (DERIVED_MARKS): the wide bars' length in view (0: none), the tag rewritten on a change.
+function noteWideInView(wide) {
+  if ((state.wideInView || 0) === wide) return;
+  state.wideInView = wide;
+  renderPeriods();
 }
 
 // The sessions shown, picked by name (a button cycling through them read "ETH" while it showed the

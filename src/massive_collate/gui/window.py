@@ -28,6 +28,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
 
 from ..calc.derivatives import Model, apply_model, segments
@@ -253,20 +254,22 @@ class WindowReader:
 
     def _intraday_page(self, s, feeds, period, span, session, to_ms, after_ms, since_ms, limit) -> dict:
         base = BASE[period]
-        step, base_ms = UNIT_MS[period] * span, UNIT_MS[base]
+        step = UNIT_MS[period] * span
         if not (step > 0 and limit > 0):  # a window of no width never reaches the data's edge: the loops would not end
             raise ValueError(f"no level {span} {period}")
         with self.engine.lock:
-            edges = [e for e in (self.store.bar_edges(f, s.ticker, base) for f in feeds) if e]
+            # the second levels reach as far as the minutes do: wide candles where no seconds are (_with_wide)
+            edges = [(e[0], e[1] + UNIT_MS[b]) for f in feeds for b in ((base, "minute") if base == "second" else (base,))
+                     for e in (self.store.bar_edges(f, s.ticker, b),) if e]
         if not edges:
             return {"frame": _empty(), "more": False, "newer": False}
-        first, end = min(e[0] for e in edges), max(e[1] for e in edges) + base_ms
+        first, end = min(e[0] for e in edges), max(e[1] for e in edges)
         # Wall-clock time a bar takes, sessions and nights included: the first window's width
         factor = 1.0 if s.around_the_clock else (5.5 if session == "regular" else 2.2)
         if since_ms is not None and end - since_ms > limit * step * factor:
             after_ms, since_ms = since_ms - 1, None  # far behind the newest: a page of newer bars, not years of them
         if since_ms is not None:  # the live tail: from the bar the chart has last, whole
-            bars = self._built(s, feeds, base, period, span, session, since_ms - 2 * step, end)
+            bars = self._shown(s, feeds, base, period, span, session, since_ms - 2 * step, end)
             return {"frame": bars[epoch_ms(bars.index) >= since_ms], "more": False, "newer": False}
         width = limit * step * factor
         if after_ms is not None:  # newer: the bars after the newest the chart has
@@ -275,7 +278,7 @@ class WindowReader:
             after_ms = max(after_ms, first - 1)
             while True:
                 hi = min(end, after_ms + width)
-                bars = self._built(s, feeds, base, period, span, session, after_ms, hi)
+                bars = self._shown(s, feeds, base, period, span, session, after_ms, hi)
                 bars = bars[epoch_ms(bars.index) > after_ms]
                 if len(bars) > limit or hi >= end:
                     break
@@ -287,7 +290,7 @@ class WindowReader:
         hi = min(to_ms, end) if to_ms is not None else end
         while True:
             lo = max(first, hi - width)
-            bars = self._built(s, feeds, base, period, span, session, lo, hi)
+            bars = self._shown(s, feeds, base, period, span, session, lo, hi)
             if len(bars) > limit or lo <= first:
                 break
             width *= 3
@@ -366,6 +369,56 @@ class WindowReader:
             bars.loc[common, COLUMNS] = sent.loc[common, COLUMNS].to_numpy()
             bars.loc[common, "derived"] = False  # ... except where a feed sent this level
         return bars
+
+    def _shown(self, s, feeds, base, period, span, session, lo, hi) -> pd.DataFrame:
+        """_built for the chart's pages: at the second levels, with the minutes that hold no second
+        bar as wide candles (_with_wide). Only the pages: stats, profiles, bricks and replays read
+        the level's own bars."""
+        bars = self._built(s, feeds, base, period, span, session, lo, hi)
+        return self._with_wide(s, feeds, bars, span, session, lo, hi) if base == "second" else bars
+
+    def _with_wide(self, s, feeds, bars, span, session, lo, hi) -> pd.DataFrame:
+        """A second level's bars of [lo, hi) with the minutes that hold no second bar (the night on
+        Blue Ocean from Tiingo, history before the seconds' year) as wide candles: each minute
+        fills its slots of the level (60 at 1 s, 6 at 10 s, 2 at 30 s), so it is as wide as its
+        time and the chart's time axis stays even. Its middle slot is the minute itself (its
+        prices, volume and trades: the view's high and low, the volume pane, sums exact); the
+        others lie flat at its close with no volume, so the chart's own thin candles fall inside
+        the wide one drawn over them (app.js drawWide) and nothing has to be painted out. Every
+        slot carries the minute's prices as wo, wh, wl, wc (the cursor's bar), and `wide`, the
+        minute's length (0 on the level's own bars). The forming minute's slots stop at the
+        present, its middle one then the last of them."""
+        minutes = self._merged(s, feeds, "minute", lo, hi)
+        if minutes is None or not len(minutes):
+            return bars
+        m = resample(minutes, "minute", 1, session, asset=s.asset, utc_days=utc_days(s), session_hours=session_hours(s))
+        t = epoch_ms(m.index)
+        held = np.unique(epoch_ms(bars.index) // 60_000 * 60_000) if len(bars) else np.array([], dtype=np.int64)
+        m, t = m[~np.isin(t, held)], t[~np.isin(t, held)]
+        if not len(m):
+            return bars
+        k = 60 // span
+        offsets = np.tile(np.arange(k, dtype=np.int64) * span * 1000, len(m))
+        rows = np.repeat(np.arange(len(m)), k)
+        ts = t[rows] + offsets
+        keep = (ts >= lo) & (ts < hi) & (ts <= _now_ms())
+        rows, offsets = rows[keep], offsets[keep]
+        wide = m.iloc[rows].copy()
+        wide.index = pd.to_datetime(ts[keep], unit="ms", utc=True).tz_convert(ET)
+        for col, w in (("open", "wo"), ("high", "wh"), ("low", "wl"), ("close", "wc")):
+            wide[w] = wide[col].to_numpy()
+        # the middle slot, or the last one the forming minute has so far
+        last = pd.Series(offsets).groupby(rows).transform("max").to_numpy()
+        flat = offsets != np.minimum((k // 2) * span * 1000, last)
+        close = wide["close"].to_numpy()
+        for col in ("open", "high", "low"):
+            wide.loc[flat, col] = close[flat]
+        wide.loc[flat, ["volume", "turnover", "trades"]] = 0
+        wide["wide"] = 60_000
+        if "derived" not in wide:
+            wide["derived"] = False
+        bars = bars.assign(wide=0) if len(bars) else bars
+        return pd.concat([bars, wide]).sort_index(kind="stable") if len(bars) else wide
 
     def _sent(self, s, feeds, period, span, lo, hi) -> pd.DataFrame | None:
         """The feeds' own bars at the level in [lo, hi), best feed first per time."""

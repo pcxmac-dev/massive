@@ -194,8 +194,21 @@
     const list = chart.getDataList();
     if (!list.length) return null;
     const i = cursorIndex != null && cursorIndex >= 0 && cursorIndex < list.length ? cursorIndex : list.length - 1;
-    const b = list[i];
-    const prev = i > 0 ? list[i - 1] : null;
+    let b = list[i];
+    // a wide bar (a minute drawn across its slots, app.js drawWide): the minute's prices from its slot,
+    // its volume from its middle slot, and its change from the bar before its first
+    let k = i;
+    if (b.wide) {
+      const key = Math.floor(b.timestamp / b.wide);
+      const same = (x) => x?.wide && Math.floor(x.timestamp / b.wide) === key;
+      let z = i;
+      while (k > 0 && same(list[k - 1])) k--;
+      while (z + 1 < list.length && same(list[z + 1])) z++;
+      const full = list.slice(k, z + 1).reduce((m, x) => (x.volume > m.volume ? x : m), list[k]);
+      b = { ...b, open: b.wo, high: b.wh, low: b.wl, close: b.wc, volume: full.volume, turnover: full.turnover,
+            trades: full.trades };
+    }
+    const prev = k > 0 ? list[k - 1] : null;
     const change = prev ? b.close - prev.close : b.close - b.open;
     const base = prev ? prev.close : b.open;
     const next = i + 1 < list.length ? list[i + 1].timestamp : b.timestamp + 60000;
@@ -213,6 +226,11 @@
   }
 
   const t = (ms) => fmtTime(ms);
+  // a bar's time: a wide bar's is its minute's (its slots are the seconds it is drawn across)
+  const barTime = (b) => (b.wide ? Math.floor(b.timestamp / b.wide) * b.wide : b.timestamp);
+  const wideTag = (b) => (b.wide ? ` <span class="derived-tag" title="No ${state.period?.span || 1}-${state.period?.type || 'second'} data here: `
+    + `the ${b.wide % 60000 ? `${b.wide / 1000}-second` : `${b.wide / 60000}-minute`} bar, drawn as wide as its time">`
+    + `${b.wide % 60000 ? `${b.wide / 1000} s` : `${b.wide / 60000} min`} bar</span>` : '');
   const isPrice = () => state.model.kind === 'price';
   const e = window.MassiveIcons.esc;
   // The box sits in the price window's upper right corner, below the roll labels of continuous futures.
@@ -227,9 +245,9 @@
       box.style.top = `${pane.top + (state.meta?.rolls?.length ? 26 : 6)}px`;
       box.style.right = `${(chart.getSize('candle_pane', 'yAxis')?.width || 92) + 6}px`;
       box.innerHTML = `
-        <div><span class="p-muted">Max</span> ${priceText(s.hi?.high)} <span class="p-muted">${s.hi ? e(t(s.hi.timestamp)) : ''}</span>
-          · <span class="p-muted">Min</span> ${priceText(s.lo?.low)} <span class="p-muted">${s.lo ? e(t(s.lo.timestamp)) : ''}</span></div>
-        <div><span class="p-muted">${s.live ? 'Last' : e(t(b.timestamp))}</span>${b.interp
+        <div><span class="p-muted">Max</span> ${priceText(s.hi?.high)} <span class="p-muted">${s.hi ? e(t(barTime(s.hi))) : ''}</span>
+          · <span class="p-muted">Min</span> ${priceText(s.lo?.low)} <span class="p-muted">${s.lo ? e(t(barTime(s.lo))) : ''}</span></div>
+        <div><span class="p-muted">${s.live ? 'Last' : e(t(barTime(b)))}</span>${wideTag(b)}${b.interp
           ? ' <span class="derived-tag interp" title="Interpolated: no data at this interval here; a line between the 1-minute bars\' volume-weighted prices">interpolated*</span>'
           : b.derived ? ' <span class="derived-tag" title="Derived: built here from finer data; no feed sent this candle at this interval">derived*</span>' : ''}
           O ${priceText(b.open)} H ${priceText(b.high)} L ${priceText(b.low)} C ${priceText(b.close)} ${chg}
@@ -241,7 +259,7 @@
       $('pCursor').innerHTML = `
         <h3>${s.live ? 'Last bar' : 'Bar under cursor'}</h3>
         ${kv([
-          ['Time', e(t(b.timestamp))],
+          ['Time', `${e(t(barTime(b)))}${wideTag(b)}`],
           ['Open', priceText(b.open)], ['High', priceText(b.high)], ['Low', priceText(b.low)], ['Close', priceText(b.close)],
           ['Change', chg], ['Range', priceText(s.range)], ['Volume', big(b.volume)],
           isPrice() && s.vwap != null && ['VWAP', priceText(s.vwap)],
@@ -250,8 +268,8 @@
         ])}
         <div class="p-sub">On screen</div>
         ${kv([
-          ['Max', `${priceText(s.hi?.high)} <small>${s.hi ? e(t(s.hi.timestamp)) : ''}</small>`],
-          ['Min', `${priceText(s.lo?.low)} <small>${s.lo ? e(t(s.lo.timestamp)) : ''}</small>`],
+          ['Max', `${priceText(s.hi?.high)} <small>${s.hi ? e(t(barTime(s.hi))) : ''}</small>`],
+          ['Min', `${priceText(s.lo?.low)} <small>${s.lo ? e(t(barTime(s.lo))) : ''}</small>`],
           ['Max − min', priceText(s.hi && s.lo ? s.hi.high - s.lo.low : null)],
         ])}`;
     }

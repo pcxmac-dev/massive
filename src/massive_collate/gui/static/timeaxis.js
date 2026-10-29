@@ -199,10 +199,11 @@
       const t1 = store.dataIndexToTimestamp(to + 1);
       const xOf = (ts) => xAxis.convertToPixel(store.timestampToDataIndex(ts)) - c.getBarSpace().halfBar;
       const dark = !document.body.classList.contains('light');
-      // pre-market a cool blue, after-hours grey: one shade for both made them hard to tell apart
-      const preShade = dark ? 'rgba(10,32,96,0.45)' : 'rgba(20,60,170,0.13)';  // a deep navy
+      // pre-market a cool blue, after-hours grey: one shade for both made them hard to tell apart. The
+      // blue and the violet at half the strength they had (the user, 2026-10-28: "a little too bright")
+      const preShade = dark ? 'rgba(10,32,96,0.225)' : 'rgba(20,60,170,0.065)';  // a deep navy
       const postShade = dark ? 'rgba(120,123,134,0.07)' : 'rgba(120,123,134,0.08)';
-      const nightShade = dark ? 'rgba(90,40,140,0.30)' : 'rgba(110,60,170,0.10)';  // overnight: a violet
+      const nightShade = dark ? 'rgba(90,40,140,0.15)' : 'rgba(110,60,170,0.05)';  // overnight: a violet
       const wide = state.session !== 'regular';  // extended hours or all four sessions
       const now = Date.now();
       const cur = currentSession(sess.list, now);

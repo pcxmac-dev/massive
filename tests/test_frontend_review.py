@@ -299,3 +299,52 @@ def test_the_current_times_clock_and_level_2s_times_follow_the_picked_zone():
         body = _inner(l2, name)
         assert "const zone = pickedZone();" in body and "zoneShort(zone)" in body and " ET`" not in body
     assert "addEventListener('massive:timezone', () => { if (lastProfile) render(lastProfile); })" in l2
+
+
+def test_the_auto_zoom_holds_at_the_datas_finest_sampling_unless_overridden():
+    app = _js("app.js")
+    choose = _function(app, "chooseLevel")
+    # a level stopping short of the window while a coarser one goes on, or a second level seen drawn
+    # wide there, is not chosen; overridden, the second levels reach as far back as the minutes
+    assert "if (!wide && (stopsShort(lv, levels, toMs) || (lv.type === 'second' && seenWide(from, toMs)))) continue;" in choose
+    assert "const wide = state.autoOverride && lv.type === 'second';" in choose
+    assert "Math.min(lv.first, minutesFrom)" in choose
+    short = _function(app, "stopsShort")
+    assert "lv.last + REACH_SLACK_MS < toMs" in short and "o.last > lv.last + REACH_SLACK_MS" in short
+    lod = _function(app, "checkLod")
+    assert "if (!state.autoOverride && cur.type === 'second') noteWide(chart.getDataList(), w.lo, w.hi);" in lod
+    assert "chooseLevel(w.days, w.fromMs, cur, w.toMs)" in lod
+    assert "toMs: last ? last.timestamp" in _function(app, "visibleWindow")
+    # the tag: a click (or Enter/Space) overrides, again holds; a new symbol starts held
+    toggle = _function(app, "toggleAutoOverride")
+    assert "state.autoOverride = !state.autoOverride;" in toggle and "checkLod();" in toggle
+    assert "$('periods').addEventListener('click', (e) => { if (e.target.closest('#autoLevel')) toggleAutoOverride(); });" in app
+    assert "window.addEventListener('massive:symbol', () => { state.autoOverride = false;" in app
+    periods = _function(app, "renderPeriods")
+    assert "const under = state.autoOverride && state.wideInView > 0;" in periods
+    assert "tag.classList.toggle('under', under);" in periods and "tag.setAttribute('aria-pressed'" in periods
+    css = (STATIC / "style.css").read_text(encoding="utf-8")
+    assert ".auto-level.under { color: #f0a030; animation: auto-under" in css
+    assert "@media (prefers-reduced-motion: reduce) { .auto-level.under { animation: none;" in css
+
+
+def test_wide_bars_are_drawn_once_across_their_slots_and_read_as_their_minute():
+    app = _js("app.js")
+    marks = app.split("name: 'DERIVED_MARKS'", 1)[1].split("\n});\n", 1)[0]
+    assert "if (wide && WIDE_TYPES.has(state.chartType)) drawWide(ctx, c, xAxis, yAxis, data, from, to);" in marks
+    assert "noteWideInView(wide);" in marks
+    assert "if (!d?.derived || d.interp || d.wide) continue;" in marks  # no derived rings under wide slots
+    draw = _function(app, "drawWide")
+    assert "Math.floor(data[j + 1].timestamp / d.wide) * d.wide === start" in draw  # one minute's slots together
+    assert "yAxis.convertToPixel(d.wh)" in draw and "fillStyle = plotBackground" not in draw  # nothing painted out
+    panels = _js("panels.js")
+    stats = _inner(panels, "cursorStats")
+    assert "b = { ...b, open: b.wo, high: b.wh, low: b.wl, close: b.wc, volume: full.volume" in stats
+    assert "const prev = k > 0 ? list[k - 1] : null;" in stats  # its change from the bar before its first slot
+    assert "e(t(barTime(b)))" in panels and "e(t(barTime(s.hi)))" in panels
+
+
+def test_the_pre_market_and_overnight_shades_are_at_half_their_old_strength():
+    axis = _js("timeaxis.js")
+    assert "const preShade = dark ? 'rgba(10,32,96,0.225)' : 'rgba(20,60,170,0.065)';" in axis
+    assert "const nightShade = dark ? 'rgba(90,40,140,0.15)' : 'rgba(110,60,170,0.05)';" in axis

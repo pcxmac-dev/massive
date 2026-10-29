@@ -347,3 +347,39 @@ def test_hours_come_from_half_hours_read_once_a_month(store, monkeypatch):
     reads.clear()
     reader.page("*", "SPCX", "minute", 30, "extended", limit=1000)
     assert sorted(reads) == [("minute", september), ("minute", october)]
+
+
+def test_minutes_without_seconds_are_wide_candles_at_the_second_levels(store):
+    """Seconds for two minutes of the last day's evening; the minutes after them (as Blue Ocean's night from
+    Tiingo: minutes only) fill their slots at 1, 10 and 30 s: as wide as their time, the middle slot the
+    minute itself, the others flat at its close, each carrying its prices. Minutes that hold seconds
+    are not doubled."""
+    day = DAYS[-1]
+    secs = [{"t": _ms(f"{day} 19:50") + i * 1000, "o": 20.0, "h": 20.1, "l": 19.9, "c": 20.05, "v": 5.0, "vw": 20.0, "n": 1}
+            for i in range(0, 120, 3)]  # 19:50:00 to 19:51:57, every third second
+    store.upsert_bars("massive", "SPCX", "second", 1, secs)
+    night = [{"t": _ms(f"{day} 20:00") + i * 60_000, "o": 21.0 + i, "h": 21.5 + i, "l": 20.5 + i, "c": 21.2 + i,
+              "v": 600.0, "vw": 21.0 + i, "n": 6} for i in range(3)]  # 20:00 to 20:02: no seconds
+    store.upsert_bars("tiingoboats", "SPCX", "minute", 1, night)
+    store.watch("tiingoboats", ["SPCX"], "minute")
+    reader = WindowReader(BarEngine(store))
+    page = reader.page("*", "SPCX", "second", 1, "all", limit=5000)["bars"]
+    wide = [b for b in page if b.get("wide") and b["timestamp"] >= _ms(f"{day} 20:00")]
+    assert len(wide) == 180 and {b["wide"] for b in wide} == {60_000}  # three minutes, 60 slots each
+    first = [b for b in wide if b["timestamp"] < _ms(f"{day} 20:01")]
+    assert [b["timestamp"] for b in first] == [_ms(f"{day} 20:00") + i * 1000 for i in range(60)]
+    assert {(b["wo"], b["wh"], b["wl"], b["wc"]) for b in first} == {(21.0, 21.5, 20.5, 21.2)}  # the minute, on each
+    middle = first[30]
+    assert (middle["open"], middle["high"], middle["low"], middle["close"], middle["volume"]) == (21.0, 21.5, 20.5, 21.2, 600.0)
+    rest = first[:30] + first[31:]
+    assert {(b["open"], b["high"], b["low"], b["close"], b["volume"]) for b in rest} == {(21.2, 21.2, 21.2, 21.2, 0.0)}  # flat
+    own = [b for b in page if not b.get("wide") and _ms(f"{day} 19:50") <= b["timestamp"] < _ms(f"{day} 19:52")]
+    assert len(own) == 40 and all(b["wide"] == 0 for b in own)  # the minutes 19:50 and 19:51 hold seconds: not wide
+    ten = reader.page("*", "SPCX", "second", 10, "all", limit=5000)["bars"]
+    assert sum(1 for b in ten if b.get("wide") and b["timestamp"] >= _ms(f"{day} 20:00")) == 18  # 6 a minute at 10 s
+    tail = reader.page("*", "SPCX", "second", 1, "all", since_ms=_ms(f"{day} 20:02"))["bars"]
+    assert len(tail) == 60 and tail[0]["close"] == 23.2  # the live tail takes the newest minute's slots
+    assert all(not b.get("wide") for b in reader.page("*", "SPCX", "minute", 1, "all", limit=5000)["bars"])
+    stats_level = reader._built(reader.series("*", "SPCX"), reader.feeds("*", "SPCX"), "second", "second", 1, "all",
+                                _ms(f"{day} 19:00"), _ms(f"{day} 21:00"))
+    assert "wide" not in stats_level and len(stats_level) == 40  # stats and profiles read the seconds only

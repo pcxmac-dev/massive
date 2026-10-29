@@ -328,7 +328,7 @@ def lod_aggregate(bars: pd.DataFrame, k: int) -> pd.DataFrame:
 
 
 EXTRA_COLUMNS = ("yang_start", "yang", "switch", "up", "env_high", "env_low", "dev_sd", "venues_n", "q1", "med", "q3",
-                 "derived", "interp")
+                 "derived", "interp", "wide", "wo", "wh", "wl", "wc")
 # Derived models stored as bars: not feeds of their own in the merged view.
 MODEL_SOURCES = ("composite",)
 # Symbols whose second intervals continue back past their one-second data with values interpolated

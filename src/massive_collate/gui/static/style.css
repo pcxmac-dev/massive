@@ -224,7 +224,14 @@ body.panel-hidden #sidePanel, body.panel-hidden #panelResizer { display: none; }
 .kv dd select { max-width: 100%; }
 .kv dd small { color: var(--muted); }
 .auto-level { font-size: 12px; color: var(--text); padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px;
-  white-space: nowrap; cursor: default; }
+  white-space: nowrap; cursor: pointer; }
+.auto-level:hover { border-color: var(--accent); }
+/* overridden: the zoom goes on to seconds where the data has only minutes (app.js toggleAutoOverride) */
+.auto-level.override { border-style: dashed; border-color: #f0a030; }
+/* ... and below the data's sampling now: the minutes drawn wide among the seconds */
+.auto-level.under { color: #f0a030; animation: auto-under 1s steps(2, jump-none) infinite; }
+@keyframes auto-under { 50% { color: var(--text); border-color: var(--border); background: rgba(240, 160, 48, .18); } }
+@media (prefers-reduced-motion: reduce) { .auto-level.under { animation: none; background: rgba(240, 160, 48, .18); } }
 .auto-detail { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; font-size: 11px; color: var(--muted);
   white-space: nowrap; }
 .auto-detail input { width: 80px; margin: 0; }
