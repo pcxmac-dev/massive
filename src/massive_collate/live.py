@@ -410,9 +410,13 @@ class BoatsPoller:
         return out
 
     def minutes(self, ticker: str, night) -> list[dict]:
-        """The night's minutes so far, the forming one too (oldest first)."""
+        """The night's minutes so far, the forming one too (oldest first). Tiingo reads startDate
+        as a New York date: the night's open's date there. (The open's UTC date, asked before, is
+        the next day in New York, so a night's first four hours came back empty, 2026-10-28.)"""
+        from .sessions import ET
+
         rows = self.client.get(f"/boats/{self.symbol(ticker)}/prices",
-                               {"startDate": night.open.astimezone(timezone.utc).date().isoformat(),
+                               {"startDate": night.open.astimezone(ET).date().isoformat(),
                                 "resampleFreq": "1min", "columns": "open,high,low,close,volume"})
         lo = int(night.open.timestamp() * 1000)
         bars = []
@@ -1012,7 +1016,7 @@ class Recorder:
             quotes = p.quotes(wanted)
             with self._lock:
                 st = self._status[TIINGO_BOATS]
-                st.update(connected=True, symbols=sorted(wanted), note=None)
+                st.update(connected=True, idle=False, error=None, symbols=sorted(wanted), note=None)
                 st["pairs"] = {t: v for t, v in st["pairs"].items() if t in wanted}  # only those open: no list growing
                 for t, q in quotes.items():
                     st["pairs"].setdefault(t, {"trades": 0}).update(q)
