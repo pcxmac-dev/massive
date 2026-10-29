@@ -2,6 +2,8 @@
 replace them when they arrive, and what was known when stays readable."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pandas as pd
 import pytest
 
@@ -279,3 +281,20 @@ def test_the_status_bar_hears_what_is_being_built_while_it_runs(store):
     assert derive_progress(store, now) is None  # not heard from in minutes: over
     store.kv_set(derive.PROGRESS_KEY, "")
     assert derive_progress(store, now) is None
+
+
+def test_a_chain_given_another_frame_is_built_again_over_everything_held_the_others_not(store):
+    """10 s added to the seconds' chain (2026-10-28): a series whose seconds were built before
+    (30 s only) gets its 10 s over all of them at the next build; its minutes are not built again."""
+    secs = [{"t": _ms("2026-10-20 10:00") + i * 1000, "o": 100.0, "h": 101.0, "l": 99.0, "c": 100.5,
+             "v": 1, "vw": 100.0, "n": 1} for i in range(30)]
+    store.upsert_bars("massive", "AAPL", "second", 1, secs)
+    store.upsert_bars("massive", "AAPL", "minute", 1, _minutes("2026-10-20 10:00", 5))
+    store.watch("massive", ["AAPL"], "second")
+    now = str(int(datetime.now(timezone.utc).timestamp() * 1000) + 10 * 60_000)  # past the build's slack
+    store.kv_set(derive.KEY.format("massive", "AAPL", "second"), now)  # built before, under the old chain
+    store.kv_set(derive.KEY.format("massive", "AAPL", "minute"), now)
+    derive.run(store, log=lambda *_: None)
+    count = dict(store._bars("massive").execute("SELECT timespan || multiplier, COUNT(*) FROM built_bars GROUP BY 1").fetchall())
+    assert count.get("second10") == 3 and count.get("second30") == 1
+    assert "minute5" not in count  # the minutes' chain was not built again

@@ -55,6 +55,9 @@ CHAINS = (
 FROM_MINUTES = dict(CHAINS)["minute"]
 STANDARD = (("second", 1), ("minute", 1), *(f for _, frames in CHAINS for f in frames))
 KEY = "derive:v3:{}:{}:{}"  # source, ticker, base -> base bars stored after this (ms) are not built from yet
+# A chain given another frame: its key's version, so its next build is a first one over everything
+# held (the other chains' are not built again). Seconds: 10 s added 2026-10-28.
+CHAIN_VERSIONS = {"second": 2}
 PROGRESS_KEY = "derive:progress"
 CHUNK_DAYS = {"second": 5, "minute": 60}
 SLACK_MS = 60_000  # writers' stored_at can commit out of order: look back a minute
@@ -150,7 +153,7 @@ def build_chain(store, source: str, ticker: str, base: str, asset: str = "stock"
     """Build (or rebuild) the frames above one base frame (CHAINS) for one series from what
     changed since the last build. Returns bars stored."""
     frames = dict(CHAINS)[base]
-    key = KEY.format(source, ticker, base)
+    key = KEY.format(source, ticker, base) + (f":c{CHAIN_VERSIONS[base]}" if base in CHAIN_VERSIONS else "")
     started = int(time_module.time() * 1000)
     built_to = int(store.kv_get(key) or -1)
     edges = store.bar_edges(source, ticker, base)
