@@ -506,26 +506,36 @@ def test_every_open_symbol_listens_for_new_bars_while_the_page_is_in_view():
     assert "if (live && !state.stream" not in poll  # not the live symbols only
 
 
-def test_the_open_symbols_logo_stays_while_a_globe_turns_behind_it_like_explorers_throbber():
+def test_the_open_symbols_logo_stays_still_and_a_turning_globe_covers_it_half_the_time():
     """The user (2026-10-28): "use the old school explorer icon + the current symbol icon scheme"; "keep the
     status on the bottom, but lets animate the current symbol icon"; "i need the appearance of a sphere
     rotating"; "its gotta look just as smooth"; "blue and gold like, ... centers on the current time zone";
     "use night and day"; "night globe with cities lights or day globe like the IE 3 one"; "the symbol icon
-    doesn't really move, its more or less the globe rotating in its place"."""
+    doesn't really move, its more or less the globe rotating in its place"; "the globe when flying by didn't
+    completely obscure the icon, it should"; "half icon time half globe moving time"."""
     js = _js("throbber.js")
     assert "const FETCHING = new Set(['waiting', 'downloading']);" in js  # its fetch queued or under way
-    assert "const TURN_MS = 2300;" in js and "const LOGO_SCALE = 0.6;" in js
+    assert "const TURN_MS = 2300;" in js and "const COVER_MS = 120;" in js
+    assert "LOGO_SCALE" not in js  # the logo is never drawn small in front of the globe any more
     assert "const OCEAN = [16, 52, 150], LAND = [226, 176, 62]" in js  # blue and gold by day
     sphere = _inner(js, "drawSphere")
     assert "const lon = home + ((v + c.lon) * 180) / Math.PI;" in sphere  # centred on the picked zone's meridian
     assert "const h = c.sinLat * sun.sinLat + c.cl * sun.cosLat * Math.cos((lon - sun.lon) * RAD);" in sphere  # the Sun now
     assert "const glow = (1 - day) * gridAt(lights, lon, c.lat);" in sphere  # its cities lit at night
-    assert "g.drawImage(entry.logo.canvas, at, at, w, w);" in sphere  # the logo still, in front
+    # the logo flat and whole underneath; the globe over it, opaque once in: it hides the logo completely
+    assert sphere.index("if (s < 1) g.drawImage(entry.logo.canvas, 0, 0);") < sphere.index("g.drawImage(entry.globe, 0, 0);")
+    assert "px[o + 3] = Math.round(255 * c.edge);" in sphere and "g.globalAlpha = s;" in sphere
+    assert "if (s <= 0) return;" in sphere  # the logo's half: no globe drawn at all
     assert "Math.min(zoneOffset(zone, new Date(Date.UTC(y, 0, 1))), zoneOffset(zone, new Date(Date.UTC(y, 6, 1))))" in js
     draw = _inner(js, "draw")
     assert "frame = requestAnimationFrame(draw);" in draw  # every screen frame: as smooth as the screen draws
-    assert "const turns = (now - began) / TURN_MS;" in draw  # the angle from the time
-    assert "else if (!ending && Math.floor(turns) > Math.floor(angle)) ending = now;" in draw  # done: home, then going
+    assert "const cycle = Math.floor(run / TURN_MS), t = (run % TURN_MS) / TURN_MS;" in draw  # the phase from the time
+    # half the globe, half the logo; done: the globe's half finishes and it stops on the logo
+    assert "const s = t < 0.5 ? Math.min(1, ms / COVER_MS, (half - ms) / COVER_MS) : 0;" in draw
+    assert "else if (t >= 0.5 || cycle > held) { turning = false; show(false); return; }" in draw
+    assert "const v = Math.PI * (0.5 - 2 * t);" in draw  # half a turn while it shows, the zone's meridian halfway
+    # its check every 250 ms can come before app.js has run: no ReferenceError while the page loads
+    assert _inner(js, "busy").split("{", 1)[1].lstrip().startswith("if (typeof state === 'undefined') return false;")
     assert "if (front.dataset.html !== html) { front.innerHTML = html; front.dataset.html = html; entry.logo = null; }" in js
     assert "window.Throbber = { face, pulse, busy, preview: setPreview };" in js
     html = (STATIC / "index.html").read_text(encoding="utf-8")

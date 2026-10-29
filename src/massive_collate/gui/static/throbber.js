@@ -1,31 +1,31 @@
 'use strict';
-/* The open symbol's logo as a throbber, after Internet Explorer 3's: its "e" held still in front of a
-   globe turning in its place (the user, 2026-10-28: "use the old school explorer icon + the current
-   symbol icon scheme"; "keep the status on the bottom, but lets animate the current symbol icon"; "i
-   need the appearance of a sphere rotating"; "its gotta look just as smooth"; "blue and gold like, but
-   make sure that it centers on the current time zone so that it fades on both sides of the user's
-   location"; "use night and day, to reflect the current time"; "like night globe with cities lights or
-   day globe like the IE 3 one"; "the symbol icon doesn't really move, its more or less the globe
-   rotating in its place").
+/* The open symbol's logo as a throbber, after Internet Explorer 3's: its logo held still, and a globe
+   turning in its place over it half the time (the user, 2026-10-28: "use the old school explorer icon +
+   the current symbol icon scheme"; "keep the status on the bottom, but lets animate the current symbol
+   icon"; "i need the appearance of a sphere rotating"; "its gotta look just as smooth"; "blue and gold
+   like, but make sure that it centers on the current time zone so that it fades on both sides of the
+   user's location"; "use night and day, to reflect the current time"; "like night globe with cities
+   lights or day globe like the IE 3 one"; "the symbol icon doesn't really move, its more or less the
+   globe rotating in its place"; "the globe when flying by didn't completely obscure the icon, it should";
+   "half icon time half globe moving time").
 
    Wherever the logo shows (the symbol button at the top left, the Stock rail button), while the symbol
-   updates the logo draws in to the middle (LOGO_SCALE of its size, a soft shadow under it) and behind
-   it the Earth turns in its place as the Earth turns, once every TURN_MS: by day in Explorer's style,
-   blue oceans and gold land, glossy (drawn here from the Markets view's map: Explorer's own picture is
-   Microsoft's); by night where the Sun is down now, dark, its cities lit; its middle the picked time
-   zone's meridian (homeLon) when it starts and ends, lit from the front so it is brightest there and
-   fades to both sides. Every screen frame is drawn pixel by pixel with smooth edges, the angle from the
-   time. When the update is done the globe finishes its turn, home again, and fades as the logo grows back
-   to the flat logo. Updating: its fetch queued or under way (the status bar's job, activity.js), or new
-   bars just in (pulse: app.js, each stream message or poll that brought some; at least one whole turn).
-   With reduced motion asked for nothing turns: a ring. */
+   updates each TURN_MS is half the globe and half the logo: the globe comes over the logo (COVER_MS),
+   covers it completely while the Earth turns in its place as the Earth turns, half a turn, and goes,
+   leaving the logo, still, for the other half. By day in Explorer's style, blue oceans and gold land,
+   glossy (drawn here from the Markets view's map: Explorer's own picture is Microsoft's); by night where
+   the Sun is down now, dark, its cities lit; its middle the picked time zone's meridian (homeLon) halfway
+   through, lit from the front so it is brightest there and fades to both sides. Every screen frame is
+   drawn pixel by pixel with smooth edges, the angle from the time. When the update is done it stops on
+   the logo: the globe's half finishes first. Updating: its fetch queued or under way (the status bar's
+   job, activity.js), or new bars just in (pulse: app.js, each stream message or poll that brought some;
+   at least one whole TURN_MS). With reduced motion asked for nothing turns: a ring. */
 (() => {
-  const TURN_MS = 2300;          // one turn, as Explorer's (the user's reference: tenor.com, 2.3 s)
+  const TURN_MS = 2300;          // the globe's half and the logo's, as Explorer's loop (the user's reference: tenor.com, 2.3 s)
+  const COVER_MS = 120;          // the globe coming over the logo, and going
   // By day Explorer's globe, blue and gold: deep royal-blue oceans, gold land, a white gloss. By night
   // (where the Sun is down now: "use night and day, to reflect the current time") dark, its cities lit.
   const OCEAN = [16, 52, 150], LAND = [226, 176, 62], ICE = [246, 226, 168];
-  const LOGO_SCALE = 0.6;         // the logo's size in front of the turning globe
-  const FADE_MS = 260;            // the logo drawing in and growing back, the globe coming and going
   const NIGHT_OCEAN = [4, 9, 26], NIGHT_LAND = [22, 20, 18], CITY = [255, 206, 120];
   const TWILIGHT = 0.1;          // the Sun's height (sine) over which day turns to night: about 6 degrees either side
   const RAD = Math.PI / 180;
@@ -54,12 +54,12 @@
   const HALF = (() => { const h = [LIGHT[0], LIGHT[1], LIGHT[2] + 1], m = Math.hypot(...h); return h.map((c) => c / m); })();
   const FETCHING = new Set(['waiting', 'downloading']);  // the symbol's fetch queued or under way
   const still = window.matchMedia?.('(prefers-reduced-motion: reduce)');
-  const hosts = new Map();       // host element -> { size, logo: {key, canvas} }
+  const hosts = new Map();       // host element -> { size, logo: {key, canvas}, globe: canvas }
   const views = new Map();       // n -> each disc pixel's place on the sphere and its light (they do not turn)
   let land = null;               // the Earth: land cover, 0..1, on a 256 x 128 longitude/latitude grid
   let lights = null;             // its cities' light at night, 0..1, on the same grid
   let pulseUntil = 0;
-  let turning = false, frame = 0, began = 0, angle = 0, ending = 0;
+  let turning = false, frame = 0, began = 0, held = 0;  // held: the last TURN_MS it was updating in
 
   // The picked time zone's standard meridian (degrees): its offset from UTC out of daylight saving, 15
   // degrees an hour (Los Angeles: -120). The Earth's half is centred on it.
@@ -189,8 +189,8 @@
     return c;
   }
 
-  // One frame: the Earth facing `v` radians east of the time zone's meridian, `s` of the way in (0: only
-  // the flat logo; 1: the globe whole, the logo LOGO_SCALE of its size in front).
+  // One frame: the logo, flat, and over it the Earth facing `v` radians east of the time zone's meridian,
+  // `s` of the way in (0: the logo alone; 1: the globe whole, the logo covered completely).
   function drawSphere(canvas, entry, front, v, s) {
     const dpr = Math.min(4, Math.max(1, window.devicePixelRatio || 1));
     const n = Math.round(entry.size * dpr);
@@ -198,7 +198,12 @@
     const key = `${n}|${front.dataset.html}|${front.querySelector('img.sym-img')?.complete ? 1 : 0}`;
     if (entry.logo?.key !== key) entry.logo = { key, canvas: logoCanvas(front, n) };
     const g = canvas.getContext('2d');
-    const img = g.createImageData(n, n), px = img.data;
+    g.clearRect(0, 0, n, n);
+    if (s < 1) g.drawImage(entry.logo.canvas, 0, 0);  // none of it at the limb once the globe is whole
+    if (s <= 0) return;
+    if (entry.globe?.width !== n) { entry.globe = document.createElement('canvas'); entry.globe.width = entry.globe.height = n; }
+    const eg = entry.globe.getContext('2d');
+    const img = eg.createImageData(n, n), px = img.data;
     const home = homeLon();                // its middle the picked time zone's meridian
     const sun = sunNow();                  // where the Sun is overhead now: day and night
     const col = [0, 0, 0];
@@ -221,16 +226,12 @@
         const atmosphere = ch === 2 ? 120 : ch === 1 ? 70 : 30;  // a blue haze at the limb
         px[o + ch] = Math.min(255, col[ch] * c.light + 255 * shine + atmosphere * c.rim * 0.6 + CITY[ch] * glow);
       }
-      px[o + 3] = Math.round(255 * c.edge * s);
+      px[o + 3] = Math.round(255 * c.edge);
     }
-    g.putImageData(img, 0, 0);
-    // the logo in front, still: drawing in to LOGO_SCALE as the globe comes, back to whole as it goes
-    const w = n * (1 - (1 - LOGO_SCALE) * s), at = (n - w) / 2;
-    g.save();
-    g.shadowColor = `rgba(0, 0, 0, ${0.6 * s})`;
-    g.shadowBlur = n * 0.08 * s;
-    g.drawImage(entry.logo.canvas, at, at, w, w);
-    g.restore();
+    eg.putImageData(img, 0, 0);
+    g.globalAlpha = s;  // the globe over the logo, opaque once in: it hides it completely
+    g.drawImage(entry.globe, 0, 0);
+    g.globalAlpha = 1;
   }
 
   // Where the Sun is overhead now (globeicon.js: noon's longitude, today's declination), or at a preview's time.
@@ -278,6 +279,7 @@
   function pulse() { pulseUntil = Math.max(pulseUntil, Date.now() + TURN_MS); watch(); }
 
   function busy() {
+    if (typeof state === 'undefined') return false;  // app.js not run yet: the page still loading
     const job = window.Activity?.job;
     const fetching = !!job && job.ticker === state.ticker && FETCHING.has(job.phase);
     return !!state.ticker && (fetching || Date.now() < pulseUntil);
@@ -290,19 +292,21 @@
     }
   }
 
-  // Every screen frame while it turns: the angle from the time, so it is as smooth as the screen draws.
+  // Every screen frame while it runs: the first half of each TURN_MS the globe over the logo, the second
+  // the logo; the phase from the time, so it is as smooth as the screen draws.
   function draw(now) {
     frame = 0;
     if (preview) { turning = false; return; }  // a look at it holds its frame
-    if (document.hidden) { turning = false; ending = 0; show(false); return; }
-    const turns = (now - began) / TURN_MS;
-    const on = busy();
-    if (on) ending = 0;  // updating again: the globe stays
-    else if (!ending && Math.floor(turns) > Math.floor(angle)) ending = now;  // done, a turn ended: home, and going
-    angle = turns;
-    const s = Math.min(1, (now - began) / FADE_MS) * (ending ? Math.max(0, 1 - (now - ending) / FADE_MS) : 1);
-    if (ending && s <= 0) { turning = false; ending = 0; show(false); return; }
-    const v = ending ? 0 : -2 * Math.PI * (turns % 1);  // the Earth turns eastward: the surface moves left to right
+    if (document.hidden) { turning = false; show(false); return; }
+    const run = Math.max(0, now - began);  // a frame's time can be a little before the start
+    const cycle = Math.floor(run / TURN_MS), t = (run % TURN_MS) / TURN_MS;
+    if (busy()) held = cycle;
+    else if (t >= 0.5 || cycle > held) { turning = false; show(false); return; }  // done: it stops on the logo
+    const ms = t * TURN_MS, half = TURN_MS / 2;
+    const s = t < 0.5 ? Math.min(1, ms / COVER_MS, (half - ms) / COVER_MS) : 0;  // the globe's half
+    // half a turn while it shows, the zone's meridian halfway; the Earth turns eastward: the surface moves
+    // left to right
+    const v = Math.PI * (0.5 - 2 * t);
     for (const [host, entry] of hosts) {
       if (!host.isConnected) { hosts.delete(host); continue; }
       const box = host.querySelector(':scope > .throb');
@@ -322,8 +326,7 @@
     if (on && !turning && !document.hidden && !preview) {
       turning = true;
       began = performance.now();
-      angle = 0;
-      ending = 0;
+      held = 0;
       frame = requestAnimationFrame(draw);
     }
   }
