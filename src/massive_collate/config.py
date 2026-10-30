@@ -338,6 +338,45 @@ def saved_user_keys() -> dict[str, str]:
         return {}
 
 
+def save_user_variable(name: str, value: str | None, registry=None) -> None:
+    """Save one of the user's environment variables (None: remove it) where tools/set-key.ps1 saves
+    them, the Windows registry's user Environment key, and in this process's environment: processes
+    started from now on read it, and this one at once (its own environment wins over the saved
+    variables in load_settings). `registry`: winreg, or a stand-in in tests. Windows only."""
+    real = registry is None
+    if real:
+        if os.name != "nt":
+            raise ConfigError("saving a setting needs Windows' user environment variables: set it in .env")
+        import winreg as registry
+    with registry.OpenKey(registry.HKEY_CURRENT_USER, "Environment", 0, registry.KEY_SET_VALUE) as key:
+        if value is None:
+            try:
+                registry.DeleteValue(key, name)
+            except FileNotFoundError:
+                pass
+        else:
+            registry.SetValueEx(key, name, 0, registry.REG_SZ, value)
+    if value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = value
+    if real:
+        _announce_environment()
+
+
+def _announce_environment() -> None:
+    """Tell Windows the user's environment changed (as [Environment]::SetEnvironmentVariable does),
+    so programs started from Explorer see it; best effort."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        result = wintypes.DWORD()
+        ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x001A, 0, "Environment", 0x0002, 2000, ctypes.byref(result))
+    except Exception:  # noqa: BLE001 - the variable is saved either way
+        pass
+
+
 def load_settings(
     env: Mapping[str, str] | None = None,
     env_file: Path | None = Path(".env"),

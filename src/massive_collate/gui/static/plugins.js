@@ -6,6 +6,8 @@
    scan with a Rescan; on the right its part in the delivery scheme (the eras it delivers or stands
    by for), its requests today, the symbols it watches, its keys (set or not, never their values).
    Each plugin refreshes its own plan info: a rescan asks the provider what the key really gets.
+   A plan its scan cannot tell (Tiingo's Power from Commercial) is chosen here: each plan variable
+   is a choice, saved like the key script saves it (POST /api/plugins/plan); keys stay in the script.
    Below them the publishers (news and publications: publications.py), each an agency's or a
    vendor's plugin: its feeds with their last and next reads, its release schedule, its scrape
    checks, its limits as last verified with a Recheck, and a Pause.
@@ -72,6 +74,24 @@
     setTimeout(load, 1_000);
   }
 
+  async function choosePlan(select) {
+    const p = data.plugins.find((x) => x.name === select.dataset.planPlugin);
+    const variable = select.dataset.var, value = select.value || null;
+    const ask = value
+      ? `Use ${variable}=${value}? ${p.title} will keep to that plan's limits, in the app and the sync: choose only the plan you pay for.`
+      : `Let ${p.title}'s scan or its default decide ${variable} again?`;
+    if (!window.confirm(ask)) { render(); return; }
+    note = '';
+    try {
+      const res = await fetch('/api/plugins/plan', { method: 'POST', headers: WRITE_HEADERS,
+        body: JSON.stringify({ plugin: p.name, variable, value }) });
+      const out = await res.json().catch(() => ({}));
+      note = res.ok ? `${variable} ${value ? `set to ${value}` : 'left to its scan or default'}: the app uses it now, the sync from its next run.`
+        : out.error || res.statusText;
+    } catch (err) { note = String(err.message || err); }
+    await load();
+  }
+
   async function post(path, done) {
     note = '';
     try {
@@ -106,23 +126,36 @@
   }
 
   // -- middle: the plugin picked -------------------------------------------------------------
+  // a plan variable with choices is a choice: "automatic" leaves it to the scan or the default
+  function planCell(p, v) {
+    if (!v.choices.length) return `<b>${esc(v.value ?? '–')}</b>`;
+    const found = p.plan.found?.[v.name];
+    const auto = `automatic: ${found || v.choices[0]} (${found ? 'its scan' : 'the default'})`;
+    const mine = v.origin === 'you';
+    return `<select class="pl-choose" data-plan-plugin="${esc(p.name)}" data-var="${esc(v.name)}"${data.offline
+      ? ' disabled title="This offline copy of the app saves no settings"' : ''}>
+        <option value=""${mine ? '' : ' selected'}>${esc(auto)}</option>
+        ${v.choices.map((c) => `<option value="${esc(c)}"${mine && v.value === c ? ' selected' : ''}>${esc(c)}</option>`).join('')}
+      </select>`;
+  }
+
   function planHtml(p) {
     const name = p.name;
-    const rows = p.plan.vars.map((v) => `<tr><td><code>${esc(v.name)}</code></td><td><b>${esc(v.value ?? '–')}</b></td>
-        <td class="pl-origin pl-${esc(v.origin)}">${esc(ORIGIN[v.origin])}</td>
-        <td class="p-muted">${esc(v.choices.join(' · '))}</td></tr>`).join('');
+    const rows = p.plan.vars.map((v) => `<tr><td><code>${esc(v.name)}</code></td><td>${planCell(p, v)}</td>
+        <td class="pl-origin pl-${esc(v.origin)}">${esc(ORIGIN[v.origin])}</td></tr>`).join('');
     const differs = p.plan.differs.map((d) => `<div class="pl-warn">Your <code>${esc(d.name)}</code> is <b>${esc(d.yours)}</b>,
         but its scan found <b>${esc(d.found)}</b>. Yours is used; change it if the scan is right.</div>`).join('');
     const found = Object.entries(p.plan.found || {});
     return `<h4>Plan</h4>
-      ${rows ? `<table class="act-table ex-mini pl-plan"><thead><tr><th>Variable</th><th>Value</th><th>From</th><th>Choices</th></tr></thead><tbody>${rows}</tbody></table>`
+      ${rows ? `<table class="act-table ex-mini pl-plan"><thead><tr><th>Variable</th><th>Plan</th><th>From</th></tr></thead><tbody>${rows}</tbody></table>`
         : `<div class="p-muted small">One fixed plan: ${esc(p.plan.tier)}.</div>`}
       ${found.length ? `<div class="p-muted small">Its last scan found ${found.map(([k, v]) => `<code>${esc(k)}=${esc(v)}</code>${
         p.plan.alike?.[k]?.length ? ` (or ${p.plan.alike[k].map(esc).join(', ')}: their answers are the same, so the lower limits are used)` : ''}`).join(', ')}:
         used wherever you have not set it yourself.</div>` : ''}
       ${differs}
       ${p.plan.note ? `<div class="pl-note">${esc(p.plan.note)}.</div>` : ''}
-      ${rows ? `<div class="p-muted small">To set a plan or a key: <code>${esc(data.keyScript)} ${esc(name)}</code></div>` : ''}`;
+      ${rows ? `<div class="p-muted small">Choose a plan above: it is saved as your user environment variable. Keys are set
+        with the key script: <code>${esc(data.keyScript)} ${esc(name)}</code></div>` : ''}`;
   }
 
   function limitsHtml(p) {
@@ -293,6 +326,9 @@
     box.querySelector('.ex-list').scrollTop = scrolled;
   }
 
+  box.addEventListener('change', (e) => {
+    if (e.target.matches('select.pl-choose')) choosePlan(e.target);
+  });
   box.addEventListener('click', (e) => {
     const t = e.target.closest('[data-plugin],[data-rescan],[data-recheck],[data-pause]');
     if (!t || t.disabled) return;

@@ -54,6 +54,9 @@ Working notes so work can resume in a fresh session. Newest first.
   the derived frames once an hour; a symbol opened in the chart fetches at once on the feeds it
   needs that are idle. A sync from before this change still holds `massive.lock`: the new hourly
   syncs start no feed until it ends.
+- **Plans chosen in the app** (2026-10-29): the Plugins view's Plan dropdowns save a plugin's plan
+  variable like the key script (TIINGO_PLAN=commercial is the user's, set 2026-10-29). Direction (the
+  user): plugins will eventually live in their own repositories, each with its own version.
 - **Plugins find their own plan; the Plugins view** (rail: a plug; docs/ARCHITECTURE.md, "Each
   plugin refreshes its own plan info", "The Plugins view"): scans may name the plan (Massive's
   stocks plan, Alpaca's), applied where the user set none; scans on each chart app start, weekly,

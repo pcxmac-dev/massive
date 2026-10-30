@@ -739,6 +739,32 @@ class ChartApp:
         self._plugins_cache = None
         return {"started": True, "name": name, "pid": proc.pid}
 
+    def set_plan(self, plugin: str, variable: str, value: str | None) -> dict:
+        """A plugin's plan chosen in the Plugins view (the user, 2026-10-29: "let me choose also on
+        the plugin, in the app"): saved like the key script saves it (a user environment variable,
+        config.save_user_variable), or with None removed, leaving it to the plugin's scan or its
+        default. Only a plan variable with choices, to one of them: never a key. The app uses it at
+        its next look at the settings, the sync from its next run."""
+        from ..sources import providers
+
+        if self.settings.offline:
+            raise RuntimeError("offline (MASSIVE_OFFLINE): this copy of the app saves no settings")
+        p = providers().get(plugin)
+        if p is None or variable not in p.plan_choices:
+            raise LookupError(f"{plugin} has no plan variable {variable}")
+        if value is not None:
+            value = str(value).strip().lower()
+            if value not in p.plan_choices[variable]:
+                raise ValueError(f"{variable} is one of {', '.join(p.plan_choices[variable])}")
+        self._save_variable(variable, value)
+        with self._settings_lock:
+            self._settings_at = 0.0  # looked at again on the next request
+        self._plugins_cache = None
+        return {"plugin": plugin, "variable": variable, "value": value}
+
+    def _save_variable(self, name: str, value: str | None) -> None:
+        config.save_user_variable(name, value)
+
     def _spawn(self, args: list[str]):
         """A command of the app in its own windowless process (kept, so it is reaped)."""
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -1695,6 +1721,12 @@ def make_handler(app: ChartApp, port_ref: list[int]):
                     return self._json(app.priority(ticker, me if visit else None), HTTPStatus.ACCEPTED)
                 if method == "POST" and parts == ["", "api", "fetching"]:
                     return self._json(app.set_fetching(body))
+                if method == "POST" and parts == ["", "api", "plugins", "plan"]:
+                    try:
+                        return self._json(app.set_plan(str(body.get("plugin") or ""), str(body.get("variable") or ""),
+                                                       body.get("value") or None))
+                    except RuntimeError as e:
+                        return self._json({"error": str(e)}, HTTPStatus.CONFLICT)
                 if method == "POST" and parts == ["", "api", "plugins", "rescan"]:
                     name = parse_qs(urlparse(self.path).query).get("name", [None])[-1] or None
                     try:

@@ -207,6 +207,15 @@ limits), its requests today, the symbols it watches, its keys (set or not, never
 request ledger: no requests. `POST /api/plugins/rescan[?name=]` runs `capabilities` in a process of
 its own, one at a time; the plans it finds count in the app within SETTINGS_TTL_S.
 
+A plan its scan cannot tell (Tiingo's Power from Commercial) is chosen there (the user, 2026-10-29):
+each plan variable with choices is a dropdown, "automatic" (its scan or its default) or one of its
+choices, confirmed first. `POST /api/plugins/plan` ({plugin, variable, value or null}) saves it where
+the key script saves it, the user's environment variables (`config.save_user_variable`: the
+registry's user Environment key, and the app's own environment, which load_settings ranks above the
+saved variables); null removes it. Only a plugin's own plan variable with choices, to one of them:
+never a key, never a variable without choices. The app uses it at its next look at the settings, the
+sync from its next run. An offline copy refuses: it shares the user's real variables.
+
 ## Which source delivers what (2026-10-27)
 
 The user's order of collection: **#1 daily bars, #2 1-minute bars, #3 1-second bars**. `sourcing.py`

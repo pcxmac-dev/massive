@@ -364,3 +364,140 @@ def test_the_key_script_offers_each_plan_and_a_rescan():
     src = (Path(__file__).resolve().parents[1] / "tools" / "set-key.ps1").read_text(encoding="utf-8")
     assert "function Set-Plan" in src and "-m massive_collate capabilities $p.name" in src
     assert "[switch]$Rescan" in src and "$choices -notcontains $pick" in src
+
+
+class _Registry:
+    """A stand-in for winreg: the user Environment key as a dict."""
+    HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ = "HKCU", 2, 1
+
+    def __init__(self):
+        self.values = {}
+
+    class _Key:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def OpenKey(self, root, path, reserved=0, access=0):
+        assert (root, path, access) == ("HKCU", "Environment", 2)
+        return self._Key()
+
+    def SetValueEx(self, key, name, reserved, kind, value):
+        self.values[name] = value
+
+    def DeleteValue(self, key, name):
+        if name not in self.values:
+            raise FileNotFoundError(name)
+        del self.values[name]
+
+
+def test_a_chosen_plan_is_saved_where_the_key_script_saves_it():
+    import os
+
+    from massive_collate.config import save_user_variable
+
+    reg = _Registry()
+    save_user_variable("TIINGO_PLAN", "commercial", registry=reg)
+    assert reg.values == {"TIINGO_PLAN": "commercial"} and os.environ["TIINGO_PLAN"] == "commercial"  # this process too
+    save_user_variable("TIINGO_PLAN", None, registry=reg)
+    assert reg.values == {} and "TIINGO_PLAN" not in os.environ
+    save_user_variable("TIINGO_PLAN", None, registry=reg)  # removing one not set: nothing to do
+
+
+def _choosing_app(tmp_path, monkeypatch, offline=False):
+    from massive_collate import config
+    from massive_collate.gui.server import ChartApp
+
+    env = {**KEYS, "TIINGO_API_KEY": "t", "MASSIVE_DB": str(tmp_path / "m.db"), **({"MASSIVE_OFFLINE": "1"} if offline else {})}
+    saved: dict[str, str] = {}
+    monkeypatch.setattr(config, "saved_user_keys", lambda: dict(saved))
+    store = Store(tmp_path / "m.db", check_same_thread=False)
+    app = ChartApp(store, settings=load_settings(env=env, env_file=None),
+                   reload_settings=lambda: load_settings(env={**env, **saved}, env_file=None))
+    wrote = []
+
+    def save(name, value):
+        wrote.append((name, value))
+        saved.pop(name, None) if value is None else saved.__setitem__(name, value)
+
+    app._save_variable = save  # never the real registry in a test
+    return store, app, wrote
+
+
+def test_the_plugins_view_chooses_a_plan_the_scan_cannot_tell(tmp_path, monkeypatch):
+    from massive_collate.sources.plugins import tiingo
+
+    store, app, wrote = _choosing_app(tmp_path, monkeypatch)
+    try:
+        assert tiingo.plan_of(app.settings) == "starter"
+        assert app.set_plan("tiingo", "TIINGO_PLAN", " Commercial ") == {"plugin": "tiingo", "variable": "TIINGO_PLAN",
+                                                                         "value": "commercial"}
+        assert wrote == [("TIINGO_PLAN", "commercial")]
+        assert tiingo.plan_of(app.settings) == "commercial"  # at the app's next look, not after SETTINGS_TTL_S
+        assert app.settings.for_source("tiingo").max_requests_per_day == 142_500
+        t = next(p for p in app.plugins()["plugins"] if p["name"] == "tiingo")
+        assert t["plan"]["vars"][0] | {} == {"name": "TIINGO_PLAN", "value": "commercial", "origin": "you",
+                                             "choices": ["starter", "power", "commercial"]}
+        app.set_plan("tiingo", "TIINGO_PLAN", None)  # automatic: the scan or the default again
+        assert wrote[-1] == ("TIINGO_PLAN", None) and tiingo.plan_of(app.settings) == "starter"
+        with pytest.raises(ValueError):
+            app.set_plan("tiingo", "TIINGO_PLAN", "gold")
+        for plugin, variable in (("tiingo", "TIINGO_API_KEY"), ("bitstamp", "TIINGO_PLAN"), ("nowhere", "X"),
+                                 ("massive", "MASSIVE_MAX_REQUESTS_PER_DAY")):
+            with pytest.raises(LookupError):
+                app.set_plan(plugin, variable, "x")  # never a key, nor a variable without choices
+        assert len(wrote) == 2
+    finally:
+        store.close()
+
+
+def test_an_offline_copy_saves_no_plan(tmp_path, monkeypatch):
+    store, app, wrote = _choosing_app(tmp_path, monkeypatch, offline=True)
+    try:
+        with pytest.raises(RuntimeError, match="saves no settings"):
+            app.set_plan("tiingo", "TIINGO_PLAN", "commercial")  # it shares your real user variables
+        assert wrote == []
+    finally:
+        store.close()
+
+
+def test_the_plan_route_takes_only_this_apps_pages(tmp_path, monkeypatch):
+    import threading
+    from http.client import HTTPConnection
+    from http.server import ThreadingHTTPServer
+
+    from massive_collate.gui.server import make_handler
+
+    store, app, wrote = _choosing_app(tmp_path, monkeypatch)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app, [0]))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    port = httpd.server_address[1]
+
+    def post(body, header=True):
+        c = HTTPConnection("127.0.0.1", port)
+        headers = {"Host": f"127.0.0.1:{port}", "Content-Type": "application/json", **({"X-Massive-Charts": "1"} if header else {})}
+        c.request("POST", "/api/plugins/plan", body=json.dumps(body), headers=headers)
+        r = c.getresponse()
+        raw = r.read()
+        return r.status, json.loads(raw) if r.getheader("Content-Type", "").startswith("application/json") else raw
+
+    try:
+        assert post({"plugin": "tiingo", "variable": "TIINGO_PLAN", "value": "power"}, header=False)[0] == 403
+        assert wrote == []
+        status, out = post({"plugin": "tiingo", "variable": "TIINGO_PLAN", "value": "power"})
+        assert status == 200 and out["value"] == "power" and wrote == [("TIINGO_PLAN", "power")]
+        assert post({"plugin": "tiingo", "variable": "TIINGO_PLAN", "value": None})[1]["value"] is None
+        assert post({"plugin": "tiingo", "variable": "TIINGO_PLAN", "value": "gold"})[0] == 400
+        assert post({"plugin": "tiingo", "variable": "TIINGO_API_KEY", "value": "k"})[0] == 404
+    finally:
+        httpd.shutdown()
+        store.close()
+
+
+def test_the_page_offers_each_plan_as_a_choice():
+    static = Path(__file__).resolve().parents[1] / "src" / "massive_collate" / "gui" / "static"
+    js = (static / "plugins.js").read_text(encoding="utf-8")
+    assert "/api/plugins/plan" in js and "select.pl-choose" in js and "window.confirm(ask)" in js
+    assert "This offline copy of the app saves no settings" in js and "headers: WRITE_HEADERS" in js
