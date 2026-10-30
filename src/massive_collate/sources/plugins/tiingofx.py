@@ -1,6 +1,6 @@
 """Tiingo's forex (tiingo.com): currency pairs' 1-minute bars from 2020, with the Tiingo key. A feed
 of its own (its database file, its watch rows), kept up to date, on Tiingo's limits: one account, so
-one rate window and one daily cap for both feeds, as Blue Ocean shares Alpaca's (boats.py). Its data
+one rate window and one daily cap for both feeds, as Blue Ocean shares Alpaca's (alpaca.py's BOATS). Its data
 is Tiingo's own (its own market here), not a copy of Massive's currencies. Taken to spend the paid
 plan's allowance, which the stocks' daily bars leave almost all unused (the user, 2026-10-28)."""
 from __future__ import annotations

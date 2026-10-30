@@ -1,13 +1,22 @@
-"""Alpaca (alpaca.markets): US stocks with keys (SIP from 2016, IEX live), crypto without.
+"""Alpaca (alpaca.markets): US stocks with keys (SIP from 2016, IEX live), crypto without; and
+Blue Ocean's overnight session through the same keys, a feed of its own (BOATS).
 
 Its scan finds the plan: Algo Trader Plus serves the consolidated tape's latest 15 minutes, Basic
-refuses them; it sets ALPACA_PLAN where you have not."""
+refuses them; it sets ALPACA_PLAN where you have not.
+
+Blue Ocean ATS (blueocean-tech.io) through Alpaca (the user, 2026-10-29: "the Blue Ocean plugin is
+part of alpaca"): US stocks overnight, 20:00-04:00 ET, Sunday to Thursday nights; the fourth session
+(sessions.py). Its own market, the only venue trading then, so its own feed (`boats`: its database,
+ledgers and watchlist rows), listed and rescanned inside this plugin (Provider.part_of). It uses
+Alpaca's keys and shares Alpaca's limits (the same account): one rate window and one daily cap for
+both feeds, so together they stay within the free Basic plan. (Tiingo has it too, as a paid add-on:
+tiingo.py's scan reports it.)"""
 from __future__ import annotations
 
 from dataclasses import replace
 
 from ...config import ALPACA_TIERS, ConfigError
-from ..alpaca import TRADING_URLS, AlpacaClient, AlpacaSource
+from ..alpaca import PAGE_LIMIT, TRADING_URLS, AlpacaClient, AlpacaSource, BoatsSource
 from ..registry import KeyVar, Provider, Scanned, limiter, machine_caps
 
 
@@ -53,10 +62,11 @@ def scan(source) -> list[tuple[str, bool, str]] | Scanned:
     return Scanned(tuple(rows), {"ALPACA_PLAN": plan})
 
 
-PLUGIN = Provider(
-    version="1.0.0", api="1.0",  # its own release, and the plugin contract it was written for
+ALPACA = Provider(
+    version="1.1.0", api="1.1",  # its own release, and the plugin contract it was written for
     name="alpaca", title="Alpaca", build=build, assets=frozenset({"stock", "crypto"}), order=10,
-    about="US stocks (SIP from 2016, the session up to 15 min ago, IEX live) with keys; crypto without",
+    about="US stocks (SIP from 2016, the session up to 15 min ago, IEX live; overnight on Blue Ocean) with keys; "
+          "crypto without",
     keys=(KeyVar("ALPACA_API_KEY_ID", "key ID", ("APCA_API_KEY_ID",)),
           KeyVar("ALPACA_API_SECRET_KEY", "secret key", ("APCA_API_SECRET_KEY",))),
     keyless=frozenset({"crypto"}), signup="alpaca.markets: a paper account's API keys",
@@ -72,3 +82,39 @@ PLUGIN = Provider(
     missing_keys_chip="stocks need keys",
     view=view, has_keys=lambda s: bool(s.alpaca and s.alpaca.has_keys), markets=markets, scan=scan,
 )
+
+
+def build_boats(settings, request_budget):
+    a = settings.alpaca
+    if a is None:
+        raise ConfigError("Alpaca settings missing")
+    # Alpaca's window and day cap, held for the machine under Alpaca's name: one account's limits
+    client = AlpacaClient(a.key_id, a.secret_key, trading_url=TRADING_URLS[a.paper],
+                          rate_limiter=limiter("alpaca", settings, a.key_id), request_budget=request_budget)
+    return BoatsSource(machine_caps(client, "alpaca", settings, a.key_id), realtime=a.tier.name == "alpaca-plus")
+
+
+def boats_scan(source) -> list[tuple[str, bool, str]]:
+    """What the plan gives Blue Ocean (one request): last week's overnight minute bars of a busy stock."""
+    ok = source.is_entitled("minute", "AAPL", "stock")
+    return [("stock minute bars overnight (feed=boats)", ok,
+             "Alpaca Basic: history up to 15 minutes ago" if ok else "refused by the plan")]
+
+
+BOATS = Provider(
+    version="1.1.0", api="1.1",  # this plugin's release (its second feed), and the contract it needs (part_of)
+    name="boats", title="Blue Ocean", build=build_boats, assets=frozenset({"stock"}), order=15, account="alpaca",
+    part_of="alpaca",
+    about="US stocks overnight, 20:00-04:00 ET, Blue Ocean ATS through Alpaca (your Alpaca keys and limits)",
+    keys=ALPACA.keys, signup=ALPACA.signup, kind="exchange",
+    provides={"stock": ("minute",)}, per_request={"minute": PAGE_LIMIT},
+    limits="shares Alpaca's: 200 requests per minute (Basic) for both feeds",
+    missing_keys_note="keys not set: Blue Ocean's overnight bars come through Alpaca, with ALPACA_API_KEY_ID "
+                      "and ALPACA_API_SECRET_KEY",
+    view=view, rate=lambda settings: ALPACA.rate_window(settings),
+    has_keys=lambda s: bool(s.alpaca and s.alpaca.has_keys),
+    markets=lambda settings: {"stock": "boats"},
+    scan=boats_scan,
+)
+
+PLUGINS = (ALPACA, BOATS)  # one plugin, two feeds: the day sessions (and crypto), and Blue Ocean's nights

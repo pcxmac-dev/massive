@@ -912,6 +912,9 @@ def cmd_plugins(args, settings: Settings | None) -> int:
         serves = ", ".join(r.get("serves") or []) or "-"
         print(f"{r['name']:9} {r['title']:10} {'archive' if r['archive'] else 'feed':8} {keys:58} serves: {serves}")
         print(f"{'':9} {r['about']}" + (f"; keys from {r['signup']}" if r["signup"] else "") + f" {release(r)}")
+        for f in r["feeds"]:  # a feed of its own in this plugin, on its keys (Alpaca's Blue Ocean)
+            print(f"{'':9} and feed {f['name']} ({f['title']}): {f['about']}"
+                  + (f"; serves: {', '.join(f['serves']) or '-'}" if "serves" in f else ""))
     for r in pubs:
         print(f"{r['name']:12} {r['title']:28} publisher {release(r)}")
     for where, why in left_out:
@@ -943,12 +946,11 @@ def cmd_sourcing(args, settings: Settings) -> int:
 
 def cmd_capabilities(args, settings: Settings) -> int:
     """Each provider's capability scan (its plugin's `scan`): a few requests asking what its plan
-    really gives, within its caps like any run; kept and shown in its report (`sourcing`)."""
-    import json
+    really gives, within its caps like any run; kept and shown in its report (`sourcing`). A
+    plugin's name scans each of its feeds (Alpaca: Blue Ocean's too)."""
+    from .sources.registry import plugin_feeds
 
-    from . import sourcing
-
-    names = [args.name] if args.name else [n for n, p in providers().items() if p.scan]
+    names = plugin_feeds(args.name) if args.name else [n for n, p in providers().items() if p.scan]
     for name in names:
         p = providers().get(name)
         if p is None or p.scan is None:

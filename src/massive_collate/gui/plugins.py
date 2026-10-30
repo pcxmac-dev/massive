@@ -7,15 +7,21 @@ Each plugin refreshes its own plan info: its scan asks the provider what the key
 may name the plan that shows (registry.Scanned), applied wherever the user set none
 (config.with_detected). Scans run on each chart app start, weekly in the sync, and from this view.
 
+A plugin with several feeds (Alpaca: its own, and Blue Ocean's nights on its keys: Provider.part_of)
+is one entry: its feeds listed, their capabilities, scans, eras, requests and symbols together.
+While a rescan runs, each feed it has still to ask says "scanning" (the user, 2026-10-29: "when i
+hit rescan all, i want the status of each plug in to say scanning, not 'ready'"); one asked in this
+run is back to its state, and a feed with no scan (a public one) or none it can ask keeps its own.
+
 Read from the settings, the plugins' reports, the scans kept (kv sourcing.SCAN_KEY), the watchlist
 and the request ledger: no requests. A key's value never leaves: only whether it is set.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 from ..sources import providers
-from ..sources.registry import PLUGIN_API, errors
+from ..sources.registry import PLUGIN_API, errors, plugin_feeds, plugin_of
 
 GROUPS = ("Feeds with keys", "Public feeds")
 
@@ -31,6 +37,54 @@ def _state(keys_set, served, kill) -> str:
     if keys_set is False:
         return "partly" if served else "no key"
     return "ready"
+
+
+def _asked_since(at, since) -> bool:
+    """Whether a scan kept at `at` was asked at or after `since` (ISO times; one without an offset
+    is local time, as the scans keep it)."""
+    try:
+        a, b = (t if t.tzinfo else t.astimezone() for t in (datetime.fromisoformat(at), datetime.fromisoformat(since)))
+    except (TypeError, ValueError):
+        return False
+    return a >= b
+
+
+def _scanning(p, running: dict | None, scan: dict | None, state: str) -> bool:
+    """Whether the rescan going now has this feed still to ask: it covers the feed (every plugin,
+    the feed, or the plugin it is part of), the feed has a scan and is set up (ready, or partly:
+    what it serves without its keys), and its kept scan is older than the rescan."""
+    if not running or p.scan is None or state not in ("ready", "partly"):
+        return False
+    if running.get("name") not in (None, p.name, plugin_of(p.name)):
+        return False
+    return not ((scan or {}).get("at") and _asked_since(scan["at"], running.get("since")))
+
+
+def _fold(entry: dict, feeds: list[dict]) -> dict:
+    """A plugin's entry with the feeds part of it folded in (`feeds`: its own first): what each can
+    do, its scan's answers and its eras named by the feed; requests, symbols and load summed (each
+    feed's requests are its own in the ledger, its caps the plugin's: one account)."""
+    every = [entry, *feeds]
+    for e in every:
+        for row in (*e["capabilities"], *e["scan"]["results"], *e["delivery"]):
+            row["feed"] = e["title"]
+    out = {**entry,
+           "feeds": [{"name": e["name"], "title": e["title"], "about": e["about"], "state": e["state"],
+                      "serves": e["serves"], "scanAt": e["scan"]["at"]} for e in every],
+           "assets": sorted({a for e in every for a in e["assets"]}),
+           "capabilities": [c for e in every for c in e["capabilities"]],
+           "streams": [s for e in every for s in e["streams"]],
+           "notes": [*entry["notes"], *(f"{e['title']}: {n}" for e in feeds for n in e["notes"])],
+           "delivery": [d for e in every for d in e["delivery"]],
+           "watched": sum(e["watched"] for e in every), "load": round(sum(e["load"] for e in every), 3),
+           "usage": {**entry["usage"], "today": sum(e["usage"]["today"] for e in every)}}
+    ats = [e["scan"]["at"] for e in every if e["scan"]["has"] and e["scan"]["at"]]
+    out["scan"] = {"has": any(e["scan"]["has"] for e in every), "at": min(ats) if ats else None,
+                   "results": [r for e in every for r in e["scan"]["results"]],
+                   "running": any(e["scan"]["running"] for e in every)}
+    if any(e["state"] == "scanning" for e in every) and entry["state"] in ("ready", "partly", "scanning"):
+        out["state"] = "scanning"
+    return out
 
 
 def _plan(p, settings, scan: dict | None) -> dict:
@@ -55,7 +109,7 @@ def view(store, settings, feeds: dict, scheme, scans: dict, running: dict | None
 
     today = today or scheme.today
     counts = store.watch_counts()
-    out = []
+    entries = {}
     for name, p in providers().items():
         prof = feeds.get(name)  # None: not set up here at all (Massive without its key)
         scan = scans.get(name)
@@ -68,14 +122,16 @@ def view(store, settings, feeds: dict, scheme, scans: dict, running: dict | None
                      "end": e.end.isoformat() if e.end else None, "first": e.sources[0] == name,
                      "unique": e.unique, "others": [s for s in e.sources if s != name], "symbols": e.symbols}
                     for e in scheme.eras if name in e.sources]
-        out.append({
+        state = _state(keys_set, served, kill)
+        scanning = _scanning(p, running, scan, state)
+        entries[name] = {
             "name": name, "title": p.title, "about": p.about, "origin": p.origin, "version": p.version, "api": p.api,
             "signup": p.signup,
             "group": GROUPS[0] if p.keys else GROUPS[1], "archive": p.archival, "kind": p.kind,
             "assets": sorted(p.assets), "keyless": sorted(p.keyless), "serves": served,
             "configured": prof is not None, "keysSet": keys_set,
             "keys": [{"name": k.name, "label": k.label, "set": bool(k.value(settings.env))} for k in p.keys],
-            "state": _state(keys_set, served, kill), "kill": kill,
+            "state": "scanning" if scanning else state, "kill": kill,
             "plan": _plan(p, settings, scan),
             "limits": ({**report.limits.__dict__, "rate": list(report.limits.rate) if report.limits.rate else None}
                        if report else {"published": p.limits}),
@@ -86,12 +142,13 @@ def view(store, settings, feeds: dict, scheme, scans: dict, running: dict | None
             "notes": list(report.notes) if report else [],
             "scan": {"has": p.scan is not None, "at": (scan or {}).get("at"),
                      "results": [{"what": w, "available": bool(ok), "detail": d} for w, ok, d in (scan or {}).get("results", [])],
-                     "running": bool(running) and running.get("name") in (None, name)},
+                     "running": scanning},
             "usage": {"today": store.requests_today(name), "perDay": view_.max_requests_per_day,
                       "perRun": view_.max_requests_per_run},
             "watched": sum(n for (feed, _), n in counts.items() if feed == name),
             "delivery": delivery, "load": round(scheme.load.get(name, 0.0), 3),
-        })
+        }
+    out = [_fold(e, [entries[n] for n in plugin_feeds(name)[1:]]) for name, e in entries.items() if plugin_of(name) == name]
     return {"plugins": out, "groups": list(GROUPS), "errors": [{"where": w, "why": why} for w, why in errors()],
             "api": PLUGIN_API,
             "running": running, "offline": bool(settings.offline),

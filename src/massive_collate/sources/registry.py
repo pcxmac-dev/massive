@@ -55,7 +55,8 @@ DEFAULT_PER_REQUEST = 1000  # bars a request returns, for a provider that does n
 # The plugin contract this app offers (major.minor): a new minor only adds (a field with a default,
 # a helper), a new major changes or removes something a plugin may rely on. A plugin written
 # before the contract had a number was written for 1.0 (Provider.api's default).
-PLUGIN_API = "1.0"
+# 1.1 (2026-10-29): Provider.part_of, a plugin's second feed (Alpaca's Blue Ocean).
+PLUGIN_API = "1.1"
 
 
 def api_version(api) -> tuple[int, int]:
@@ -202,6 +203,9 @@ class Provider:
     # the feed whose account (key and limits) its requests count against, when another's: a 429 or a
     # refused key kills both (killswitch.sharing)
     account: str = ""
+    # the plugin it is a feed of, when another feed's (API 1.1; Blue Ocean: Alpaca's): listed, keyed
+    # and rescanned inside that one, a feed of its own everywhere else (plugin_feeds)
+    part_of: str = ""
     tier: "Tier | None" = None  # its plan, when it has one fixed plan
     per_run: int | None = None  # its request caps with that plan
     per_day: int | None = None
@@ -646,6 +650,18 @@ def get(name: str) -> Provider | None:
     return providers().get(name)
 
 
+def plugin_of(name: str) -> str:
+    """The plugin a feed is listed under: the one it is part of (Provider.part_of), or its own
+    (a part_of naming no provider here leaves it a plugin of its own)."""
+    p = providers().get(name)
+    return p.part_of if p is not None and p.part_of in providers() and p.part_of != name else name
+
+
+def plugin_feeds(name: str) -> list[str]:
+    """A plugin's feeds: its own first, then the ones part of it (Alpaca: alpaca, boats)."""
+    return [name, *(n for n in providers() if n != name and plugin_of(n) == name)]
+
+
 def errors() -> list[tuple[str, str]]:
     """The plugins left out at loading: (module or entry point, why)."""
     providers()
@@ -658,16 +674,25 @@ def variables() -> tuple[str, ...]:
 
 
 def menu(settings: "Settings | None" = None) -> list[dict]:
-    """The providers for the key script and the `plugins` command: no key's value, only whether it
-    is set (when settings are given)."""
+    """The provider plugins for the key script and the `plugins` command, each once, with the feeds
+    part of it (`feeds`: Alpaca's Blue Ocean, on its keys): no key's value, only whether it is set
+    (when settings are given)."""
     out = []
     for p in providers().values():
+        if plugin_of(p.name) != p.name:
+            continue  # listed in its plugin's row
         row = {"name": p.name, "title": p.title, "about": p.about, "signup": p.signup, "origin": p.origin,
                "version": p.version, "api": p.api, "archive": p.archival, "assets": sorted(p.assets),
                "keyless": sorted(p.keyless),
                "keys": [{"name": k.name, "label": k.label, "aliases": list(k.aliases)} for k in p.keys],
                "planChoices": [{"name": v, "choices": list(c)} for v, c in p.plan_choices.items()],
-               "planNote": p.plan_note, "scan": p.scan is not None}
+               "planNote": p.plan_note, "scan": p.scan is not None, "feeds": []}
+        for n in plugin_feeds(p.name)[1:]:
+            f = providers()[n]
+            feed = {"name": f.name, "title": f.title, "about": f.about, "assets": sorted(f.assets)}
+            if settings is not None:
+                feed["serves"] = sorted(f.served(settings) or ())
+            row["feeds"].append(feed)
         if settings is not None:
             served = p.served(settings)
             row.update(keysSet=p.keys_set(settings), serves=sorted(served) if served else [],

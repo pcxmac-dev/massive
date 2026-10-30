@@ -6,7 +6,10 @@
    scan with a Rescan; on the right its part in the delivery scheme (the eras it delivers or stands
    by for), its requests today, the symbols it watches, its keys (set or not, never their values),
    its version, the plugin API it was written for and where it came from (built in, or a package).
-   Each plugin refreshes its own plan info: a rescan asks the provider what the key really gets.
+   Each plugin refreshes its own plan info: a rescan asks the provider what the key really gets;
+   while it runs, each plugin it has still to ask says "scanning" in place of its state.
+   A plugin with several feeds (Alpaca: its own, and Blue Ocean's nights on its keys) lists them,
+   and names the feed on each capability, scan answer and era.
    A plan its scan cannot tell (Tiingo's Power from Commercial) is chosen here: each plan variable
    is a choice, saved like the key script saves it (POST /api/plugins/plan); keys stay in the script.
    Below them the publishers (news and publications: publications.py), each an agency's or a
@@ -18,7 +21,7 @@
   const { esc, safeUrl } = window.MassiveIcons;
   let data = null, sel = null, note = '', timer = null;
 
-  const STATE = { ready: 'ready', partly: 'keys not set', 'no key': 'no key', killed: 'killed', paused: 'paused',
+  const STATE = { ready: 'ready', scanning: 'scanning…', partly: 'keys not set', 'no key': 'no key', killed: 'killed', paused: 'paused',
                   refused: 'refused', failing: 'failing', waiting: 'waiting', off: 'not set up' };
   const FEED_STATE = { ok: 'read', unchanged: 'unchanged', waiting: 'waiting', failed: 'failed', refused: 'refused',
                        'not asked yet': 'not asked yet' };
@@ -116,7 +119,7 @@
         const plan = t ? `${t.value} · ${ORIGIN[t.origin]}` : p.plan.tier;
         return `<button type="button" class="ex-venue${p.name === sel ? ' active' : ''}" data-plugin="${esc(p.name)}" title="${esc(p.about)}">
           <span class="ex-name">${esc(p.title)}</span>${chip(p.state)}
-          <span class="ex-count">${esc(plan)}${p.scan.running ? ' · scanning…' : ''}</span></button>`;
+          <span class="ex-count">${esc(plan)}${p.feeds.length > 1 ? ` · ${p.feeds.length} feeds` : ''}</span></button>`;
       }).join('');
     }).join('');
     const pubs = (data.publishers || []).map((p) => `<button type="button" class="ex-venue${PUB + p.name === sel ? ' active' : ''}" data-plugin="${esc(PUB + p.name)}" title="${esc(p.about)}">
@@ -172,11 +175,22 @@
       </div>${l.published ? `<div class="p-muted small">Its server publishes: ${esc(l.published)}</div>` : ''}`;
   }
 
+  // a plugin with several feeds (Alpaca and its Blue Ocean): each listed, with its state
+  const several = (p) => p.feeds.length > 1;
+  function feedsHtml(p) {
+    if (!several(p)) return '';
+    return `<h4>Feeds</h4><table class="act-table ex-mini pl-feedlist"><tbody>${p.feeds.map((f) => `<tr>
+        <td><b>${esc(f.title)}</b> <code>${esc(f.name)}</code><div class="p-muted small">${esc(f.about)}</div></td>
+        <td>${chip(f.state)}</td></tr>`).join('')}</tbody></table>
+      <div class="p-muted small">Each a feed of its own (its own bars, symbols and requests), on this plugin's keys and limits.</div>`;
+  }
+
   function capabilitiesHtml(p) {
     if (!p.capabilities.length) return '';
-    return `<h4>What it can do on this plan</h4><table class="act-table ex-mini"><thead><tr><th>Asset</th><th>Bars</th>
+    const feed = (c) => (several(p) ? `<td>${esc(c.feed)}</td>` : '');
+    return `<h4>What it can do on this plan</h4><table class="act-table ex-mini"><thead><tr>${several(p) ? '<th>Feed</th>' : ''}<th>Asset</th><th>Bars</th>
         <th>Market</th><th>From</th><th>Fresh</th><th class="num">A request</th></tr></thead><tbody>
-      ${p.capabilities.map((c) => `<tr><td>${esc(c.asset)}</td><td>${esc(JOBS[c.resolution] || c.resolution)}</td><td>${esc(c.market)}</td>
+      ${p.capabilities.map((c) => `<tr>${feed(c)}<td>${esc(c.asset)}</td><td>${esc(JOBS[c.resolution] || c.resolution)}</td><td>${esc(c.market)}</td>
         <td>${esc(c.since)}</td><td>${esc(c.fresh)}</td><td class="num">${c.perRequest == null ? 'whole history' : `${num(c.perRequest)} bars`}</td></tr>`).join('')}
       </tbody></table>
       ${p.streams.length ? `<h4>Live</h4>${p.streams.map((s) => `<div class="small"><b>${esc(s.asset)}</b> ${esc(s.what)}</div>`).join('')}` : ''}`;
@@ -187,11 +201,13 @@
     const can = p.configured && p.state !== 'no key' && !data.offline && !data.running;
     const why = data.offline ? 'This offline copy of the app sends no requests' : !p.configured || p.state === 'no key'
       ? 'Its keys are not set' : data.running ? 'A rescan is running' : 'Ask the provider again what the key gets (a few requests)';
-    const rows = p.scan.results.map((r) => `<tr><td>${esc(r.what)}</td>
+    const rows = p.scan.results.map((r, i) => `${several(p) && r.feed !== p.scan.results[i - 1]?.feed
+        ? `<tr class="pl-feedrow"><th colspan="3">${esc(r.feed)}</th></tr>` : ''}<tr><td>${esc(r.what)}</td>
         <td>${r.available ? '<span class="up">yes</span>' : '<span class="down">no</span>'}</td><td class="p-muted">${esc(r.detail)}</td></tr>`).join('');
     return `<h4 class="pl-scan-head"><span>Capability scan</span>
         <button type="button" data-rescan="${esc(p.name)}"${can ? '' : ' disabled'} title="${esc(why)}">${p.scan.running ? 'Scanning…' : 'Rescan'}</button></h4>
-      <div class="p-muted small">${p.scan.at ? `Last asked ${ago(p.scan.at)}` : 'Not scanned yet'}: on each start of the app, weekly in the sync, and here.</div>
+      <div class="p-muted small">${p.scan.at ? `Last asked ${ago(p.scan.at)}` : 'Not scanned yet'}: on each start of the app, weekly in the sync, and here${
+        several(p) ? ` (its ${p.feeds.length} feeds together)` : ''}.</div>
       ${rows ? `<table class="act-table ex-mini"><tbody>${rows}</tbody></table>` : ''}`;
   }
 
@@ -276,7 +292,7 @@
     if (pub) return pubMainHtml(pub);
     const p = plugin();
     if (!p) return '<div class="empty">No plugin found.</div>';
-    return `${planHtml(p)}${limitsHtml(p)}${capabilitiesHtml(p)}${scanHtml(p)}
+    return `${feedsHtml(p)}${planHtml(p)}${limitsHtml(p)}${capabilitiesHtml(p)}${scanHtml(p)}
       ${p.notes.length ? `<h4>Notes</h4>${p.notes.map((n) => `<div class="small">${esc(n)}</div>`).join('')}` : ''}`;
   }
 
@@ -289,7 +305,7 @@
     const u = p.usage;
     const used = u.perDay ? Math.min(100, (u.today / u.perDay) * 100) : 0;
     const first = p.delivery.filter((e) => e.first), standby = p.delivery.filter((e) => !e.first);
-    const era = (e) => `<tr><td>${esc(JOBS[e.job] || e.job)}</td><td>${esc(e.asset)}</td><td>${esc(e.start)} → ${esc(e.end || 'now')}</td>
+    const era = (e) => `<tr><td>${esc(JOBS[e.job] || e.job)}</td><td>${esc(e.asset)}${several(p) ? `<div class="p-muted">${esc(e.feed)}</div>` : ''}</td><td>${esc(e.start)} → ${esc(e.end || 'now')}</td>
         <td class="p-muted">${e.unique ? 'only source' : e.first ? `then ${esc(e.others.join(', '))}` : `after ${esc(e.others[0] || '')}`}</td></tr>`;
     const keys = p.keys.length ? p.keys.map((k) => `<div class="small"><code>${esc(k.name)}</code> ${k.set ? '<span class="up">set</span>' : '<span class="down">not set</span>'}</div>`).join('')
       : '<div class="p-muted small">Needs no key.</div>';

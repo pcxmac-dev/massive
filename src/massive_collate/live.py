@@ -51,7 +51,7 @@ def watchlists_key(profile: int) -> str:
 def active_watchlists(store) -> list:
     """The signed-in profile's watchlists (the one signed in last): they set the fetcher's order."""
     return store.kv_json(watchlists_key(store.active_profile()), [])
-BOATS_FEED = "boats"  # Blue Ocean's overnight session (sources/plugins/boats.py)
+BOATS_FEED = "boats"  # Blue Ocean's overnight session (sources/plugins/alpaca.py, BOATS)
 TIINGO_BOATS = "tiingoboats"  # Blue Ocean's night under way, live from Tiingo (BoatsPoller): a feed of its own
 # One venue's bars, ranked last in a chart of all feeds: they show where no feed of the whole market
 # has bars (IEX: the session under way until a sync downloads it; Blue Ocean: the overnight session,

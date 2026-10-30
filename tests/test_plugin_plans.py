@@ -272,12 +272,14 @@ def test_the_chart_app_rescans_in_a_process_of_its_own_one_at_a_time(tmp_path):
     spawned = []
     app._spawn = lambda args: spawned.append(args) or _Proc()
     try:
-        out = app.start_rescan("tiingo")
-        assert out["started"] and spawned[0][-3:] == ["massive_collate", "capabilities", "tiingo"]
+        out = app.start_rescan("alpaca")
+        assert out["started"] and spawned[0][-3:] == ["massive_collate", "capabilities", "alpaca"]
         with pytest.raises(RuntimeError, match="already running"):
             app.start_rescan()
-        assert app.plugins()["running"]["name"] == "tiingo"
-        assert next(p for p in app.plugins()["plugins"] if p["name"] == "tiingo")["scan"]["running"]
+        assert app.plugins()["running"]["name"] == "alpaca"
+        by = {p["name"]: p for p in app.plugins()["plugins"]}
+        assert by["alpaca"]["scan"]["running"] and by["alpaca"]["state"] == "scanning"
+        assert not by["massive"]["scan"]["running"] and by["massive"]["state"] == "ready"  # not this rescan's
         app._rescan[0].done = True
         app.start_rescan()
         assert spawned[1][-1] == "capabilities"  # every plugin set up here
@@ -316,7 +318,8 @@ def test_the_plugins_view_shows_each_plugin_its_plan_keys_and_part(tmp_path):
         store.watch_spec("alpaca", resolve("AAPL::XNAS"))
         out = app.plugins()
         by = {p["name"]: p for p in out["plugins"]}
-        assert list(by) == list(providers()) and out["offline"] is False and out["errors"] == []
+        assert list(by) == [n for n in providers() if n != "boats"]  # Blue Ocean is a feed of Alpaca's plugin
+        assert out["offline"] is False and out["errors"] == []
         assert by["massive"]["group"] == "Feeds with keys" and by["bitstamp"]["group"] == "Public feeds"
         assert by["alpaca"]["keys"] == [{"name": "ALPACA_API_KEY_ID", "label": "key ID", "set": True},
                                         {"name": "ALPACA_API_SECRET_KEY", "label": "secret key", "set": True}]
@@ -501,3 +504,84 @@ def test_the_page_offers_each_plan_as_a_choice():
     js = (static / "plugins.js").read_text(encoding="utf-8")
     assert "/api/plugins/plan" in js and "select.pl-choose" in js and "window.confirm(ask)" in js
     assert "This offline copy of the app saves no settings" in js and "headers: WRITE_HEADERS" in js
+
+
+# -- Alpaca's Blue Ocean folded into its plugin; "scanning" while a rescan runs ----------------------
+def test_the_plugins_view_folds_blue_ocean_into_alpacas_entry(tmp_path):
+    from massive_collate.symbols import resolve
+
+    store, app = _app(tmp_path)
+    try:
+        store.watch_spec("alpaca", resolve("AAPL::XNAS"))
+        store.watch_spec("boats", resolve("MSFT::XNAS"))
+        _keep(store, "boats", {}, results=(("stock minute bars overnight (feed=boats)", True, "x"),))
+        by = {p["name"]: p for p in app.plugins()["plugins"]}
+        assert "boats" not in by
+        a = by["alpaca"]
+        assert [(f["name"], f["title"], f["state"]) for f in a["feeds"]] == [("alpaca", "Alpaca", "ready"),
+                                                                             ("boats", "Blue Ocean", "ready")]
+        assert a["watched"] == 2 and "Blue Ocean" in a["about"]
+        assert ("Blue Ocean", "boats", "minute") in {(c["feed"], c["market"], c["resolution"]) for c in a["capabilities"]}
+        assert {c["feed"] for c in a["capabilities"]} == {"Alpaca", "Blue Ocean"}
+        assert ("Blue Ocean", "stock minute bars overnight (feed=boats)") in {(r["feed"], r["what"]) for r in a["scan"]["results"]}
+        assert a["scan"]["has"] and len(by["tiingo"]["feeds"]) == 1
+    finally:
+        store.close()
+
+
+def test_a_rescan_says_scanning_on_each_plugin_it_has_still_to_ask(tmp_path):
+    """The user, 2026-10-29: "when i hit rescan all, i want the status of each plug in to say
+    scanning, not 'ready'"."""
+    from massive_collate.gui import plugins
+
+    s = load_settings(env=KEYS, env_file=None)
+    since = "2026-10-29T13:00:00+00:00"
+    old = {"at": "2026-10-22T09:00:00-04:00", "results": []}
+    asked = {"at": "2026-10-29T09:00:05-04:00", "results": []}  # 13:00:05 UTC: in this rescan
+    with Store(tmp_path / "m.db") as store:
+        feeds = feed_profiles(s)
+        scheme = sourcing.standing(store, feeds)
+
+        def view(running, scans):
+            return {p["name"]: p for p in plugins.view(store, s, feeds, scheme, scans, running)["plugins"]}
+
+        def states(running, scans):
+            return {n: (p["state"], p["scan"]["running"]) for n, p in view(running, scans).items()}
+
+        scans = {"massive": asked, "alpaca": old, "boats": old}
+        idle = states(None, scans)
+        assert idle["alpaca"] == ("ready", False) and idle["massive"] == ("ready", False)
+        every = states({"name": None, "since": since}, scans)
+        assert every["alpaca"] == ("scanning", True)  # its scans are a week old
+        assert every["massive"] == ("ready", False)  # asked since the rescan began: back to its state
+        assert every["bitstamp"] == ("ready", False)  # a public feed with no scan: nothing to ask
+        assert every["tiingo"] == ("no key", False)  # not set up here: not asked
+        one = states({"name": "alpaca", "since": since}, {**scans, "massive": old})
+        assert one["alpaca"] == ("scanning", True) and one["massive"] == ("ready", False)  # only Alpaca's
+        # Alpaca asked, its Blue Ocean feed not yet: the plugin still says scanning, its feeds which
+        a = view({"name": None, "since": since}, {**scans, "alpaca": asked})["alpaca"]
+        assert a["state"] == "scanning" and [f["state"] for f in a["feeds"]] == ["ready", "scanning"]
+        done = states({"name": None, "since": since}, {**scans, "alpaca": asked, "boats": asked})
+        assert done["alpaca"] == ("ready", False)
+
+
+def test_a_scan_kept_in_local_time_is_compared_with_the_rescans_start():
+    from datetime import timedelta
+
+    from massive_collate.gui.plugins import _asked_since
+
+    now = datetime.now()  # a scan's time without an offset is local, as the scans keep it
+    utc = datetime.now(timezone.utc)
+    assert _asked_since(now.isoformat(timespec="seconds"), (utc - timedelta(hours=1)).isoformat())
+    assert not _asked_since(now.isoformat(timespec="seconds"), (utc + timedelta(hours=1)).isoformat())
+    assert not _asked_since(None, utc.isoformat()) and not _asked_since("never", utc.isoformat())
+
+
+def test_the_page_says_scanning_and_lists_a_plugins_feeds():
+    static = Path(__file__).resolve().parents[1] / "src" / "massive_collate" / "gui" / "static"
+    js = (static / "plugins.js").read_text(encoding="utf-8")
+    assert "scanning: 'scanning…'" in js and "' · scanning…'" not in js  # the chip says it, not the plan line
+    assert "function feedsHtml(p)" in js and "<th>Feed</th>" in js and 'class="pl-feedrow"' in js
+    assert "${feedsHtml(p)}${planHtml(p)}" in js
+    css = (static / "style.css").read_text(encoding="utf-8")
+    assert ".ex-state.pl-scanning { color: var(--accent);" in css

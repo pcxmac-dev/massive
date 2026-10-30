@@ -19,6 +19,7 @@ from massive_collate.symbols import resolve
 from .conftest import FakeSource
 
 BUILT_IN = ["massive", "alpaca", "boats", "bitstamp", "coinbase", "bitfinex", "cboe", "tiingo", "tiingofx"]
+LISTED = [n for n in BUILT_IN if n != "boats"]  # the plugins listed: Blue Ocean is a feed of Alpaca's
 
 
 class AcmeSource(FakeSource):
@@ -165,9 +166,10 @@ def test_every_built_in_plugin_is_versioned_for_this_apps_contract():
 
     plugins_ = [*providers().values(), *publishers().values()]
     assert len(plugins_) == len(BUILT_IN) + 6  # the feeds and the six publishers
-    for p in plugins_:
-        assert p.version == "1.0.0" and p.api == "1.0" and registry.api_refusal(p.api) is None, p.name
-    assert registry.PLUGIN_API == "1.0"
+    for p in plugins_:  # Alpaca's two feeds are 1.1.0, for API 1.1 (part_of): the rest as first released
+        want = ("1.1.0", "1.1") if p.name in ("alpaca", "boats") else ("1.0.0", "1.0")
+        assert (p.version, p.api) == want and registry.api_refusal(p.api) is None, p.name
+    assert registry.PLUGIN_API == "1.1"
 
 
 def test_a_plugin_for_another_major_is_left_out_and_reported_and_a_matching_one_loads(installed):
@@ -180,7 +182,7 @@ def test_a_plugin_for_another_major_is_left_out_and_reported_and_a_matching_one_
     old_news = Publisher(name="old-news", title="Old news", about="", feeds=(), policy=Policy(), api="0.3")
     found = installed(("next", "acme_next:PLUGIN", lambda: acme("acme-next", "2.0")),
                       ("old", "acme_old:PLUGIN", lambda: acme("acme-old", "0.9")),
-                      ("newer", "acme_newer:PLUGIN", lambda: acme("acme-newer", "1.1")),
+                      ("newer", "acme_newer:PLUGIN", lambda: acme("acme-newer", "1.2")),
                       ("odd", "acme_odd:PLUGIN", lambda: acme("acme-odd", "latest")),
                       ("same", "acme_same:PLUGIN", lambda: acme("acme-same", "1.0", version="2.4.1")),
                       ("plain", "acme_plain:PLUGIN", lambda: acme("acme-plain", "1")),
@@ -191,11 +193,11 @@ def test_a_plugin_for_another_major_is_left_out_and_reported_and_a_matching_one_
     why = dict(registry.errors())
     assert set(why) == {"next (acme_next:PLUGIN)", "old (acme_old:PLUGIN)", "newer (acme_newer:PLUGIN)",
                         "odd (acme_odd:PLUGIN)", "news (old_news:PUBLISHER)"}
-    assert why["next (acme_next:PLUGIN)"] == ("acme-next: written for plugin API 2.0; this app offers 1.0: "
+    assert why["next (acme_next:PLUGIN)"] == ("acme-next: written for plugin API 2.0; this app offers 1.1: "
                                               "it needs a newer app")
     assert why["old (acme_old:PLUGIN)"].startswith("acme-old: written for plugin API 0.9") \
         and "needs a release for 1.x" in why["old (acme_old:PLUGIN)"]
-    assert "newer than this app's 1.0" in why["newer (acme_newer:PLUGIN)"]
+    assert "newer than this app's 1.1" in why["newer (acme_newer:PLUGIN)"]
     assert "not a contract version" in why["odd (acme_odd:PLUGIN)"]
     assert "old-news: written for plugin API 0.3" in why["news (old_news:PUBLISHER)"]
 
@@ -232,14 +234,16 @@ def test_the_plugins_command_shows_each_plugins_version_and_origin(monkeypatch, 
     monkeypatch.setattr(config, "read_env_file", lambda path: {})
     assert cli.main(["plugins", "--json"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert out["api"] == "1.0" and out["errors"] == []
-    assert {(r["version"], r["api"], r["origin"]) for r in out["providers"]} == {("1.0.0", "1.0", "built in")}
+    assert out["api"] == "1.1" and out["errors"] == []
+    assert {(r["version"], r["api"], r["origin"]) for r in out["providers"]} == {("1.0.0", "1.0", "built in"),
+                                                                                 ("1.1.0", "1.1", "built in")}
     pubs = {r["name"]: r for r in out["publishers"]}
     assert set(pubs) == {"fed", "nyfed", "sec", "bls", "fedreg", "massive-news"}
     assert pubs["massive-news"]["version"] == "1.0.0" and pubs["massive-news"]["account"] == "massive"
     assert cli.main(["plugins"]) == 0
     text = capsys.readouterr().out
-    assert text.startswith("Plugin API 1.0") and "[1.0.0 for plugin API 1.0, built in]" in text
+    assert text.startswith("Plugin API 1.1") and "[1.0.0 for plugin API 1.0, built in]" in text
+    assert "[1.1.0 for plugin API 1.1, built in]" in text
     assert any(line.startswith("massive-news") and "publisher [1.0.0" in line for line in text.splitlines())
 
 
@@ -249,8 +253,9 @@ def test_the_plugins_view_shows_each_plugins_version_and_origin(tmp_path):
 
     with Store(tmp_path / "m.db") as store:
         out = ChartApp(store, settings=load_settings(env={}, env_file=None)).plugins()
-    assert out["api"] == "1.0"
-    assert {(p["version"], p["api"], p["origin"]) for p in out["plugins"]} == {("1.0.0", "1.0", "built in")}
+    assert out["api"] == "1.1"
+    assert {(p["version"], p["api"], p["origin"]) for p in out["plugins"]} == {("1.0.0", "1.0", "built in"),
+                                                                               ("1.1.0", "1.1", "built in")}
     assert {(p["version"], p["api"]) for p in out["publishers"]} == {("1.0.0", "1.0")}
 
 
@@ -267,7 +272,7 @@ def test_the_plugins_command_lists_keys_set_never_their_values(monkeypatch, caps
     out = capsys.readouterr().out
     assert "secret-massive" not in out
     rows = {r["name"]: r for r in json.loads(out)["providers"]}
-    assert list(rows) == BUILT_IN
+    assert list(rows) == LISTED
     assert rows["massive"]["keysSet"] is True and rows["tiingo"]["keysSet"] is False
     assert rows["bitstamp"]["keysSet"] is None and rows["bitstamp"]["keys"] == []
     assert [k["name"] for k in rows["alpaca"]["keys"]] == ["ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY"]
@@ -283,7 +288,7 @@ def test_the_providers_are_listed_even_with_a_wrong_setting(monkeypatch, capsys)
     monkeypatch.setattr(config, "read_env_file", lambda path: {})
     assert cli.main(["plugins", "--json"]) == 0
     rows = json.loads(capsys.readouterr().out)["providers"]
-    assert [r["name"] for r in rows] == BUILT_IN and "keysSet" not in rows[0]
+    assert [r["name"] for r in rows] == LISTED and "keysSet" not in rows[0]
     assert cli.main(["status"]) == 2  # every other command still stops at it
 
 
@@ -388,3 +393,66 @@ def test_the_limit_found_is_read_from_the_scan_kept_in_the_database(tmp_path):
     assert set(registry.sharing("alpaca")) >= {"alpaca", "boats"}
     assert sorted(lim for n in registry.sharing("alpaca") for lim in registry.scan_limits(tmp_path / "m.db", n)) == [
         (50.0, 60.0), (150.0, 60.0)]
+
+
+# -- a plugin's second feed (Provider.part_of, API 1.1): Alpaca's Blue Ocean ----------------------
+def test_blue_ocean_is_a_feed_of_the_alpaca_plugin():
+    """The user, 2026-10-29: "the Blue Ocean plugin is part of alpaca, so it should be part of the
+    alpaca plugin". One module, two feeds: Blue Ocean keeps its own name, market and bars, on
+    Alpaca's keys and limits."""
+    import importlib.util
+
+    from massive_collate.sources.plugins import alpaca
+
+    assert [p.name for p in alpaca.PLUGINS] == ["alpaca", "boats"] and not hasattr(alpaca, "PLUGIN")
+    assert importlib.util.find_spec("massive_collate.sources.plugins.boats") is None  # no plugin of its own
+    boats = provider("boats")
+    assert (boats.title, boats.part_of, boats.account) == ("Blue Ocean", "alpaca", "alpaca")
+    assert boats.build.__module__ == "massive_collate.sources.plugins.alpaca"
+    assert registry.plugin_feeds("alpaca") == ["alpaca", "boats"] and registry.plugin_of("boats") == "alpaca"
+    assert registry.plugin_feeds("tiingo") == ["tiingo"] and registry.plugin_of("tiingofx") == "tiingofx"
+    s = load_settings(env={"ALPACA_API_KEY_ID": "i", "ALPACA_API_SECRET_KEY": "s"}, env_file=None)
+    assert markets("boats", s) == {"stock": "boats"} and rate_window("boats", s) == rate_window("alpaca", s)
+    assert feed_profiles(s)["boats"].assets == {"stock"} and set(registry.sharing("alpaca")) >= {"alpaca", "boats"}
+
+
+def test_a_feed_part_of_no_plugin_here_is_a_plugin_of_its_own(installed):
+    installed(("acme", "acme_feed:PLUGIN", lambda: replace(ACME, part_of="nope", api="1.1")))
+    assert registry.plugin_of("acme") == "acme" and registry.plugin_feeds("acme") == ["acme"]
+    assert "acme" in {r["name"] for r in registry.menu()}
+
+
+def test_the_plugins_command_lists_alpaca_once_with_its_blue_ocean_feed(monkeypatch, capsys):
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "i")
+    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "s")
+    monkeypatch.setattr(config, "read_env_file", lambda path: {})
+    assert cli.main(["plugins", "--json"]) == 0
+    rows = {r["name"]: r for r in json.loads(capsys.readouterr().out)["providers"]}
+    assert "boats" not in rows  # the key script offers Alpaca's keys once
+    (feed,) = rows["alpaca"]["feeds"]
+    assert (feed["name"], feed["title"], feed["serves"]) == ("boats", "Blue Ocean", ["stock"])
+    assert all(r["feeds"] == [] for n, r in rows.items() if n != "alpaca")
+    assert cli.main(["plugins"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert any(line.strip().startswith("and feed boats (Blue Ocean): US stocks overnight") and "serves: stock" in line
+               for line in lines)
+    assert not any(line.startswith("boats") for line in lines)
+
+
+def test_a_rescan_of_alpaca_scans_its_blue_ocean_feed_too(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    asked = []
+
+    @contextmanager
+    def run(args, settings, label, lock=True):  # no request: the run that would ask
+        yield object(), None, print
+
+    monkeypatch.setattr(cli, "api_run", run)
+    monkeypatch.setattr(cli, "_scan", lambda name, source, store, log, settings=None: asked.append(name))
+    s = load_settings(env={"ALPACA_API_KEY_ID": "i", "ALPACA_API_SECRET_KEY": "s",
+                           "MASSIVE_DB": str(tmp_path / "m.db")}, env_file=None)
+    for name, want in (("alpaca", ["alpaca", "boats"]), ("boats", ["boats"])):
+        asked.clear()
+        assert cli.cmd_capabilities(cli.build_parser().parse_args(["capabilities", name]), s) == 0
+        assert asked == want

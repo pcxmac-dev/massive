@@ -73,7 +73,7 @@ PLAN_DELAYS["alpaca-plus"] = {"stock": Delay("delay"), "crypto": Delay("delay"),
 # empty would be counted as held and never asked again).
 PLAN_DELAYS["tiingofx"] = {"fx": Delay("utc_day")}
 
-# A feed whose market keeps hours of its own: Blue Ocean (sources/plugins/boats.py) trades US stocks
+# A feed whose market keeps hours of its own: Blue Ocean (sources/plugins/alpaca.py, BOATS) trades US stocks
 # overnight only, 20:00-04:00 ET (MarketCalendar's "overnight"). Judged by the stock day, its nights
 # looked closed: it was asked only up to 20:00, so a night's bars came the next morning, and a stock
 # opened in the chart at 23:00 read up to date with the night going on.

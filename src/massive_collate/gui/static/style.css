@@ -991,6 +991,8 @@ main > .view.ex-view:not([hidden]) { display: grid; }
 .pl-all { width: 100%; margin: 4px 0 2px; }
 .pl-note-line { margin: 4px 0; }
 .ex-state.pl-ready { color: var(--up); border-color: var(--up); }
+.ex-state.pl-scanning { color: var(--accent); border-color: var(--accent); }  /* a rescan has it still to ask */
+.pl-feedrow th { text-align: left; font-weight: 600; color: var(--muted); padding-top: 6px; }
 .ex-state.pl-killed, .ex-state.pl-no-key { color: var(--down); border-color: var(--down); }
 .ex-state.pl-partly { color: var(--accent); border-color: var(--accent); }
 .pl-view .ex-list h4 { margin: 16px 0 6px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }

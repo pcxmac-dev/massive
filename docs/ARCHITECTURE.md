@@ -128,9 +128,10 @@ live recorder, whose "what changed since" read every bar's `stored_at`, had read
 
 Every data provider the fetcher uses is a plugin: one `Provider` record (`sources/registry.py`)
 holding everything the app knows about it, so nothing else names a provider to decide how to treat
-it. The built-in ones are `sources/plugins/` (Massive, Alpaca, Blue Ocean, Bitstamp, Coinbase,
-Bitfinex, Cboe, Tiingo, Tiingo forex; the publishers Fed, New York Fed, SEC, BLS, Federal Register and
-Massive's headlines), one module each defining `PLUGIN`; their data-source classes stay in `sources/massive.py`,
+it. The built-in ones are `sources/plugins/` (Massive, Alpaca with its Blue Ocean feed, Bitstamp,
+Coinbase, Bitfinex, Cboe, Tiingo, Tiingo forex; the publishers Fed, New York Fed, SEC, BLS, Federal
+Register and Massive's headlines), one module each defining `PLUGIN` (Alpaca's `PLUGINS`: its two
+feeds); their data-source classes stay in `sources/massive.py`,
 `alpaca.py` and `public.py`. A module added to `sources/plugins/` is found on the next start; a
 provider shipped as its own package registers under the entry point group `massive_collate.providers`.
 A plugin that fails to load is left out and reported (`plugins`), never fatal.
@@ -169,9 +170,12 @@ A plugin that fails to load is left out and reported (`plugins`), never fatal.
   (`sourcing.apply_detected`, `config.with_detected`: the user's own variable always wins; a value
   the settings refuse is not applied). They run on each start of the chart app (`gui`, unless
   `--no-rescan`; never on an offline copy), weekly at the start of a feed's sync, from the Plugins
-  view's Rescan, the key script's menu (`set-key.ps1 <name> -Rescan`) and `capabilities [name]`; a
-  scan takes no run lock (a few requests, inside the machine-wide rate windows and daily caps),
-  and a provider whose keys are not set is not scanned.
+  view's Rescan, the key script's menu (`set-key.ps1 <name> -Rescan`) and `capabilities [name]` (a
+  plugin's name scans each of its feeds); a scan takes no run lock (a few requests, inside the
+  machine-wide rate windows and daily caps), and a provider whose keys are not set is not scanned.
+  While a rescan runs, the Plugins view shows "scanning" on each plugin it has still to ask (the
+  user, 2026-10-29), from its kept scans' times against the rescan's start; one asked in this run
+  is back to its state, and a public feed with no scan keeps its own.
   - Massive: its stocks plan from `plan_reach` (daily bars 3, 6, 11, 21 years back, 1-second bars,
     trades, quotes; `config.tier_for`): `MASSIVE_TIER`. The other classes' plans are not probed: a
     free class is held to 5 requests a minute, and a probe that took one for paid would lift that.
@@ -194,17 +198,23 @@ A plugin that fails to load is left out and reported (`plugins`), never fatal.
     An unknown value is Starter.
 - **The plugin contract, versioned** (2026-10-29; the user: "eventually plugins will need to be in
   their own repo with their own version"). The app offers `registry.PLUGIN_API` (major.minor, now
-  1.0). Each plugin, a `Provider` or a `Publisher`, gives its own `version` (its release:
+  1.1). Each plugin, a `Provider` or a `Publisher`, gives its own `version` (its release:
   major.minor.patch) and the contract it was written for (`api`: a literal such as `"1.0"`, never
   `PLUGIN_API` itself, which would always match). At discovery a plugin written for another major,
   or for a newer minor than the app offers, is left out and reported with the ones that fail to
   load (`errors()`, `plugins`, the key script, the Plugins view's "Left out"), never fatal. An `api`
-  left out is 1.0. The built-ins are all 1.0.0 for API 1.0. `plugins` (and its `--json`: `api`, each
+  left out is 1.0. The built-ins are 1.0.0 for API 1.0, but Alpaca's two feeds: 1.1.0 for API 1.1. `plugins` (and its `--json`: `api`, each
   plugin's `version`, `api`, `origin`; the publishers too), the key script's list and the Plugins
   view show each plugin's version and origin.
   - **Minor and major.** A minor only adds: a field with a default, a new optional callback, a new
     helper. A major changes or removes something a plugin may rely on: a field's meaning, a
     callback's arguments, a helper's behaviour, a name moved. A plugin for 1.0 loads in every 1.x.
+  - **1.1** (2026-10-29) adds `Provider.part_of`: a plugin's second feed names the feed it is part of
+    (Blue Ocean: `part_of="alpaca"`; the user: "the Blue Ocean plugin is part of alpaca, so it should
+    be part of the alpaca plugin"). The feed keeps its own name, bars, ledgers and watchlist rows; the
+    plugin lists it once (`registry.plugin_of`, `plugin_feeds`): `plugins` and the key script show
+    one row with its feeds, the Plugins view one entry (its feeds, their capabilities, scans, eras,
+    requests and symbols together), and its Rescan or `capabilities <plugin>` scans every feed.
   - **What a plugin may rely on (API 1.0)**, and nothing else of `massive_collate`:
     `sources.registry`: `PLUGIN_API`, `Provider`, `KeyVar`, `Scanned`, and `Report`, `Limits`,
     `Capability` for a `reporter`; the helpers `limiter`, `machine_caps`, `public_client`,
@@ -331,7 +341,7 @@ sourcing` shows the reports and the plan (no requests).
 US stocks trade overnight on Blue Ocean ATS, 20:00-04:00 ET, Sunday to Thursday nights before a
 trading day; the consolidated tape (Massive, Alpaca's SIP) carries none of it.
 
-- **Its feed:** `boats` (sources/plugins/boats.py, `BoatsSource`): Alpaca's market data with
+- **Its feed:** `boats` (sources/plugins/alpaca.py's `BOATS`, part of the Alpaca plugin; `BoatsSource`): Alpaca's market data with
   `feed=boats`, minute bars, on the free Basic plan up to 15 minutes ago. Its own market, one
   venue: ranked last in a chart of all feeds (live.PARTIAL_FEEDS, like IEX), so its bars show
   where no feed of the whole market has any: the nights. It uses Alpaca's keys and shares Alpaca's

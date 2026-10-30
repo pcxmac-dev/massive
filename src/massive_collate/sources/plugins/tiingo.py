@@ -2,7 +2,7 @@
 
 Its scan (`capabilities`, one request each) asks what else the account's plan gives: IEX's minute
 bars (one exchange), forex and crypto bars, and Blue Ocean's overnight bars (a paid add-on,
-2026-10-27: $9 a month; Alpaca's free plan has them: boats.py, and from earlier: Tiingo had none
+2026-10-27: $9 a month; Alpaca's free plan has them: alpaca.py's BOATS, and from earlier: Tiingo had none
 before 2024-09-25, asked 2026-10-28). The stocks' daily bars are collected here, the forex
 minutes on a feed of their own on this key's limits (tiingofx.py).
 
