@@ -16,9 +16,11 @@
    round over it from the left, covers it whole when it faces us (the zone's meridian in the middle), and
    goes round behind it to the right, so the logo and the globe show together, the globe over half of
    it on the whole. Its leading and trailing edges fade (EDGE_FADE). By day in Explorer's style, blue
-   oceans and gold land, glossy (drawn here from the Markets view's map: Explorer's own picture is
-   Microsoft's); by night where the Sun is down now, dark, its cities lit; lit from the front so it is
-   brightest in the middle. Every screen frame is drawn pixel by pixel with smooth edges, the angle from
+   oceans and gold land, glossy where the Sun is overhead (drawn here from the Markets view's map:
+   Explorer's own picture is Microsoft's); by night where the Sun is down now, a shade of it, its cities
+   lit; the one fading into the other over twilight, with no line between (TWILIGHT); the Sun centred on
+   the time zone it is over, so the Earth is lit one of 24 ways a day, each drawn once (litEarth); lit
+   from the front too, so it is brightest in the middle. Every screen frame is drawn pixel by pixel with smooth edges, the angle from
    the time. It starts and stops with the half-globe behind the logo: when the update is done the turn
    finishes first. Updating: its fetch queued or under way (the status bar's job, activity.js), or new
    bars just in (pulse: app.js, each stream message or poll that brought some; at least one whole turn).
@@ -26,12 +28,31 @@
 (() => {
   const TURN_MS = 2300;          // one turn, as Explorer's loop (the user's reference: tenor.com, 2.3 s)
   const EDGE_FADE = 35 * Math.PI / 180;  // the half-globe's leading and trailing edges fade over this much of it
-  // By day Explorer's globe, blue and gold: deep royal-blue oceans, gold land, a white gloss. By night
-  // (where the Sun is down now: "use night and day, to reflect the current time") dark, its cities lit.
-  const OCEAN = [16, 52, 150], LAND = [226, 176, 62], ICE = [246, 226, 168];
-  const NIGHT_OCEAN = [4, 9, 26], NIGHT_LAND = [22, 20, 18], CITY = [255, 206, 120];
-  const TWILIGHT = 0.1;          // the Sun's height (sine) over which day turns to night: about 6 degrees either side
+  // By day Explorer's globe, blue and gold: deep royal-blue oceans, gold land, the Sun's white shine. By night
+  // (where the Sun is down now: "use night and day, to reflect the current time") a shade of it, not
+  // darkness, its cities lit (the user, 2026-10-30: "instead of hard darkness it would be less shade").
+  const OCEAN = [16, 52, 150], LAND = [226, 176, 62], ICE = [246, 226, 168], CITY = [255, 206, 120];
+  const NIGHT = [0.3, 0.34, 0.46];  // night's shade of the day's colours, a little bluer: moonlit
   const RAD = Math.PI / 180;
+  // Day fades into night with no line between them (the user, 2026-10-30: "there needs to be a fade from
+  // night to day on the globe itself, not just day and then night"; "the transition between night and day
+  // is almost seamless"): over the Sun's height (its sine) from 20 degrees up to 18 degrees down, where
+  // twilight ends, eased at both ends; the day side dims as the Sun gets lower, from SUN_HIGH, so the fade
+  // begins well before the Sun sets; the cities light up as it gets dark (CITY_DUSK).
+  const TWILIGHT = [Math.sin(-18 * RAD), Math.sin(20 * RAD)];
+  const SUN_HIGH = Math.sin(55 * RAD), LOW_SUN = 0.5;  // the day side whole above 55 degrees, at half with the Sun on the horizon
+  const CITY_DUSK = 2;           // the cities' light grows as night's share squared: faint at sunset, whole by twilight's end
+  // The gloss is the Sun's shine (the user: "the shiny bit in the center is like where the sun shines, so
+  // that shiny bit needs to be focused on the timezones it's currently in, so there is a chance the shiny
+  // bit is never seen cause its on the other side of the globe"): round the place the Sun is overhead,
+  // turning with the Earth, out of sight while that is on its far side; this tight (the height's power).
+  const GLINT = 28;
+  // 0 below a, 1 above b, eased between with no step in its slope at either end (smootherstep)
+  const ease = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * t * (t * (t * 6 - 15) + 10); };
+  // The Sun centred on the time zone it is over (the user: "the sun needs to be centered on the current
+  // zone it's in, so there will need to be about 24 different globe renders"): its longitude that zone's
+  // meridian, a multiple of ZONE_DEG, so the Earth is lit one of 24 ways, each drawn once (litEarth).
+  const ZONE_DEG = 15;
   // The world's large cities, for the night side's lights: [lat, lon, people in millions], rounded.
   const CITIES = [
     [35.7, 139.7, 37], [28.6, 77.2, 32], [31.2, 121.5, 29], [23.8, 90.4, 23], [-23.6, -46.6, 22], [19.4, -99.1, 22],
@@ -54,13 +75,13 @@
   ];
   // lit from the front, a little above: brightest at the middle (the user's place), fading to both sides
   const LIGHT = (() => { const l = [0, 0.22, 1], m = Math.hypot(...l); return l.map((c) => c / m); })();
-  const HALF = (() => { const h = [LIGHT[0], LIGHT[1], LIGHT[2] + 1], m = Math.hypot(...h); return h.map((c) => c / m); })();
   const FETCHING = new Set(['waiting', 'downloading']);  // the symbol's fetch queued or under way
   const still = window.matchMedia?.('(prefers-reduced-motion: reduce)');
   const hosts = new Map();       // host element -> { size, logo: {key, canvas}, globe: canvas }
   const views = new Map();       // n -> each disc pixel's place on the sphere and its light (they do not turn)
   let land = null;               // the Earth: land cover, 0..1, on a 256 x 128 longitude/latitude grid
   let lights = null;             // its cities' light at night, 0..1, on the same grid
+  const lit = new Map();         // where the Sun is centred -> the Earth lit so (litEarth): 24 a day
   let pulseUntil = 0;
   let turning = false, frame = 0, began = 0, held = 0;  // held: the last TURN_MS it was updating in
 
@@ -120,6 +141,7 @@
       land = new Float32Array(LW * LH);  // each cell the share of its 4 x 4 pixels that are land
       for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) land[(y >> 2) * LW + (x >> 2)] += px[(y * W + x) * 4 + 3] / 255 / 16;
     } catch { land = new Float32Array(LW * LH); }  // no map: an ocean globe
+    lit.clear();  // lit again with the land
   }
   loadLand();
 
@@ -141,13 +163,43 @@
     return grid;
   })();
 
-  // A grid's value at (lon, lat) in degrees, bilinear between its cells.
-  function gridAt(grid, lon, lat) {
+  // The Earth lit with the Sun over (sun.lon, sun.lat) in degrees: each cell of the grid its colour, by
+  // day, by night or between (TWILIGHT), its gloss (by day) and its cities' light. Drawn once for each
+  // of the 24 places the Sun is centred on, and kept (a new day's 24 take the oldest's place).
+  function litEarth(sun) {
+    const key = `${sun.lon}|${sun.lat}`;
+    if (lit.has(key)) return lit.get(key);
+    const grid = new Float32Array(LW * LH * 5), sinD = Math.sin(sun.lat * RAD), cosD = Math.cos(sun.lat * RAD);
+    for (let y = 0; y < LH; y++) {
+      const lat = 90 - (y + 0.5) * 180 / LH, sinLat = Math.sin(lat * RAD), cosLat = Math.cos(lat * RAD);
+      const ice = Math.abs(lat) > 72 ? Math.min(1, (Math.abs(lat) - 72) / 8) : 0;
+      for (let x = 0; x < LW; x++) {
+        const lon = (x + 0.5) * 360 / LW - 180, k = y * LW + x, l = land ? land[k] : 0;
+        // the Sun's height here (the sine of its elevation): day above, night below, twilight between
+        const h = sinLat * sinD + cosLat * cosD * Math.cos((lon - sun.lon) * RAD);
+        const day = ease(TWILIGHT[0], TWILIGHT[1], h);                  // night 0 .. day 1, faded over twilight
+        const sunlit = LOW_SUN + (1 - LOW_SUN) * ease(0, SUN_HIGH, h);  // the day side dimming as the Sun gets low
+        for (let ch = 0; ch < 3; ch++) {
+          const colour = (OCEAN[ch] * (1 - l) + LAND[ch] * l) * (1 - ice) + ICE[ch] * ice;  // blue and gold
+          grid[k * 5 + ch] = colour * (sunlit * day + NIGHT[ch] * (1 - day));            // by night a shade of it
+        }
+        grid[k * 5 + 3] = h > 0 ? h ** GLINT * (0.75 - 0.5 * l) : 0;  // the Sun's shine where it is overhead, the ocean glossier
+        grid[k * 5 + 4] = (1 - day) ** CITY_DUSK * lights[k];  // its cities lit as it gets dark
+      }
+    }
+    if (lit.size >= 24) lit.delete(lit.keys().next().value);
+    lit.set(key, grid);
+    return grid;
+  }
+
+  // The lit Earth at (lon, lat) in degrees, into `out`: its colour, gloss and lights, bilinear between its cells.
+  function litAt(grid, lon, lat, out) {
     const fx = ((((lon + 180) % 360) + 360) % 360) / 360 * LW - 0.5, fy = Math.min(LH - 1, Math.max(0, (90 - lat) / 180 * LH - 0.5));
     const x0 = Math.floor(fx), y0 = Math.floor(fy), tx = fx - x0, ty = fy - y0;
     const xa = ((x0 % LW) + LW) % LW, xb = (xa + 1) % LW, y1 = Math.min(LH - 1, y0 + 1);
-    return (grid[y0 * LW + xa] * (1 - tx) + grid[y0 * LW + xb] * tx) * (1 - ty)
-         + (grid[y1 * LW + xa] * (1 - tx) + grid[y1 * LW + xb] * tx) * ty;
+    const a = (y0 * LW + xa) * 5, b = (y0 * LW + xb) * 5, c = (y1 * LW + xa) * 5, d = (y1 * LW + xb) * 5;
+    for (let i = 0; i < 5; i++) out[i] = (grid[a + i] * (1 - tx) + grid[b + i] * tx) * (1 - ty) + (grid[c + i] * (1 - tx) + grid[d + i] * tx) * ty;
+    return out;
   }
 
   // -- the view: each disc pixel's place on the sphere and its light, for a size (they do not turn) -----
@@ -159,11 +211,10 @@
         const x = (i + 0.5 - r) / r, y = (r - j - 0.5) / r, rr = x * x + y * y;
         const edge = Math.min(1, Math.max(0, (1 - Math.sqrt(rr)) * r + 0.5));  // the limb's coverage: smooth
         if (edge <= 0) continue;
-        const k = Math.min(1, rr), z = Math.sqrt(1 - k), cl = Math.sqrt(1 - y * y);
+        const k = Math.min(1, rr), z = Math.sqrt(1 - k);
         const diffuse = Math.max(0, x * LIGHT[0] + y * LIGHT[1] + z * LIGHT[2]);
-        const spec = Math.pow(Math.max(0, x * HALF[0] + y * HALF[1] + z * HALF[2]), 28);
         cells.push({ o: (j * n + i) * 4, lon: Math.atan2(x, z), lat: Math.asin(Math.max(-1, Math.min(1, y))) * 180 / Math.PI,
-                     sinLat: y, cl, v: (1 - y) / 2, edge, light: 0.38 + 0.78 * diffuse, spec, rim: Math.pow(1 - z, 3) });
+                     v: (1 - y) / 2, edge, light: 0.38 + 0.78 * diffuse, rim: Math.pow(1 - z, 3) });
       }
     }
     views.set(n, cells);
@@ -207,8 +258,8 @@
     const eg = entry.globe.getContext('2d');
     const img = eg.createImageData(n, n), px = img.data;
     const home = homeLon();                // its middle the picked time zone's meridian
-    const sun = sunNow();                  // where the Sun is overhead now: day and night
-    const col = [0, 0, 0];
+    const earth = litEarth(sunNow());      // the Earth lit with the Sun over the time zone it is in now
+    const at = [0, 0, 0, 0, 0];            // a pixel's colour, gloss and cities' light
     for (const c of view(n)) {
       let p = (v + c.lon) % (2 * Math.PI);  // the pixel's place on the half-globe, from its middle
       if (p > Math.PI) p -= 2 * Math.PI; else if (p < -Math.PI) p += 2 * Math.PI;
@@ -216,22 +267,11 @@
       if (k <= 0) continue;                 // the other half: the logo shows
       const cover = k * k * (3 - 2 * k);    // its leading and trailing edges faded
       const lon = home + (p * 180) / Math.PI;
-      const l = land ? gridAt(land, lon, c.lat) : 0;
-      const ice = Math.abs(c.lat) > 72 ? Math.min(1, (Math.abs(c.lat) - 72) / 8) : 0;
-      // the Sun's height here (the sine of its elevation): day above, night below, twilight between
-      const h = c.sinLat * sun.sinLat + c.cl * sun.cosLat * Math.cos((lon - sun.lon) * RAD);
-      const day = Math.min(1, Math.max(0, (h + TWILIGHT) / (2 * TWILIGHT)));
-      for (let ch = 0; ch < 3; ch++) {
-        const lit = (OCEAN[ch] * (1 - l) + LAND[ch] * l) * (1 - ice) + ICE[ch] * ice;  // by day: blue and gold
-        const dark = NIGHT_OCEAN[ch] * (1 - l) + NIGHT_LAND[ch] * l;
-        col[ch] = lit * day + dark * (1 - day);
-      }
-      const shine = c.spec * (0.75 - 0.5 * l) * day;            // the ocean glossier than the land, by day
-      const glow = (1 - day) * gridAt(lights, lon, c.lat);      // its cities lit at night
+      litAt(earth, lon, c.lat, at);
       const o = c.o;
       for (let ch = 0; ch < 3; ch++) {
         const atmosphere = ch === 2 ? 120 : ch === 1 ? 70 : 30;  // a blue haze at the limb
-        px[o + ch] = Math.min(255, col[ch] * c.light + 255 * shine + atmosphere * c.rim * 0.6 + CITY[ch] * glow);
+        px[o + ch] = Math.min(255, at[ch] * c.light + 255 * at[3] + atmosphere * c.rim * 0.6 + CITY[ch] * at[4]);
       }
       px[o + 3] = Math.round(255 * c.edge * cover);
     }
@@ -239,11 +279,13 @@
     g.drawImage(entry.globe, 0, 0);  // over the logo: where it is whole, it hides it
   }
 
-  // Where the Sun is overhead now (globeicon.js: noon's longitude, today's declination), or at a preview's time.
+  // Where the Sun is now (globeicon.js: noon's longitude, today's declination), or at a preview's time:
+  // centred on the time zone it is over, that zone's meridian (-180..165), its declination to the degree.
   function sunNow() {
     const t = preview?.at || new Date();
     const s = window.GlobeIcon?.sun?.(t) || { lon: -15 * (t.getUTCHours() + t.getUTCMinutes() / 60 - 12), lat: 0 };
-    return { lon: s.lon, sinLat: Math.sin(s.lat * RAD), cosLat: Math.cos(s.lat * RAD) };
+    const lon = ZONE_DEG * Math.round(s.lon / ZONE_DEG);
+    return { lon: ((lon % 360) + 540) % 360 - 180, lat: Math.round(s.lat) };
   }
 
   // A look at it (the demos the user asked for: a zone at a time): { at: Date, zone, turn: 0..1 (0: its

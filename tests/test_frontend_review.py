@@ -528,8 +528,8 @@ def test_the_open_symbols_logo_stays_still_and_half_a_globe_turns_round_it_with_
     assert "const k = Math.min(1, (Math.PI / 2 - Math.abs(p)) / EDGE_FADE);" in sphere and "if (k <= 0) continue;" in sphere
     assert "const cover = k * k * (3 - 2 * k);" in sphere and "px[o + 3] = Math.round(255 * c.edge * cover);" in sphere
     assert "const lon = home + (p * 180) / Math.PI;" in sphere  # its middle the picked zone's meridian
-    assert "const h = c.sinLat * sun.sinLat + c.cl * sun.cosLat * Math.cos((lon - sun.lon) * RAD);" in sphere  # the Sun now
-    assert "const glow = (1 - day) * gridAt(lights, lon, c.lat);" in sphere  # its cities lit at night
+    assert "const earth = litEarth(sunNow());" in sphere and "litAt(earth, lon, c.lat, at);" in sphere  # the Sun now
+    assert "CITY[ch] * at[4]" in sphere  # its cities lit at night
     assert "Math.min(zoneOffset(zone, new Date(Date.UTC(y, 0, 1))), zoneOffset(zone, new Date(Date.UTC(y, 6, 1))))" in js
     draw = _inner(js, "draw")
     assert "frame = requestAnimationFrame(draw);" in draw  # every screen frame: as smooth as the screen draws
@@ -551,3 +551,42 @@ def test_the_open_symbols_logo_stays_still_and_half_a_globe_turns_round_it_with_
     css = (STATIC / "style.css").read_text(encoding="utf-8")
     assert ".throb.updating .throb-sphere { display: block; }" in css and ".throb.updating .throb-front { visibility: hidden; }" in css
     assert ".throb.ringed { border-radius: 50%; box-shadow: 0 0 0 2px var(--accent); }" in css  # reduced motion
+
+
+def test_the_globe_fades_from_day_into_a_lighter_night_with_the_sun_centred_on_its_time_zone():
+    """The user (2026-10-30): "there needs to be a fade from night to day on the globe itself, not just day
+    and then night"; "so work on the frames so the transition between night and day is almost seamless";
+    "instead of hard darkness it would be less shade, and the sun needs to be centered on the current zone
+    it's in, so there will need to be about 24 different globe renders for each time the sun moves"."""
+    import re
+
+    js = _js("throbber.js")
+    # the fade: over the Sun's height from 20 degrees up to 18 down (twilight's end), wide, not a line
+    up, down = (int(d) for d in re.search(r"const TWILIGHT = \[Math\.sin\((-?\d+) \* RAD\), Math\.sin\((-?\d+) \* RAD\)\];", js).groups()[::-1])
+    assert (up, down) == (20, -18) and up - down >= 30
+    # eased at both ends: no step in its slope where the fade starts or stops (smootherstep)
+    assert "return t * t * t * (t * (t * 6 - 15) + 10);" in js
+    ease = lambda t: t * t * t * (t * (t * 6 - 15) + 10)  # noqa: E731 - the same curve, checked here
+    assert ease(0) == 0 and ease(1) == 1 and all(ease((i + 1) / 100) - ease(i / 100) < 0.02 for i in range(100))
+    # the day side dims as the Sun gets low, so the fade starts well before it sets
+    assert "const SUN_HIGH = Math.sin(55 * RAD), LOW_SUN = 0.5;" in js
+    # night a shade of the day's colours, not darkness: a third to almost half as bright, a little bluer
+    night = [float(x) for x in re.search(r"const NIGHT = \[([\d., ]+)\];", js).group(1).split(",")]
+    assert 0.25 <= min(night) and max(night) <= 0.5 and night[2] == max(night)
+    assert "NIGHT_OCEAN" not in js and "NIGHT_LAND" not in js
+    earth = _inner(js, "litEarth")
+    assert "grid[k * 5 + ch] = colour * (sunlit * day + NIGHT[ch] * (1 - day));" in earth
+    assert "grid[k * 5 + 4] = (1 - day) ** CITY_DUSK * lights[k];" in earth  # the cities come on as it gets dark
+    # the Sun centred on the time zone it is over: 24 places, each lit Earth drawn once and kept
+    assert "const ZONE_DEG = 15;" in js and 360 // 15 == 24
+    sun = _inner(js, "sunNow")
+    assert "const lon = ZONE_DEG * Math.round(s.lon / ZONE_DEG);" in sun
+    assert "return { lon: ((lon % 360) + 540) % 360 - 180, lat: Math.round(s.lat) };" in sun
+    zone = lambda lon: ((15 * round(lon / 15)) % 360 + 540) % 360 - 180  # noqa: E731 - Python's round: halves to even
+    assert {zone(x / 4) for x in range(-720, 720)} == set(range(-180, 180, 15))  # one of 24, 180 the same as -180
+    assert "if (lit.has(key)) return lit.get(key);" in earth and "if (lit.size >= 24) lit.delete(lit.keys().next().value);" in earth
+    assert "lit.clear();  // lit again with the land" in _inner(js, "loadLand")
+    # the shine is the Sun's, round the place it is overhead: it turns with the Earth, out of sight while
+    # the Sun is on the far side ("there is a chance the shiny bit is never seen"); no gloss fixed in front
+    assert "const GLINT = 28;" in js and "grid[k * 5 + 3] = h > 0 ? h ** GLINT * (0.75 - 0.5 * l) : 0;" in earth
+    assert "255 * at[3]" in _inner(js, "drawSphere") and "spec" not in js and "HALF" not in js
