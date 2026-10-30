@@ -66,6 +66,9 @@ class Publisher:
     # a vendor's read: read(ctx) -> new items (ctx: publications.Context); official feeds are read
     # by the reader itself
     read: Callable[[object], int] | None = None
+    # its own version and the plugin contract it was written for (sources/registry.py: PLUGIN_API)
+    version: str = ""
+    api: str = "1.0"
     origin: str = "built in"  # set when loaded
 
     def feed(self, key: str) -> Feed | None:

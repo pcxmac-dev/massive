@@ -68,6 +68,7 @@ function Get-Providers {
         throw "Could not list the providers ($py -m massive_collate plugins --json)."
     }
     $listed = ($json | Out-String) | ConvertFrom-Json
+    $script:PluginApi = $listed.api
     foreach ($e in @($listed.errors)) {
         if ($e) { Write-Host ('  left out: {0}: {1}' -f $e.where, $e.why) }
     }
@@ -84,22 +85,32 @@ function Get-KeyState($key) {
     'not set'
 }
 
+# A plugin's version, and where it came from when not built in (a package's entry point)
+function Get-Release($p) {
+    $version = $p.version
+    if (-not $version) { $version = 'unversioned' }
+    if ($p.origin -and $p.origin -ne 'built in') { return '{0}, {1}' -f $version, $p.origin }
+    $version
+}
+
 function Show-Providers($providers) {
     $keyed = @($providers | Where-Object { @($_.keys).Count -gt 0 })
     $free = @($providers | Where-Object { @($_.keys).Count -eq 0 })
-    Write-Host 'Data providers (each a plugin of the app):'
+    $api = ''
+    if ($script:PluginApi) { $api = "; plugin API $($script:PluginApi)" }
+    Write-Host "Data providers (each a plugin of the app$api):"
     for ($i = 0; $i -lt $keyed.Count; $i++) {
         $p = $keyed[$i]
         $keys = (@($p.keys) | ForEach-Object { '{0}: {1}' -f $_.name, (Get-KeyState $_) }) -join ', '
         $note = ''
         if (@($p.keyless).Count -gt 0) { $note = '  ({0} without keys)' -f (@($p.keyless) -join ', ') }
-        Write-Host ('  {0}. {1,-10} {2}{3}' -f ($i + 1), $p.title, $keys, $note)
+        Write-Host ('  {0}. {1,-12} {2,-7} {3}{4}' -f ($i + 1), $p.title, (Get-Release $p), $keys, $note)
         foreach ($v in @($p.planVars | Where-Object { $_ -and @($_.choices).Count -gt 0 })) {
             Write-Host ('     {0}={1} ({2})' -f $v.name, $v.value, (Get-Origin $v.origin))
         }
     }
     if ($free.Count -gt 0) {
-        Write-Host ('  -  {0}: no key needed' -f ((@($free) | ForEach-Object { $_.title }) -join ', '))
+        Write-Host ('  -  {0}: no key needed' -f ((@($free) | ForEach-Object { '{0} {1}' -f $_.title, (Get-Release $_) }) -join ', '))
     }
     $keyed
 }
@@ -182,7 +193,7 @@ function Remove-ProviderKeys($p) {
 
 function Edit-Provider($p) {
     Write-Host ''
-    Write-Host "$($p.title): $($p.about)"
+    Write-Host "$($p.title) $(Get-Release $p): $($p.about)"
     if ($p.signup) { Write-Host "Keys from $($p.signup)" }
     $names = (@($p.keys) | ForEach-Object { $_.name }) -join ', '
     $plans = @($p.planVars | Where-Object { $_ -and @($_.choices).Count -gt 0 })

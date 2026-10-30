@@ -147,6 +147,7 @@ def scan(source, today: date | None = None) -> Scanned:
 
 
 PLUGIN = Provider(
+    version="1.0.0", api="1.0",  # its own release, and the plugin contract it was written for
     name="tiingo", title="Tiingo", build=build, assets=frozenset({"stock"}), order=60,
     about="US stock daily bars from 1962 (a free account key)",
     keys=(KeyVar("TIINGO_API_KEY"),), signup="tiingo.com: a free account's API token",

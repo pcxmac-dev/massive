@@ -8,6 +8,7 @@ from __future__ import annotations
 from ..publisher import Feed, Policy, Publisher
 
 PUBLISHER = Publisher(
+    version="1.0.0", api="1.0",  # its own release, and the plugin contract it was written for
     name="sec", title="SEC", order=220,
     about="press releases and trading suspensions",
     feeds=(

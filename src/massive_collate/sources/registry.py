@@ -27,6 +27,11 @@ What a plugin gives:
 
 Callbacks left out take the defaults below, so a plain keyed REST feed needs little more than its
 build. A plugin that fails to load is left out and reported (`errors()`, `plugins`), never fatal.
+
+The contract is versioned (`PLUGIN_API`, major.minor; docs/ARCHITECTURE.md says what it holds).
+Each plugin gives its own `version` (a package's may leave it empty: its distribution's is used)
+and the contract it was written for (`api`). One written for another major, or for a newer minor
+than this app offers, is left out and reported like a broken one.
 """
 from __future__ import annotations
 
@@ -47,6 +52,36 @@ if TYPE_CHECKING:
 
 ENTRY_POINTS = "massive_collate.providers"
 DEFAULT_PER_REQUEST = 1000  # bars a request returns, for a provider that does not say
+# The plugin contract this app offers (major.minor): a new minor only adds (a field with a default,
+# a helper), a new major changes or removes something a plugin may rely on. A plugin written
+# before the contract had a number was written for 1.0 (Provider.api's default).
+PLUGIN_API = "1.0"
+
+
+def api_version(api) -> tuple[int, int]:
+    """A contract version's (major, minor): "1.2", "1" (1.0). ValueError when it is not one."""
+    parts = str(api).strip().split(".")
+    if not 1 <= len(parts) <= 2 or not all(p.isdigit() for p in parts):
+        raise ValueError(f"api {api!r} is not a contract version (major.minor)")
+    return int(parts[0]), int(parts[1]) if len(parts) == 2 else 0
+
+
+def api_refusal(api, offered: str | None = None) -> str | None:
+    """Why a plugin written for contract `api` cannot load in an app offering `offered` (default:
+    PLUGIN_API; None: it can): its major must be the app's, its minor no newer than the app's."""
+    offered = offered or PLUGIN_API
+    try:
+        major, minor = api_version(api)
+    except ValueError as e:
+        return str(e)
+    have, have_minor = api_version(offered)
+    if major < have:
+        return f"written for plugin API {api}; this app offers {offered}: it needs a release for {have}.x"
+    if major > have:
+        return f"written for plugin API {api}; this app offers {offered}: it needs a newer app"
+    if minor > have_minor:
+        return f"written for plugin API {api}, newer than this app's {offered}: it needs a newer app"
+    return None
 
 
 @dataclass(frozen=True)
@@ -199,6 +234,8 @@ class Provider:
     # Plugins view): a few requests asking what its plan really gives, each answer (what, available,
     # detail), or a `Scanned` with the plan they show too; kept, and shown in its report.
     scan: Callable[["DataSource"], "list[tuple[str, bool, str]] | Scanned"] | None = None
+    version: str = ""  # the plugin's own version (a package's, left empty: its distribution's)
+    api: str = "1.0"  # the contract (PLUGIN_API) it was written for: another major is left out
     origin: str = "built in"  # set when loaded: built in, or the package's entry point
 
     @property
@@ -511,6 +548,32 @@ def _entry_points() -> Iterable:
         return ()
 
 
+def _distribution(ep) -> tuple[str, str]:
+    """The installed distribution an entry point comes from: (name, version); empty when unknown."""
+    try:
+        dist = getattr(ep, "dist", None)
+        return (str(dist.name or ""), str(dist.version or "")) if dist is not None else ("", "")
+    except Exception:  # broken metadata: the plugin still loads, unversioned
+        return "", ""
+
+
+def _load(where: str, load: Callable[[], object], origin: str, version: str,
+          found: list, errors: list[tuple[str, str]]) -> None:
+    """One module's or entry point's plugins into `found`, those this app's contract cannot take
+    (api_refusal) and a module that fails to load into `errors`; `version` is the package's."""
+    try:
+        plugins_ = _plugins_in(load(), origin)
+    except Exception as e:
+        errors.append((where, f"{type(e).__name__}: {e}"))
+        return
+    for p in plugins_:
+        why = api_refusal(p.api)
+        if why:
+            errors.append((where, f"{p.name}: {why}"))
+        else:
+            found.append(p if p.version or not version else replace(p, version=version))
+
+
 def discover() -> tuple[dict[str, Provider], list[tuple[str, str]]]:
     """Every provider plugin: the built-in modules, then the installed packages' entry points.
     Returns (providers by name in their order, [(where, why)] for the ones left out)."""
@@ -519,23 +582,20 @@ def discover() -> tuple[dict[str, Provider], list[tuple[str, str]]]:
 
 
 def discover_all() -> tuple[dict[str, Provider], dict[str, Publisher], list[tuple[str, str]]]:
-    """The providers and the publishers (both by name, in their order), and the plugins left out."""
+    """The providers and the publishers (both by name, in their order), and the plugins left out:
+    one that fails to load, one written for a contract this app does not offer (api_refusal), a
+    second of one name."""
     from . import plugins
 
     found: list[Provider | Publisher] = []
     errors: list[tuple[str, str]] = []
     for info in sorted(pkgutil.iter_modules(plugins.__path__), key=lambda m: m.name):
         where = f"{plugins.__name__}.{info.name}"
-        try:
-            found += _plugins_in(importlib.import_module(where), "built in")
-        except Exception as e:
-            errors.append((where, f"{type(e).__name__}: {e}"))
+        _load(where, lambda: importlib.import_module(where), "built in", "", found, errors)
     for ep in _entry_points():
-        where = f"{ep.name} ({ep.value})"
-        try:
-            found += _plugins_in(ep.load(), f"package: {ep.value}")
-        except Exception as e:
-            errors.append((where, f"{type(e).__name__}: {e}"))
+        dist, version = _distribution(ep)
+        _load(f"{ep.name} ({ep.value})", ep.load, f"package: {dist} ({ep.value})" if dist else f"package: {ep.value}",
+              version, found, errors)
     out: dict[str, Provider] = {}
     pubs: dict[str, Publisher] = {}
     keys: dict[str, str] = {}  # a feed's key -> its publisher (keys name the state kept)
@@ -603,7 +663,8 @@ def menu(settings: "Settings | None" = None) -> list[dict]:
     out = []
     for p in providers().values():
         row = {"name": p.name, "title": p.title, "about": p.about, "signup": p.signup, "origin": p.origin,
-               "archive": p.archival, "assets": sorted(p.assets), "keyless": sorted(p.keyless),
+               "version": p.version, "api": p.api, "archive": p.archival, "assets": sorted(p.assets),
+               "keyless": sorted(p.keyless),
                "keys": [{"name": k.name, "label": k.label, "aliases": list(k.aliases)} for k in p.keys],
                "planChoices": [{"name": v, "choices": list(c)} for v, c in p.plan_choices.items()],
                "planNote": p.plan_note, "scan": p.scan is not None}
@@ -613,3 +674,9 @@ def menu(settings: "Settings | None" = None) -> list[dict]:
                        plan=settings.for_source(p.name).tier.name, planVars=p.plan_state(settings))
         out.append(row)
     return out
+
+
+def publisher_menu() -> list[dict]:
+    """The publisher plugins for the `plugins` command: what each is, its version and origin."""
+    return [{"name": p.name, "title": p.title, "about": p.about, "kind": p.kind, "account": p.account,
+             "origin": p.origin, "version": p.version, "api": p.api} for p in publishers().values()]

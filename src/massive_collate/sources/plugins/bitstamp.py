@@ -8,6 +8,7 @@ from ..registry import Provider, public_client
 TIER, PER_RUN, PER_DAY = PUBLIC_FEEDS["bitstamp"]
 
 PLUGIN = Provider(
+    version="1.0.0", api="1.0",  # its own release, and the plugin contract it was written for
     name="bitstamp", title="Bitstamp",
     build=lambda settings, budget: BitstampSource(
         public_client("bitstamp", "https://www.bitstamp.net/api/v2", settings, budget)),

@@ -33,6 +33,7 @@ def build(settings, request_budget):
 
 
 PLUGIN = Provider(
+    version="1.0.0", api="1.0",  # its own release, and the plugin contract it was written for
     name="tiingofx", title="Tiingo forex", build=build, assets=frozenset({"fx"}), order=61, account="tiingo",
     about="currency pairs' 1-minute bars from 2020 (your Tiingo key and limits)",
     keys=TIINGO.keys, signup=TIINGO.signup, kind="vendor",

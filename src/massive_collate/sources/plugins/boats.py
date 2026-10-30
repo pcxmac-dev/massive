@@ -29,6 +29,7 @@ def scan(source) -> list[tuple[str, bool, str]]:
 
 
 PLUGIN = Provider(
+    version="1.0.0", api="1.0",  # its own release, and the plugin contract it was written for
     name="boats", title="Blue Ocean", build=build, assets=frozenset({"stock"}), order=15, account="alpaca",
     about="US stocks overnight, 20:00-04:00 ET, Blue Ocean ATS through Alpaca (your Alpaca keys and limits)",
     keys=ALPACA.keys, signup=ALPACA.signup, kind="exchange",

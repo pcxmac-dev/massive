@@ -4,7 +4,8 @@
    in the middle the one picked: its plan and where that came from (set by you, found by its scan,
    the default), its limits, what it can do on that plan, its live streams and its last capability
    scan with a Rescan; on the right its part in the delivery scheme (the eras it delivers or stands
-   by for), its requests today, the symbols it watches, its keys (set or not, never their values).
+   by for), its requests today, the symbols it watches, its keys (set or not, never their values),
+   its version, the plugin API it was written for and where it came from (built in, or a package).
    Each plugin refreshes its own plan info: a rescan asks the provider what the key really gets.
    A plan its scan cannot tell (Tiingo's Power from Commercial) is chosen here: each plan variable
    is a choice, saved like the key script saves it (POST /api/plugins/plan); keys stay in the script.
@@ -49,6 +50,8 @@
   };
   const every = (m) => (m >= 60 ? `${num(m / 60)} h` : `${num(m)} min`);
   const tierOf = (p) => p.plan.vars.find((v) => v.choices.length) || null;
+  // a plugin's version, the plugin API it was written for and where it came from
+  const release = (p) => `<div class="p-muted small pl-release">Version ${esc(p.version || 'unversioned')} · plugin API ${esc(p.api)} · ${esc(p.origin)}</div>`;
 
   async function load() {
     clearTimeout(timer);
@@ -251,7 +254,7 @@
       : `Stopped until ${until(p.kill.until)} UTC: ${esc(p.kill.why)}`;
     const used = p.policy.perDay ? Math.min(100, (p.requestsToday / p.policy.perDay) * 100) : 0;
     return `<h3>${esc(p.title)} ${chip(p.state)}</h3>
-      <div class="p-muted small">${esc(p.about)}${p.origin !== 'built in' ? ` · ${esc(p.origin)}` : ''}</div>
+      <div class="p-muted small">${esc(p.about)}</div>${release(p)}
       ${stop ? `<div class="pl-warn">${stop}</div>` : ''}
       ${p.held ? `<div class="pl-warn">Nothing sent until ${until(p.held.until)} UTC: ${esc(p.held.why)}</div>` : ''}
       <div class="tiles ex-tiles">
@@ -291,7 +294,7 @@
     const keys = p.keys.length ? p.keys.map((k) => `<div class="small"><code>${esc(k.name)}</code> ${k.set ? '<span class="up">set</span>' : '<span class="down">not set</span>'}</div>`).join('')
       : '<div class="p-muted small">Needs no key.</div>';
     return `<h3>${esc(p.title)} ${chip(p.state)}</h3>
-      <div class="p-muted small">${esc(p.about)}${p.origin !== 'built in' ? ` · ${esc(p.origin)}` : ''}</div>
+      <div class="p-muted small">${esc(p.about)}</div>${release(p)}
       ${p.kill ? `<div class="pl-warn">Killed until ${esc(p.kill.until?.slice(0, 16).replace('T', ' '))} UTC: ${esc(p.kill.why)}</div>` : ''}
       <div class="tiles ex-tiles">
         ${tile('Requests today', num(u.today), `of ${num(u.perDay)} a day`)}
@@ -315,7 +318,7 @@
       : p ? `${p.archive ? 'closed archive' : 'feed'} · ${p.kind} data · ${p.assets.join(', ')}` : '';
     box.innerHTML = `
       <div class="ex-venues"><div class="view-head"><div><h2>Plugins</h2>
-        <div class="p-muted small">${num(data.plugins.length)} providers · ${num(setUp)} set up · ${num((data.publishers || []).length)} publishers</div></div></div>
+        <div class="p-muted small">${num(data.plugins.length)} providers · ${num(setUp)} set up · ${num((data.publishers || []).length)} publishers · plugin API ${esc(data.api)}</div></div></div>
         <button type="button" class="pl-all" data-rescan="*"${data.offline || data.running ? ' disabled' : ''}
           title="${data.offline ? 'This offline copy of the app sends no requests' : 'Every plugin set up here asks its provider again (a few requests each)'}">${data.running ? 'Scanning…' : 'Rescan all'}</button>
         ${note ? `<div class="p-muted small pl-note-line">${esc(note)}</div>` : ''}

@@ -148,6 +148,112 @@ def test_a_module_may_give_several_providers(installed):
     assert list(found)[:2] == ["massive", "acme2"] and "acme" in found
 
 
+# -- the plugin contract's version (registry.PLUGIN_API) ---------------------------------------------
+def test_a_contract_version_takes_its_own_major_and_no_newer_minor():
+    assert registry.api_version("1.2") == (1, 2) and registry.api_version("1") == (1, 0)
+    assert registry.api_refusal("1.0", "1.0") is None and registry.api_refusal("1.0", "1.3") is None
+    assert registry.api_refusal("1.3", "1.3") is None and registry.api_refusal(" 1 ", "1.3") is None
+    assert "needs a newer app" in registry.api_refusal("1.4", "1.3")  # a minor newer than the app's
+    assert "needs a newer app" in registry.api_refusal("2.0", "1.3")
+    assert "needs a release for 2.x" in registry.api_refusal("1.9", "2.0")
+    for bad in ("", "one", "1.0.0", "1.x", "-1.0"):
+        assert "not a contract version" in registry.api_refusal(bad, "1.0")
+
+
+def test_every_built_in_plugin_is_versioned_for_this_apps_contract():
+    from massive_collate.sources import publishers
+
+    plugins_ = [*providers().values(), *publishers().values()]
+    assert len(plugins_) == len(BUILT_IN) + 6  # the feeds and the six publishers
+    for p in plugins_:
+        assert p.version == "1.0.0" and p.api == "1.0" and registry.api_refusal(p.api) is None, p.name
+    assert registry.PLUGIN_API == "1.0"
+
+
+def test_a_plugin_for_another_major_is_left_out_and_reported_and_a_matching_one_loads(installed):
+    from massive_collate.sources import publishers
+    from massive_collate.sources.publisher import Policy, Publisher
+
+    def acme(name, api, **kw):
+        return replace(ACME, name=name, title=name, keys=(), plan_vars=(), api=api, **kw)
+
+    old_news = Publisher(name="old-news", title="Old news", about="", feeds=(), policy=Policy(), api="0.3")
+    found = installed(("next", "acme_next:PLUGIN", lambda: acme("acme-next", "2.0")),
+                      ("old", "acme_old:PLUGIN", lambda: acme("acme-old", "0.9")),
+                      ("newer", "acme_newer:PLUGIN", lambda: acme("acme-newer", "1.1")),
+                      ("odd", "acme_odd:PLUGIN", lambda: acme("acme-odd", "latest")),
+                      ("same", "acme_same:PLUGIN", lambda: acme("acme-same", "1.0", version="2.4.1")),
+                      ("plain", "acme_plain:PLUGIN", lambda: acme("acme-plain", "1")),
+                      ("news", "old_news:PUBLISHER", lambda: old_news))
+    assert list(found) == BUILT_IN + ["acme-plain", "acme-same"]  # the app goes on with the others
+    assert provider("acme-same").version == "2.4.1" and provider("acme-same").api == "1.0"
+    assert "old-news" not in publishers()
+    why = dict(registry.errors())
+    assert set(why) == {"next (acme_next:PLUGIN)", "old (acme_old:PLUGIN)", "newer (acme_newer:PLUGIN)",
+                        "odd (acme_odd:PLUGIN)", "news (old_news:PUBLISHER)"}
+    assert why["next (acme_next:PLUGIN)"] == ("acme-next: written for plugin API 2.0; this app offers 1.0: "
+                                              "it needs a newer app")
+    assert why["old (acme_old:PLUGIN)"].startswith("acme-old: written for plugin API 0.9") \
+        and "needs a release for 1.x" in why["old (acme_old:PLUGIN)"]
+    assert "newer than this app's 1.0" in why["newer (acme_newer:PLUGIN)"]
+    assert "not a contract version" in why["odd (acme_odd:PLUGIN)"]
+    assert "old-news: written for plugin API 0.3" in why["news (old_news:PUBLISHER)"]
+
+
+def test_a_plugin_that_says_no_api_was_written_for_the_first_contract(installed, monkeypatch):
+    before = Provider(name="acme-before", title="Acme", build=lambda s, b: None, assets=frozenset({"stock"}))
+    assert before.api == "1.0"
+    assert "acme-before" in installed(("before", "acme_before:PLUGIN", lambda: before))
+    monkeypatch.setattr(registry, "PLUGIN_API", "2.0")  # an app of a later major: it is left out then
+    assert "acme-before" not in registry.reload()
+    why = dict(registry.errors())["before (acme_before:PLUGIN)"]
+    assert why == "acme-before: written for plugin API 1.0; this app offers 2.0: it needs a release for 2.x"
+    assert "massive_collate.sources.plugins.cboe" in dict(registry.errors())  # the built-ins too, until released for it
+
+
+def test_a_packages_plugin_without_a_version_takes_its_distributions(monkeypatch):
+    dist = SimpleNamespace(name="massive-acme", version="0.4.2")
+    eps = [SimpleNamespace(name="acme", value="massive_acme:PLUGIN", load=lambda: ACME, dist=dist),
+           SimpleNamespace(name="own", value="massive_own:PLUGIN", dist=dist,
+                           load=lambda: replace(ACME, name="acme-own", version="9.9.9"))]
+    monkeypatch.setattr(registry, "_entry_points", lambda: eps)
+    try:
+        registry.reload()
+        assert provider("acme").version == "0.4.2"
+        assert provider("acme").origin == "package: massive-acme (massive_acme:PLUGIN)"
+        assert provider("acme-own").version == "9.9.9"  # its own release wins
+        row = {r["name"]: r for r in registry.menu()}["acme"]
+        assert (row["version"], row["api"], row["origin"]) == ("0.4.2", "1.0", "package: massive-acme (massive_acme:PLUGIN)")
+    finally:
+        registry._providers = None
+
+
+def test_the_plugins_command_shows_each_plugins_version_and_origin(monkeypatch, capsys):
+    monkeypatch.setattr(config, "read_env_file", lambda path: {})
+    assert cli.main(["plugins", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["api"] == "1.0" and out["errors"] == []
+    assert {(r["version"], r["api"], r["origin"]) for r in out["providers"]} == {("1.0.0", "1.0", "built in")}
+    pubs = {r["name"]: r for r in out["publishers"]}
+    assert set(pubs) == {"fed", "nyfed", "sec", "bls", "fedreg", "massive-news"}
+    assert pubs["massive-news"]["version"] == "1.0.0" and pubs["massive-news"]["account"] == "massive"
+    assert cli.main(["plugins"]) == 0
+    text = capsys.readouterr().out
+    assert text.startswith("Plugin API 1.0") and "[1.0.0 for plugin API 1.0, built in]" in text
+    assert any(line.startswith("massive-news") and "publisher [1.0.0" in line for line in text.splitlines())
+
+
+def test_the_plugins_view_shows_each_plugins_version_and_origin(tmp_path):
+    from massive_collate.gui.server import ChartApp
+    from massive_collate.storage import Store
+
+    with Store(tmp_path / "m.db") as store:
+        out = ChartApp(store, settings=load_settings(env={}, env_file=None)).plugins()
+    assert out["api"] == "1.0"
+    assert {(p["version"], p["api"], p["origin"]) for p in out["plugins"]} == {("1.0.0", "1.0", "built in")}
+    assert {(p["version"], p["api"]) for p in out["publishers"]} == {("1.0.0", "1.0")}
+
+
 def test_unknown_providers_are_refused_by_name():
     with pytest.raises(ValueError, match="unknown source 'nope'; available: massive, alpaca"):
         build_source("nope", load_settings(env={}, env_file=None))

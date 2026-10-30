@@ -8,6 +8,7 @@ from ..registry import Provider, public_client
 TIER, PER_RUN, PER_DAY = PUBLIC_FEEDS["cboe"]
 
 PLUGIN = Provider(
+    version="1.0.0", api="1.0",  # its own release, and the plugin contract it was written for
     name="cboe", title="Cboe",
     build=lambda settings, budget: CboeSource(
         public_client("cboe", "https://cdn-api.cboe.com/api/global/us_indices/daily_prices", settings, budget)),

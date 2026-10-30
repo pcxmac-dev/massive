@@ -16,6 +16,7 @@ def moments(day: date) -> tuple[datetime, ...]:
 
 
 PUBLISHER = Publisher(
+    version="1.0.0", api="1.0",  # its own release, and the plugin contract it was written for
     name="bls", title="Bureau of Labor Statistics", order=230,
     about="the employment situation, CPI, PPI and job openings, at their 8:30 a.m. releases",
     feeds=(

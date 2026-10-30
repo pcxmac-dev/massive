@@ -886,25 +886,34 @@ def cmd_feeds(args, settings: Settings) -> int:
 
 def cmd_plugins(args, settings: Settings | None) -> int:
     """The provider plugins (sources/registry.py): each one's keys, set or not (never their values),
-    what it serves here and where it came from; the ones that failed to load. --json: the same for
-    tools/set-key.ps1's menu (listed even when a setting is wrong: settings is None then)."""
+    what it serves here, its version and where it came from; the publisher plugins; the ones left
+    out (failed to load, or written for another plugin API). --json: the same for tools/set-key.ps1's
+    menu (listed even when a setting is wrong: settings is None then)."""
     import json
 
     from .sources import registry
 
     rows = registry.menu(settings)
+    pubs = registry.publisher_menu()
     left_out = registry.errors()
     if args.json:
-        print(json.dumps({"providers": rows, "errors": [{"where": w, "why": why} for w, why in left_out]}))
+        print(json.dumps({"api": registry.PLUGIN_API, "providers": rows, "publishers": pubs,
+                          "errors": [{"where": w, "why": why} for w, why in left_out]}))
         return 0
+
+    def release(r: dict) -> str:
+        return f"[{r['version'] or 'unversioned'} for plugin API {r['api']}, {r['origin']}]"
+
+    print(f"Plugin API {registry.PLUGIN_API} (docs/ARCHITECTURE.md: Providers are plugins)")
     for r in rows:
         keys = ", ".join(k["name"] for k in r["keys"]) or "no key needed"
         if r.get("keysSet") is not None:
             keys += " (set)" if r["keysSet"] else f" (not set{': ' + ', '.join(r['keyless']) + ' only' if r['keyless'] else ''})"
         serves = ", ".join(r.get("serves") or []) or "-"
         print(f"{r['name']:9} {r['title']:10} {'archive' if r['archive'] else 'feed':8} {keys:58} serves: {serves}")
-        print(f"{'':9} {r['about']}" + (f"; keys from {r['signup']}" if r["signup"] else "")
-              + ("" if r["origin"] == "built in" else f" [{r['origin']}]"))
+        print(f"{'':9} {r['about']}" + (f"; keys from {r['signup']}" if r["signup"] else "") + f" {release(r)}")
+    for r in pubs:
+        print(f"{r['name']:12} {r['title']:28} publisher {release(r)}")
     for where, why in left_out:
         print(f"left out: {where}: {why}")
     print("Set or remove a provider's keys: powershell -NoProfile -ExecutionPolicy Bypass -File .\\tools\\set-key.ps1")

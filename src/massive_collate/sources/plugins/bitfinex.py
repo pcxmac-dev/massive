@@ -7,6 +7,7 @@ from ..registry import Provider, public_client
 from .coinbase import venue_view
 
 PLUGIN = Provider(
+    version="1.0.0", api="1.0",  # its own release, and the plugin contract it was written for
     name="bitfinex", title="Bitfinex",
     build=lambda settings, budget: BitfinexSource(
         public_client("bitfinex", "https://api-pub.bitfinex.com/v2", settings, budget)),

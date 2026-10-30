@@ -47,6 +47,7 @@ def calendar(today: date) -> list[dict]:
 
 
 PUBLISHER = Publisher(
+    version="1.0.0", api="1.0",  # its own release, and the plugin contract it was written for
     name="fed", title="Federal Reserve", order=200,
     about="press releases (monetary policy, regulation, enforcement), speeches and testimony; "
           "read at the FOMC's 2:00 p.m. releases",

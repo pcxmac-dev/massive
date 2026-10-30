@@ -1,6 +1,7 @@
 """The Plugins view (rail icon: a plug; the user, 2026-10-27): every data provider plugin (a feed,
-a source: sources/registry.py), its plan and where that came from, its limits and capabilities,
-its last capability scan with a Rescan, and its part in the delivery scheme.
+a source: sources/registry.py), its version and origin (built in, or an installed package), its
+plan and where that came from, its limits and capabilities, its last capability scan with a
+Rescan, and its part in the delivery scheme; the plugin API this app offers.
 
 Each plugin refreshes its own plan info: its scan asks the provider what the key really gets and
 may name the plan that shows (registry.Scanned), applied wherever the user set none
@@ -14,7 +15,7 @@ from __future__ import annotations
 from datetime import date
 
 from ..sources import providers
-from ..sources.registry import errors
+from ..sources.registry import PLUGIN_API, errors
 
 GROUPS = ("Feeds with keys", "Public feeds")
 
@@ -68,7 +69,8 @@ def view(store, settings, feeds: dict, scheme, scans: dict, running: dict | None
                      "unique": e.unique, "others": [s for s in e.sources if s != name], "symbols": e.symbols}
                     for e in scheme.eras if name in e.sources]
         out.append({
-            "name": name, "title": p.title, "about": p.about, "origin": p.origin, "signup": p.signup,
+            "name": name, "title": p.title, "about": p.about, "origin": p.origin, "version": p.version, "api": p.api,
+            "signup": p.signup,
             "group": GROUPS[0] if p.keys else GROUPS[1], "archive": p.archival, "kind": p.kind,
             "assets": sorted(p.assets), "keyless": sorted(p.keyless), "serves": served,
             "configured": prof is not None, "keysSet": keys_set,
@@ -91,5 +93,6 @@ def view(store, settings, feeds: dict, scheme, scans: dict, running: dict | None
             "delivery": delivery, "load": round(scheme.load.get(name, 0.0), 3),
         })
     return {"plugins": out, "groups": list(GROUPS), "errors": [{"where": w, "why": why} for w, why in errors()],
+            "api": PLUGIN_API,
             "running": running, "offline": bool(settings.offline),
             "keyScript": r"powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\set-key.ps1"}

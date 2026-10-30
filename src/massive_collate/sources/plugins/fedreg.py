@@ -16,6 +16,7 @@ def moments(day: date) -> tuple[datetime, ...]:
 
 
 PUBLISHER = Publisher(
+    version="1.0.0", api="1.0",  # its own release, and the plugin contract it was written for
     name="fedreg", title="Federal Register", order=240,
     about="rules and notices of the SEC (FINRA's and the exchanges' filings), the CFTC, the Fed and the Treasury",
     feeds=(Feed("fedreg", "Federal Register", "Rules and notices: SEC (FINRA, exchanges), CFTC, Fed, Treasury",

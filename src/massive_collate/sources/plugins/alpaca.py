@@ -54,6 +54,7 @@ def scan(source) -> list[tuple[str, bool, str]] | Scanned:
 
 
 PLUGIN = Provider(
+    version="1.0.0", api="1.0",  # its own release, and the plugin contract it was written for
     name="alpaca", title="Alpaca", build=build, assets=frozenset({"stock", "crypto"}), order=10,
     about="US stocks (SIP from 2016, the session up to 15 min ago, IEX live) with keys; crypto without",
     keys=(KeyVar("ALPACA_API_KEY_ID", "key ID", ("APCA_API_KEY_ID",)),

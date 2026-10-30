@@ -684,6 +684,7 @@ def view(gdb: gov.GovDB, settings=None, store=None, now: datetime | None = None,
             out.append(_publisher_view(reader, gdb, pub, now))
         except Exception as e:  # noqa: BLE001 - one plugin's fault never takes the view down
             out.append({"name": pub.name, "title": pub.title, "about": pub.about, "kind": pub.kind, "origin": pub.origin,
+                        "version": pub.version, "api": pub.api,
                         "account": pub.account, "state": "off", "error": f"{type(e).__name__}: {e}", "kill": None,
                         "held": None, "policy": {"hosts": list(pub.policy.hosts), "minMinutes": pub.policy.min_minutes,
                                                  "perDay": pub.policy.per_day, "contact": pub.policy.contact,
@@ -723,7 +724,7 @@ def _publisher_view(reader: Reader, gdb: gov.GovDB, pub: Publisher, now: datetim
                        "allows": all(rb.allows(f.url) for f in pub.feeds if host_of(f.url) == host) if rb else None})
     return {
         "name": pub.name, "title": pub.title, "about": pub.about, "kind": pub.kind, "origin": pub.origin,
-        "account": pub.account, "state": state, "kill": kill, "held": held,
+        "version": pub.version, "api": pub.api, "account": pub.account, "state": state, "kill": kill, "held": held,
         "policy": {"hosts": list(pub.policy.hosts), "minMinutes": pub.policy.min_minutes, "perDay": pub.policy.per_day,
                    "contact": pub.policy.contact, "contactSet": bool(reader.contact), "terms": pub.policy.terms,
                    "termsUrl": pub.policy.terms_url, "blocked": list(BLOCKED_HOSTS)},

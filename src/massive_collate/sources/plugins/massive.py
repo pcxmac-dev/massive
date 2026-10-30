@@ -57,6 +57,7 @@ def scan(source) -> Scanned:
 
 
 PLUGIN = Provider(
+    version="1.0.0", api="1.0",  # its own release, and the plugin contract it was written for
     name="massive", title="Massive", build=build, assets=frozenset(ASSETS), order=0,
     about="stocks, indices, currencies, crypto and futures: 1-second and minute bars, reference data, news",
     keys=(KeyVar("MASSIVE_API_KEY"),), signup="massive.com: your dashboard's API keys",
@@ -97,6 +98,7 @@ def read_headlines(ctx) -> int:
 
 
 PUBLISHER = Publisher(
+    version="1.0.0", api="1.0",  # its own release, and the plugin contract it was written for
     name="massive-news", title="Massive headlines", order=300, kind="vendor", account="massive",
     about="news headlines for the News view and the globe's ticker, on Massive's key and limits",
     feeds=(Feed("massive-news", "Massive", "Headlines", "https://api.massive.com/v2/reference/news", "headlines",

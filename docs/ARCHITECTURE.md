@@ -128,8 +128,9 @@ live recorder, whose "what changed since" read every bar's `stored_at`, had read
 
 Every data provider the fetcher uses is a plugin: one `Provider` record (`sources/registry.py`)
 holding everything the app knows about it, so nothing else names a provider to decide how to treat
-it. The built-in ones are `sources/plugins/` (Massive, Alpaca, Bitstamp, Coinbase, Bitfinex, Cboe,
-Tiingo), one module each defining `PLUGIN`; their data-source classes stay in `sources/massive.py`,
+it. The built-in ones are `sources/plugins/` (Massive, Alpaca, Blue Ocean, Bitstamp, Coinbase,
+Bitfinex, Cboe, Tiingo, Tiingo forex; the publishers Fed, New York Fed, SEC, BLS, Federal Register and
+Massive's headlines), one module each defining `PLUGIN`; their data-source classes stay in `sources/massive.py`,
 `alpaca.py` and `public.py`. A module added to `sources/plugins/` is found on the next start; a
 provider shipped as its own package registers under the entry point group `massive_collate.providers`.
 A plugin that fails to load is left out and reported (`plugins`), never fatal.
@@ -191,6 +192,82 @@ A plugin that fails to load is left out and reported (`plugins`), never fatal.
     142,500 a day (of 20,000, 150,000); neither paid plan caps the symbols a month. Enterprise and
     redistribution are priced by Tiingo's sales with no published limits, so they are not offered.
     An unknown value is Starter.
+- **The plugin contract, versioned** (2026-10-29; the user: "eventually plugins will need to be in
+  their own repo with their own version"). The app offers `registry.PLUGIN_API` (major.minor, now
+  1.0). Each plugin, a `Provider` or a `Publisher`, gives its own `version` (its release:
+  major.minor.patch) and the contract it was written for (`api`: a literal such as `"1.0"`, never
+  `PLUGIN_API` itself, which would always match). At discovery a plugin written for another major,
+  or for a newer minor than the app offers, is left out and reported with the ones that fail to
+  load (`errors()`, `plugins`, the key script, the Plugins view's "Left out"), never fatal. An `api`
+  left out is 1.0. The built-ins are all 1.0.0 for API 1.0. `plugins` (and its `--json`: `api`, each
+  plugin's `version`, `api`, `origin`; the publishers too), the key script's list and the Plugins
+  view show each plugin's version and origin.
+  - **Minor and major.** A minor only adds: a field with a default, a new optional callback, a new
+    helper. A major changes or removes something a plugin may rely on: a field's meaning, a
+    callback's arguments, a helper's behaviour, a name moved. A plugin for 1.0 loads in every 1.x.
+  - **What a plugin may rely on (API 1.0)**, and nothing else of `massive_collate`:
+    `sources.registry`: `PLUGIN_API`, `Provider`, `KeyVar`, `Scanned`, and `Report`, `Limits`,
+    `Capability` for a `reporter`; the helpers `limiter`, `machine_caps`, `public_client`,
+    `minute_window`. `sources.publisher`: `Publisher`, `Feed`, `Policy`. `sources.base`:
+    `DataSource` (what `build` returns), `Page`, `RESOLUTIONS_BY_ASSET`; `models`: the `Exchange`
+    and `Instrument` a source returns; `errors`: `SourceError`, `NotEntitled`, `Unauthorized`,
+    `RateLimited`, `BudgetExhausted`. `config`: `Tier`, `ConfigError`, and `Settings` read only:
+    `env` (the variables it declares), `offline`, `for_source(name)` and on that view `tier`,
+    `max_requests_per_run`, `max_requests_per_day`. The HTTP client the feeds' clients build on:
+    `sources.massive.MassiveClient` (retries, its limiter, the request budget, the rate-limit
+    headers seen) and its keyless form `sources.public.PublicClient` (`public_client`).
+  - **The fields that matter across releases.** `name` is the feed's name everywhere (its database
+    file, ledgers, watchlist rows, kept scans), so a release never renames it. `origin` is set by
+    the registry, never by the plugin. `order` places it in lists (the built-in feeds 0-61, the
+    publishers 200-300, a package's 100 unless it says). Of two plugins of one name the first by
+    order is kept and the other reported. What each other field gives: the bullets above and the
+    docstrings of `sources/registry.py` and `sources/publisher.py`.
+  - **A package registers** under the entry point group `massive_collate.providers`, naming a
+    module that defines `PLUGIN`/`PLUGINS` and/or `PUBLISHER`/`PUBLISHERS`, or one record:
+
+    ```toml
+    [project.entry-points."massive_collate.providers"]
+    acme = "massive_acme"   # or "massive_acme:PLUGIN"
+    ```
+
+    Installed into the app's environment (`.venv\Scripts\python.exe -m pip install ...`) it is
+    found on the next start, listed as `package: <distribution> (<entry point>)`; one that leaves
+    `version` empty shows its distribution's version. Its keys are declared like the built-ins'
+    (`KeyVar`), so the key script and the Plugins view offer them unasked.
+- **Splitting the built-ins into packages: the plan** (nothing split yet; the user decides first).
+  1. *In this repository first*, so each plugin can leave without taking app code with it (each a
+     minor of the API where it adds to the contract):
+     - the HTTP client every feed builds on out of `sources/massive.py` into the app
+       (`sources/http.py`, `MassiveClient` kept as its name), so Massive's plugin can leave alone;
+     - what the built-ins still reach outside the contract either into the contract or into the
+       plugin: `config.PUBLIC_FEEDS` (each public feed's plan and caps, into its module),
+       `ALPACA_TIERS` and `AlpacaSettings` (`settings.alpaca`, read from `settings.env` by the
+       plugin), Massive's `TIERS`, `MASSIVE_CLASS_TIERS`, `asset_tier`, `tier_for`, `symbols.ASSETS`,
+       `sessions.ET`, `gov.FEDREG_URL`, `ratelimit.MachineLedger`, and Coinbase's `venue_view`,
+       which Bitfinex borrows (into `registry`);
+     - the app's own modules that still name a provider (some 40 lines on 2026-10-29: `live.py`'s
+       streams and Alpaca's trade parsing, `config.py`, `cli.py`'s Massive plan commands,
+       `gui/venues.py`, `gui/server.py`, `storage/directory.py`, `deps.py`, `freshness.py` ...) read it
+       from the plugin's record instead (new fields, a minor each);
+     - each source class next to its plugin (`MassiveSource`, `sources/alpaca.py`, the public
+       venues' classes in `sources/public.py`), with its tests.
+  2. *Then one repository and package per vendor*, its own version from 1.0.0 (tags `v1.0.0`), its
+     own tests run against the app installed (the fakes it needs from `tests/conftest.py` copied
+     in), its own changelog, depending on `massive-collate` from the release offering its API up to
+     the next major. The built-in module leaves `sources/plugins/` in the same app release that
+     brings the package (an optional extra of the app's `pyproject.toml`, from the packages' tags),
+     so no feed is missing between the two. The app keeps the contract's own tests (a fake package
+     plugin, the version check) and a test that every installed plugin loads.
+  3. *A pilot first*: Cboe (one keyless feed, a closed archive, the smallest), to prove the path
+     (install, entry point, version shown, its tests, its CI) before the others.
+
+  The repositories it would make, under `pcxmac-dev`: `massive-plugin-massive` (Massive and its
+  headlines publisher, on its key), `massive-plugin-alpaca` (Alpaca and Blue Ocean: Blue Ocean is
+  reached through Alpaca's API, keys and limits), `massive-plugin-tiingo` (Tiingo and Tiingo forex:
+  one key and account), `massive-plugin-coinbase`, `massive-plugin-bitstamp`,
+  `massive-plugin-bitfinex`, `massive-plugin-cboe`, and the publishers `massive-plugin-fed`,
+  `massive-plugin-nyfed`, `massive-plugin-sec`, `massive-plugin-bls`, `massive-plugin-fedreg`
+  (or the five agencies as one `massive-plugin-gov`).
 
 ## The Plugins view (2026-10-27)
 

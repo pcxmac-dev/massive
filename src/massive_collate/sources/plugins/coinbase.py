@@ -21,6 +21,7 @@ def venue_view(name: str):
 
 
 PLUGIN = Provider(
+    version="1.0.0", api="1.0",  # its own release, and the plugin contract it was written for
     name="coinbase", title="Coinbase",
     build=lambda settings, budget: CoinbaseSource(
         public_client("coinbase", "https://api.exchange.coinbase.com", settings, budget)),
