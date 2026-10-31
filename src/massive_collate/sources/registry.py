@@ -662,6 +662,14 @@ def plugin_feeds(name: str) -> list[str]:
     return [name, *(n for n in providers() if n != name and plugin_of(n) == name)]
 
 
+def label(name: str) -> str:
+    """How a feed is named to the user: a plugin's own by its name, one part of another plugin as
+    that plugin with what it is of it (the user, 2026-10-30: "the source isn't blue ocean its alpaca
+    w/ blue ocean"): alpaca (blue ocean), tiingo (forex). A name no provider has stays as it is."""
+    owner = plugin_of(name)
+    return f"{owner} ({providers()[name].title.lower()})" if owner != name else name
+
+
 def errors() -> list[tuple[str, str]]:
     """The plugins left out at loading: (module or entry point, why)."""
     providers()
@@ -689,7 +697,7 @@ def menu(settings: "Settings | None" = None) -> list[dict]:
                "planNote": p.plan_note, "scan": p.scan is not None, "feeds": []}
         for n in plugin_feeds(p.name)[1:]:
             f = providers()[n]
-            feed = {"name": f.name, "title": f.title, "about": f.about, "assets": sorted(f.assets)}
+            feed = {"name": f.name, "title": f.title, "label": label(n), "about": f.about, "assets": sorted(f.assets)}
             if settings is not None:
                 feed["serves"] = sorted(f.served(settings) or ())
             row["feeds"].append(feed)

@@ -19,7 +19,7 @@ from massive_collate.symbols import resolve
 from .conftest import FakeSource
 
 BUILT_IN = ["massive", "alpaca", "boats", "bitstamp", "coinbase", "bitfinex", "cboe", "tiingo", "tiingofx"]
-LISTED = [n for n in BUILT_IN if n != "boats"]  # the plugins listed: Blue Ocean is a feed of Alpaca's
+LISTED = [n for n in BUILT_IN if n not in ("boats", "tiingofx")]  # the plugins listed: Alpaca's and Tiingo's second feeds in them
 
 
 class AcmeSource(FakeSource):
@@ -167,7 +167,7 @@ def test_every_built_in_plugin_is_versioned_for_this_apps_contract():
     plugins_ = [*providers().values(), *publishers().values()]
     assert len(plugins_) == len(BUILT_IN) + 6  # the feeds and the six publishers
     for p in plugins_:  # Alpaca's two feeds are 1.1.0, for API 1.1 (part_of): the rest as first released
-        want = ("1.1.0", "1.1") if p.name in ("alpaca", "boats") else ("1.0.0", "1.0")
+        want = ("1.1.0", "1.1") if p.name in ("alpaca", "boats", "tiingo", "tiingofx") else ("1.0.0", "1.0")
         assert (p.version, p.api) == want and registry.api_refusal(p.api) is None, p.name
     assert registry.PLUGIN_API == "1.1"
 
@@ -410,7 +410,7 @@ def test_blue_ocean_is_a_feed_of_the_alpaca_plugin():
     assert (boats.title, boats.part_of, boats.account) == ("Blue Ocean", "alpaca", "alpaca")
     assert boats.build.__module__ == "massive_collate.sources.plugins.alpaca"
     assert registry.plugin_feeds("alpaca") == ["alpaca", "boats"] and registry.plugin_of("boats") == "alpaca"
-    assert registry.plugin_feeds("tiingo") == ["tiingo"] and registry.plugin_of("tiingofx") == "tiingofx"
+    assert registry.plugin_feeds("massive") == ["massive"] and registry.plugin_of("coinbase") == "coinbase"
     s = load_settings(env={"ALPACA_API_KEY_ID": "i", "ALPACA_API_SECRET_KEY": "s"}, env_file=None)
     assert markets("boats", s) == {"stock": "boats"} and rate_window("boats", s) == rate_window("alpaca", s)
     assert feed_profiles(s)["boats"].assets == {"stock"} and set(registry.sharing("alpaca")) >= {"alpaca", "boats"}
@@ -430,11 +430,12 @@ def test_the_plugins_command_lists_alpaca_once_with_its_blue_ocean_feed(monkeypa
     rows = {r["name"]: r for r in json.loads(capsys.readouterr().out)["providers"]}
     assert "boats" not in rows  # the key script offers Alpaca's keys once
     (feed,) = rows["alpaca"]["feeds"]
-    assert (feed["name"], feed["title"], feed["serves"]) == ("boats", "Blue Ocean", ["stock"])
-    assert all(r["feeds"] == [] for n, r in rows.items() if n != "alpaca")
+    assert (feed["name"], feed["title"], feed["label"], feed["serves"]) == ("boats", "Blue Ocean", "alpaca (blue ocean)", ["stock"])
+    assert [f["name"] for f in rows["tiingo"]["feeds"]] == ["tiingofx"]
+    assert all(r["feeds"] == [] for n, r in rows.items() if n not in ("alpaca", "tiingo"))
     assert cli.main(["plugins"]) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert any(line.strip().startswith("and feed boats (Blue Ocean): US stocks overnight") and "serves: stock" in line
+    assert any(line.strip().startswith("and alpaca (blue ocean) (feed boats): US stocks overnight") and "serves: stock" in line
                for line in lines)
     assert not any(line.startswith("boats") for line in lines)
 
@@ -456,3 +457,36 @@ def test_a_rescan_of_alpaca_scans_its_blue_ocean_feed_too(tmp_path, monkeypatch)
         asked.clear()
         assert cli.cmd_capabilities(cli.build_parser().parse_args(["capabilities", name]), s) == 0
         assert asked == want
+
+
+# -- Tiingo's forex a feed of the Tiingo plugin; a feed of a plugin's keys named by that plugin -------
+def test_tiingos_forex_is_a_feed_of_the_tiingo_plugin():
+    """The user, 2026-10-30: "i also have tiingo and tiingo forex, tiingo should be one plugin"."""
+    import importlib.util
+
+    from massive_collate.sources.plugins import tiingo
+
+    assert [p.name for p in tiingo.PLUGINS] == ["tiingo", "tiingofx"] and not hasattr(tiingo, "PLUGIN")
+    assert importlib.util.find_spec("massive_collate.sources.plugins.tiingofx") is None  # no plugin of its own
+    fx = provider("tiingofx")
+    assert (fx.title, fx.part_of, fx.account, fx.archival) == ("Forex", "tiingo", "tiingo", False)
+    assert provider("tiingo").archival  # its stocks' daily bars stay a closed archive; its forex is kept up to date
+    assert registry.plugin_feeds("tiingo") == ["tiingo", "tiingofx"] and registry.plugin_of("tiingofx") == "tiingo"
+    s = load_settings(env={"TIINGO_API_KEY": "k"}, env_file=None)
+    assert markets("tiingofx", s) == {"fx": "tiingofx"} and rate_window("tiingofx", s) == rate_window("tiingo", s)
+    assert set(registry.sharing("tiingo")) >= {"tiingo", "tiingofx"}
+
+
+def test_a_feed_on_a_plugins_keys_is_named_by_that_plugin_never_as_a_source_of_its_own():
+    """The user, 2026-10-30: "the source isn't blue ocean its alpaca w/ blue ocean"; "house all alpaca in
+    alpaca"."""
+    from massive_collate import live
+    from massive_collate.gui.server import feed_labels
+
+    assert registry.label("alpaca") == "alpaca" and registry.label("boats") == "alpaca (blue ocean)"
+    assert registry.label("tiingofx") == "tiingo (forex)" and registry.label("massive") == "massive"
+    assert registry.label("nope") == "nope"  # a name no provider has: as it is
+    labels = feed_labels()
+    assert set(labels) >= set(providers()) | {live.IEX_FEED, live.TIINGO_BOATS}
+    assert labels["iex"] == "alpaca (iex)" and labels["tiingoboats"] == "tiingo (blue ocean)"
+    assert not any("ocean" in v and not v.startswith(("alpaca", "tiingo")) for v in labels.values())

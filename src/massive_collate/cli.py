@@ -912,8 +912,8 @@ def cmd_plugins(args, settings: Settings | None) -> int:
         serves = ", ".join(r.get("serves") or []) or "-"
         print(f"{r['name']:9} {r['title']:10} {'archive' if r['archive'] else 'feed':8} {keys:58} serves: {serves}")
         print(f"{'':9} {r['about']}" + (f"; keys from {r['signup']}" if r["signup"] else "") + f" {release(r)}")
-        for f in r["feeds"]:  # a feed of its own in this plugin, on its keys (Alpaca's Blue Ocean)
-            print(f"{'':9} and feed {f['name']} ({f['title']}): {f['about']}"
+        for f in r["feeds"]:  # a feed of its own in this plugin, on its keys: alpaca (blue ocean)
+            print(f"{'':9} and {f['label']} (feed {f['name']}): {f['about']}"
                   + (f"; serves: {', '.join(f['serves']) or '-'}" if "serves" in f else ""))
     for r in pubs:
         print(f"{r['name']:12} {r['title']:28} publisher {release(r)}")

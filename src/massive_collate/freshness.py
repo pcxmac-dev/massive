@@ -68,7 +68,7 @@ PLAN_DELAYS["alpaca-basic"] = {"stock": Delay("delay", timedelta(minutes=16)), "
                                "overnight": Delay("delay", timedelta(minutes=16))}
 PLAN_DELAYS["alpaca-plus"] = {"stock": Delay("delay"), "crypto": Delay("delay"), "overnight": Delay("delay")}
 
-# Tiingo's forex (sources/plugins/tiingofx.py), taken for history: whole UTC days, through the day
+# Tiingo's forex (sources/plugins/tiingo.py, FOREX: tiingo (forex)), taken for history: whole UTC days, through the day
 # before (how soon its newest minutes are final is not known; a minute asked too soon and found
 # empty would be counted as held and never asked again).
 PLAN_DELAYS["tiingofx"] = {"fx": Delay("utc_day")}

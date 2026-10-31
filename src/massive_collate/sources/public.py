@@ -411,7 +411,7 @@ class TiingoFxSource(_Archive):
     2020-01-01, the earliest it serves ("End date must be >= 2020-01-01", asked 2026-10-28). One
     request gives at most about four days of minutes (5,772 bars for a whole year asked, 2026-10-28),
     so it is asked WINDOW_DAYS whole UTC days at a time, which always fit. A feed of its own
-    (plugins/tiingofx.py) on the Tiingo key's limits; still trading, so kept up to date."""
+    (plugins/tiingo.py, FOREX) on the Tiingo key's limits; still trading, so kept up to date."""
 
     name = "tiingofx"
     assets = ("fx",)

@@ -128,10 +128,10 @@ live recorder, whose "what changed since" read every bar's `stored_at`, had read
 
 Every data provider the fetcher uses is a plugin: one `Provider` record (`sources/registry.py`)
 holding everything the app knows about it, so nothing else names a provider to decide how to treat
-it. The built-in ones are `sources/plugins/` (Massive, Alpaca with its Blue Ocean feed, Bitstamp,
-Coinbase, Bitfinex, Cboe, Tiingo, Tiingo forex; the publishers Fed, New York Fed, SEC, BLS, Federal
-Register and Massive's headlines), one module each defining `PLUGIN` (Alpaca's `PLUGINS`: its two
-feeds); their data-source classes stay in `sources/massive.py`,
+it. The built-in ones are `sources/plugins/` (Massive, Alpaca with its overnight feed on Blue Ocean,
+Bitstamp, Coinbase, Bitfinex, Cboe, Tiingo with its forex feed; the publishers Fed, New York Fed, SEC,
+BLS, Federal Register and Massive's headlines), one module each defining `PLUGIN` (Alpaca's and
+Tiingo's `PLUGINS`: two feeds each); their data-source classes stay in `sources/massive.py`,
 `alpaca.py` and `public.py`. A module added to `sources/plugins/` is found on the next start; a
 provider shipped as its own package registers under the entry point group `massive_collate.providers`.
 A plugin that fails to load is left out and reported (`plugins`), never fatal.
@@ -203,7 +203,8 @@ A plugin that fails to load is left out and reported (`plugins`), never fatal.
   `PLUGIN_API` itself, which would always match). At discovery a plugin written for another major,
   or for a newer minor than the app offers, is left out and reported with the ones that fail to
   load (`errors()`, `plugins`, the key script, the Plugins view's "Left out"), never fatal. An `api`
-  left out is 1.0. The built-ins are 1.0.0 for API 1.0, but Alpaca's two feeds: 1.1.0 for API 1.1. `plugins` (and its `--json`: `api`, each
+  left out is 1.0. The built-ins are 1.0.0 for API 1.0, but Alpaca's and Tiingo's two feeds each:
+  1.1.0 for API 1.1. `plugins` (and its `--json`: `api`, each
   plugin's `version`, `api`, `origin`; the publishers too), the key script's list and the Plugins
   view show each plugin's version and origin.
   - **Minor and major.** A minor only adds: a field with a default, a new optional callback, a new
@@ -215,6 +216,12 @@ A plugin that fails to load is left out and reported (`plugins`), never fatal.
     plugin lists it once (`registry.plugin_of`, `plugin_feeds`): `plugins` and the key script show
     one row with its feeds, the Plugins view one entry (its feeds, their capabilities, scans, eras,
     requests and symbols together), and its Rescan or `capabilities <plugin>` scans every feed.
+    Tiingo's forex is one too (`tiingofx`, `part_of="tiingo"`; the user, 2026-10-30: "tiingo should
+    be one plugin"). Such a feed is never named as a source of its own (`registry.label`, the page's
+    `feedLabel`; the user: "the source isn't blue ocean its alpaca w/ blue ocean"; "house all alpaca
+    in alpaca"): its plugin with what it is of it, `alpaca (blue ocean)`, `tiingo (forex)`, and the
+    live feeds so too (`live.LIVE_LABELS`: `alpaca (iex)`, `tiingo (blue ocean)`), in the chart's
+    feed lists, the Fetcher, the Exchanges view and the Plugins view.
   - **What a plugin may rely on (API 1.0)**, and nothing else of `massive_collate`:
     `sources.registry`: `PLUGIN_API`, `Provider`, `KeyVar`, `Scanned`, and `Report`, `Limits`,
     `Capability` for a `reporter`; the helpers `limiter`, `machine_caps`, `public_client`,
@@ -272,9 +279,9 @@ A plugin that fails to load is left out and reported (`plugins`), never fatal.
      (install, entry point, version shown, its tests, its CI) before the others.
 
   The repositories it would make, under `pcxmac-dev`: `massive-plugin-massive` (Massive and its
-  headlines publisher, on its key), `massive-plugin-alpaca` (Alpaca and Blue Ocean: Blue Ocean is
-  reached through Alpaca's API, keys and limits), `massive-plugin-tiingo` (Tiingo and Tiingo forex:
-  one key and account), `massive-plugin-coinbase`, `massive-plugin-bitstamp`,
+  headlines publisher, on its key), `massive-plugin-alpaca` (Alpaca with its overnight feed on Blue
+  Ocean, reached through Alpaca's API, keys and limits), `massive-plugin-tiingo` (Tiingo with its
+  forex feed: one key and account), `massive-plugin-coinbase`, `massive-plugin-bitstamp`,
   `massive-plugin-bitfinex`, `massive-plugin-cboe`, and the publishers `massive-plugin-fed`,
   `massive-plugin-nyfed`, `massive-plugin-sec`, `massive-plugin-bls`, `massive-plugin-fedreg`
   (or the five agencies as one `massive-plugin-gov`).

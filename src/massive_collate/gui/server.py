@@ -1147,6 +1147,7 @@ class ChartApp:
                     rows_cache=self._activity_rows, rows_ttl_s=SYMBOL_ROWS_TTL_S))
             out = dict(hit[2])
         out["feeds"] = self.feeds()
+        out["feedLabels"] = feed_labels()
         # The opened symbol's own run: its end is not every feed's (Massive's pass goes on beside it)
         run = getattr(self, "_symbol_run", None)
         out["symbolRun"] = {"ticker": run[0], "going": run[1].poll() is None} if run else None
@@ -1485,6 +1486,14 @@ def _sector(ticker: str, profile: dict | None, asset: str, close: float | None =
 
 
 NOT_COLLECTING = ("blocked", "closed", "retired")
+
+
+def feed_labels() -> dict[str, str]:
+    """How the page names each feed (registry.label, live.LIVE_LABELS): a feed of a plugin's keys
+    by that plugin, alpaca (blue ocean), never as a source of its own; each poll of /api/activity."""
+    from ..sources import providers, registry
+
+    return {**{n: registry.label(n) for n in providers()}, **live.LIVE_LABELS}
 
 
 def _symbol_state(rows: dict[str, dict], order: list[str]) -> dict | None:

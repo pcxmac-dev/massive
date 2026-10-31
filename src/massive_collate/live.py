@@ -57,6 +57,10 @@ TIINGO_BOATS = "tiingoboats"  # Blue Ocean's night under way, live from Tiingo (
 # has bars (IEX: the session under way until a sync downloads it; Blue Ocean: the overnight session,
 # which the consolidated tape does not carry; live from Tiingo, the night under way)
 PARTIAL_FEEDS = frozenset({IEX_FEED, BOATS_FEED, TIINGO_BOATS})
+# The live feeds, named by the plugin whose keys they stream on (the user, 2026-10-30: "house all
+# alpaca in alpaca"; "the source isn't blue ocean its alpaca w/ blue ocean"), as registry.label names
+# a plugin's feeds: Alpaca's IEX stream, Tiingo's Blue Ocean night.
+LIVE_LABELS = {IEX_FEED: "alpaca (iex)", TIINGO_BOATS: "tiingo (blue ocean)"}
 BOATS_QUOTE_SECONDS = 5.0  # the open stocks' last sale and quote at night: one request for them all
 # each open stock's minutes of the night: asked again after this many seconds, or 2 s a stock with
 # more open (at most 30 requests a minute, whatever is open)

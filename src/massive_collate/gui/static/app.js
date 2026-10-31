@@ -2002,6 +2002,20 @@ async function selectSymbol(ticker, source = null) {
   window.dispatchEvent(new CustomEvent('massive:symbol', { detail: meta.ticker }));
 }
 
+// How a feed is named (the user, 2026-10-30: "the source isn't blue ocean its alpaca w/ blue ocean";
+// "house all alpaca in alpaca"): a feed on a plugin's keys by that plugin, alpaca (blue ocean), tiingo
+// (forex), alpaca (iex); its own name otherwise. From each poll of /api/activity (server.feed_labels);
+// the open symbol's feeds are named again when they first arrive.
+let FEED_LABELS = {};
+function feedLabel(source) { return FEED_LABELS[source] || source; }
+window.addEventListener('massive:activity', (e) => {
+  const labels = e.detail?.feedLabels;
+  if (!labels || JSON.stringify(labels) === JSON.stringify(FEED_LABELS)) return;
+  FEED_LABELS = labels;
+  if (state.ticker && symbolInfo(state.ticker)) renderFeeds(symbolInfo(state.ticker));
+  renderPanel();
+});
+
 function renderFeeds(info) {
   const sel = $('feedSelect');
   sel.innerHTML = '';
@@ -2011,16 +2025,16 @@ function renderFeeds(info) {
   if (m) {  // an asset on several exchanges: its models first
     const q = Object.fromEntries((m.exchanges || []).map((x) => [x.feed, x.quality]));
     const ex = Object.fromEntries((m.exchanges || []).map((x) => [x.feed, x.exchange]));
-    const name = (feed) => (ex[feed] && ex[feed] !== feed ? `${ex[feed]} (via ${feed})` : feed);
+    const name = (feed) => (ex[feed] && ex[feed] !== feed ? `${ex[feed]} (via ${feedLabel(feed)})` : feedLabel(feed));
     if (m.reference) add(m.reference, `Reference: ${name(m.reference)} (gold standard)`);
     if (m.composite) add('composite', `Composite: ${m.exchanges.length} exchanges, with deviation`);
-    if (m.consolidated) add(m.consolidated, `Consolidated: ${m.consolidated}`);
+    if (m.consolidated) add(m.consolidated, `Consolidated: ${feedLabel(m.consolidated)}`);
     feeds.filter((f) => f.source !== m.reference && f.source !== m.consolidated)
       .forEach((f) => add(f.source, `Exchange: ${name(f.source)}${q[f.source] != null ? `, quality ${q[f.source].toFixed(2)}` : ''}`));
     add(MERGED, 'All feeds, merged');
   } else {
-    add(MERGED, feeds.length > 1 ? `All feeds (${feeds.map((f) => f.source).join(' > ')})` : `Feed: ${feeds[0]?.source || '-'}`);
-    if (feeds.length > 1) feeds.forEach((f) => add(f.source, `Only ${f.source}`));
+    add(MERGED, feeds.length > 1 ? `All feeds (${feeds.map((f) => feedLabel(f.source)).join(' > ')})` : `Feed: ${feedLabel(feeds[0]?.source) || '-'}`);
+    if (feeds.length > 1) feeds.forEach((f) => add(f.source, `Only ${feedLabel(f.source)}`));
   }
   sel.value = state.source;
   sel.hidden = !feeds.length;
@@ -3400,7 +3414,7 @@ function updateStatus(loaded) {
     `${m.ticker}${info.name ? ' · ' + info.name : ''}`,
     ...(mo.kind === 'price' ? [] : [`model: ${$('modelSelect').selectedOptions[0].text} in ${state.modelUnit || '…'}`
       + (mo.kind === 'integral' ? '' : `, Savitzky-Golay window ${windowForDetail(mo.detail)} bars`)]),
-    `feed: ${m.feeds.join(' > ')} (${m.base} data${m.hasDaily ? ' + official daily' : ''})`,
+    `feed: ${m.feeds.map(feedLabel).join(' > ')} (${m.base} data${m.hasDaily ? ' + official daily' : ''})`,
     `${m.rows.toLocaleString()} rows, ${m.first.slice(0, 10)} to ${m.last.slice(0, 10)}`,
     `price precision ${m.pricePrecision} decimals`,
     SESSION_TEXT[state.session]?.[1] || 'regular hours 09:30-16:00',
@@ -3589,11 +3603,11 @@ function renderPruned() {
   if (!feeds.length) { box.innerHTML = ''; return; }
   const fmt = (ms) => new Date(ms).toLocaleString('en-US', { timeZone: TZ, month: 'short', day: '2-digit', year: 'numeric',
                                                               hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
-  const counts = feeds.map(([feed, c]) => `${esc(feed)}: ${Object.entries(c).map(([rule, k]) =>
+  const counts = feeds.map(([feed, c]) => `${esc(feedLabel(feed))}: ${Object.entries(c).map(([rule, k]) =>
     `${k.toLocaleString()} ${esc(PRUNED_RULES[rule] || rule)}`).join(', ')}`).join('<br>');
   const rows = (p.entries || []).slice(0, 50).map((e) => `
     <tr class="${e.releasedAt ? 'pr-released' : ''}" title="${esc(JSON.stringify(e.evidence, null, 1))}">
-      <td>${esc(fmt(e.ts))}</td><td>${esc(e.source)}</td><td>${esc(`${e.multiplier} ${e.timespan}`)}</td>
+      <td>${esc(fmt(e.ts))}</td><td>${esc(feedLabel(e.source))}</td><td>${esc(`${e.multiplier} ${e.timespan}`)}</td>
       <td>${esc(PRUNED_RULES[e.rule] || e.rule)}${e.releasedAt ? ' (released)' : ''}</td>
       <td>${esc(prunedWhy(e))}</td></tr>`).join('');
   box.innerHTML = `
@@ -3699,12 +3713,12 @@ function renderPanel() {
 function feedPicker(ticker, shown) {
   const held = (symbolInfo(ticker).feeds || []).map((f) => f.source);
   const feeds = [...new Set([...held, ...shown.filter((f) => f !== MERGED)])];
-  if (feeds.length < 2 && state.source !== MERGED) return esc(shown.join(' > '));
+  if (feeds.length < 2 && state.source !== MERGED) return esc(shown.map(feedLabel).join(' > '));
   const opt = (value, label) => `<option value="${esc(value)}"${value === state.source ? ' selected' : ''}>${esc(label)}</option>`;
   return `<select id="pFeed" class="p-feed" aria-label="Feed" title="Feeds that hold ${esc(ticker)}'s data: pick one to chart it alone">
-    ${opt(MERGED, feeds.length > 1 ? `All merged (${feeds.join(' > ')})` : feeds[0] || 'merged')}
-    ${feeds.length > 1 ? feeds.map((f) => opt(f, f)).join('') : ''}
-    ${state.source !== MERGED && !feeds.includes(state.source) ? opt(state.source, state.source) : ''}</select>`;
+    ${opt(MERGED, feeds.length > 1 ? `All merged (${feeds.map(feedLabel).join(' > ')})` : feeds[0] ? feedLabel(feeds[0]) : 'merged')}
+    ${feeds.length > 1 ? feeds.map((f) => opt(f, feedLabel(f))).join('') : ''}
+    ${state.source !== MERGED && !feeds.includes(state.source) ? opt(state.source, feedLabel(state.source)) : ''}</select>`;
 }
 
 $('pData').addEventListener('change', (e) => {
@@ -3716,7 +3730,7 @@ function attributionHtml(att, base) {
   const spans = (att && att[base]) || [];
   if (!spans.length) return '';
   const d = (ms) => new Date(ms).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  const rows = [...spans].reverse().slice(0, 8).map(([a, b, src]) => [esc(src), `${d(a)} → ${b > Date.now() - 864e5 ? 'latest' : d(b)}`]);
+  const rows = [...spans].reverse().slice(0, 8).map(([a, b, src]) => [esc(feedLabel(src)), `${d(a)} → ${b > Date.now() - 864e5 ? 'latest' : d(b)}`]);
   return `<div class="p-sub">Sources (${esc(base)} bars)</div>${kv(rows)}`;
 }
 

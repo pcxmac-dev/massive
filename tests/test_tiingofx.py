@@ -1,4 +1,5 @@
-"""Tiingo's forex: currency pairs' 1-minute bars from 2020 on a feed of its own, on Tiingo's limits."""
+"""Tiingo's forex: currency pairs' 1-minute bars from 2020 on a feed of the Tiingo plugin (tiingo (forex)),
+on Tiingo's limits."""
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
@@ -10,7 +11,7 @@ from massive_collate.collector import history_floor
 from massive_collate.config import load_settings
 from massive_collate.errors import NotEntitled
 from massive_collate.sources import feed_profiles, providers
-from massive_collate.sources.plugins import tiingofx
+from massive_collate.sources.plugins import tiingo
 from massive_collate.sources.public import TiingoFxSource
 
 
@@ -74,9 +75,9 @@ def test_the_feed_is_its_own_market_on_tiingos_plan_and_limits(monkeypatch):
     assert not feed_profiles(load_settings(env={}, env_file=None))["tiingofx"].assets  # no key: serves nothing
     # one account: the window and the day's cap are held under Tiingo's name, shared with its stocks feed
     held = []
-    monkeypatch.setattr(tiingofx, "limiter", lambda name, s, key: held.append(("window", name)))
-    monkeypatch.setattr(tiingofx, "machine_caps", lambda client, name, s, key: held.append(("day", name)) or client)
-    source = tiingofx.build(settings, 5)
+    monkeypatch.setattr(tiingo, "limiter", lambda name, s, key: held.append(("window", name)))
+    monkeypatch.setattr(tiingo, "machine_caps", lambda client, name, s, key: held.append(("day", name)) or client)
+    source = tiingo.build_forex(settings, 5)
     assert held == [("window", "tiingo"), ("day", "tiingo")] and source.name == "tiingofx"
 
 

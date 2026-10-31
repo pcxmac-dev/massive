@@ -590,3 +590,24 @@ def test_the_globe_fades_from_day_into_a_lighter_night_with_the_sun_centred_on_i
     # the Sun is on the far side ("there is a chance the shiny bit is never seen"); no gloss fixed in front
     assert "const GLINT = 28;" in js and "grid[k * 5 + 3] = h > 0 ? h ** GLINT * (0.75 - 0.5 * l) : 0;" in earth
     assert "255 * at[3]" in _inner(js, "drawSphere") and "spec" not in js and "HALF" not in js
+
+
+def test_the_page_names_a_feed_on_a_plugins_keys_by_that_plugin():
+    """The user (2026-10-30): "the source isn't blue ocean its alpaca w/ blue ocean"; "house all alpaca in
+    alpaca": every list of feeds says alpaca (blue ocean), never boats or Blue Ocean as a source."""
+    app = _js("app.js")
+    assert "function feedLabel(source) { return FEED_LABELS[source] || source; }" in app
+    assert "const labels = e.detail?.feedLabels;" in app  # from each poll of /api/activity
+    feeds = _function(app, "renderFeeds")
+    assert "`All feeds (${feeds.map((f) => feedLabel(f.source)).join(' > ')})`" in feeds and "`Only ${feedLabel(f.source)}`" in feeds
+    picker = _function(app, "feedPicker")
+    assert "feeds.map((f) => opt(f, feedLabel(f)))" in picker and "`All merged (${feeds.map(feedLabel).join(' > ')})`" in picker
+    assert "[esc(feedLabel(src))," in _function(app, "attributionHtml")
+    assert "`feed: ${m.feeds.map(feedLabel).join(' > ')}" in app
+    act = _js("activity.js")
+    assert "const label = (source) => (typeof feedLabel === 'function' ? feedLabel(source) : source);" in act
+    for spot in ("<b>${esc(label(l.source))}</b>", "${esc(label(f.name))}${f.closed", "<b>${esc(label(src))}</b>",
+                 "<b>${esc(label(r.source))}</b>", "(${esc(label(live.source))})"):
+        assert spot in act, spot
+    assert "(d.feeds || []).map((f) => (typeof feedLabel === 'function' ? feedLabel(f) : f)).join(' > ')" in _js("venues.js")
+    assert "<td><b>${esc(f.label)}</b>" in _js("plugins.js")

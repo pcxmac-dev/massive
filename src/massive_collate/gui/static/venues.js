@@ -138,7 +138,7 @@
       <div class="tiles ex-tiles">
         ${st.range52w ? tile('52 weeks', `${price(st.range52w.low)} – ${price(st.range52w.high)}`, `${num(st.range52w.sessions)} sessions`) : ''}
         ${st.rangeAll ? tile('All stored', `${price(st.rangeAll.low)} – ${price(st.rangeAll.high)}`, `${num(st.sessions)} sessions`) : ''}
-        ${tile('Data', esc(d.base || '–'), `${esc((d.feeds || []).join(' > '))} · ${num(d.rows)} bars`)}
+        ${tile('Data', esc(d.base || '–'), `${esc((d.feeds || []).map((f) => (typeof feedLabel === 'function' ? feedLabel(f) : f)).join(' > '))} · ${num(d.rows)} bars`)}
         ${tile('Stored', d.first ? esc(d.first.slice(0, 10)) : '–', d.last ? `to ${esc(d.last.slice(0, 10))}` : '')}
       </div>
       ${info.futures ? `<div class="p-muted small">Continuous: holding ${esc(info.futures.contract)}, ${num(info.futures.rolls)} rolls</div>` : ''}

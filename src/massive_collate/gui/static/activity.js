@@ -21,6 +21,8 @@
   const esc = window.MassiveIcons.esc;
   const safeUrl = window.MassiveIcons.safeUrl;
   const num = (n) => (n == null ? '–' : Number(n).toLocaleString());
+  // a feed as the page names it: alpaca (blue ocean), tiingo (forex) (app.js feedLabel)
+  const label = (source) => (typeof feedLabel === 'function' ? feedLabel(source) : source);
 
   let data = null;
   let filter = 'all';
@@ -155,13 +157,13 @@
       const one = (r) => `${r.current ? `fetching <b>${esc(r.current)}</b>` : 'starting'} · ${num(r.requests)}${
         r.source === data.source ? ` of ${num(data.plan.maxPerRun)}` : ''} requests · ${dur(r.seconds)}`;
       if (going.length > 1) {
-        return `<span class="dot on"></span><b>Running ${going.length} feeds</b> — ${going.map((r) => `<b>${esc(r.source)}</b> ${one(r)}`).join('; ')}`;
+        return `<span class="dot on"></span><b>Running ${going.length} feeds</b> — ${going.map((r) => `<b>${esc(label(r.source))}</b> ${one(r)}`).join('; ')}`;
       }
       const live = going[0];
-      return `<span class="dot on"></span><b>Running ${esc(live.command)}</b> <span class="p-muted">(${esc(live.source)})</span> — ${one(live)}`;
+      return `<span class="dot on"></span><b>Running ${esc(live.command)}</b> <span class="p-muted">(${esc(label(live.source))})</span> — ${one(live)}`;
     }
     if (d) {  // after a run: frames built from what arrived (nothing fetched meanwhile)
-      return `<span class="dot on"></span><b>Building derived frames</b> — ${esc(d.source)}:${esc(d.ticker)}, `
+      return `<span class="dot on"></span><b>Building derived frames</b> — ${esc(label(d.source))}:${esc(d.ticker)}, `
         + `${esc(d.to.join(', '))} from ${esc(d.from)} (${num(d.n)} of ${num(d.of)}) · nothing is being fetched`;
     }
     if (p?.halt) return '<span class="dot"></span><b>Halted</b> — nothing is fetched until you resume';
@@ -310,7 +312,7 @@
     const d = data?.derive;
     if (d && cls !== 'bad' && (!msg || !busy)) {
       msg = `Building ${esc(d.to.join(', '))} from ${esc(d.from)} bars <span class="net-derived">*derived</span> · `
-        + `${esc(d.source)}:${esc(d.ticker)} (${num(d.n)} of ${num(d.of)})`;
+        + `${esc(label(d.source))}:${esc(d.ticker)} (${num(d.n)} of ${num(d.of)})`;
       progress = d.of ? d.n / d.of : null;
       busy = true;
       cls = '';
@@ -383,7 +385,7 @@
       const next = wait ? `<span class="warn">in ${wait} s</span> <div class="sub">${esc(l.wait.reason)}</div>`
         : full ? `<span class="warn">in ${Math.ceil(w.freeIn)} s</span> <div class="sub">window full</div>` : 'now';
       const live = (data.fetching || []).some((f) => f.source === l.source);  // every feed fetching now
-      return `<tr class="${live ? 'live' : ''}"><td><b>${esc(l.source)}</b><div class="sub">${esc(l.plan)}</div></td>
+      return `<tr class="${live ? 'live' : ''}"><td><b>${esc(label(l.source))}</b><div class="sub">${esc(l.plan)}</div></td>
         <td>${status}</td><td>${esc(l.published)}</td><td>${esc(l.keptTo)}</td>
         <td>${w.allowed ? `${meter(w.used / w.allowed, full ? 'warn' : '')}<div class="sub">${num(w.used)} of ${num(w.allowed)} in the last ${w.periodSeconds >= 3600 ? 'hour' : 'minute'}</div>` : '<span class="sub">no limit</span>'}</td>
         <td>${next}</td>
@@ -409,7 +411,7 @@
     el('actStatus').innerHTML = statusLine();
     el('actFeeds').innerHTML = (data.feeds || []).map((f) => `<button type="button" data-feed="${esc(f.name)}"
         class="${f.name === feed ? 'active' : ''}" title="${esc(f.plan)}${f.archive ? ' · public archive: fills history once per symbol, then closed' : ''}${f.keys === false
-          ? ` · ${esc(f.keysNote || 'key not set')}` : ''}${f.configured ? '' : ' · not configured here'}">${esc(f.name)}${f.closed ? ' <span class="chip">closed</span>' : f.keys === false ? ` <span class="chip">${esc(f.keysChip || 'no key')}</span>` : ''}</button>`).join('');
+          ? ` · ${esc(f.keysNote || 'key not set')}` : ''}${f.configured ? '' : ' · not configured here'}">${esc(label(f.name))}${f.closed ? ' <span class="chip">closed</span>' : f.keys === false ? ` <span class="chip">${esc(f.keysChip || 'no key')}</span>` : ''}</button>`).join('');
     loadAudits();
     el('actLimits').innerHTML = limitsHtml(data.limits || []);
     el('scanBtn').disabled = !!data.running;
@@ -623,7 +625,7 @@
     }
     const rows = streams.flatMap(([src, s]) => {
       const pairs = Object.entries(s.pairs || {}).sort(([a], [b]) => a.localeCompare(b));
-      const head = `<tr><td><b>${esc(src)}</b></td><td colspan="4">${s.connected
+      const head = `<tr><td><b>${esc(label(src))}</b></td><td colspan="4">${s.connected
         ? `<span class="rec on"></span> connected${s.since ? ` · since ${when(s.since)}` : ''}${s.symbols
           ? ` · ${s.symbols.length} symbol${s.symbols.length === 1 ? '' : 's'}` : ''}`
         : s.idle ? `<span class="state">idle</span> <span class="sub">${esc(s.note || 'nothing of it open on a chart: not connected')}</span>`

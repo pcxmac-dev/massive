@@ -318,7 +318,7 @@ def test_the_plugins_view_shows_each_plugin_its_plan_keys_and_part(tmp_path):
         store.watch_spec("alpaca", resolve("AAPL::XNAS"))
         out = app.plugins()
         by = {p["name"]: p for p in out["plugins"]}
-        assert list(by) == [n for n in providers() if n != "boats"]  # Blue Ocean is a feed of Alpaca's plugin
+        assert list(by) == [n for n in providers() if n not in ("boats", "tiingofx")]  # feeds of Alpaca's and Tiingo's plugins
         assert out["offline"] is False and out["errors"] == []
         assert by["massive"]["group"] == "Feeds with keys" and by["bitstamp"]["group"] == "Public feeds"
         assert by["alpaca"]["keys"] == [{"name": "ALPACA_API_KEY_ID", "label": "key ID", "set": True},
@@ -518,13 +518,15 @@ def test_the_plugins_view_folds_blue_ocean_into_alpacas_entry(tmp_path):
         by = {p["name"]: p for p in app.plugins()["plugins"]}
         assert "boats" not in by
         a = by["alpaca"]
-        assert [(f["name"], f["title"], f["state"]) for f in a["feeds"]] == [("alpaca", "Alpaca", "ready"),
-                                                                             ("boats", "Blue Ocean", "ready")]
+        assert [(f["name"], f["label"], f["state"]) for f in a["feeds"]] == [("alpaca", "alpaca", "ready"),
+                                                                             ("boats", "alpaca (blue ocean)", "ready")]
         assert a["watched"] == 2 and "Blue Ocean" in a["about"]
-        assert ("Blue Ocean", "boats", "minute") in {(c["feed"], c["market"], c["resolution"]) for c in a["capabilities"]}
-        assert {c["feed"] for c in a["capabilities"]} == {"Alpaca", "Blue Ocean"}
-        assert ("Blue Ocean", "stock minute bars overnight (feed=boats)") in {(r["feed"], r["what"]) for r in a["scan"]["results"]}
-        assert a["scan"]["has"] and len(by["tiingo"]["feeds"]) == 1
+        assert ("alpaca (blue ocean)", "boats", "minute") in {(c["feed"], c["market"], c["resolution"]) for c in a["capabilities"]}
+        assert {c["feed"] for c in a["capabilities"]} == {"alpaca", "alpaca (blue ocean)"}  # the source is alpaca
+        assert ("alpaca (blue ocean)", "stock minute bars overnight (feed=boats)") in {(r["feed"], r["what"]) for r in a["scan"]["results"]}
+        assert a["scan"]["has"] and [f["label"] for f in by["tiingo"]["feeds"]] == ["tiingo", "tiingo (forex)"]
+        assert "tiingofx" not in by  # Tiingo is one plugin
+        assert all("Blue Ocean" not in o for p in by.values() for d in p["delivery"] for o in d["others"])
     finally:
         store.close()
 

@@ -4,7 +4,7 @@ Its scan (`capabilities`, one request each) asks what else the account's plan gi
 bars (one exchange), forex and crypto bars, and Blue Ocean's overnight bars (a paid add-on,
 2026-10-27: $9 a month; Alpaca's free plan has them: alpaca.py's BOATS, and from earlier: Tiingo had none
 before 2024-09-25, asked 2026-10-28). The stocks' daily bars are collected here, the forex
-minutes on a feed of their own on this key's limits (tiingofx.py).
+minutes on a feed of this plugin on this key's limits (FOREX below: tiingo (forex)).
 
 Its plan is found in part: Tiingo's API has no account endpoint and sends no rate-limit headers
 (2026-10-27), but its News API is the paid plans' (Power, Commercial) and not Starter's (the pricing
@@ -18,9 +18,9 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date, timedelta
 
-from ...config import PUBLIC_FEEDS
+from ...config import PUBLIC_FEEDS, Tier
 from ...errors import SourceError
-from ..public import PublicClient, TiingoSource
+from ..public import PublicClient, TiingoFxSource, TiingoSource
 from ..registry import KeyVar, Provider, Scanned, limiter, machine_caps
 
 TIER, PER_RUN, PER_DAY = PUBLIC_FEEDS["tiingo"]
@@ -80,7 +80,7 @@ def build(settings, request_budget):
 
 def monthly_symbols(source, settings, key):
     """The plan's different symbols a month on a Tiingo source (collector._monthly_symbol), counted
-    for the key on the whole machine: its stocks and its forex (tiingofx) take the same places."""
+    for the key on the whole machine: its stocks and its forex (FOREX) take the same places."""
     from ...ratelimit import MachineLedger
 
     source.symbols_per_month = PLANS[plan_of(settings)][3]
@@ -146,8 +146,8 @@ def scan(source, today: date | None = None) -> Scanned:
     return Scanned(tuple(out), plan, alike)
 
 
-PLUGIN = Provider(
-    version="1.0.0", api="1.0",  # its own release, and the plugin contract it was written for
+TIINGO = Provider(
+    version="1.1.0", api="1.1",  # this plugin's release (its forex a feed of it), and the contract it needs (part_of)
     name="tiingo", title="Tiingo", build=build, assets=frozenset({"stock"}), order=60,
     about="US stock daily bars from 1962 (a free account key)",
     keys=(KeyVar("TIINGO_API_KEY"),), signup="tiingo.com: a free account's API token",
@@ -164,3 +164,45 @@ PLUGIN = Provider(
     markets=lambda settings: {"stock": "sip"},
     scan=scan,
 )
+
+
+# -- its forex: tiingo (forex) -----------------------------------------------------------------------
+# Currency pairs' 1-minute bars from 2020, with the Tiingo key: a feed of this plugin (the user,
+# 2026-10-30: "tiingo should be one plugin"), its own database file and watch rows (`tiingofx`), kept
+# up to date, on Tiingo's limits: one account, so one rate window and one daily cap for both feeds.
+# Its data is Tiingo's own (its own market here), not a copy of Massive's currencies. Taken to spend
+# the paid plan's allowance, which the stocks' daily bars leave almost all unused (the user, 2026-10-28).
+# Its currencies' history: from Tiingo's first forex minute (its plan's other limits are Tiingo's)
+FX_TIER = Tier("tiingofx", requests_per_minute=None, history_years=None, history_start=TiingoFxSource.START)
+
+
+def view_forex(base):
+    """Tiingo's plan (its caps and window, TIINGO_PLAN), with the currencies' history from 2020."""
+    out = view(base)
+    return replace(out, tier=replace(out.tier, by_asset=(("fx", FX_TIER),)))
+
+
+def build_forex(settings, request_budget):
+    key = settings.tiingo_api_key
+    headers = {"Authorization": f"Token {key}"} if key else {}
+    # Tiingo's window and day cap, held for the machine under Tiingo's name: one account's limits
+    client = PublicClient("https://api.tiingo.com", headers=headers, request_budget=request_budget,
+                          rate_limiter=limiter("tiingo", settings, key))
+    # its pairs take places among the plan's different symbols a month, with Tiingo's stocks
+    return monthly_symbols(TiingoFxSource(machine_caps(client, "tiingo", settings, key), has_key=bool(key)), settings, key)
+
+
+FOREX = Provider(
+    version="1.1.0", api="1.1",  # this plugin's release, and the contract it needs (part_of)
+    name="tiingofx", title="Forex", build=build_forex, assets=frozenset({"fx"}), order=61, account="tiingo",
+    part_of="tiingo",
+    about="currency pairs' 1-minute bars from 2020, from Tiingo (its key and limits)",
+    keys=TIINGO.keys, signup=TIINGO.signup, kind="vendor",
+    provides={"fx": ("minute",)}, per_request={"minute": TiingoFxSource.WINDOW_DAYS * 1440},
+    limits="shares Tiingo's: its plan's requests an hour and a day, for both feeds",
+    missing_keys_note="key not set: Tiingo's forex comes with TIINGO_API_KEY",
+    view=view_forex, rate=TIINGO.rate, has_keys=lambda s: bool(s.tiingo_api_key),
+    markets=lambda settings: {"fx": "tiingofx"},
+)
+
+PLUGINS = (TIINGO, FOREX)  # one plugin, two feeds: the stocks' daily archive, and its forex minutes

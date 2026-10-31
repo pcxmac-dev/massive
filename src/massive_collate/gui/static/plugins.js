@@ -8,8 +8,9 @@
    its version, the plugin API it was written for and where it came from (built in, or a package).
    Each plugin refreshes its own plan info: a rescan asks the provider what the key really gets;
    while it runs, each plugin it has still to ask says "scanning" in place of its state.
-   A plugin with several feeds (Alpaca: its own, and Blue Ocean's nights on its keys) lists them,
-   and names the feed on each capability, scan answer and era.
+   A plugin with several feeds (Alpaca: alpaca, and its nights on Blue Ocean, alpaca (blue ocean);
+   Tiingo: tiingo and tiingo (forex)) lists them, and names the feed on each capability, scan answer
+   and era.
    A plan its scan cannot tell (Tiingo's Power from Commercial) is chosen here: each plan variable
    is a choice, saved like the key script saves it (POST /api/plugins/plan); keys stay in the script.
    Below them the publishers (news and publications: publications.py), each an agency's or a
@@ -175,12 +176,13 @@
       </div>${l.published ? `<div class="p-muted small">Its server publishes: ${esc(l.published)}</div>` : ''}`;
   }
 
-  // a plugin with several feeds (Alpaca and its Blue Ocean): each listed, with its state
+  // a plugin with several feeds (alpaca, and alpaca (blue ocean) on its keys): each listed by the
+  // plugin's name, with its state ("the source isn't blue ocean its alpaca w/ blue ocean")
   const several = (p) => p.feeds.length > 1;
   function feedsHtml(p) {
     if (!several(p)) return '';
     return `<h4>Feeds</h4><table class="act-table ex-mini pl-feedlist"><tbody>${p.feeds.map((f) => `<tr>
-        <td><b>${esc(f.title)}</b> <code>${esc(f.name)}</code><div class="p-muted small">${esc(f.about)}</div></td>
+        <td><b>${esc(f.label)}</b><div class="p-muted small">${esc(f.about)}</div></td>
         <td>${chip(f.state)}</td></tr>`).join('')}</tbody></table>
       <div class="p-muted small">Each a feed of its own (its own bars, symbols and requests), on this plugin's keys and limits.</div>`;
   }
