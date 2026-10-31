@@ -2,8 +2,9 @@
 read on a schedule of its own by the recorder (publications.py), never behind a sync.
 
 A module in `sources/plugins/` defines `PUBLISHER` (a Publisher; `PUBLISHERS` for several), beside
-or instead of a feed's `PLUGIN`: each agency has a module of its own (fed.py, sec.py ...), and a
-vendor's headlines sit in its feed's module (massive.py), its requests on that feed's account.
+or instead of a feed's `PLUGIN`: the federal agencies are parts of one plugin (plugins/federal/, a
+module each: fed.py, sec.py ...; `part_of`), and a vendor's headlines sit in its feed's module
+(massive.py), its requests on that feed's account.
 
 Each declares its scrape checks (`Policy`), which the reader enforces before every request:
 - only the hosts it names, over HTTPS, and never a blocked site (publications.BLOCKED_HOSTS: the
@@ -66,6 +67,12 @@ class Publisher:
     # a vendor's read: read(ctx) -> new items (ctx: publications.Context); official feeds are read
     # by the reader itself
     read: Callable[[object], int] | None = None
+    # the plugin it is part of, when another publisher's (API 1.2; the Fed: Federal's): listed in it,
+    # and stopped while that one is paused; its own scrape checks, state and pause still its own
+    part_of: str = ""
+    # the datasets it publishes (datasets.py names; API 1.2; the CFTC's Commitments of Traders):
+    # fetched by `datasets`, shown with it
+    datasets: tuple[str, ...] = ()
     # its own version and the plugin contract it was written for (sources/registry.py: PLUGIN_API)
     version: str = ""
     api: str = "1.0"

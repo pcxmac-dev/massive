@@ -588,14 +588,21 @@ class ChartApp:
 
     def publishers(self) -> list[dict]:
         """The publisher plugins for the Plugins view (publications.view): each one's state, feeds,
-        scrape checks, limits as last verified, schedule. Read from gov/gov.db and the kills: no requests."""
+        scrape checks, limits as last verified, schedule; a plugin of several (Federal) with its parts,
+        and the datasets a part publishes as the Datasets view has them (the CFTC's Commitments of
+        Traders). Read from gov/gov.db, the kills and the datasets' files: no requests."""
         from .. import gov, publications
 
         with self._gov_lock:
             if self._gov_db is None:
                 self._gov_db = gov.GovDB(gov.db_path(self.store.path))
             with self._lock:
-                return publications.view(self._gov_db, self.settings, self.store)
+                out = publications.view(self._gov_db, self.settings, self.store)
+        if any(p["datasets"] for p in out):
+            held = {d["name"]: d for d in self.datasets()["datasets"]}
+            for p in out:
+                p["datasetRows"] = [held[n] for n in p["datasets"] if n in held]
+        return out
 
     def start_recheck(self, name: str) -> dict:
         """Verify a publisher's limits now (publications.recheck_now) in a thread: robots.txt read

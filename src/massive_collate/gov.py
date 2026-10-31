@@ -12,10 +12,10 @@
 - The New York Fed: the federal funds target range, the effective rate and SOFR, from its
   markets API.
 
-All are official feeds made for programs, keyless. Each agency is a publisher plugin of its own
-(sources/plugins/fed.py, nyfed.py, sec.py, bls.py, fedreg.py), read on its own schedule under its
-scrape checks by publications.py (the recorder's thread); this module parses what they send and
-keeps it. FINRA's own website terms bar robots and use with AI programs, so nothing is read from
+All are official feeds made for programs, keyless. Each agency is a part of the Federal plugin
+(sources/plugins/federal/: fed.py, nyfed.py, sec.py, bls.py, fedreg.py), read on its own schedule
+under its own scrape checks by publications.py (the recorder's thread); this module parses what
+they send and keeps it. FINRA's own website terms bar robots and use with AI programs, so nothing is read from
 finra.org (publications.BLOCKED_HOSTS): its rule changes arrive through the Federal Register and
 the Gov view links to finra.org. Stored in a file of its own (gov/gov.db beside the main
 database), with each feed's state, each publisher's requests a day, the hosts' robots.txt and each

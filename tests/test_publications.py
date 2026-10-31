@@ -1,5 +1,5 @@
-"""The publisher plugins (sources/publisher.py) read by publications.py: each agency a plugin of
-its own, a vendor's headlines in its feed's module; their scrape checks (own hosts over HTTPS,
+"""The publisher plugins (sources/publisher.py) read by publications.py: each agency a publisher of
+its own in the Federal plugin (tests/test_federal.py), a vendor's headlines in its feed's module; their scrape checks (own hosts over HTTPS,
 blocked sites, feeds only, robots.txt, floors and daily caps, redirects); their schedules (the
 FOMC's 2:00 p.m. statement); the limits recheck; a pause; the recorder's thread."""
 from __future__ import annotations
@@ -55,7 +55,7 @@ NOW = datetime(2026, 10, 26, 6, 0, tzinfo=timezone.utc)
 
 
 # -- the plugins ------------------------------------------------------------------------------------
-def test_each_agency_is_a_plugin_of_its_own_and_massives_headlines_sit_in_its_module():
+def test_each_agency_is_a_publisher_of_its_own_and_massives_headlines_sit_in_its_module():
     pubs = publishers()
     assert {"fed", "nyfed", "sec", "bls", "fedreg", "massive-news"} <= set(pubs)
     assert all(p.origin == "built in" for p in pubs.values())
@@ -168,7 +168,7 @@ def test_rate_limit_headers_are_kept_and_a_429_holds_it_off():
 
 # -- when ---------------------------------------------------------------------------------------------------
 def test_the_fed_is_read_at_2pm_on_fomc_days_and_otherwise_every_30_minutes():
-    from massive_collate.sources.plugins import fed
+    from massive_collate.sources.plugins.federal import fed
 
     p = publishers()["fed"]
     press, speeches = p.feed("fed-press"), p.feed("fed-speeches")

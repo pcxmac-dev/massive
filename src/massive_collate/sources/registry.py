@@ -56,7 +56,8 @@ DEFAULT_PER_REQUEST = 1000  # bars a request returns, for a provider that does n
 # a helper), a new major changes or removes something a plugin may rely on. A plugin written
 # before the contract had a number was written for 1.0 (Provider.api's default).
 # 1.1 (2026-10-29): Provider.part_of, a plugin's second feed (Alpaca's Blue Ocean).
-PLUGIN_API = "1.1"
+# 1.2 (2026-10-30): Publisher.part_of and Publisher.datasets, a plugin of several publishers (Federal).
+PLUGIN_API = "1.2"
 
 
 def api_version(api) -> tuple[int, int]:
@@ -639,6 +640,19 @@ def publishers() -> dict[str, Publisher]:
         return dict(_publishers)
 
 
+def publisher_of(name: str) -> str:
+    """The plugin a publisher is listed under: the one it is part of (Publisher.part_of: Federal's
+    agencies), or its own (a part_of naming no publisher here leaves it one of its own)."""
+    pubs = publishers()
+    p = pubs.get(name)
+    return p.part_of if p is not None and p.part_of in pubs and p.part_of != name else name
+
+
+def publisher_parts(name: str) -> list[str]:
+    """A publisher plugin's parts, in their order (Federal: fed, nyfed, sec, bls, fedreg, cftc)."""
+    return [n for n in publishers() if n != name and publisher_of(n) == name]
+
+
 def reload() -> dict[str, Provider]:
     global _providers
     with _lock:
@@ -710,6 +724,12 @@ def menu(settings: "Settings | None" = None) -> list[dict]:
 
 
 def publisher_menu() -> list[dict]:
-    """The publisher plugins for the `plugins` command: what each is, its version and origin."""
-    return [{"name": p.name, "title": p.title, "about": p.about, "kind": p.kind, "account": p.account,
-             "origin": p.origin, "version": p.version, "api": p.api} for p in publishers().values()]
+    """The publisher plugins for the `plugins` command, each once, with its parts (`parts`:
+    Federal's agencies): what each is, its version and origin."""
+    def row(p: Publisher) -> dict:
+        return {"name": p.name, "title": p.title, "about": p.about, "kind": p.kind, "account": p.account,
+                "origin": p.origin, "version": p.version, "api": p.api, "datasets": list(p.datasets)}
+
+    pubs = publishers()
+    return [{**row(p), "parts": [row(pubs[n]) for n in publisher_parts(p.name)]}
+            for p in pubs.values() if publisher_of(p.name) == p.name]

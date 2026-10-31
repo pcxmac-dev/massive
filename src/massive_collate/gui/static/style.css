@@ -993,6 +993,10 @@ main > .view.ex-view:not([hidden]) { display: grid; }
 .ex-state.pl-ready { color: var(--up); border-color: var(--up); }
 .ex-state.pl-scanning { color: var(--accent); border-color: var(--accent); }  /* a rescan has it still to ask */
 .pl-feedrow th { text-align: left; font-weight: 600; color: var(--muted); padding-top: 6px; }
+/* a plugin of several publishers (Federal): its agencies listed beneath it, indented */
+.ex-venue.pl-sub { width: calc(100% - 14px); margin-left: 14px; padding-top: 4px; padding-bottom: 4px; }
+.pl-link { border: none; background: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; font-weight: 600; }
+.pl-link:hover { text-decoration: underline; }
 .ex-state.pl-killed, .ex-state.pl-no-key { color: var(--down); border-color: var(--down); }
 .ex-state.pl-partly { color: var(--accent); border-color: var(--accent); }
 .pl-view .ex-list h4 { margin: 16px 0 6px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }

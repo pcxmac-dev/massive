@@ -11,7 +11,7 @@
                Ocean overnight), its products, and insight into them on the right (venues.js)
      Markets   the world's exchanges on a globe turned to where it is noon now (globe.js)
      News      every announcement the globe's ticker shows (news.js)
-     Gov       the government and the regulators: current regulatory parameters, the Fed's, the SEC's,
+     Federal   the federal agencies and regulators (the Federal plugin): current regulatory parameters, the Fed's, the SEC's,
                BLS's and the Federal Register's newest (gov.js)
      Datasets  research series drawn on one time axis: factors, CAPE, COT positioning (datasets.js)
      Fetcher   historical data (sessions before the current one); coloured while a run is active

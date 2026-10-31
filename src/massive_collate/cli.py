@@ -917,6 +917,8 @@ def cmd_plugins(args, settings: Settings | None) -> int:
                   + (f"; serves: {', '.join(f['serves']) or '-'}" if "serves" in f else ""))
     for r in pubs:
         print(f"{r['name']:12} {r['title']:28} publisher {release(r)}")
+        for part in r["parts"]:  # a plugin of several publishers: Federal's agencies
+            print(f"{'':12} and {part['title']} ({part['name']}): {part['about']}")
     for where, why in left_out:
         print(f"left out: {where}: {why}")
     print("Set or remove a provider's keys: powershell -NoProfile -ExecutionPolicy Bypass -File .\\tools\\set-key.ps1")

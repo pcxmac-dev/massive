@@ -56,6 +56,11 @@
   const tierOf = (p) => p.plan.vars.find((v) => v.choices.length) || null;
   // a plugin's version, the plugin API it was written for and where it came from
   const release = (p) => `<div class="p-muted small pl-release">Version ${esc(p.version || 'unversioned')} · plugin API ${esc(p.api)} · ${esc(p.origin)}</div>`;
+  // what a publisher reads: a plugin of several (Federal) its agencies, a vendor's on its feed's key, its feeds, its datasets
+  const pubCount = (p) => (p.parts.length ? `${p.parts.length} agencies`
+    : p.kind === 'vendor' ? `on ${p.account}'s key · every ${every(Math.min(...p.feeds.map((f) => f.every)))}`
+      : p.feeds.length ? `${p.feeds.length} feed${p.feeds.length === 1 ? '' : 's'} · every ${every(Math.min(...p.feeds.map((f) => f.every)))}`
+        : p.datasets.length ? `${p.datasets.length} dataset${p.datasets.length === 1 ? '' : 's'}` : 'nothing to read');
 
   async function load() {
     clearTimeout(timer);
@@ -123,9 +128,12 @@
           <span class="ex-count">${esc(plan)}${p.feeds.length > 1 ? ` · ${p.feeds.length} feeds` : ''}</span></button>`;
       }).join('');
     }).join('');
-    const pubs = (data.publishers || []).map((p) => `<button type="button" class="ex-venue${PUB + p.name === sel ? ' active' : ''}" data-plugin="${esc(PUB + p.name)}" title="${esc(p.about)}">
+    // a plugin of several publishers (Federal) once, its agencies beneath it; a publisher of its own as it is
+    const pubButton = (p, sub) => `<button type="button" class="ex-venue${sub ? ' pl-sub' : ''}${PUB + p.name === sel ? ' active' : ''}" data-plugin="${esc(PUB + p.name)}" title="${esc(p.about)}">
           <span class="ex-name">${esc(p.title)}</span>${chip(p.state)}
-          <span class="ex-count">${esc(p.kind === 'vendor' ? `on ${p.account}'s key` : `${p.feeds.length} feed${p.feeds.length === 1 ? '' : 's'}`)} · every ${esc(every(Math.min(...p.feeds.map((f) => f.every))))}</span></button>`).join('');
+          <span class="ex-count">${esc(pubCount(p))}</span></button>`;
+    const pubs = (data.publishers || []).filter((p) => !p.partOf).map((p) => pubButton(p, false)
+      + (data.publishers || []).filter((q) => q.partOf === p.name).map((q) => pubButton(q, true)).join('')).join('');
     const news = pubs ? `<h4 class="ex-group">News and publications</h4>${pubs}` : '';
     const left = data.errors.length ? `<h4 class="ex-group">Left out</h4>${data.errors.map((e) => `
       <div class="pl-error"><b>${esc(e.where)}</b><div class="p-muted small">${esc(e.why)}</div></div>`).join('')}` : '';
@@ -214,7 +222,35 @@
   }
 
   // -- a publisher (news and publications) ------------------------------------------------------
+  // a plugin of several publishers (Federal): its agencies, each with its state, what it reads and when
+  function partsHtml(p) {
+    const parts = data.publishers.filter((q) => q.partOf === p.name);
+    const last = (q) => q.feeds.map((f) => f.at).filter(Boolean).sort().pop();
+    const next = (q) => q.feeds.map((f) => f.next).filter(Boolean).sort()[0];
+    return `<h4>Agencies</h4><table class="act-table ex-mini pl-parts"><thead><tr><th>Agency</th><th>State</th><th>Reads</th>
+        <th>Last read</th><th>Next</th><th class="num">Requests today</th></tr></thead><tbody>${parts.map((q) => `<tr>
+        <td><button type="button" class="pl-link" data-plugin="${esc(PUB + q.name)}">${esc(q.title)}</button><div class="p-muted small">${esc(q.about)}</div></td>
+        <td>${chip(q.state)}</td><td>${esc(q.feeds.length ? `${q.feeds.length} feed${q.feeds.length === 1 ? '' : 's'}` : q.datasets.length ? 'a dataset' : '–')}</td>
+        <td>${last(q) ? ago(last(q)) : q.feeds.length ? 'never' : '–'}</td><td>${q.state === 'paused' ? 'paused' : next(q) ? until(next(q)) : '–'}</td>
+        <td class="num">${num(q.requestsToday)}</td></tr>`).join('')}</tbody></table>
+      <div class="p-muted small">Each agency keeps its own scrape checks, limits, pause and recheck: pick one for them. Pausing ${esc(p.title)} pauses them all.</div>`;
+  }
+
+  // the datasets a publisher puts out (the CFTC's Commitments of Traders), as the Datasets view has them
+  function datasetsHtml(p) {
+    const rows = p.datasetRows || [];
+    if (!p.datasets.length) return '';
+    return `<h4>Datasets</h4><table class="act-table ex-mini"><thead><tr><th>Dataset</th><th class="num">Values</th><th>Fetched</th><th>Files due</th></tr></thead><tbody>
+      ${p.datasets.map((n) => rows.find((r) => r.name === n) || { name: n, title: n }).map((d) => `<tr><td><b>${esc(d.title)}</b><div class="p-muted small">${esc(d.licence || '')}</div></td>
+        <td class="num">${d.values != null ? num(d.values) : '–'}</td><td>${d.fetched ? ago(d.fetched) : 'not yet'}</td><td>${d.due != null ? num(d.due) : '–'}</td></tr>`).join('')}</tbody></table>
+      <div class="p-muted small">Fetched with the datasets (<code>datasets fetch</code>, then on their own cadence) and shown in the Datasets view.</div>`;
+  }
+
   function pubMainHtml(p) {
+    if (p.parts.length) return partsHtml(p);
+    if (!p.feeds.length) {
+      return `${datasetsHtml(p)}${p.policy.terms ? `<h4>Terms</h4><div class="small">${esc(p.policy.terms)}</div>` : ''}`;
+    }
     const feeds = p.feeds.map((f) => `<tr><td><b>${esc(f.title)}</b><div class="p-muted small">${esc(f.host || f.agency)}</div></td>
         <td>${esc(every(f.every))}</td><td><span class="pl-fstate pl-f-${esc(f.state.replace(/ /g, '-'))}">${esc(FEED_STATE[f.state] || f.state)}</span></td>
         <td>${f.at ? ago(f.at) : 'never'}</td><td>${p.state === 'paused' ? 'paused' : f.next ? until(f.next) : '–'}</td>
@@ -264,27 +300,32 @@
   function pubSideHtml(p) {
     const whose = p.kill?.whose;
     const paused = p.state === 'paused' && whose === 'own';  // its own pause: Resume undoes it here
+    const plugin = p.partOf ? data.publishers.find((q) => q.name === p.partOf) : null;  // Federal, for its agencies
     const until = (iso) => esc(String(iso || '').slice(0, 16).replace('T', ' '));
     const stop = !p.kill ? ''
       : paused ? 'Paused by you'
+      : whose === 'plugin' ? `${p.kill.by === 'user' ? 'Paused' : 'Stopped'} with ${esc(plugin?.title || p.partOf)}: ${p.kill.by === 'user' ? 'resume it there' : esc(p.kill.why)}`
       : whose === 'fetching' ? `${esc(p.kill.why)}: resume fetching there`
       : whose === 'account' ? `Stopped with ${esc(p.account)}'s account until ${until(p.kill.until)} UTC: ${esc(p.kill.why)}`
       : `Stopped until ${until(p.kill.until)} UTC: ${esc(p.kill.why)}`;
     const used = p.policy.perDay ? Math.min(100, (p.requestsToday / p.policy.perDay) * 100) : 0;
+    const all = p.parts.length > 0;  // a plugin of several: its pause is theirs too
     return `<h3>${esc(p.title)} ${chip(p.state)}</h3>
       <div class="p-muted small">${esc(p.about)}</div>${release(p)}
+      ${plugin ? `<div class="p-muted small">Part of the <button type="button" class="pl-link" data-plugin="${esc(PUB + plugin.name)}">${esc(plugin.title)}</button> plugin.</div>` : ''}
       ${stop ? `<div class="pl-warn">${stop}</div>` : ''}
       ${p.held ? `<div class="pl-warn">Nothing sent until ${until(p.held.until)} UTC: ${esc(p.held.why)}</div>` : ''}
       <div class="tiles ex-tiles">
-        ${tile('Requests today', num(p.requestsToday), `of ${num(p.policy.perDay)} a day`)}
-        ${tile('Floor', every(p.floorMinutes), 'between reads of a feed')}
-        ${tile('Feeds', num(p.feeds.length), p.kind === 'vendor' ? `on ${esc(p.account)}'s key` : 'official, keyless')}
-        ${tile('Verified', p.recheck ? ago(p.recheck.at) : 'never', 'its limits')}
+        ${tile('Requests today', num(p.requestsToday), all ? 'its agencies together' : `of ${num(p.policy.perDay)} a day`)}
+        ${all ? tile('Agencies', num(p.parts.length), 'each a part of it') : tile('Floor', every(p.floorMinutes), 'between reads of a feed')}
+        ${tile('Feeds', num(all ? data.publishers.filter((q) => q.partOf === p.name).reduce((n, q) => n + q.feeds.length, 0) : p.feeds.length),
+          p.kind === 'vendor' ? `on ${esc(p.account)}'s key` : 'official, keyless')}
+        ${all ? '' : tile('Verified', p.recheck ? ago(p.recheck.at) : 'never', 'its limits')}
       </div>
-      <div class="pl-usage" title="${num(p.requestsToday)} of ${num(p.policy.perDay)} requests today"><i style="width:${used.toFixed(1)}%"></i></div>
+      ${all ? '' : `<div class="pl-usage" title="${num(p.requestsToday)} of ${num(p.policy.perDay)} requests today"><i style="width:${used.toFixed(1)}%"></i></div>`}
       <h4>Reading</h4>
-      <button type="button" data-pause="${esc(p.name)}" data-on="${paused ? '0' : '1'}"${data.offline || (p.kill && !paused) ? ' disabled' : ''}>${paused ? 'Resume' : 'Pause'}</button>
-      <div class="p-muted small">${paused ? 'Nothing is read until you resume it.' : 'Pausing stops its reads until you resume it.'}</div>
+      <button type="button" data-pause="${esc(p.name)}" data-on="${paused ? '0' : '1'}"${data.offline || (p.kill && !paused) ? ' disabled' : ''}>${paused ? (all ? 'Resume all' : 'Resume') : (all ? 'Pause all' : 'Pause')}</button>
+      <div class="p-muted small">${paused ? 'Nothing is read until you resume it.' : all ? 'Pausing it stops every agency in it until you resume it.' : 'Pausing stops its reads until you resume it.'}</div>
       ${p.policy.terms ? `<h4>Terms</h4><div class="small">${esc(p.policy.terms)}</div>` : ''}
       ${safeUrl(p.policy.termsUrl) ? `<div class="p-muted small"><a href="${esc(safeUrl(p.policy.termsUrl))}" target="_blank" rel="noopener noreferrer">${esc(p.policy.termsUrl.replace(/^https:\/\//, ''))}</a></div>` : ''}`;
   }
@@ -332,7 +373,7 @@
     const p = plugin(), pub = publisher();
     const scrolled = box.querySelector('.ex-list')?.scrollTop || 0;
     const setUp = data.plugins.filter((x) => x.configured && x.state !== 'no key').length;
-    const head = pub ? `publisher · ${pub.kind === 'vendor' ? `a vendor's headlines, on ${pub.account}'s key` : 'official feeds'} · ${pub.feeds.length} feed${pub.feeds.length === 1 ? '' : 's'}`
+    const head = pub ? `publisher · ${pub.kind === 'vendor' ? `a vendor's headlines, on ${pub.account}'s key` : 'official feeds'} · ${pubCount(pub)}`
       : p ? `${p.archive ? 'closed archive' : 'feed'} · ${p.kind} data · ${p.assets.join(', ')}` : '';
     box.innerHTML = `
       <div class="ex-venues"><div class="view-head"><div><h2>Plugins</h2>

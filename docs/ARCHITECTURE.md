@@ -129,9 +129,10 @@ live recorder, whose "what changed since" read every bar's `stored_at`, had read
 Every data provider the fetcher uses is a plugin: one `Provider` record (`sources/registry.py`)
 holding everything the app knows about it, so nothing else names a provider to decide how to treat
 it. The built-in ones are `sources/plugins/` (Massive, Alpaca with its overnight feed on Blue Ocean,
-Bitstamp, Coinbase, Bitfinex, Cboe, Tiingo with its forex feed; the publishers Fed, New York Fed, SEC,
-BLS, Federal Register and Massive's headlines), one module each defining `PLUGIN` (Alpaca's and
-Tiingo's `PLUGINS`: two feeds each); their data-source classes stay in `sources/massive.py`,
+Bitstamp, Coinbase, Bitfinex, Cboe, Tiingo with its forex feed; the publishers: Federal, the federal
+agencies in one plugin (the Fed, New York Fed, SEC, BLS, Federal Register, CFTC: `plugins/federal/`),
+and Massive's headlines), one module each defining `PLUGIN` (Alpaca's and Tiingo's `PLUGINS`: two
+feeds each; Federal's `PUBLISHERS`); their data-source classes stay in `sources/massive.py`,
 `alpaca.py` and `public.py`. A module added to `sources/plugins/` is found on the next start; a
 provider shipped as its own package registers under the entry point group `massive_collate.providers`.
 A plugin that fails to load is left out and reported (`plugins`), never fatal.
@@ -198,13 +199,13 @@ A plugin that fails to load is left out and reported (`plugins`), never fatal.
     An unknown value is Starter.
 - **The plugin contract, versioned** (2026-10-29; the user: "eventually plugins will need to be in
   their own repo with their own version"). The app offers `registry.PLUGIN_API` (major.minor, now
-  1.1). Each plugin, a `Provider` or a `Publisher`, gives its own `version` (its release:
+  1.2). Each plugin, a `Provider` or a `Publisher`, gives its own `version` (its release:
   major.minor.patch) and the contract it was written for (`api`: a literal such as `"1.0"`, never
   `PLUGIN_API` itself, which would always match). At discovery a plugin written for another major,
   or for a newer minor than the app offers, is left out and reported with the ones that fail to
   load (`errors()`, `plugins`, the key script, the Plugins view's "Left out"), never fatal. An `api`
   left out is 1.0. The built-ins are 1.0.0 for API 1.0, but Alpaca's and Tiingo's two feeds each:
-  1.1.0 for API 1.1. `plugins` (and its `--json`: `api`, each
+  1.1.0 for API 1.1, and Federal with its agencies: 1.0.0 for API 1.2. `plugins` (and its `--json`: `api`, each
   plugin's `version`, `api`, `origin`; the publishers too), the key script's list and the Plugins
   view show each plugin's version and origin.
   - **Minor and major.** A minor only adds: a field with a default, a new optional callback, a new
@@ -222,6 +223,13 @@ A plugin that fails to load is left out and reported (`plugins`), never fatal.
     in alpaca"): its plugin with what it is of it, `alpaca (blue ocean)`, `tiingo (forex)`, and the
     live feeds so too (`live.LIVE_LABELS`: `alpaca (iex)`, `tiingo (blue ocean)`), in the chart's
     feed lists, the Fetcher, the Exchanges view and the Plugins view.
+  - **1.2** (2026-10-30) adds `Publisher.part_of` and `Publisher.datasets`: a plugin of several
+    publishers (Federal: its agencies name `part_of="federal"`), and the datasets a publisher puts
+    out (the CFTC's Commitments of Traders). Each part keeps its own name, scrape checks, state,
+    pause and recheck; the plugin is listed once with its parts (`registry.publisher_of`,
+    `publisher_parts`, `publisher_menu`), and pausing it stops them all (`publications.Reader.kill`:
+    `whose="plugin"`). A publisher with no feed of its own (the plugin's record, a part with
+    datasets only) is never read or rechecked: nothing is sent for it, robots.txt neither.
   - **What a plugin may rely on (API 1.0)**, and nothing else of `massive_collate`:
     `sources.registry`: `PLUGIN_API`, `Provider`, `KeyVar`, `Scanned`, and `Report`, `Limits`,
     `Capability` for a `reporter`; the helpers `limiter`, `machine_caps`, `public_client`,
@@ -282,9 +290,55 @@ A plugin that fails to load is left out and reported (`plugins`), never fatal.
   headlines publisher, on its key), `massive-plugin-alpaca` (Alpaca with its overnight feed on Blue
   Ocean, reached through Alpaca's API, keys and limits), `massive-plugin-tiingo` (Tiingo with its
   forex feed: one key and account), `massive-plugin-coinbase`, `massive-plugin-bitstamp`,
-  `massive-plugin-bitfinex`, `massive-plugin-cboe`, and the publishers `massive-plugin-fed`,
-  `massive-plugin-nyfed`, `massive-plugin-sec`, `massive-plugin-bls`, `massive-plugin-fedreg`
-  (or the five agencies as one `massive-plugin-gov`).
+  `massive-plugin-bitfinex`, `massive-plugin-cboe`, and the publishers `massive-plugin-federal`
+  (the federal agencies, one plugin) and, later, a state regulators' plugin of its own.
+
+## The Federal plugin (2026-10-30)
+
+The user: "lets take a look at all regulatory agencies that affect corporations and stocks, review
+whats already in place on this app and merge everything in to a Federal plugin, from news feeds to
+edgar access, to everything that matters"; "if there are state regulatory agencies, those would be
+in another plugin"; "if api keys are required we can address that". One publisher plugin,
+`sources/plugins/federal/`, a module per agency, each a part (`part_of="federal"`, API 1.2) with
+its own scrape checks. Official feeds and documented APIs only, never a page; nothing stored moves
+(gov/gov.db, datasets/cftc.db stay); new data in new files beside them. It holds three kinds:
+releases and news (read on schedules), data series (point in time, chartable), and company data
+(per stock, matched by the SEC's CIK to ticker list).
+
+- **Phase 1, the merge (done 2026-10-30):** the Federal Reserve, the New York Fed, the SEC, BLS and
+  the Federal Register (each a plugin of its own before), and the CFTC's Commitments of Traders (a
+  dataset) as its parts; one Plugins view entry (its agencies beneath it, an overview of them, Pause
+  all) and one `plugins` row; the Gov view renamed Federal. No new request.
+- **Phase 2, EDGAR company data:** the ticker to CIK list; per watched or open stock its filings
+  (8-K with items, 10-Q/10-K, offerings S-1/S-3/424B, proxies), share structure (shares outstanding
+  from each cover, public float in dollars yearly with float shares from that day's close, diluted
+  shares), Form 4 insider trades, Schedule 13D/13G holders, fails-to-deliver (twice a month); new
+  filings within about 10 minutes from the XBRL RSS under /Archives (sec.gov/cgi-bin, the "latest
+  filings" Atom, is disallowed by its robots.txt); SEC litigation releases and administrative
+  proceedings. Beside it, from Massive's plugin (every Stocks plan): short interest and days to cover,
+  daily short volume, free float. The side panel's Share structure, Filings, Insiders and holders.
+- **Phase 3, markets:** the Fed's monetary and enforcement feeds and H.15 (its release XML: the Data
+  Download Program is being retired); the New York Fed's repo and reverse repo, SOMA holdings,
+  primary dealer statistics and more rates; the Treasury's daily yield curves, auctions
+  (TreasuryDirect), Daily Treasury Statement and debt (Fiscal Data API); the CFTC's API
+  (disaggregated and financial futures reports); FDIC failures, OCC and CFPB feeds; OFAC's sanctions
+  list compared daily (its RSS retired).
+- **Phase 4, economic calendar and data:** one calendar (FOMC by hand, BLS's ICS, BEA's JSON schedule,
+  Census, EIA's weekly reports, Treasury auctions, WASDE); series from BLS, BEA, Census and EIA (their
+  keys).
+- **Phase 5, sector regulators linked to stocks:** FDA (openFDA approvals and recalls, its RSS), FTC
+  (competition releases, merger early terminations: an api.data.gov key) and DOJ Antitrust, the
+  Consolidated Screening List against listed companies, NRC events, EPA enforcement, USDA reports;
+  NHTSA, FCC and FERC once tested (their sites refused a research fetcher). Matched by CIK, else by
+  name with a confidence shown; never acted on automatically.
+- **Phase 6, Congress and rulemaking:** Congress.gov, Regulations.gov, GovInfo (presidential
+  documents too), on an api.data.gov key.
+- **Keys** (the user signs up; the key script sets them): GOV_CONTACT (the SEC), one api.data.gov key,
+  EIA's, BEA's, Census's and BLS's own, openFDA's optionally. Not planned unless asked: USPTO, USITC
+  and FFIEC (identity checks or an account).
+- **Left out:** FINRA's site and MSRB's EMMA (their terms bar automated reading), FRED (no storing),
+  SEC full-text search (not a documented API), sec.gov/cgi-bin (robots.txt), the CFTC's RSS (off),
+  pages only (the Beige Book), PCAOB (terms not read), the White House site's feed (GovInfo instead).
 
 ## The Plugins view (2026-10-27)
 

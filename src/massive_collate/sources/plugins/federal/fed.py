@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
 
-from ...sessions import ET
-from ..publisher import Feed, Policy, Publisher
+from ....sessions import ET
+from ...publisher import Feed, Policy, Publisher
+from .release import API, VERSION
 
 # The second day of each FOMC meeting: the decision, at 2:00 p.m. ET. True: with the Summary of
 # Economic Projections (the dot plot).
@@ -47,7 +48,7 @@ def calendar(today: date) -> list[dict]:
 
 
 PUBLISHER = Publisher(
-    version="1.0.0", api="1.0",  # its own release, and the plugin contract it was written for
+    version=VERSION, api=API, part_of="federal",  # the Federal plugin's release and contract (federal/__init__.py)
     name="fed", title="Federal Reserve", order=200,
     about="press releases (monetary policy, regulation, enforcement), speeches and testimony; "
           "read at the FOMC's 2:00 p.m. releases",

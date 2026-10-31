@@ -1,5 +1,6 @@
 'use strict';
-/* Gov view (rail icon: a state house): what the government and the regulators publish (gov.py).
+/* Federal view (rail icon: a state house; the Gov view before the Federal plugin): what the federal
+   agencies and regulators publish (gov.py; the Federal plugin, sources/plugins/federal/).
    The current regulatory parameters first (policy rates with their dates, rule parameters with the
    rule and its newest Federal Register document), then the agencies' newest, filtered by agency
    (FINRA: its rule filings, from the Federal Register), the next scheduled releases, then each
@@ -53,9 +54,9 @@
     const rows = data.items.filter((it) => matches(it, filter) && (!q || [it.title, it.agency, it.kind, ...it.tags].some((v) => v && v.toLowerCase().includes(q))));
     const waiting = data.sources.filter((s) => s.state === 'waiting');
     box.innerHTML = `
-      <div class="view-head"><div><h2>Government &amp; regulators</h2>
+      <div class="view-head"><div><h2>Federal</h2>
         <div class="p-muted small">The Fed, the SEC, BLS, the Federal Register (SEC with FINRA's and the exchanges' rule filings, CFTC, Fed,
-          Treasury) and the New York Fed's rates: official feeds, each agency a plugin read on its own schedule (Plugins view).</div></div>
+          Treasury) and the New York Fed's rates: official feeds, each agency a part of the Federal plugin, read on its own schedule (Plugins view).</div></div>
         <div class="view-actions"><input id="govSearch" type="search" placeholder="Filter" value="${esc(query)}"></div></div>
       <h3 class="gov-h">Current regulatory parameters</h3>
       <div class="gov-params">${data.parameters.map(parameter).join('')}</div>

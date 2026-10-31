@@ -5,10 +5,11 @@ a second: these wait for GOV_CONTACT (your name and email, sent in the User-Agen
 nothing is sent until you set it), and are read hourly, far inside that rate."""
 from __future__ import annotations
 
-from ..publisher import Feed, Policy, Publisher
+from ...publisher import Feed, Policy, Publisher
+from .release import API, VERSION
 
 PUBLISHER = Publisher(
-    version="1.0.0", api="1.0",  # its own release, and the plugin contract it was written for
+    version=VERSION, api=API, part_of="federal",  # the Federal plugin's release and contract (federal/__init__.py)
     name="sec", title="SEC", order=220,
     about="press releases and trading suspensions",
     feeds=(

@@ -6,8 +6,9 @@ from __future__ import annotations
 
 from datetime import date, datetime, time
 
-from ...sessions import ET
-from ..publisher import Feed, Policy, Publisher
+from ....sessions import ET
+from ...publisher import Feed, Policy, Publisher
+from .release import API, VERSION
 
 
 def moments(day: date) -> tuple[datetime, ...]:
@@ -17,7 +18,7 @@ def moments(day: date) -> tuple[datetime, ...]:
 
 
 PUBLISHER = Publisher(
-    version="1.0.0", api="1.0",  # its own release, and the plugin contract it was written for
+    version=VERSION, api=API, part_of="federal",  # the Federal plugin's release and contract (federal/__init__.py)
     name="nyfed", title="New York Fed", order=210,
     about="the federal funds target range, the effective federal funds rate and SOFR",
     feeds=(

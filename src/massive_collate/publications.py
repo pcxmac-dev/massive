@@ -189,13 +189,17 @@ class Reader:
 
     def kill(self, pub: Publisher, now: datetime) -> dict | None:
         """Why nothing is sent for it now, with `whose`: "own" (a pause by hand, or its own kill),
-        "account" (its account's kill: a vendor's feed refused), "fetching" (background fetching
-        paused or halted, the chart's button). None when it may read."""
+        "plugin" (the plugin it is part of paused or killed: Federal's agencies), "account" (its
+        account's kill: a vendor's feed refused), "fetching" (background fetching paused or halted,
+        the chart's button). None when it may read."""
         if self.store is None:
             return None
         own = killswitch.killed(self.store, pub.name, "fetch", now)
         if own:
             return {**own, "whose": "own"}
+        plugin = killswitch.killed(self.store, pub.part_of, "fetch", now) if pub.part_of else None
+        if plugin:
+            return {**plugin, "whose": "plugin"}
         account = killswitch.killed(self.store, pub.account, "fetch", now) if pub.account else None
         if account:
             return {**account, "whose": "account"}
@@ -298,6 +302,8 @@ class Reader:
 
     def _step_one(self, pub: Publisher, now: datetime, force: bool) -> datetime:
         later = now + timedelta(seconds=STEP_MAX_S)
+        if not pub.feeds:  # a plugin's own record (Federal), or a part with datasets only: nothing to read
+            return later
         if not self.set_up(pub) or self.kill(pub, now):
             return later
         if pub.policy.contact and not self.contact:  # nothing at all goes to it, robots.txt neither
@@ -581,6 +587,8 @@ class Reader:
         and daily cap that follow. A vendor's are its feed's: its rate window and daily cap. Nothing
         is sent while it is stopped or held (the findings kept stand). Kept and returned."""
         findings: dict = {"at": now.isoformat(timespec="seconds"), "hosts": {}, "notes": []}
+        if not pub.feeds:  # a plugin's own record, or a part with datasets only: robots.txt neither
+            return {**findings, "notes": ["no feed of its own to read: nothing sent"]}
         if pub.policy.contact and not self.contact:
             findings["notes"].append("waiting for GOV_CONTACT: nothing is sent to it, robots.txt neither")
             self.gdb.recheck_set(pub.name, findings)
@@ -691,7 +699,22 @@ def view(gdb: gov.GovDB, settings=None, store=None, now: datetime | None = None,
                                                  "contactSet": bool(reader.contact), "terms": pub.policy.terms,
                                                  "termsUrl": pub.policy.terms_url, "blocked": list(BLOCKED_HOSTS)},
                         "floorMinutes": pub.policy.min_minutes, "requestsToday": 0, "feeds": [], "robots": [],
-                        "recheck": None, "calendar": [], "moments": []})
+                        "recheck": None, "calendar": [], "moments": [], "partOf": pub.part_of,
+                        "datasets": list(pub.datasets), "parts": []})
+    by = {p["name"]: p for p in out}
+    for p in out:
+        if p["partOf"] not in by or p["partOf"] == p["name"]:
+            p["partOf"] = ""  # part of no publisher here: one of its own
+    for p in out:  # a plugin of several publishers (Federal): its parts, their requests, its state from theirs
+        parts = [q for q in out if q["partOf"] == p["name"] and q is not p]
+        if not parts:
+            continue
+        p["parts"] = [q["name"] for q in parts]
+        p["requestsToday"] += sum(q["requestsToday"] for q in parts)
+        states = {q["state"] for q in parts}
+        if p["state"] not in ("paused", "refused", "off"):
+            p["state"] = ("failing" if states & {"failing", "refused"} else "ready" if "ready" in states
+                          else "waiting" if "waiting" in states else "off" if states <= {"off"} else p["state"])
     return out
 
 
@@ -712,7 +735,7 @@ def _publisher_view(reader: Reader, gdb: gov.GovDB, pub: Publisher, now: datetim
                       "next": None if kill or not reader.set_up(pub) or state == "waiting"
                       else reader.next_read(pub, f, now, row or None).isoformat(timespec="seconds")})
     states = {f["state"] for f in feeds}
-    paused = kill is not None and kill.get("by") == "user" and kill.get("whose") in ("own", "fetching")
+    paused = kill is not None and kill.get("by") == "user" and kill.get("whose") in ("own", "plugin", "fetching")
     state = ("paused" if paused else "refused" if kill or held else
              "off" if not reader.set_up(pub) else "refused" if "refused" in states else
              "failing" if "failed" in states else "waiting" if states == {"waiting"} else "ready")
@@ -731,7 +754,8 @@ def _publisher_view(reader: Reader, gdb: gov.GovDB, pub: Publisher, now: datetim
         "floorMinutes": floor, "requestsToday": reader.requests_today(pub, now),
         "feeds": feeds, "robots": robots, "recheck": gdb.recheck_get(pub.name),
         "calendar": _calendar(pub, now),
-        "moments": [m.isoformat(timespec="seconds") for m in _today_moments(pub, now)]}
+        "moments": [m.isoformat(timespec="seconds") for m in _today_moments(pub, now)],
+        "partOf": pub.part_of, "datasets": list(pub.datasets), "parts": []}
 
 
 def _today_moments(pub: Publisher, now: datetime) -> list[datetime]:
